@@ -16,3 +16,9 @@ export const prisma =
 if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = prisma;
 
 export * from "@prisma/client";
+export { PrismaApprovalRepository } from "./repositories/approval-repository.js";
+export { PrismaAuditRepository } from "./repositories/audit-repository.js";
+export { PrismaUserRepository } from "./repositories/user-repository.js";
+export { PrismaRefreshTokenRepository } from "./repositories/refresh-token-repository.js";
+export { PrismaConversationRepository } from "./repositories/conversation-repository.js";
+export type { CreateConversationInput, AddMessageInput } from "./repositories/conversation-repository.js";

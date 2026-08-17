@@ -4,6 +4,7 @@ async function seed() {
   console.log("Seeding database...");
 
   await prisma.agent.createMany({
+    skipDuplicates: true,
     data: [
       {
         name: "conversational-assistant",

@@ -3,11 +3,10 @@ import { config } from "dotenv";
 
 config();
 
-const envSchema = z.object({
+const baseEnvSchema = z.object({
   NODE_ENV: z.enum(["development", "staging", "production"]).default("development"),
   DATABASE_URL: z.string().min(1, "DATABASE_URL is required"),
   JWT_SECRET: z.string().min(32),
-  OPENAI_API_KEY: z.string().startsWith("sk-"),
 
   GOOGLE_CLIENT_ID: z.string().optional(),
   GOOGLE_CLIENT_SECRET: z.string().optional(),
@@ -29,14 +28,23 @@ const envSchema = z.object({
   API_PORT: z.coerce.number().default(3001),
 });
 
-export type Env = z.infer<typeof envSchema>;
+const serverEnvSchema = baseEnvSchema.extend({
+  OPENAI_API_KEY: z.string().startsWith("sk-").optional(),
+  OPENAI_DEFAULT_MODEL: z.string().default("gpt-4o"),
+  OPENAI_TIMEOUT_MS: z.coerce.number().default(30000),
+  OPENAI_MAX_RETRIES: z.coerce.number().default(2),
+});
 
-let _env: Env | null = null;
+export type BaseEnv = z.infer<typeof baseEnvSchema>;
+export type ServerEnv = z.infer<typeof serverEnvSchema>;
 
-export function getEnv(): Env {
-  if (_env) return _env;
+let _baseEnv: BaseEnv | null = null;
+let _serverEnv: ServerEnv | null = null;
 
-  const result = envSchema.safeParse(process.env);
+export function getEnv(): BaseEnv {
+  if (_baseEnv) return _baseEnv;
+
+  const result = baseEnvSchema.safeParse(process.env);
 
   if (!result.success) {
     console.error("Invalid environment variables:");
@@ -44,6 +52,21 @@ export function getEnv(): Env {
     throw new Error("Invalid environment variables");
   }
 
-  _env = result.data;
-  return _env;
+  _baseEnv = result.data;
+  return _baseEnv;
+}
+
+export function getServerEnv(): ServerEnv {
+  if (_serverEnv) return _serverEnv;
+
+  const result = serverEnvSchema.safeParse(process.env);
+
+  if (!result.success) {
+    console.error("Invalid server environment variables:");
+    console.error(result.error.flatten().fieldErrors);
+    throw new Error("Invalid server environment variables");
+  }
+
+  _serverEnv = result.data;
+  return _serverEnv;
 }

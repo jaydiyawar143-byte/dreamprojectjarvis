@@ -17,8 +17,8 @@
     "lint": "eslint src/"
   },
   "dependencies": {
-    "openai": "^4.50.0",
-    "@jarvis/core": "workspace:*"
+    "@jarvis/core": "workspace:*",
+    "@jarvis/tools": "workspace:*"
   },
   "devDependencies": {
     "typescript": "^5.5.0",

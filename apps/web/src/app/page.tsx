@@ -1,9 +1,22 @@
+"use client";
+
+import { useEffect } from "react";
+import { useRouter } from "next/navigation";
+import { useAuth } from "@/lib/auth";
+
 export default function Home() {
+  const { authenticated, loading } = useAuth();
+  const router = useRouter();
+
+  useEffect(() => {
+    if (!loading) {
+      router.push(authenticated ? "/chat" : "/login");
+    }
+  }, [loading, authenticated, router]);
+
   return (
-    <main className="flex min-h-screen flex-col items-center justify-center p-24">
-      <h1 className="text-4xl font-bold mb-4">JARVIS</h1>
-      <p className="text-xl text-gray-600">AI Operating System</p>
-      <p className="mt-4 text-gray-500">Coming soon...</p>
-    </main>
+    <div className="min-h-screen flex items-center justify-center bg-gray-950">
+      <p className="text-gray-400">Loading...</p>
+    </div>
   );
 }

@@ -1,4 +1,6 @@
 import { z } from "zod";
+import type { ITool } from "./tool.js";
+import type { AuditEntry } from "./common.js";
 
 export const AgentCategorySchema = z.enum([
   "communication",
@@ -58,12 +60,27 @@ export const AgentOutputSchema = z.object({
 
 export type AgentOutput = z.infer<typeof AgentOutputSchema>;
 
+export interface MemoryManager {
+  store(conversationId: string, content: string, metadata?: Record<string, unknown>): Promise<void>;
+  recall(conversationId: string, query: string, limit?: number): Promise<string[]>;
+}
+
+export interface ToolRegistry {
+  get(toolId: string): ITool | undefined;
+  getAll(): ITool[];
+}
+
+export interface AuditLogger {
+  log(entry: Omit<AuditEntry, "id" | "timestamp">): Promise<void>;
+}
+
 export interface AgentContext {
   userId: string;
   conversationId?: string;
-  memoryManager: unknown;
-  toolRegistry: unknown;
-  auditLogger: unknown;
+  traceId: string;
+  memoryManager: MemoryManager;
+  toolRegistry: ToolRegistry;
+  auditLogger: AuditLogger;
 }
 
 export interface IAgent {

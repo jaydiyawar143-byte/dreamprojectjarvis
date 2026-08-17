@@ -21,6 +21,7 @@
     "db:studio": "prisma studio"
   },
   "dependencies": {
+    "@jarvis/core": "workspace:*",
     "@prisma/client": "^5.15.0",
     "dotenv": "^16.4.5"
   },

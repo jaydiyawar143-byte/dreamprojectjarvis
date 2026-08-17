@@ -1,64 +1,55 @@
-interface Approval {
-  id: string;
-  userId: string;
-  agentId: string;
-  toolId: string;
-  action: string;
-  params: Record<string, unknown>;
-  status: "pending" | "approved" | "rejected";
-  expiresAt: Date;
-  resolvedAt?: Date;
-  createdAt: Date;
-}
+import type {
+  Approval,
+  ApprovalStatus,
+  IApprovalRepository,
+  IApprovalManager,
+} from "@jarvis/core";
 
-export class ApprovalService {
-  private pendingApprovals: Map<string, Approval> = new Map();
+export class ApprovalService implements IApprovalManager {
+  constructor(private repository: IApprovalRepository) {}
 
   async requestApproval(
     request: Omit<Approval, "id" | "status" | "createdAt">
   ): Promise<Approval> {
-    const approval: Approval = {
-      ...request,
-      id: crypto.randomUUID(),
-      status: "pending",
-      createdAt: new Date(),
-    };
-
-    this.pendingApprovals.set(approval.id, approval);
-
-    // In production: persist to DB, send notification
+    const approval = await this.repository.create(request);
     console.log("[APPROVAL] New approval request:", approval.id);
-
     return approval;
   }
 
   async approve(approvalId: string): Promise<Approval | null> {
-    const approval = this.pendingApprovals.get(approvalId);
-    if (!approval || approval.status !== "pending") return null;
+    const existing = await this.repository.findById(approvalId);
+    if (!existing || existing.status !== "pending") return null;
 
-    approval.status = "approved";
-    approval.resolvedAt = new Date();
-    this.pendingApprovals.delete(approvalId);
+    const updated = await this.repository.updateStatus(
+      approvalId,
+      "approved" as ApprovalStatus
+    );
 
-    return approval;
+    console.log("[APPROVAL] Approved:", approvalId);
+    return updated;
   }
 
   async reject(approvalId: string): Promise<Approval | null> {
-    const approval = this.pendingApprovals.get(approvalId);
-    if (!approval || approval.status !== "pending") return null;
+    const existing = await this.repository.findById(approvalId);
+    if (!existing || existing.status !== "pending") return null;
 
-    approval.status = "rejected";
-    approval.resolvedAt = new Date();
-    this.pendingApprovals.delete(approvalId);
+    const updated = await this.repository.updateStatus(
+      approvalId,
+      "rejected" as ApprovalStatus
+    );
 
-    return approval;
+    console.log("[APPROVAL] Rejected:", approvalId);
+    return updated;
   }
 
   async getPending(): Promise<Approval[]> {
-    return Array.from(this.pendingApprovals.values()).filter(
-      (a) => a.status === "pending"
-    );
+    return this.repository.findPending();
+  }
+
+  async findExistingForTool(
+    toolId: string,
+    userId: string
+  ): Promise<Approval | null> {
+    return this.repository.findExistingForTool(toolId, userId);
   }
 }
-
-export const approvalService = new ApprovalService();

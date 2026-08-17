@@ -1,9 +1,4 @@
-import type { Role } from "@jarvis/core";
-
-interface Permission {
-  resource: string;
-  action: "read" | "write" | "execute" | "admin";
-}
+import type { Role, Permission, ToolPermission } from "@jarvis/core";
 
 const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
   owner: [
@@ -19,6 +14,8 @@ const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     { resource: "approvals", action: "write" },
     { resource: "audit", action: "read" },
     { resource: "settings", action: "read" },
+    { resource: "tools", action: "read" },
+    { resource: "tools", action: "execute" },
   ],
   member: [
     { resource: "conversations", action: "read" },
@@ -26,11 +23,13 @@ const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     { resource: "agents", action: "execute" },
     { resource: "knowledge", action: "read" },
     { resource: "knowledge", action: "write" },
+    { resource: "tools", action: "read" },
   ],
   viewer: [
     { resource: "conversations", action: "read" },
     { resource: "agents", action: "read" },
     { resource: "knowledge", action: "read" },
+    { resource: "tools", action: "read" },
   ],
 };
 
@@ -50,5 +49,14 @@ export class PermissionService {
 
   getPermissions(role: Role): Permission[] {
     return ROLE_PERMISSIONS[role] || [];
+  }
+
+  checkToolPermissions(
+    role: Role,
+    requiredPermissions: ToolPermission[]
+  ): boolean {
+    return requiredPermissions.every((perm) =>
+      this.hasPermission(role, "tools", perm)
+    );
   }
 }

@@ -38,19 +38,37 @@ enum AuditResult {
 }
 
 model User {
-  id        String   @id @default(cuid())
-  email     String   @unique
-  name      String
-  password  String
-  role      Role     @default(MEMBER)
-  avatarUrl String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id           String    @id @default(cuid())
+  email        String    @unique
+  name         String
+  password     String
+  role         Role      @default(MEMBER)
+  avatarUrl    String?
+  lastLoginAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
 
   conversations Conversation[]
   approvals     Approval[]
   auditLogs     AuditLog[]
   settings      UserSetting[]
+  refreshTokens RefreshToken[]
+}
+
+model RefreshToken {
+  id        String   @id @default(cuid())
+  userId    String
+  tokenHash String   @unique
+  userAgent String?
+  ipAddress String?
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([tokenHash])
 }
 
 model Conversation {
@@ -153,6 +171,7 @@ model AuditLog {
   action      String
   parameters  Json?
   result      AuditResult
+  traceId     String?
   ipAddress   String?
   metadata    Json?
   createdAt   DateTime    @default(now())
