@@ -1,11 +1,13 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth";
 import Link from "next/link";
 
 export default function RegisterPage() {
   const { register } = useAuth();
+  const router = useRouter();
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -18,7 +20,11 @@ export default function RegisterPage() {
     setLoading(true);
     const result = await register(email, name, password);
     setLoading(false);
-    if (result.error) setError(result.error);
+    if (result.error) {
+      setError(result.error);
+    } else {
+      router.push("/chat");
+    }
   }
 
   return (

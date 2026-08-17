@@ -1,11 +1,13 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth";
 import Link from "next/link";
 
 export default function LoginPage() {
   const { login } = useAuth();
+  const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -17,7 +19,11 @@ export default function LoginPage() {
     setLoading(true);
     const result = await login(email, password);
     setLoading(false);
-    if (result.error) setError(result.error);
+    if (result.error) {
+      setError(result.error);
+    } else {
+      router.push("/chat");
+    }
   }
 
   return (

@@ -7,6 +7,7 @@ import { createServer, type Server } from "http";
 import { Server as SocketIOServer } from "socket.io";
 import { loadEnvironment } from "./config/env.js";
 import { healthRouter } from "./routes/health.js";
+import { createAuthRouter } from "./routes/auth.js";
 import { createChatRouter } from "./routes/chat.js";
 import { createConversationsRouter } from "./routes/conversations.js";
 import { getContainer } from "./services/container.js";
@@ -31,6 +32,7 @@ app.use(morgan("combined"));
 app.use(express.json({ limit: "10mb" }));
 
 app.use("/api/v1/health", healthRouter);
+app.use("/api/v1/auth", createAuthRouter(container.authService, container.tokenService));
 app.use("/api/v1/chat", createChatRouter(container));
 app.use("/api/v1/conversations", createConversationsRouter(container));
 

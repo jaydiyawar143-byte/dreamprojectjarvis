@@ -3,15 +3,25 @@ import type { TokenService } from "@jarvis/security";
 import { Orchestrator, AgentRegistry, ConversationalAssistant } from "@jarvis/agents";
 import { OpenAIAdapter } from "@jarvis/ai-openai";
 import { ToolExecutor } from "@jarvis/tools";
-import { PermissionService, ApprovalService, TokenService as TokenServiceImpl, AuditLogger } from "@jarvis/security";
+import {
+  PermissionService,
+  ApprovalService,
+  TokenService as TokenServiceImpl,
+  AuditLogger,
+  PasswordHasher,
+  AuthManager,
+} from "@jarvis/security";
 import {
   prisma,
   PrismaAuditRepository,
   PrismaConversationRepository,
+  PrismaUserRepository,
+  PrismaRefreshTokenRepository,
 } from "@jarvis/db";
 
 export interface Container {
   tokenService: TokenService;
+  authService: AuthManager;
   orchestrator: IOrchestrator;
   conversationRepo: PrismaConversationRepository;
   auditLogger: AuditLogger;
@@ -42,6 +52,11 @@ export function getContainer(): Container {
 
   const conversationRepo = new PrismaConversationRepository(prisma);
 
+  const passwordHasher = new PasswordHasher();
+  const userRepo = new PrismaUserRepository(prisma);
+  const refreshTokenRepo = new PrismaRefreshTokenRepository(prisma);
+  const authService = new AuthManager(passwordHasher, tokenService, refreshTokenRepo, userRepo);
+
   const permissionService = new PermissionService();
   const approvalService = new ApprovalService(noopApprovalRepo);
 
@@ -66,6 +81,7 @@ export function getContainer(): Container {
 
   _container = {
     tokenService,
+    authService,
     orchestrator,
     conversationRepo,
     auditLogger,

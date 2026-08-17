@@ -9,6 +9,7 @@ const envFile =
       ? ".env.staging"
       : ".env.development";
 
+config({ path: resolve(process.cwd(), "../../.env") });
 config({ path: resolve(process.cwd(), envFile) });
 config({ path: resolve(process.cwd(), ".env.local") });
 
