@@ -1,0 +1,45 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+.next/
+out/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+.env.development
+.env.staging
+.env.production
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Prisma
+packages/db/prisma/migrations/**/migration_lock.toml
+
+# Turbo
+.turbo/
+
+# Docker
+docker-compose.override.yml
+
+# Coverage
+coverage/
+
+# Misc
+*.tgz
+.cache/

@@ -1,0 +1,185 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  OWNER
+  ADMIN
+  MEMBER
+  VIEWER
+}
+
+enum AgentStatus {
+  IDLE
+  INITIALIZING
+  READY
+  PROCESSING
+  ERROR
+  DISABLED
+}
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  EXPIRED
+}
+
+enum AuditResult {
+  SUCCESS
+  FAILURE
+  REJECTED
+  PENDING
+}
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String
+  password  String
+  role      Role     @default(MEMBER)
+  avatarUrl String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  conversations Conversation[]
+  approvals     Approval[]
+  auditLogs     AuditLog[]
+  settings      UserSetting[]
+}
+
+model Conversation {
+  id        String   @id @default(cuid())
+  title     String?
+  userId    String
+  agentId   String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user     User      @relation(fields: [userId], references: [id])
+  agent    Agent?    @relation(fields: [agentId], references: [id])
+  messages Message[]
+  memory   Memory[]
+}
+
+model Message {
+  id             String   @id @default(cuid())
+  conversationId String
+  role           String
+  content        String
+  metadata       Json?
+  createdAt      DateTime @default(now())
+
+  conversation Conversation @relation(fields: [conversationId], references: [id])
+}
+
+model Agent {
+  id          String      @id @default(cuid())
+  name        String      @unique
+  description String
+  category    String
+  status      AgentStatus @default(IDLE)
+  config      Json?
+  tools       Json?
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  conversations Conversation[]
+}
+
+model Memory {
+  id             String   @id @default(cuid())
+  conversationId String
+  content        String
+  embedding      Unsupported("vector(1536)")?
+  metadata       Json?
+  createdAt      DateTime @default(now())
+
+  conversation Conversation @relation(fields: [conversationId], references: [id])
+
+  @@index([conversationId])
+}
+
+model KnowledgeDocument {
+  id          String   @id @default(cuid())
+  title       String
+  content     String
+  source      String?
+  metadata    Json?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  chunks KnowledgeChunk[]
+}
+
+model KnowledgeChunk {
+  id           String @id @default(cuid())
+  documentId   String
+  content      String
+  embedding    Unsupported("vector(1536)")?
+  chunkIndex   Int
+  metadata     Json?
+
+  document KnowledgeDocument @relation(fields: [documentId], references: [id])
+
+  @@index([documentId])
+}
+
+model Approval {
+  id         String         @id @default(cuid())
+  userId     String
+  agentId    String?
+  toolId     String
+  action     String
+  params     Json
+  status     ApprovalStatus @default(PENDING)
+  expiresAt  DateTime
+  resolvedAt DateTime?
+  createdAt  DateTime       @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+}
+
+model AuditLog {
+  id          String      @id @default(cuid())
+  userId      String
+  agentId     String?
+  toolId      String?
+  action      String
+  parameters  Json?
+  result      AuditResult
+  ipAddress   String?
+  metadata    Json?
+  createdAt   DateTime    @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([createdAt])
+}
+
+model Integration {
+  id          String   @id @default(cuid())
+  name        String
+  provider    String
+  config      Json?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model UserSetting {
+  id     String @id @default(cuid())
+  userId String
+  key    String
+  value  String
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@unique([userId, key])
+}
