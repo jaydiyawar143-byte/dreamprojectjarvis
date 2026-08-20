@@ -14,14 +14,18 @@
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
+    "test": "vitest run",
     "lint": "eslint src/"
   },
   "dependencies": {
     "openai": "^4.50.0",
-    "@jarvis/core": "workspace:*"
+    "@jarvis/core": "workspace:*",
+    "@jarvis/db": "workspace:*",
+    "@jarvis/ai-openai": "workspace:*"
   },
   "devDependencies": {
     "typescript": "^5.5.0",
-    "@types/node": "^20.14.0"
+    "@types/node": "^20.14.0",
+    "vitest": "^4.1.10"
   }
 }

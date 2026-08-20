@@ -206,6 +206,9 @@ importers:
       typescript:
         specifier: ^5.5.0
         version: 5.9.3
+      vitest:
+        specifier: ^4.1.10
+        version: 4.1.10(@types/node@20.19.43)(jsdom@30.0.1)(vite@8.2.1(@types/node@20.19.43)(esbuild@0.28.2)(jiti@1.21.7)(tsx@4.23.12))
 
   packages/ai-openai:
     dependencies:
@@ -251,6 +254,9 @@ importers:
       typescript:
         specifier: ^5.5.0
         version: 5.9.3
+      vitest:
+        specifier: ^4.1.10
+        version: 4.1.10(@types/node@20.19.43)(jsdom@30.0.1)(vite@8.2.1(@types/node@20.19.43)(esbuild@0.28.2)(jiti@1.21.7)(tsx@4.23.12))
 
   packages/db:
     dependencies:
@@ -292,9 +298,15 @@ importers:
 
   packages/memory:
     dependencies:
+      '@jarvis/ai-openai':
+        specifier: workspace:*
+        version: link:../ai-openai
       '@jarvis/core':
         specifier: workspace:*
         version: link:../core
+      '@jarvis/db':
+        specifier: workspace:*
+        version: link:../db
       openai:
         specifier: ^4.50.0
         version: 4.104.0(ws@8.21.3)(zod@3.25.76)
@@ -305,6 +317,9 @@ importers:
       typescript:
         specifier: ^5.5.0
         version: 5.9.3
+      vitest:
+        specifier: ^4.1.10
+        version: 4.1.10(@types/node@20.19.43)(jsdom@30.0.1)(vite@8.2.1(@types/node@20.19.43)(esbuild@0.28.2)(jiti@1.21.7)(tsx@4.23.12))
 
   packages/security:
     dependencies:
@@ -324,6 +339,9 @@ importers:
       typescript:
         specifier: ^5.5.0
         version: 5.9.3
+      vitest:
+        specifier: ^4.1.10
+        version: 4.1.10(@types/node@20.19.43)(jsdom@30.0.1)(vite@8.2.1(@types/node@20.19.43)(esbuild@0.28.2)(jiti@1.21.7)(tsx@4.23.12))
 
   packages/tools:
     dependencies:
@@ -337,6 +355,9 @@ importers:
       typescript:
         specifier: ^5.5.0
         version: 5.9.3
+      vitest:
+        specifier: ^4.1.10
+        version: 4.1.10(@types/node@20.19.43)(jsdom@30.0.1)(vite@8.2.1(@types/node@20.19.43)(esbuild@0.28.2)(jiti@1.21.7)(tsx@4.23.12))
 
 packages:
 

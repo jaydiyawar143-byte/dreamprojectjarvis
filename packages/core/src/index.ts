@@ -11,4 +11,13 @@ export * from "./types/execution.js";
 export * from "./types/orchestrator.js";
 export * from "./types/auth.js";
 export * from "./types/ai-provider.js";
-export * from "./types/memory-provider.js";
+export * from "./types/memory.js";
+export * from "./types/embedding-provider.js";
+
+// Re-export deprecated memory-provider types under unique names for backward compat
+export type {
+  MemoryStoreRequest as LegacyMemoryStoreRequest,
+  MemoryRecallRequest as LegacyMemoryRecallRequest,
+  MemoryEntry as LegacyMemoryEntry,
+  IMemoryProvider as LegacyIMemoryProvider,
+} from "./types/memory-provider.js";

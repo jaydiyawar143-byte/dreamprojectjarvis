@@ -5,6 +5,7 @@ import type {
   ToolCategory,
   ToolParameter,
   ToolPermission,
+  RiskLevel,
 } from "@jarvis/core";
 
 export abstract class BaseTool implements ITool {
@@ -12,9 +13,12 @@ export abstract class BaseTool implements ITool {
   name: string;
   description: string;
   category: ToolCategory;
+  risk: RiskLevel;
   parameters: ToolParameter[];
   requiresApproval: boolean;
   requiredPermissions: ToolPermission[];
+  version: string;
+  enabled: boolean;
 
   constructor(
     id: string,
@@ -23,15 +27,21 @@ export abstract class BaseTool implements ITool {
     category: ToolCategory,
     parameters: ToolParameter[] = [],
     requiresApproval = false,
-    requiredPermissions: ToolPermission[] = ["read"]
+    requiredPermissions: ToolPermission[] = ["read"],
+    risk: RiskLevel = "READ_ONLY",
+    version = "1.0.0",
+    enabled = true,
   ) {
     this.id = id;
     this.name = name;
     this.description = description;
     this.category = category;
+    this.risk = risk;
     this.parameters = parameters;
     this.requiresApproval = requiresApproval;
     this.requiredPermissions = requiredPermissions;
+    this.version = version;
+    this.enabled = enabled;
   }
 
   abstract execute(

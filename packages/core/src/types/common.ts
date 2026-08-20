@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { ToolPermissionSchema, type ToolPermission } from "./tool.js";
+import { ToolPermissionSchema, type ToolPermission, type RiskLevel } from "./tool.js";
 
 export const RoleSchema = {
   OWNER: "owner",
@@ -116,4 +116,104 @@ export interface IApprovalManager {
     toolId: string,
     userId: string
   ): Promise<Approval | null>;
+}
+
+// ---------------------------------------------------------------------------
+// ApprovalRequest — For Tool Intelligence approval gates
+// ---------------------------------------------------------------------------
+
+export interface ApprovalRequest {
+  id: string;
+  userId: string;
+  tool: string;
+  action: string;
+  risk: RiskLevel;
+  params: Record<string, unknown>;
+  estimatedImpact?: string;
+  cost?: { amount: number; currency: string };
+  traceId: string;
+  conversationId?: string;
+  expiresAt: Date;
+  status: "pending" | "approved" | "rejected" | "expired";
+  decidedAt?: Date;
+  decidedBy?: string;
+  createdAt: Date;
+}
+
+// ---------------------------------------------------------------------------
+// ApprovalDecision — User's response to approval request
+// ---------------------------------------------------------------------------
+
+export interface ApprovalDecision {
+  approvalId: string;
+  status: "approved" | "rejected";
+  reason?: string;
+}
+
+// ---------------------------------------------------------------------------
+// ToolApprovalCheck — Result of pre-execution approval gate
+// ---------------------------------------------------------------------------
+
+export interface ToolApprovalCheck {
+  allowed: boolean;
+  requiresApproval: boolean;
+  approvalId?: string;
+  reason?: string;
+}
+
+// ---------------------------------------------------------------------------
+// ToolExecutionAudit — Recorded for every tool step execution attempt
+// ---------------------------------------------------------------------------
+
+export interface ToolExecutionAudit {
+  executionId: string;
+  stepIndex: number;
+  userId: string;
+  tool: string;
+  action: string;
+  risk: RiskLevel;
+  arguments: Record<string, unknown>;
+  status:
+    | "success"
+    | "failed"
+    | "timeout"
+    | "denied"
+    | "approval_pending"
+    | "approval_rejected";
+  durationMs: number;
+  approvalId?: string;
+  traceId: string;
+  conversationId?: string;
+  error?: { code: string; message: string };
+  timestamp: Date;
+}
+
+// ---------------------------------------------------------------------------
+// ToolAuditEntry — Extended audit for tool executions
+// ---------------------------------------------------------------------------
+
+export interface ToolAuditEntry {
+  id: string;
+  executionId: string;
+  stepIndex: number;
+  userId: string;
+  tool: string;
+  action: string;
+  risk: RiskLevel;
+  arguments: Record<string, unknown>;
+  resultSummary: string;
+  status:
+    | "success"
+    | "failed"
+    | "timeout"
+    | "denied"
+    | "approval_pending"
+    | "approval_rejected";
+  durationMs: number;
+  approvalId?: string;
+  traceId: string;
+  conversationId?: string;
+  ipAddress?: string;
+  error?: { code: string; message: string };
+  timestamp: Date;
 }

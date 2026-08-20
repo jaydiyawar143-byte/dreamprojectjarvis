@@ -31,6 +31,7 @@ const baseEnvSchema = z.object({
 const serverEnvSchema = baseEnvSchema.extend({
   OPENAI_API_KEY: z.string().startsWith("sk-").optional(),
   OPENAI_DEFAULT_MODEL: z.string().default("gpt-4o"),
+  OPENAI_EMBEDDING_MODEL: z.string().default("text-embedding-3-small"),
   OPENAI_TIMEOUT_MS: z.coerce.number().default(30000),
   OPENAI_MAX_RETRIES: z.coerce.number().default(2),
 });

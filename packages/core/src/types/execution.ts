@@ -59,6 +59,9 @@ export interface ToolExecutionRequest {
   traceId: string;
   ipAddress?: string;
   timeoutMs?: number;
+  idempotencyKey?: string;
+  executionId?: string;
+  stepIndex?: number;
 }
 
 export interface ToolExecutionResult {

@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { ITool } from "./tool.js";
 import type { AuditEntry } from "./common.js";
+import type { IMemoryStore } from "./memory.js";
 
 export const AgentCategorySchema = z.enum([
   "communication",
@@ -60,6 +61,10 @@ export const AgentOutputSchema = z.object({
 
 export type AgentOutput = z.infer<typeof AgentOutputSchema>;
 
+/**
+ * @deprecated Use IMemoryStore from @jarvis/core instead.
+ * Kept for backward compatibility during migration.
+ */
 export interface MemoryManager {
   store(conversationId: string, content: string, metadata?: Record<string, unknown>): Promise<void>;
   recall(conversationId: string, query: string, limit?: number): Promise<string[]>;
@@ -78,7 +83,7 @@ export interface AgentContext {
   userId: string;
   conversationId?: string;
   traceId: string;
-  memoryManager: MemoryManager;
+  memoryManager: IMemoryStore;
   toolRegistry: ToolRegistry;
   auditLogger: AuditLogger;
 }

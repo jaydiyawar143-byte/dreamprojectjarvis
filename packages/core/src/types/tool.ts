@@ -1,5 +1,23 @@
 import { z } from "zod";
 
+// ---------------------------------------------------------------------------
+// Risk Level
+// ---------------------------------------------------------------------------
+
+export const RiskLevelSchema = z.enum([
+  "READ_ONLY",
+  "LOW_IMPACT",
+  "EXTERNAL_SIDE_EFFECT",
+  "HIGH_IMPACT",
+  "FINANCIAL",
+]);
+
+export type RiskLevel = z.infer<typeof RiskLevelSchema>;
+
+// ---------------------------------------------------------------------------
+// Tool Category
+// ---------------------------------------------------------------------------
+
 export const ToolCategorySchema = z.enum([
   "database",
   "communication",
@@ -12,6 +30,10 @@ export const ToolCategorySchema = z.enum([
 
 export type ToolCategory = z.infer<typeof ToolCategorySchema>;
 
+// ---------------------------------------------------------------------------
+// Tool Permission
+// ---------------------------------------------------------------------------
+
 export const ToolPermissionSchema = z.enum([
   "read",
   "write",
@@ -20,6 +42,10 @@ export const ToolPermissionSchema = z.enum([
 ]);
 
 export type ToolPermission = z.infer<typeof ToolPermissionSchema>;
+
+// ---------------------------------------------------------------------------
+// Tool Parameter
+// ---------------------------------------------------------------------------
 
 export const ToolParameterSchema = z.object({
   name: z.string(),
@@ -31,6 +57,10 @@ export const ToolParameterSchema = z.object({
 
 export type ToolParameter = z.infer<typeof ToolParameterSchema>;
 
+// ---------------------------------------------------------------------------
+// Tool Result
+// ---------------------------------------------------------------------------
+
 export const ToolResultSchema = z.object({
   success: z.boolean(),
   data: z.unknown().optional(),
@@ -40,24 +70,73 @@ export const ToolResultSchema = z.object({
 
 export type ToolResult = z.infer<typeof ToolResultSchema>;
 
+// ---------------------------------------------------------------------------
+// Tool Context (passed to tool.execute)
+// ---------------------------------------------------------------------------
+
 export interface ToolContext {
   userId: string;
   agentId?: string;
   conversationId?: string;
 }
 
+// ---------------------------------------------------------------------------
+// ITool — Core tool contract
+// ---------------------------------------------------------------------------
+
 export interface ITool {
   id: string;
   name: string;
   description: string;
   category: ToolCategory;
+  risk: RiskLevel;
   parameters: ToolParameter[];
   requiresApproval: boolean;
   requiredPermissions: ToolPermission[];
+  version: string;
+  enabled: boolean;
 
   execute(
     params: Record<string, unknown>,
     context: ToolContext
   ): Promise<ToolResult>;
   validate(params: Record<string, unknown>): boolean;
+}
+
+// ---------------------------------------------------------------------------
+// ToolPlan — Structured output from model
+// ---------------------------------------------------------------------------
+
+export const ToolStepSchema = z.object({
+  tool: z.string(),
+  params: z.record(z.unknown()).default({}),
+  dependsOn: z.number().int().nonnegative().optional(),
+  reason: z.string().optional(),
+});
+
+export type ToolStep = z.infer<typeof ToolStepSchema>;
+
+export const ToolPlanSchema = z.object({
+  intent: z.string(),
+  requiresTools: z.boolean(),
+  steps: z.array(ToolStepSchema).default([]),
+  needsClarification: z.string().optional(),
+});
+
+export type ToolPlan = z.infer<typeof ToolPlanSchema>;
+
+// ---------------------------------------------------------------------------
+// ToolDescription — Sent to model (compact)
+// ---------------------------------------------------------------------------
+
+export interface ToolDescription {
+  name: string;
+  description: string;
+  risk: RiskLevel;
+  approvalRequired: boolean;
+  parameters: {
+    type: "object";
+    properties: Record<string, { type: string; description: string; enum?: string[] }>;
+    required: string[];
+  };
 }
