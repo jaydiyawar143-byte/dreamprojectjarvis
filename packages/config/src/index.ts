@@ -13,6 +13,7 @@ const baseEnvSchema = z.object({
 
   META_ACCESS_TOKEN: z.string().optional(),
   META_AD_ACCOUNT_ID: z.string().optional(),
+  META_GRAPH_API_VERSION: z.string().optional(),
 
   N8N_BASE_URL: z.string().min(1).optional(),
   N8N_API_KEY: z.string().optional(),

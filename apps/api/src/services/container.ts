@@ -2,7 +2,30 @@ import type { IOrchestrator } from "@jarvis/core";
 import type { TokenService } from "@jarvis/security";
 import { Orchestrator, AgentRegistry, ConversationalAssistant } from "@jarvis/agents";
 import { OpenAIAdapter } from "@jarvis/ai-openai";
-import { ToolExecutor } from "@jarvis/tools";
+import {
+  ToolExecutor,
+  ToolRegistry,
+  MetaGetAccountsTool,
+  MetaGetCampaignsTool,
+  MetaGetAdSetsTool,
+  MetaGetAdsTool,
+  MetaGetInsightsTool,
+  MetaPauseCampaignTool,
+  MetaResumeCampaignTool,
+  MetaPauseAdSetTool,
+  MetaResumeAdSetTool,
+  MetaPauseAdTool,
+  MetaResumeAdTool,
+  MetaUpdateCampaignBudgetTool,
+  MetaUpdateAdSetBudgetTool,
+  MetaCreateCampaignTool,
+  type MetaAdsProvider,
+  type MetaAdsWriteProvider,
+  type MetaAdsBudgetProvider,
+  type MetaCampaignCreatorProvider,
+  type MetaAccountAuthorizer,
+} from "@jarvis/tools";
+import { createMetaGraphProvider } from "@jarvis/meta-graph";
 import {
   PermissionService,
   ApprovalService,
@@ -37,6 +60,44 @@ const noopApprovalRepo = {
   findExistingForTool: async () => null,
 };
 
+function createMetaToolRegistry(): ToolRegistry {
+  const registry = new ToolRegistry();
+  const metaAccessToken = process.env.META_ACCESS_TOKEN;
+  const metaAccountId = process.env.META_AD_ACCOUNT_ID;
+
+  if (metaAccessToken && metaAccountId) {
+    const realProvider = createMetaGraphProvider({
+      accessToken: metaAccessToken,
+      adAccountId: metaAccountId,
+      apiVersion: process.env.META_GRAPH_API_VERSION,
+    });
+
+    // Phase 8: Read-only tools
+    registry.register(new MetaGetAccountsTool(realProvider));
+    registry.register(new MetaGetCampaignsTool(realProvider));
+    registry.register(new MetaGetAdSetsTool(realProvider));
+    registry.register(new MetaGetAdsTool(realProvider));
+    registry.register(new MetaGetInsightsTool(realProvider));
+
+    // Phase 9.1: Write tools (pause/resume)
+    registry.register(new MetaPauseCampaignTool(realProvider, realProvider));
+    registry.register(new MetaResumeCampaignTool(realProvider, realProvider));
+    registry.register(new MetaPauseAdSetTool(realProvider, realProvider));
+    registry.register(new MetaResumeAdSetTool(realProvider, realProvider));
+    registry.register(new MetaPauseAdTool(realProvider, realProvider));
+    registry.register(new MetaResumeAdTool(realProvider, realProvider));
+
+    // Phase 9.2: Budget tools
+    registry.register(new MetaUpdateCampaignBudgetTool(realProvider, realProvider));
+    registry.register(new MetaUpdateAdSetBudgetTool(realProvider, realProvider));
+
+    // Phase 9.3: Campaign creation
+    registry.register(new MetaCreateCampaignTool(realProvider, realProvider));
+  }
+
+  return registry;
+}
+
 export function getContainer(): Container {
   if (_container) return _container;
 
@@ -60,8 +121,9 @@ export function getContainer(): Container {
   const permissionService = new PermissionService();
   const approvalService = new ApprovalService(noopApprovalRepo);
 
+  const toolRegistry = createMetaToolRegistry();
   const toolExecutor = new ToolExecutor(
-    { get: () => undefined } as any,
+    toolRegistry,
     permissionService,
     approvalService,
     auditLogger

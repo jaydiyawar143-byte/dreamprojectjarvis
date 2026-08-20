@@ -13,6 +13,7 @@ export * from "./types/auth.js";
 export * from "./types/ai-provider.js";
 export * from "./types/memory.js";
 export * from "./types/embedding-provider.js";
+export * from "./types/meta-ads.js";
 
 // Re-export deprecated memory-provider types under unique names for backward compat
 export type {

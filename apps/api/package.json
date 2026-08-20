@@ -19,6 +19,7 @@
     "@jarvis/db": "workspace:*",
     "@jarvis/integrations": "workspace:*",
     "@jarvis/memory": "workspace:*",
+    "@jarvis/meta-graph": "workspace:*",
     "@jarvis/security": "workspace:*",
     "@jarvis/tools": "workspace:*",
     "compression": "^1.7.4",

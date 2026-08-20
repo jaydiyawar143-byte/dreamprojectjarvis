@@ -15,6 +15,7 @@ const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     { resource: "audit", action: "read" },
     { resource: "settings", action: "read" },
     { resource: "tools", action: "read" },
+    { resource: "tools", action: "write" },
     { resource: "tools", action: "execute" },
   ],
   member: [
@@ -24,6 +25,7 @@ const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     { resource: "knowledge", action: "read" },
     { resource: "knowledge", action: "write" },
     { resource: "tools", action: "read" },
+    { resource: "tools", action: "write" },
   ],
   viewer: [
     { resource: "conversations", action: "read" },

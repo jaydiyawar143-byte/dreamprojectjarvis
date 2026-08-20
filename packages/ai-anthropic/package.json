@@ -1,0 +1,35 @@
+{
+  "name": "@jarvis/ai-anthropic",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./message-converter": {
+      "types": "./dist/message-converter.d.ts",
+      "import": "./dist/message-converter.js"
+    },
+    "./error-handler": {
+      "types": "./dist/error-handler.d.ts",
+      "import": "./dist/error-handler.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src/"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "@jarvis/core": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "@types/node": "^20.14.0"
+  }
+}
