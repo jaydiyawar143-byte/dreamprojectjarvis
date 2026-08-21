@@ -79,6 +79,13 @@ export interface ToolContext {
   agentId?: string;
   conversationId?: string;
   traceId?: string;
+  /**
+   * One-time approval authorizing THIS execution (Phase 10.3). When present,
+   * approval-gated tools atomically consume it (verifying user, tool,
+   * paramsHash, state and expiry) together with the execution claim before
+   * any external side effect. A consumed approval can never be reused.
+   */
+  approvalId?: string;
 }
 
 // ---------------------------------------------------------------------------

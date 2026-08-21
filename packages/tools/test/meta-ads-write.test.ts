@@ -12,6 +12,7 @@ import {
 } from "../src/tools/meta-ads-write-tools.js";
 import type { MetaAdsProvider, MetaAdsWriteProvider, MetaAccountAuthorizer } from "../src/tools/meta-ads-provider.js";
 import { createMockMetaProvider, createFailingMetaProvider, createEmptyMetaProvider } from "../src/tools/meta-ads-mock.js";
+import { MemoryExecutionJournal, MemoryApprovalConsumer } from "../src/execution-journal.js";
 import { sanitizeToolResult } from "../src/output-sanitizer.js";
 import { ToolRegistry as TR } from "../src/registry.js";
 import { ToolExecutor } from "../src/executor.js";
@@ -532,12 +533,24 @@ describe("Audit", () => {
     const provider = createMockMetaProvider(); const authorizer = createAuthorizer();
     const { logger, calls } = createTrackingAudit();
     const registry = new TR();
-    registry.register(new MetaPauseCampaignTool(provider, authorizer));
+    // Phase 10.3: the executor forwards the approval id; the tool must be
+    // wired with a consumption port or it fails closed.
+    const journal = new MemoryExecutionJournal();
+    const consumer = new MemoryApprovalConsumer(journal);
+    registry.register(new MetaPauseCampaignTool(provider, authorizer, journal, consumer));
     const { mgr, approvals } = createApprovalMgr();
     const executor = new ToolExecutor(registry, allowAllPerms, mgr, logger);
     await executor.execute({ toolId: "meta.campaign.pause", params: { accountId: "act_111111111", campaignId: "100000001" }, userId: "user-1", role: "admin", traceId: "t-1" });
     const approval = Array.from(approvals.values())[0];
     approval.status = "approved" as ApprovalStatus;
+    consumer.create({
+      id: approval.id,
+      userId: "user-1",
+      toolId: "meta.campaign.pause",
+      paramsHash: computeParamsHash({ accountId: "act_111111111", campaignId: "100000001" }),
+      status: "approved",
+      expiresAt: approval.expiresAt,
+    });
     await executor.execute({ toolId: "meta.campaign.pause", params: { accountId: "act_111111111", campaignId: "100000001" }, userId: "user-1", role: "admin", traceId: "t-1" });
     expect(calls.length).toBeGreaterThanOrEqual(2);
     const lastCall = calls[calls.length - 1] as Record<string, unknown>;

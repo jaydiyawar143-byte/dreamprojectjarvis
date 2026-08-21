@@ -26,6 +26,7 @@ enum AgentStatus {
 enum ApprovalStatus {
   PENDING
   APPROVED
+  CONSUMED
   REJECTED
   EXPIRED
 }
@@ -256,6 +257,10 @@ model ToolExecution {
   errorCode          String?             @map("error_code")
   errorMessage       String?             @map("error_message")
   traceId            String?             @map("trace_id")
+  ownerId            String?             @map("owner_id")
+  leaseUntil         DateTime?           @map("lease_until")
+  heartbeatAt        DateTime?           @map("heartbeat_at")
+  approvalId         String?             @map("approval_id")
   createdAt          DateTime            @default(now()) @map("created_at")
   startedAt          DateTime?           @map("started_at")
   completedAt        DateTime?           @map("completed_at")
@@ -268,5 +273,6 @@ model ToolExecution {
   @@index([idempotencyKey], map: "tool_executions_idem_key_idx")
   @@index([traceId], map: "tool_executions_trace_idx")
   @@index([createdAt], map: "tool_executions_created_at_idx")
+  @@index([status, leaseUntil], map: "tool_executions_stale_idx")
   @@map("ToolExecution")
 }

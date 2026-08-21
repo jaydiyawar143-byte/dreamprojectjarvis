@@ -169,6 +169,10 @@ export function createMockMetaProvider(config: MockMetaProviderConfig = {}): Ful
   const throwOnCall = config.throwOnCall;
   const delayMs = config.delayMs ?? 0;
 
+  // Created resources get IDs in a range disjoint from the seeded fixtures,
+  // deterministically (independent of how many campaigns were seeded).
+  let createdCampaigns = 0;
+
   const delay = () =>
     delayMs > 0 ? new Promise((resolve) => setTimeout(resolve, delayMs)) : Promise.resolve();
 
@@ -286,7 +290,7 @@ export function createMockMetaProvider(config: MockMetaProviderConfig = {}): Ful
     createCampaign: async (_accountId: string, input: MetaCampaignInput) => {
       await delay();
       if (throwOnCall === "createCampaign") throw new Error("Meta API unavailable");
-      const newId = String(100000000 + campaigns.length + 1);
+      const newId = String(100000010 + createdCampaigns++);
       const campaign: MetaCampaign = {
         campaignId: newId,
         name: input.name,

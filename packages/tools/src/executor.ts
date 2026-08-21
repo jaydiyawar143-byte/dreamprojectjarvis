@@ -74,6 +74,12 @@ export class ToolExecutor implements IToolExecutor {
       }
     }
 
+    // Phase 10.3: when a valid cached approval authorizes this execution,
+    // its id is forwarded to the tool, which atomically CONSUMES it (verifying
+    // user/tool/paramsHash/state/expiry) together with the execution claim —
+    // one-time enforcement is durable, not executor-local.
+    let approvalIdForExecution: string | undefined;
+
     if (tool.requiresApproval) {
       const existing =
         await this.approvalManager.findExistingForTool(
@@ -105,6 +111,7 @@ export class ToolExecutor implements IToolExecutor {
           paramsBound(existing)
         ) {
           hasValidApproval = true;
+          approvalIdForExecution = existing.id;
         } else if (existing.status === "rejected") {
           const completedAt = new Date();
           await this.audit(request, executionId, "rejected", startedAt);
@@ -169,6 +176,7 @@ export class ToolExecutor implements IToolExecutor {
             agentId: request.agentId,
             conversationId: request.conversationId,
             traceId: request.traceId,
+            approvalId: approvalIdForExecution,
           }),
         timeoutMs
       );

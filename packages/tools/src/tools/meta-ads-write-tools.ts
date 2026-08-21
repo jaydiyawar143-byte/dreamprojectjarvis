@@ -1,8 +1,17 @@
 import { BaseTool } from "../base-tool.js";
-import type { ToolResult, ToolContext, BudgetGuardrailsConfig, CampaignProposal, MetaCampaignInput } from "@jarvis/core";
+import type {
+  ApprovalConsumptionResult,
+  BudgetGuardrailsConfig,
+  CampaignProposal,
+  IApprovalConsumptionPort,
+  MetaCampaignInput,
+  ToolContext,
+  ToolResult,
+} from "@jarvis/core";
 import {
   BLOCKED_STATUSES,
   CREATE_BLOCKED_STATUSES,
+  DEFAULT_LEASE_MS,
   computeParamsHash,
   type ExecutionJournalPort,
   type ExecutionJournalStatus,
@@ -10,7 +19,7 @@ import {
 import type { MetaAdsProvider, MetaAccountAuthorizer, MetaAdsWriteProvider, MetaAdsBudgetProvider, MetaCampaignCreatorProvider } from "./meta-ads-provider.js";
 import { validateAccountId, validateEntityId, parseBudgetValue } from "./meta-ads-validators.js";
 import { validateBudgetAmount, validateBudgetTransition, buildBudgetChangeSummary, verifyBudgetResult, DEFAULT_BUDGET_GUARDRAILS } from "./meta-ads-budget-guardrails.js";
-import { MemoryExecutionJournal, isAmbiguousWriteError } from "../execution-journal.js";
+import { MemoryExecutionJournal, isAmbiguousWriteError, withSafeTerminalTransitions } from "../execution-journal.js";
 
 // ---------------------------------------------------------------------------
 // Execution state machine (durable idempotency via ExecutionJournalPort)
@@ -102,10 +111,58 @@ export function buildIdempotencyKey(
 
 type WriteProvider = MetaAdsProvider & MetaAdsWriteProvider;
 
+// ---------------------------------------------------------------------------
+// authorizeAndClaim — one-time approval consumption fused with the execution
+// claim (Phase 10.3). When an approvalId is present it MUST be atomically
+// consumed (verifying user, tool, paramsHash, APPROVED state, expiry) in the
+// same durable step that claims the execution record. Denial => no claim,
+// no external side effect. Fail-closed when a port is missing.
+// ---------------------------------------------------------------------------
+async function authorizeAndClaim(
+  approvals: IApprovalConsumptionPort | undefined,
+  journal: ExecutionJournalPort,
+  toolId: string,
+  executionId: string,
+  params: Record<string, unknown>,
+  context: ToolContext
+): Promise<{ ok: true; claimed: true } | { ok: false; error: string }> {
+  if (!context.approvalId) {
+    // No approval in context (unit-test seam / non-gated invocation):
+    // plain single-winner claim as before.
+    const claimed = await journal.claimForExecution(executionId, {
+      ownerId: crypto.randomUUID(),
+      leaseMs: DEFAULT_LEASE_MS,
+    });
+    return claimed ? { ok: true, claimed: true } : { ok: false, error: "Execution already executing" };
+  }
+  if (!approvals) {
+    // An approval id was supplied but no consumption port is wired:
+    // NEVER execute — that would bypass one-time enforcement.
+    return { ok: false, error: "Approval verification unavailable" };
+  }
+  let result: ApprovalConsumptionResult;
+  try {
+    result = await approvals.consumeForExecution({
+      approvalId: context.approvalId,
+      userId: context.userId,
+      toolId,
+      paramsHash: computeParamsHash(params),
+      executionId,
+    });
+  } catch {
+    // Consumption infrastructure failure: fail closed — no ownership,
+    // no external side effect, approval untouched.
+    return { ok: false, error: "Approval verification unavailable" };
+  }
+  if (!result.ok) return { ok: false, error: `Approval denied: ${result.reason}` };
+  return { ok: true, claimed: true };
+}
+
 abstract class BaseMetaAdsWriteTool extends BaseTool {
   protected readonly provider: WriteProvider;
   protected readonly authorizer: MetaAccountAuthorizer;
   protected readonly journal: ExecutionJournalPort;
+  protected readonly approvals?: IApprovalConsumptionPort;
 
   constructor(
     id: string,
@@ -115,7 +172,8 @@ abstract class BaseMetaAdsWriteTool extends BaseTool {
     provider: WriteProvider,
     authorizer: MetaAccountAuthorizer,
     version = "1.0.0",
-    journal: ExecutionJournalPort = defaultExecutionJournal
+    journal: ExecutionJournalPort = defaultExecutionJournal,
+    approvals?: IApprovalConsumptionPort
   ) {
     super(
       id,
@@ -131,7 +189,10 @@ abstract class BaseMetaAdsWriteTool extends BaseTool {
     );
     this.provider = provider;
     this.authorizer = authorizer;
-    this.journal = journal;
+    // Terminal-transition failures are contained (see withSafeTerminalTransitions):
+    // a journal outage after a claim must never cause an unsafe external retry.
+    this.journal = withSafeTerminalTransitions(journal);
+    this.approvals = approvals;
   }
 
   protected async checkAccess(userId: string, accountId: string): Promise<ToolResult | null> {
@@ -166,14 +227,21 @@ abstract class BaseMetaAdsWriteTool extends BaseTool {
     context: ToolContext,
     blockedStates: ReadonlySet<ExecutionJournalStatus>
   ): Promise<{ ok: true; executionId: string } | { ok: false; error: string }> {
-    const record = await this.journal.begin({
-      userId: context.userId,
-      toolId: this.id,
-      idempotencyKey,
-      paramsHash: computeParamsHash(params),
-      provider: "meta-ads",
-      traceId: context.traceId,
-    });
+    let record;
+    try {
+      record = await this.journal.begin({
+        userId: context.userId,
+        toolId: this.id,
+        idempotencyKey,
+        paramsHash: computeParamsHash(params),
+        provider: "meta-ads",
+        traceId: context.traceId,
+        approvalId: context.approvalId,
+      });
+    } catch {
+      // Journal unavailable BEFORE any claim: fail closed, no ownership taken.
+      return { ok: false, error: "Execution journal unavailable" };
+    }
     if (blockedStates.has(record.status)) {
       return { ok: false, error: `Execution already ${record.status.toLowerCase()}` };
     }
@@ -181,7 +249,11 @@ abstract class BaseMetaAdsWriteTool extends BaseTool {
   }
 
   protected async claimExecution(executionId: string): Promise<boolean> {
-    return (await this.journal.claimForExecution(executionId)) !== null;
+    // Durable single-winner claim with lease ownership.
+    return (await this.journal.claimForExecution(executionId, {
+      ownerId: crypto.randomUUID(),
+      leaseMs: DEFAULT_LEASE_MS,
+    })) !== null;
   }
 }
 
@@ -190,7 +262,7 @@ abstract class BaseMetaAdsWriteTool extends BaseTool {
 // ---------------------------------------------------------------------------
 
 export class MetaPauseCampaignTool extends BaseMetaAdsWriteTool {
-  constructor(provider: WriteProvider, authorizer: MetaAccountAuthorizer, journal?: ExecutionJournalPort) {
+  constructor(provider: WriteProvider, authorizer: MetaAccountAuthorizer, journal?: ExecutionJournalPort, approvals?: IApprovalConsumptionPort) {
     super(
       "meta.campaign.pause",
       "Pause Meta Campaign",
@@ -202,7 +274,8 @@ export class MetaPauseCampaignTool extends BaseMetaAdsWriteTool {
       provider,
       authorizer,
       "1.0.0",
-      journal
+      journal,
+      approvals
     );
   }
 
@@ -246,8 +319,16 @@ export class MetaPauseCampaignTool extends BaseMetaAdsWriteTool {
       if (!transition.valid) return this.failure(transition.error!);
 
       const previousState = campaign.status;
-      claimed = await this.claimExecution(ensured.executionId);
-      if (!claimed) return this.failure("Execution already executing");
+      const claim = await authorizeAndClaim(
+        this.approvals,
+        this.journal,
+        this.id,
+        ensured.executionId,
+        params,
+        context
+      );
+      if (!claim.ok) return this.failure(claim.error);
+      claimed = true;
       const writeResult = await this.provider.updateCampaignStatus(validAccount, validCampaignId, "PAUSED");
 
       if (!writeResult.success) {
@@ -302,7 +383,7 @@ export class MetaPauseCampaignTool extends BaseMetaAdsWriteTool {
 // ---------------------------------------------------------------------------
 
 export class MetaResumeCampaignTool extends BaseMetaAdsWriteTool {
-  constructor(provider: WriteProvider, authorizer: MetaAccountAuthorizer, journal?: ExecutionJournalPort) {
+  constructor(provider: WriteProvider, authorizer: MetaAccountAuthorizer, journal?: ExecutionJournalPort, approvals?: IApprovalConsumptionPort) {
     super(
       "meta.campaign.resume",
       "Resume Meta Campaign",
@@ -314,7 +395,8 @@ export class MetaResumeCampaignTool extends BaseMetaAdsWriteTool {
       provider,
       authorizer,
       "1.0.0",
-      journal
+      journal,
+      approvals
     );
   }
 
@@ -358,8 +440,16 @@ export class MetaResumeCampaignTool extends BaseMetaAdsWriteTool {
       if (!transition.valid) return this.failure(transition.error!);
 
       const previousState = campaign.status;
-      claimed = await this.claimExecution(ensured.executionId);
-      if (!claimed) return this.failure("Execution already executing");
+      const claim = await authorizeAndClaim(
+        this.approvals,
+        this.journal,
+        this.id,
+        ensured.executionId,
+        params,
+        context
+      );
+      if (!claim.ok) return this.failure(claim.error);
+      claimed = true;
       const writeResult = await this.provider.updateCampaignStatus(validAccount, validCampaignId, "ACTIVE");
 
       if (!writeResult.success) {
@@ -414,7 +504,7 @@ export class MetaResumeCampaignTool extends BaseMetaAdsWriteTool {
 // ---------------------------------------------------------------------------
 
 export class MetaPauseAdSetTool extends BaseMetaAdsWriteTool {
-  constructor(provider: WriteProvider, authorizer: MetaAccountAuthorizer, journal?: ExecutionJournalPort) {
+  constructor(provider: WriteProvider, authorizer: MetaAccountAuthorizer, journal?: ExecutionJournalPort, approvals?: IApprovalConsumptionPort) {
     super(
       "meta.adset.pause",
       "Pause Meta Ad Set",
@@ -426,7 +516,8 @@ export class MetaPauseAdSetTool extends BaseMetaAdsWriteTool {
       provider,
       authorizer,
       "1.0.0",
-      journal
+      journal,
+      approvals
     );
   }
 
@@ -470,8 +561,16 @@ export class MetaPauseAdSetTool extends BaseMetaAdsWriteTool {
       if (!transition.valid) return this.failure(transition.error!);
 
       const previousState = adSet.status;
-      claimed = await this.claimExecution(ensured.executionId);
-      if (!claimed) return this.failure("Execution already executing");
+      const claim = await authorizeAndClaim(
+        this.approvals,
+        this.journal,
+        this.id,
+        ensured.executionId,
+        params,
+        context
+      );
+      if (!claim.ok) return this.failure(claim.error);
+      claimed = true;
       const writeResult = await this.provider.updateAdSetStatus(validAccount, validAdSetId, "PAUSED");
 
       if (!writeResult.success) {
@@ -526,7 +625,7 @@ export class MetaPauseAdSetTool extends BaseMetaAdsWriteTool {
 // ---------------------------------------------------------------------------
 
 export class MetaResumeAdSetTool extends BaseMetaAdsWriteTool {
-  constructor(provider: WriteProvider, authorizer: MetaAccountAuthorizer, journal?: ExecutionJournalPort) {
+  constructor(provider: WriteProvider, authorizer: MetaAccountAuthorizer, journal?: ExecutionJournalPort, approvals?: IApprovalConsumptionPort) {
     super(
       "meta.adset.resume",
       "Resume Meta Ad Set",
@@ -538,7 +637,8 @@ export class MetaResumeAdSetTool extends BaseMetaAdsWriteTool {
       provider,
       authorizer,
       "1.0.0",
-      journal
+      journal,
+      approvals
     );
   }
 
@@ -582,8 +682,16 @@ export class MetaResumeAdSetTool extends BaseMetaAdsWriteTool {
       if (!transition.valid) return this.failure(transition.error!);
 
       const previousState = adSet.status;
-      claimed = await this.claimExecution(ensured.executionId);
-      if (!claimed) return this.failure("Execution already executing");
+      const claim = await authorizeAndClaim(
+        this.approvals,
+        this.journal,
+        this.id,
+        ensured.executionId,
+        params,
+        context
+      );
+      if (!claim.ok) return this.failure(claim.error);
+      claimed = true;
       const writeResult = await this.provider.updateAdSetStatus(validAccount, validAdSetId, "ACTIVE");
 
       if (!writeResult.success) {
@@ -638,7 +746,7 @@ export class MetaResumeAdSetTool extends BaseMetaAdsWriteTool {
 // ---------------------------------------------------------------------------
 
 export class MetaPauseAdTool extends BaseMetaAdsWriteTool {
-  constructor(provider: WriteProvider, authorizer: MetaAccountAuthorizer, journal?: ExecutionJournalPort) {
+  constructor(provider: WriteProvider, authorizer: MetaAccountAuthorizer, journal?: ExecutionJournalPort, approvals?: IApprovalConsumptionPort) {
     super(
       "meta.ad.pause",
       "Pause Meta Ad",
@@ -650,7 +758,8 @@ export class MetaPauseAdTool extends BaseMetaAdsWriteTool {
       provider,
       authorizer,
       "1.0.0",
-      journal
+      journal,
+      approvals
     );
   }
 
@@ -694,8 +803,16 @@ export class MetaPauseAdTool extends BaseMetaAdsWriteTool {
       if (!transition.valid) return this.failure(transition.error!);
 
       const previousState = ad.status;
-      claimed = await this.claimExecution(ensured.executionId);
-      if (!claimed) return this.failure("Execution already executing");
+      const claim = await authorizeAndClaim(
+        this.approvals,
+        this.journal,
+        this.id,
+        ensured.executionId,
+        params,
+        context
+      );
+      if (!claim.ok) return this.failure(claim.error);
+      claimed = true;
       const writeResult = await this.provider.updateAdStatus(validAccount, validAdId, "PAUSED");
 
       if (!writeResult.success) {
@@ -750,7 +867,7 @@ export class MetaPauseAdTool extends BaseMetaAdsWriteTool {
 // ---------------------------------------------------------------------------
 
 export class MetaResumeAdTool extends BaseMetaAdsWriteTool {
-  constructor(provider: WriteProvider, authorizer: MetaAccountAuthorizer, journal?: ExecutionJournalPort) {
+  constructor(provider: WriteProvider, authorizer: MetaAccountAuthorizer, journal?: ExecutionJournalPort, approvals?: IApprovalConsumptionPort) {
     super(
       "meta.ad.resume",
       "Resume Meta Ad",
@@ -762,7 +879,8 @@ export class MetaResumeAdTool extends BaseMetaAdsWriteTool {
       provider,
       authorizer,
       "1.0.0",
-      journal
+      journal,
+      approvals
     );
   }
 
@@ -806,8 +924,16 @@ export class MetaResumeAdTool extends BaseMetaAdsWriteTool {
       if (!transition.valid) return this.failure(transition.error!);
 
       const previousState = ad.status;
-      claimed = await this.claimExecution(ensured.executionId);
-      if (!claimed) return this.failure("Execution already executing");
+      const claim = await authorizeAndClaim(
+        this.approvals,
+        this.journal,
+        this.id,
+        ensured.executionId,
+        params,
+        context
+      );
+      if (!claim.ok) return this.failure(claim.error);
+      claimed = true;
       const writeResult = await this.provider.updateAdStatus(validAccount, validAdId, "ACTIVE");
 
       if (!writeResult.success) {
@@ -878,6 +1004,7 @@ abstract class BaseMetaAdsBudgetTool extends BaseTool {
   protected readonly authorizer: MetaAccountAuthorizer;
   protected readonly guardrails: BudgetGuardrailsConfig;
   protected readonly journal: ExecutionJournalPort;
+  protected readonly approvals?: IApprovalConsumptionPort;
 
   constructor(
     id: string,
@@ -888,7 +1015,8 @@ abstract class BaseMetaAdsBudgetTool extends BaseTool {
     authorizer: MetaAccountAuthorizer,
     guardrails?: BudgetGuardrailsConfig,
     version = "1.0.0",
-    journal: ExecutionJournalPort = defaultExecutionJournal
+    journal: ExecutionJournalPort = defaultExecutionJournal,
+    approvals?: IApprovalConsumptionPort
   ) {
     super(
       id,
@@ -905,7 +1033,9 @@ abstract class BaseMetaAdsBudgetTool extends BaseTool {
     this.provider = provider;
     this.authorizer = authorizer;
     this.guardrails = guardrails ?? DEFAULT_BUDGET_GUARDRAILS;
-    this.journal = journal;
+    // Terminal-transition failures are contained (see withSafeTerminalTransitions).
+    this.journal = withSafeTerminalTransitions(journal);
+    this.approvals = approvals;
   }
 
   protected async checkAccess(userId: string, accountId: string): Promise<ToolResult | null> {
@@ -921,14 +1051,21 @@ abstract class BaseMetaAdsBudgetTool extends BaseTool {
     params: Record<string, unknown>,
     context: ToolContext
   ): Promise<{ ok: true; executionId: string } | { ok: false; error: string }> {
-    const record = await this.journal.begin({
-      userId: context.userId,
-      toolId: this.id,
-      idempotencyKey,
-      paramsHash: computeParamsHash(params),
-      provider: "meta-ads",
-      traceId: context.traceId,
-    });
+    let record;
+    try {
+      record = await this.journal.begin({
+        userId: context.userId,
+        toolId: this.id,
+        idempotencyKey,
+        paramsHash: computeParamsHash(params),
+        provider: "meta-ads",
+        traceId: context.traceId,
+        approvalId: context.approvalId,
+      });
+    } catch {
+      // Journal unavailable BEFORE any claim: fail closed, no ownership taken.
+      return { ok: false, error: "Execution journal unavailable" };
+    }
     if (BLOCKED_STATUSES.has(record.status)) {
       return { ok: false, error: `Execution already ${record.status.toLowerCase()}` };
     }
@@ -936,7 +1073,11 @@ abstract class BaseMetaAdsBudgetTool extends BaseTool {
   }
 
   protected async claimExecution(executionId: string): Promise<boolean> {
-    return (await this.journal.claimForExecution(executionId)) !== null;
+    // Durable single-winner claim with lease ownership.
+    return (await this.journal.claimForExecution(executionId, {
+      ownerId: crypto.randomUUID(),
+      leaseMs: DEFAULT_LEASE_MS,
+    })) !== null;
   }
 }
 
@@ -949,7 +1090,8 @@ export class MetaUpdateCampaignBudgetTool extends BaseMetaAdsBudgetTool {
     provider: BudgetProvider,
     authorizer: MetaAccountAuthorizer,
     guardrails?: BudgetGuardrailsConfig,
-    journal?: ExecutionJournalPort
+    journal?: ExecutionJournalPort,
+    approvals?: IApprovalConsumptionPort
   ) {
     super(
       "meta.campaign.budget.update",
@@ -964,7 +1106,8 @@ export class MetaUpdateCampaignBudgetTool extends BaseMetaAdsBudgetTool {
       authorizer,
       guardrails,
       "1.0.0",
-      journal
+      journal,
+      approvals
     );
   }
 
@@ -1007,6 +1150,27 @@ export class MetaUpdateCampaignBudgetTool extends BaseMetaAdsBudgetTool {
       const previousBudget = currentBudget;
       const currency = (await this.provider.getAdAccounts()).data[0]?.currency ?? "USD";
 
+      // Desired state already achieved — idempotent no-op (mirrors the
+      // pause/resume tools): succeed without claiming or writing again.
+      if (currentBudget === requestedBudget) {
+        return this.success({
+          action: "update_campaign_budget",
+          accountId: validAccount,
+          campaignId: validCampaignId,
+          campaignName: campaign.name,
+          previousBudget,
+          requestedBudget,
+          actualBudget: currentBudget,
+          currency,
+          absoluteChange: 0,
+          percentChange: 0,
+          direction: "unchanged",
+          verified: true,
+          idempotent: true,
+          message: "Campaign daily budget is already set to the requested amount",
+        }, { toolId: this.id, risk: this.risk, userId: context.userId });
+      }
+
       // Validate transition against guardrails
       const transition = validateBudgetTransition(previousBudget, requestedBudget, this.guardrails);
       if (!transition.valid) {
@@ -1017,8 +1181,16 @@ export class MetaUpdateCampaignBudgetTool extends BaseMetaAdsBudgetTool {
       const summary = buildBudgetChangeSummary(previousBudget, requestedBudget, currency);
 
       // Execute write
-      claimed = await this.claimExecution(ensured.executionId);
-      if (!claimed) return this.failure("Execution already executing");
+      const claim = await authorizeAndClaim(
+        this.approvals,
+        this.journal,
+        this.id,
+        ensured.executionId,
+        params,
+        context
+      );
+      if (!claim.ok) return this.failure(claim.error);
+      claimed = true;
       const budgetString = requestedBudget.toFixed(2);
       const writeResult = await this.provider.updateCampaignBudget(validAccount, validCampaignId, budgetString);
 
@@ -1111,7 +1283,8 @@ export class MetaUpdateAdSetBudgetTool extends BaseMetaAdsBudgetTool {
     provider: BudgetProvider,
     authorizer: MetaAccountAuthorizer,
     guardrails?: BudgetGuardrailsConfig,
-    journal?: ExecutionJournalPort
+    journal?: ExecutionJournalPort,
+    approvals?: IApprovalConsumptionPort
   ) {
     super(
       "meta.adset.budget.update",
@@ -1126,7 +1299,8 @@ export class MetaUpdateAdSetBudgetTool extends BaseMetaAdsBudgetTool {
       authorizer,
       guardrails,
       "1.0.0",
-      journal
+      journal,
+      approvals
     );
   }
 
@@ -1169,6 +1343,27 @@ export class MetaUpdateAdSetBudgetTool extends BaseMetaAdsBudgetTool {
       const previousBudget = currentBudget;
       const currency = (await this.provider.getAdAccounts()).data[0]?.currency ?? "USD";
 
+      // Desired state already achieved — idempotent no-op (mirrors the
+      // pause/resume tools): succeed without claiming or writing again.
+      if (currentBudget === requestedBudget) {
+        return this.success({
+          action: "update_adset_budget",
+          accountId: validAccount,
+          adSetId: validAdSetId,
+          adSetName: adSet.name,
+          previousBudget,
+          requestedBudget,
+          actualBudget: currentBudget,
+          currency,
+          absoluteChange: 0,
+          percentChange: 0,
+          direction: "unchanged",
+          verified: true,
+          idempotent: true,
+          message: "Ad set daily budget is already set to the requested amount",
+        }, { toolId: this.id, risk: this.risk, userId: context.userId });
+      }
+
       // Validate transition against guardrails
       const transition = validateBudgetTransition(previousBudget, requestedBudget, this.guardrails);
       if (!transition.valid) {
@@ -1179,8 +1374,16 @@ export class MetaUpdateAdSetBudgetTool extends BaseMetaAdsBudgetTool {
       const summary = buildBudgetChangeSummary(previousBudget, requestedBudget, currency);
 
       // Execute write
-      claimed = await this.claimExecution(ensured.executionId);
-      if (!claimed) return this.failure("Execution already executing");
+      const claim = await authorizeAndClaim(
+        this.approvals,
+        this.journal,
+        this.id,
+        ensured.executionId,
+        params,
+        context
+      );
+      if (!claim.ok) return this.failure(claim.error);
+      claimed = true;
       const budgetString = requestedBudget.toFixed(2);
       const writeResult = await this.provider.updateAdSetBudget(validAccount, validAdSetId, budgetString);
 
@@ -1400,6 +1603,7 @@ abstract class BaseMetaCampaignTool extends BaseTool {
   protected readonly authorizer: MetaAccountAuthorizer;
   protected readonly guardrails: BudgetGuardrailsConfig;
   protected readonly journal: ExecutionJournalPort;
+  protected readonly approvals?: IApprovalConsumptionPort;
 
   constructor(
     id: string,
@@ -1410,7 +1614,8 @@ abstract class BaseMetaCampaignTool extends BaseTool {
     authorizer: MetaAccountAuthorizer,
     guardrails?: BudgetGuardrailsConfig,
     version = "1.0.0",
-    journal: ExecutionJournalPort = defaultExecutionJournal
+    journal: ExecutionJournalPort = defaultExecutionJournal,
+    approvals?: IApprovalConsumptionPort
   ) {
     super(
       id,
@@ -1427,7 +1632,9 @@ abstract class BaseMetaCampaignTool extends BaseTool {
     this.provider = provider;
     this.authorizer = authorizer;
     this.guardrails = guardrails ?? DEFAULT_BUDGET_GUARDRAILS;
-    this.journal = journal;
+    // Terminal-transition failures are contained (see withSafeTerminalTransitions).
+    this.journal = withSafeTerminalTransitions(journal);
+    this.approvals = approvals;
   }
 
   protected async checkAccess(userId: string, accountId: string): Promise<ToolResult | null> {
@@ -1443,14 +1650,21 @@ abstract class BaseMetaCampaignTool extends BaseTool {
     params: Record<string, unknown>,
     context: ToolContext
   ): Promise<{ ok: true; executionId: string } | { ok: false; error: string }> {
-    const record = await this.journal.begin({
-      userId: context.userId,
-      toolId: this.id,
-      idempotencyKey,
-      paramsHash: computeParamsHash(params),
-      provider: "meta-ads",
-      traceId: context.traceId,
-    });
+    let record;
+    try {
+      record = await this.journal.begin({
+        userId: context.userId,
+        toolId: this.id,
+        idempotencyKey,
+        paramsHash: computeParamsHash(params),
+        provider: "meta-ads",
+        traceId: context.traceId,
+        approvalId: context.approvalId,
+      });
+    } catch {
+      // Journal unavailable BEFORE any claim: fail closed, no ownership taken.
+      return { ok: false, error: "Execution journal unavailable" };
+    }
     // Campaign creation blocks SUCCEEDED to prevent duplicate campaigns.
     if (CREATE_BLOCKED_STATUSES.has(record.status)) {
       return { ok: false, error: `Execution already ${record.status.toLowerCase()}` };
@@ -1459,7 +1673,11 @@ abstract class BaseMetaCampaignTool extends BaseTool {
   }
 
   protected async claimExecution(executionId: string): Promise<boolean> {
-    return (await this.journal.claimForExecution(executionId)) !== null;
+    // Durable single-winner claim with lease ownership.
+    return (await this.journal.claimForExecution(executionId, {
+      ownerId: crypto.randomUUID(),
+      leaseMs: DEFAULT_LEASE_MS,
+    })) !== null;
   }
 }
 
@@ -1476,7 +1694,8 @@ export class MetaCreateCampaignTool extends BaseMetaCampaignTool {
     provider: CampaignProvider,
     authorizer: MetaAccountAuthorizer,
     guardrails?: BudgetGuardrailsConfig,
-    journal?: ExecutionJournalPort
+    journal?: ExecutionJournalPort,
+    approvals?: IApprovalConsumptionPort
   ) {
     super(
       "meta.campaign.create",
@@ -1490,7 +1709,8 @@ export class MetaCreateCampaignTool extends BaseMetaCampaignTool {
       authorizer,
       guardrails,
       "1.0.0",
-      journal
+      journal,
+      approvals
     );
   }
 
@@ -1534,8 +1754,16 @@ export class MetaCreateCampaignTool extends BaseMetaCampaignTool {
 
     let claimed = false;
     try {
-      claimed = await this.claimExecution(ensured.executionId);
-      if (!claimed) return this.failure("Execution already executing");
+      const claim = await authorizeAndClaim(
+        this.approvals,
+        this.journal,
+        this.id,
+        ensured.executionId,
+        params,
+        context
+      );
+      if (!claim.ok) return this.failure(claim.error);
+      claimed = true;
 
       const input: MetaCampaignInput = {
         name: proposal.name,

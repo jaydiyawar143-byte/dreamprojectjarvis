@@ -22,6 +22,7 @@ export type Permission = z.infer<typeof PermissionSchema>;
 export const ApprovalStatusSchema = z.enum([
   "pending",
   "approved",
+  "consumed",
   "rejected",
   "expired",
 ]);
@@ -101,6 +102,42 @@ export interface IApprovalRepository {
   updateStatus(id: string, status: ApprovalStatus, resolvedAt?: string): Promise<Approval | null>;
   findPending(): Promise<Approval[]>;
   findExistingForTool(toolId: string, userId: string): Promise<Approval | null>;
+}
+
+// ---------------------------------------------------------------------------
+// One-time approval consumption (Phase 10.3)
+// ---------------------------------------------------------------------------
+// An approval is a ONE-TIME authorization for one exact tool execution.
+// Consumption must be database-atomic and verify ALL of: approval id, user,
+// tool, paramsHash, APPROVED state and expiry. CONSUMED is terminal — no
+// code path may return a consumed approval to APPROVED. Legacy approvals
+// without paramsHash fail closed (they can never match a required hash).
+// ---------------------------------------------------------------------------
+
+export interface ApprovalConsumptionInput {
+  approvalId: string;
+  userId: string;
+  toolId: string;
+  /** SHA-256 hex of canonical(current params) — must equal the stored hash. */
+  paramsHash: string;
+  /** Execution journal record this consumption authorizes. */
+  executionId: string;
+}
+
+export type ApprovalConsumptionResult =
+  | { ok: true }
+  | { ok: false; reason: string };
+
+export interface IApprovalConsumptionPort {
+  /**
+   * Atomically consume the approval AND claim the execution record
+   * (PENDING/APPROVED/FAILED -> EXECUTING with lease) in one durable
+   * transaction. Either both happen or neither does; only ONE concurrent
+   * caller can win.
+   */
+  consumeForExecution(
+    input: ApprovalConsumptionInput
+  ): Promise<ApprovalConsumptionResult>;
 }
 
 export interface IAuditRepository {
