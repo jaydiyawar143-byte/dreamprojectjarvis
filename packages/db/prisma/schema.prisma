@@ -37,6 +37,17 @@ enum AuditResult {
   PENDING
 }
 
+enum ToolExecutionStatus {
+  PENDING
+  APPROVED
+  EXECUTING
+  SUCCEEDED
+  FAILED
+  UNKNOWN
+  RECONCILING
+  CANCELLED
+}
+
 enum MemoryType {
   FACT
   PREFERENCE
@@ -63,6 +74,7 @@ model User {
   auditLogs     AuditLog[]
   settings      UserSetting[]
   refreshTokens RefreshToken[]
+  executions    ToolExecution[]
 }
 
 model RefreshToken {
@@ -177,6 +189,7 @@ model Approval {
   toolId     String
   action     String
   params     Json
+  paramsHash String?
   status     ApprovalStatus @default(PENDING)
   expiresAt  DateTime
   resolvedAt DateTime?
@@ -223,4 +236,37 @@ model UserSetting {
   user User @relation(fields: [userId], references: [id])
 
   @@unique([userId, key])
+}
+
+// Phase 10.1 — Durable execution journal.
+// Authoritative record of external side-effecting tool executions.
+// Idempotency is enforced by the database: the unique constraint on
+// (userId, toolId, idempotencyKey) guarantees concurrent attempts converge
+// on a single execution row. UNKNOWN means an external write may have
+// executed with uncertain outcome and must never be auto-retried.
+model ToolExecution {
+  executionId        String              @id @default(cuid()) @map("execution_id")
+  userId             String              @map("user_id")
+  toolId             String              @map("tool_id")
+  idempotencyKey     String              @map("idempotency_key")
+  paramsHash         String?             @map("params_hash")
+  status             ToolExecutionStatus @default(PENDING)
+  provider           String?
+  externalResourceId String?             @map("external_resource_id")
+  errorCode          String?             @map("error_code")
+  errorMessage       String?             @map("error_message")
+  traceId            String?             @map("trace_id")
+  createdAt          DateTime            @default(now()) @map("created_at")
+  startedAt          DateTime?           @map("started_at")
+  completedAt        DateTime?           @map("completed_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, toolId, idempotencyKey], map: "tool_executions_idempotency_unique")
+  @@index([userId], map: "tool_executions_user_idx")
+  @@index([status], map: "tool_executions_status_idx")
+  @@index([idempotencyKey], map: "tool_executions_idem_key_idx")
+  @@index([traceId], map: "tool_executions_trace_idx")
+  @@index([createdAt], map: "tool_executions_created_at_idx")
+  @@map("ToolExecution")
 }

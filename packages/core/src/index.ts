@@ -14,6 +14,9 @@ export * from "./types/ai-provider.js";
 export * from "./types/memory.js";
 export * from "./types/embedding-provider.js";
 export * from "./types/meta-ads.js";
+export * from "./types/tool-execution.js";
+export * from "./utils/params-hash.js";
+export * from "./utils/redact-secrets.js";
 
 // Re-export deprecated memory-provider types under unique names for backward compat
 export type {

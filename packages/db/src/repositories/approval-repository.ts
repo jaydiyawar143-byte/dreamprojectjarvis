@@ -27,6 +27,7 @@ function toApproval(row: {
   toolId: string;
   action: string;
   params: unknown;
+  paramsHash: string | null;
   status: "PENDING" | "APPROVED" | "REJECTED" | "EXPIRED";
   expiresAt: Date;
   resolvedAt: Date | null;
@@ -39,6 +40,7 @@ function toApproval(row: {
     toolId: row.toolId,
     action: row.action,
     params: row.params as Record<string, unknown>,
+    paramsHash: row.paramsHash ?? undefined,
     status: REVERSE_STATUS_MAP[row.status],
     expiresAt: row.expiresAt.toISOString(),
     resolvedAt: row.resolvedAt?.toISOString() ?? null,
@@ -59,6 +61,7 @@ export class PrismaApprovalRepository implements IApprovalRepository {
         toolId: data.toolId,
         action: data.action,
         params: data.params as unknown as Prisma.InputJsonValue,
+        paramsHash: data.paramsHash ?? null,
         status: "PENDING",
         expiresAt: new Date(data.expiresAt),
       },

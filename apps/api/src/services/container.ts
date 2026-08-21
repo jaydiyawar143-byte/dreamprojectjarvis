@@ -19,11 +19,6 @@ import {
   MetaUpdateCampaignBudgetTool,
   MetaUpdateAdSetBudgetTool,
   MetaCreateCampaignTool,
-  type MetaAdsProvider,
-  type MetaAdsWriteProvider,
-  type MetaAdsBudgetProvider,
-  type MetaCampaignCreatorProvider,
-  type MetaAccountAuthorizer,
 } from "@jarvis/tools";
 import { createMetaGraphProvider } from "@jarvis/meta-graph";
 import {
@@ -40,6 +35,7 @@ import {
   PrismaConversationRepository,
   PrismaUserRepository,
   PrismaRefreshTokenRepository,
+  PrismaToolExecutionRepository,
 } from "@jarvis/db";
 
 export interface Container {
@@ -72,27 +68,31 @@ function createMetaToolRegistry(): ToolRegistry {
       apiVersion: process.env.META_GRAPH_API_VERSION,
     });
 
-    // Phase 8: Read-only tools
-    registry.register(new MetaGetAccountsTool(realProvider));
-    registry.register(new MetaGetCampaignsTool(realProvider));
-    registry.register(new MetaGetAdSetsTool(realProvider));
-    registry.register(new MetaGetAdsTool(realProvider));
-    registry.register(new MetaGetInsightsTool(realProvider));
+    // Phase 10.1: durable execution journal — DB-enforced idempotency for
+    // every write tool. No in-process state may gate external side effects.
+    const executionJournal = new PrismaToolExecutionRepository(prisma);
+
+    // Phase 8: Read-only tools (provider doubles as its own authorizer)
+    registry.register(new MetaGetAccountsTool(realProvider, realProvider));
+    registry.register(new MetaGetCampaignsTool(realProvider, realProvider));
+    registry.register(new MetaGetAdSetsTool(realProvider, realProvider));
+    registry.register(new MetaGetAdsTool(realProvider, realProvider));
+    registry.register(new MetaGetInsightsTool(realProvider, realProvider));
 
     // Phase 9.1: Write tools (pause/resume)
-    registry.register(new MetaPauseCampaignTool(realProvider, realProvider));
-    registry.register(new MetaResumeCampaignTool(realProvider, realProvider));
-    registry.register(new MetaPauseAdSetTool(realProvider, realProvider));
-    registry.register(new MetaResumeAdSetTool(realProvider, realProvider));
-    registry.register(new MetaPauseAdTool(realProvider, realProvider));
-    registry.register(new MetaResumeAdTool(realProvider, realProvider));
+    registry.register(new MetaPauseCampaignTool(realProvider, realProvider, executionJournal));
+    registry.register(new MetaResumeCampaignTool(realProvider, realProvider, executionJournal));
+    registry.register(new MetaPauseAdSetTool(realProvider, realProvider, executionJournal));
+    registry.register(new MetaResumeAdSetTool(realProvider, realProvider, executionJournal));
+    registry.register(new MetaPauseAdTool(realProvider, realProvider, executionJournal));
+    registry.register(new MetaResumeAdTool(realProvider, realProvider, executionJournal));
 
     // Phase 9.2: Budget tools
-    registry.register(new MetaUpdateCampaignBudgetTool(realProvider, realProvider));
-    registry.register(new MetaUpdateAdSetBudgetTool(realProvider, realProvider));
+    registry.register(new MetaUpdateCampaignBudgetTool(realProvider, realProvider, undefined, executionJournal));
+    registry.register(new MetaUpdateAdSetBudgetTool(realProvider, realProvider, undefined, executionJournal));
 
     // Phase 9.3: Campaign creation
-    registry.register(new MetaCreateCampaignTool(realProvider, realProvider));
+    registry.register(new MetaCreateCampaignTool(realProvider, realProvider, undefined, executionJournal));
   }
 
   return registry;

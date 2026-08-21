@@ -35,6 +35,10 @@ export const ApprovalSchema = z.object({
   toolId: z.string(),
   action: z.string(),
   params: z.record(z.unknown()),
+  // SHA-256 hex of canonical(params) — binds the approval to the exact
+  // parameters a human approved. Absent on legacy approvals, which must
+  // never authorize approval-gated (write) tool execution.
+  paramsHash: z.string().optional(),
   status: ApprovalStatusSchema,
   expiresAt: z.string().datetime(),
   resolvedAt: z.string().datetime().nullable().optional(),

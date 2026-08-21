@@ -10,6 +10,7 @@ import type {
   ToolApprovalCheck,
   ToolExecutionAudit,
 } from "@jarvis/core";
+import { computeParamsHash } from "@jarvis/core";
 
 export interface ToolApprovalConfig {
   approvalTtlMs?: number;
@@ -101,7 +102,16 @@ export class ToolApprovalService {
 
     if (existing && existing.status === ("approved" as ApprovalStatus)) {
       const expiresAt = new Date(existing.expiresAt).getTime();
-      if (expiresAt > Date.now()) {
+      // An approval authorizes ONLY the exact tool, user, and parameters a
+      // human approved. Missing hash (legacy approval) or mismatched hash
+      // (changed params) invalidates reuse — a fresh approval is required.
+      // Fail closed.
+      const paramsBound =
+        existing.toolId === tool.id &&
+        existing.userId === request.userId &&
+        !!existing.paramsHash &&
+        existing.paramsHash === computeParamsHash(params);
+      if (expiresAt > Date.now() && paramsBound) {
         return {
           allowed: true,
           requiresApproval: false,
@@ -204,6 +214,8 @@ export class ToolApprovalService {
       toolId: tool.id,
       action: tool.description,
       params,
+      // bind approval to exact params; canonical form is never logged
+      paramsHash: computeParamsHash(params),
       expiresAt: expiresAt.toISOString(),
     });
 

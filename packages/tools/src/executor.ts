@@ -8,6 +8,7 @@ import type {
   AuditLogger,
   ToolResult,
 } from "@jarvis/core";
+import { computeParamsHash } from "@jarvis/core";
 
 const DEFAULT_TIMEOUT_MS = 30000;
 
@@ -80,12 +81,28 @@ export class ToolExecutor implements IToolExecutor {
           request.userId
         );
 
+      // An approval authorizes ONLY the exact parameters a human approved.
+      // The stored paramsHash must match a recomputed hash of the current
+      // params. Missing hash (legacy approval) or mismatch (changed params)
+      // invalidates reuse — fail closed and require a fresh approval.
+      const paramsBound = (approval: {
+        paramsHash?: string;
+        toolId?: string;
+        userId?: string;
+      } | null): boolean =>
+        !!approval &&
+        approval.toolId === request.toolId &&
+        approval.userId === request.userId &&
+        !!approval.paramsHash &&
+        approval.paramsHash === computeParamsHash(request.params);
+
       let hasValidApproval = false;
 
       if (existing) {
         if (
           existing.status === "approved" &&
-          new Date(existing.expiresAt) > new Date()
+          new Date(existing.expiresAt) > new Date() &&
+          paramsBound(existing)
         ) {
           hasValidApproval = true;
         } else if (existing.status === "rejected") {
@@ -101,7 +118,7 @@ export class ToolExecutor implements IToolExecutor {
             completedAt,
             durationMs: completedAt.getTime() - startedAt.getTime(),
           };
-        } else if (existing.status === "pending") {
+        } else if (existing.status === "pending" && paramsBound(existing)) {
           const completedAt = new Date();
           await this.audit(request, executionId, "pending", startedAt);
           return {
@@ -114,7 +131,8 @@ export class ToolExecutor implements IToolExecutor {
             durationMs: completedAt.getTime() - startedAt.getTime(),
           };
         }
-        // expired or approved-but-expired → fall through to request new approval
+        // expired, approved-but-expired, or params not bound to this
+        // approval → fall through to request a fresh approval
       }
 
       if (!hasValidApproval) {
@@ -150,6 +168,7 @@ export class ToolExecutor implements IToolExecutor {
             userId: request.userId,
             agentId: request.agentId,
             conversationId: request.conversationId,
+            traceId: request.traceId,
           }),
         timeoutMs
       );

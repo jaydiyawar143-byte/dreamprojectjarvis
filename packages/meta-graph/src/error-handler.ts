@@ -6,6 +6,9 @@ export interface MetaApiError {
   code: number;
   error_subcode?: number;
   fbtrace_id?: string;
+  error_user_msg?: string;
+  error_user_title?: string;
+  error_data?: unknown;
 }
 
 export interface MetaErrorResponse {
@@ -46,6 +49,16 @@ export function classifyMetaError(
     metaType = err.type || "";
     metaCode = err.code || 0;
     fbtraceId = err.fbtrace_id;
+    // Surface Meta's human-readable detail (subcode/user message/error data)
+    // so callers can act on validation failures without raw API access.
+    const details: string[] = [];
+    if (err.error_user_title) details.push(err.error_user_title);
+    if (err.error_user_msg) details.push(err.error_user_msg);
+    if (err.error_subcode !== undefined) details.push(`subcode=${err.error_subcode}`);
+    if (err.error_data !== undefined) details.push(`data=${JSON.stringify(err.error_data)}`);
+    if (details.length > 0) {
+      message = `${message} (${details.join("; ")})`;
+    }
   } else if (typeof body === "string") {
     message = body;
   }

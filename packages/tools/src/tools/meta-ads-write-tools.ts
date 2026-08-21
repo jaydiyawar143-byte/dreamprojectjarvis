@@ -1,55 +1,85 @@
 import { BaseTool } from "../base-tool.js";
 import type { ToolResult, ToolContext, BudgetGuardrailsConfig, CampaignProposal, MetaCampaignInput } from "@jarvis/core";
+import {
+  BLOCKED_STATUSES,
+  CREATE_BLOCKED_STATUSES,
+  computeParamsHash,
+  type ExecutionJournalPort,
+  type ExecutionJournalStatus,
+} from "@jarvis/core";
 import type { MetaAdsProvider, MetaAccountAuthorizer, MetaAdsWriteProvider, MetaAdsBudgetProvider, MetaCampaignCreatorProvider } from "./meta-ads-provider.js";
 import { validateAccountId, validateEntityId, parseBudgetValue } from "./meta-ads-validators.js";
 import { validateBudgetAmount, validateBudgetTransition, buildBudgetChangeSummary, verifyBudgetResult, DEFAULT_BUDGET_GUARDRAILS } from "./meta-ads-budget-guardrails.js";
+import { MemoryExecutionJournal, isAmbiguousWriteError } from "../execution-journal.js";
 
 // ---------------------------------------------------------------------------
-// Execution state machine (application-level idempotency)
+// Execution state machine (durable idempotency via ExecutionJournalPort)
 // ---------------------------------------------------------------------------
 // Prevents duplicate Meta API side effects for the same action+target.
+// Production MUST inject a durable journal (PrismaToolExecutionRepository).
+// The module-level MemoryExecutionJournal below exists only as the default
+// for unit tests; it must never be relied upon in production.
 // ---------------------------------------------------------------------------
 
-export type MetaExecutionState =
-  | "PENDING"
-  | "APPROVED"
-  | "EXECUTING"
-  | "SUCCEEDED"
-  | "FAILED"
-  | "EXPIRED"
-  | "CANCELLED"
-  | "STALE";
+/** @deprecated Legacy alias of ExecutionJournalStatus kept for test compat. */
+export type MetaExecutionState = ExecutionJournalStatus | "EXPIRED" | "STALE";
 
-interface ExecutionRecord {
+const defaultExecutionJournal = new MemoryExecutionJournal();
+
+interface LegacyExecutionRecord {
   state: MetaExecutionState;
   executionId: string;
   timestamp: number;
 }
 
-const executionStore = new Map<string, ExecutionRecord>();
-
-export function getExecutionState(idempotencyKey: string): ExecutionRecord | undefined {
-  return executionStore.get(idempotencyKey);
+function toLegacyRecord(record: {
+  status: string;
+  executionId: string;
+  createdAt: Date;
+}): LegacyExecutionRecord {
+  return {
+    state: record.status as MetaExecutionState,
+    executionId: record.executionId,
+    timestamp: record.createdAt.getTime(),
+  };
 }
 
+/** @deprecated Test seam over the default memory journal. */
+export function getExecutionState(idempotencyKey: string): LegacyExecutionRecord | undefined {
+  const record = defaultExecutionJournal.findByAnyKey(idempotencyKey);
+  if (!record) return undefined;
+  return toLegacyRecord(record);
+}
+
+/** @deprecated Test seam over the default memory journal. */
 export function setExecutionState(
   idempotencyKey: string,
   state: MetaExecutionState,
-  executionId: string
+  userId: string
 ): void {
-  executionStore.set(idempotencyKey, { state, executionId, timestamp: Date.now() });
+  const toolId = idempotencyKey.split(":")[0] ?? "unknown";
+  const existing = defaultExecutionJournal.findByAnyKey(idempotencyKey);
+  if (existing && existing.userId === userId && existing.toolId === toolId) {
+    existing.status =
+      state === "EXPIRED" || state === "STALE" ? "CANCELLED" : state;
+    return;
+  }
+  void defaultExecutionJournal
+    .begin({
+      userId,
+      toolId,
+      idempotencyKey,
+      provider: "meta-ads",
+    })
+    .then((record) => {
+      record.status =
+        state === "EXPIRED" || state === "STALE" ? "CANCELLED" : state;
+    });
 }
 
 export function clearExecutionStore(): void {
-  executionStore.clear();
+  defaultExecutionJournal.clear();
 }
-
-const BLOCKED_STATES: ReadonlySet<MetaExecutionState> = new Set([
-  "EXECUTING",
-  "CANCELLED",
-  "EXPIRED",
-  "STALE",
-]);
 
 export function buildIdempotencyKey(
   toolId: string,
@@ -75,6 +105,7 @@ type WriteProvider = MetaAdsProvider & MetaAdsWriteProvider;
 abstract class BaseMetaAdsWriteTool extends BaseTool {
   protected readonly provider: WriteProvider;
   protected readonly authorizer: MetaAccountAuthorizer;
+  protected readonly journal: ExecutionJournalPort;
 
   constructor(
     id: string,
@@ -83,7 +114,8 @@ abstract class BaseMetaAdsWriteTool extends BaseTool {
     parameters: { name: string; type: string; description: string; required: boolean }[],
     provider: WriteProvider,
     authorizer: MetaAccountAuthorizer,
-    version = "1.0.0"
+    version = "1.0.0",
+    journal: ExecutionJournalPort = defaultExecutionJournal
   ) {
     super(
       id,
@@ -99,6 +131,7 @@ abstract class BaseMetaAdsWriteTool extends BaseTool {
     );
     this.provider = provider;
     this.authorizer = authorizer;
+    this.journal = journal;
   }
 
   protected async checkAccess(userId: string, accountId: string): Promise<ToolResult | null> {
@@ -127,21 +160,28 @@ abstract class BaseMetaAdsWriteTool extends BaseTool {
     return { valid: true };
   }
 
-  protected checkIdempotency(idempotencyKey: string): {
-    blocked: boolean;
-    state?: MetaExecutionState;
-    error?: string;
-  } {
-    const existing = getExecutionState(idempotencyKey);
-    if (!existing) return { blocked: false };
-    if (BLOCKED_STATES.has(existing.state)) {
-      return {
-        blocked: true,
-        state: existing.state,
-        error: `Execution already ${existing.state.toLowerCase()}`,
-      };
+  protected async ensureExecutable(
+    idempotencyKey: string,
+    params: Record<string, unknown>,
+    context: ToolContext,
+    blockedStates: ReadonlySet<ExecutionJournalStatus>
+  ): Promise<{ ok: true; executionId: string } | { ok: false; error: string }> {
+    const record = await this.journal.begin({
+      userId: context.userId,
+      toolId: this.id,
+      idempotencyKey,
+      paramsHash: computeParamsHash(params),
+      provider: "meta-ads",
+      traceId: context.traceId,
+    });
+    if (blockedStates.has(record.status)) {
+      return { ok: false, error: `Execution already ${record.status.toLowerCase()}` };
     }
-    return { blocked: false };
+    return { ok: true, executionId: record.executionId };
+  }
+
+  protected async claimExecution(executionId: string): Promise<boolean> {
+    return (await this.journal.claimForExecution(executionId)) !== null;
   }
 }
 
@@ -150,7 +190,7 @@ abstract class BaseMetaAdsWriteTool extends BaseTool {
 // ---------------------------------------------------------------------------
 
 export class MetaPauseCampaignTool extends BaseMetaAdsWriteTool {
-  constructor(provider: WriteProvider, authorizer: MetaAccountAuthorizer) {
+  constructor(provider: WriteProvider, authorizer: MetaAccountAuthorizer, journal?: ExecutionJournalPort) {
     super(
       "meta.campaign.pause",
       "Pause Meta Campaign",
@@ -160,7 +200,9 @@ export class MetaPauseCampaignTool extends BaseMetaAdsWriteTool {
         { name: "campaignId", type: "string", description: "Campaign ID to pause", required: true },
       ],
       provider,
-      authorizer
+      authorizer,
+      "1.0.0",
+      journal
     );
   }
 
@@ -177,11 +219,10 @@ export class MetaPauseCampaignTool extends BaseMetaAdsWriteTool {
     if (accessError) return accessError;
 
     const idempotencyKey = buildIdempotencyKey(this.id, validAccount, validCampaignId, "PAUSED");
-    const idempotencyCheck = this.checkIdempotency(idempotencyKey);
-    if (idempotencyCheck.blocked) {
-      return this.failure(idempotencyCheck.error!);
-    }
+    const ensured = await this.ensureExecutable(idempotencyKey, params, context, BLOCKED_STATUSES);
+    if (!ensured.ok) return this.failure(ensured.error);
 
+    let claimed = false;
     try {
       const result = await this.provider.getCampaigns(validAccount);
       const campaign = result.data.find((c) => c.campaignId === validCampaignId);
@@ -205,20 +246,27 @@ export class MetaPauseCampaignTool extends BaseMetaAdsWriteTool {
       if (!transition.valid) return this.failure(transition.error!);
 
       const previousState = campaign.status;
-      setExecutionState(idempotencyKey, "EXECUTING", context.userId);
+      claimed = await this.claimExecution(ensured.executionId);
+      if (!claimed) return this.failure("Execution already executing");
       const writeResult = await this.provider.updateCampaignStatus(validAccount, validCampaignId, "PAUSED");
 
       if (!writeResult.success) {
-        setExecutionState(idempotencyKey, "FAILED", context.userId);
+        await this.journal.markFailed(ensured.executionId, {
+          code: "PROVIDER_REJECTED",
+          message: "Provider reported failure while pausing campaign",
+        });
         return this.failure("Failed to pause campaign");
       }
 
       if (writeResult.campaign.status !== "PAUSED") {
-        setExecutionState(idempotencyKey, "FAILED", context.userId);
+        await this.journal.markFailed(ensured.executionId, {
+          code: "VERIFICATION_FAILED",
+          message: "Campaign status was not updated to PAUSED",
+        });
         return this.failure("Verification failed: campaign status was not updated to PAUSED");
       }
 
-      setExecutionState(idempotencyKey, "SUCCEEDED", context.userId);
+      await this.journal.markSucceeded(ensured.executionId, validCampaignId);
       return this.success({
         action: "pause_campaign",
         accountId: validAccount,
@@ -230,6 +278,19 @@ export class MetaPauseCampaignTool extends BaseMetaAdsWriteTool {
         verified: true,
       }, { toolId: this.id, risk: this.risk, userId: context.userId });
     } catch (err) {
+      if (claimed) {
+        if (isAmbiguousWriteError(err)) {
+          await this.journal.markUnknown(ensured.executionId, {
+            code: "AMBIGUOUS_OUTCOME",
+            message: err instanceof Error ? err.message : "Uncertain provider outcome",
+          });
+        } else {
+          await this.journal.markFailed(ensured.executionId, {
+            code: "EXECUTION_ERROR",
+            message: err instanceof Error ? err.message : "Failed to pause campaign",
+          });
+        }
+      }
       const message = err instanceof Error ? err.message : "Failed to pause campaign";
       return this.failure(`Meta API error: ${message}`);
     }
@@ -241,7 +302,7 @@ export class MetaPauseCampaignTool extends BaseMetaAdsWriteTool {
 // ---------------------------------------------------------------------------
 
 export class MetaResumeCampaignTool extends BaseMetaAdsWriteTool {
-  constructor(provider: WriteProvider, authorizer: MetaAccountAuthorizer) {
+  constructor(provider: WriteProvider, authorizer: MetaAccountAuthorizer, journal?: ExecutionJournalPort) {
     super(
       "meta.campaign.resume",
       "Resume Meta Campaign",
@@ -251,7 +312,9 @@ export class MetaResumeCampaignTool extends BaseMetaAdsWriteTool {
         { name: "campaignId", type: "string", description: "Campaign ID to resume", required: true },
       ],
       provider,
-      authorizer
+      authorizer,
+      "1.0.0",
+      journal
     );
   }
 
@@ -268,11 +331,10 @@ export class MetaResumeCampaignTool extends BaseMetaAdsWriteTool {
     if (accessError) return accessError;
 
     const idempotencyKey = buildIdempotencyKey(this.id, validAccount, validCampaignId, "ACTIVE");
-    const idempotencyCheck = this.checkIdempotency(idempotencyKey);
-    if (idempotencyCheck.blocked) {
-      return this.failure(idempotencyCheck.error!);
-    }
+    const ensured = await this.ensureExecutable(idempotencyKey, params, context, BLOCKED_STATUSES);
+    if (!ensured.ok) return this.failure(ensured.error);
 
+    let claimed = false;
     try {
       const result = await this.provider.getCampaigns(validAccount);
       const campaign = result.data.find((c) => c.campaignId === validCampaignId);
@@ -296,20 +358,27 @@ export class MetaResumeCampaignTool extends BaseMetaAdsWriteTool {
       if (!transition.valid) return this.failure(transition.error!);
 
       const previousState = campaign.status;
-      setExecutionState(idempotencyKey, "EXECUTING", context.userId);
+      claimed = await this.claimExecution(ensured.executionId);
+      if (!claimed) return this.failure("Execution already executing");
       const writeResult = await this.provider.updateCampaignStatus(validAccount, validCampaignId, "ACTIVE");
 
       if (!writeResult.success) {
-        setExecutionState(idempotencyKey, "FAILED", context.userId);
+        await this.journal.markFailed(ensured.executionId, {
+          code: "PROVIDER_REJECTED",
+          message: "Provider reported failure while resuming campaign",
+        });
         return this.failure("Failed to resume campaign");
       }
 
       if (writeResult.campaign.status !== "ACTIVE") {
-        setExecutionState(idempotencyKey, "FAILED", context.userId);
+        await this.journal.markFailed(ensured.executionId, {
+          code: "VERIFICATION_FAILED",
+          message: "Campaign status was not updated to ACTIVE",
+        });
         return this.failure("Verification failed: campaign status was not updated to ACTIVE");
       }
 
-      setExecutionState(idempotencyKey, "SUCCEEDED", context.userId);
+      await this.journal.markSucceeded(ensured.executionId, validCampaignId);
       return this.success({
         action: "resume_campaign",
         accountId: validAccount,
@@ -321,6 +390,19 @@ export class MetaResumeCampaignTool extends BaseMetaAdsWriteTool {
         verified: true,
       }, { toolId: this.id, risk: this.risk, userId: context.userId });
     } catch (err) {
+      if (claimed) {
+        if (isAmbiguousWriteError(err)) {
+          await this.journal.markUnknown(ensured.executionId, {
+            code: "AMBIGUOUS_OUTCOME",
+            message: err instanceof Error ? err.message : "Uncertain provider outcome",
+          });
+        } else {
+          await this.journal.markFailed(ensured.executionId, {
+            code: "EXECUTION_ERROR",
+            message: err instanceof Error ? err.message : "Failed to resume campaign",
+          });
+        }
+      }
       const message = err instanceof Error ? err.message : "Failed to resume campaign";
       return this.failure(`Meta API error: ${message}`);
     }
@@ -332,7 +414,7 @@ export class MetaResumeCampaignTool extends BaseMetaAdsWriteTool {
 // ---------------------------------------------------------------------------
 
 export class MetaPauseAdSetTool extends BaseMetaAdsWriteTool {
-  constructor(provider: WriteProvider, authorizer: MetaAccountAuthorizer) {
+  constructor(provider: WriteProvider, authorizer: MetaAccountAuthorizer, journal?: ExecutionJournalPort) {
     super(
       "meta.adset.pause",
       "Pause Meta Ad Set",
@@ -342,7 +424,9 @@ export class MetaPauseAdSetTool extends BaseMetaAdsWriteTool {
         { name: "adSetId", type: "string", description: "Ad set ID to pause", required: true },
       ],
       provider,
-      authorizer
+      authorizer,
+      "1.0.0",
+      journal
     );
   }
 
@@ -359,11 +443,10 @@ export class MetaPauseAdSetTool extends BaseMetaAdsWriteTool {
     if (accessError) return accessError;
 
     const idempotencyKey = buildIdempotencyKey(this.id, validAccount, validAdSetId, "PAUSED");
-    const idempotencyCheck = this.checkIdempotency(idempotencyKey);
-    if (idempotencyCheck.blocked) {
-      return this.failure(idempotencyCheck.error!);
-    }
+    const ensured = await this.ensureExecutable(idempotencyKey, params, context, BLOCKED_STATUSES);
+    if (!ensured.ok) return this.failure(ensured.error);
 
+    let claimed = false;
     try {
       const result = await this.provider.getAdSets(validAccount);
       const adSet = result.data.find((a) => a.adSetId === validAdSetId);
@@ -387,20 +470,27 @@ export class MetaPauseAdSetTool extends BaseMetaAdsWriteTool {
       if (!transition.valid) return this.failure(transition.error!);
 
       const previousState = adSet.status;
-      setExecutionState(idempotencyKey, "EXECUTING", context.userId);
+      claimed = await this.claimExecution(ensured.executionId);
+      if (!claimed) return this.failure("Execution already executing");
       const writeResult = await this.provider.updateAdSetStatus(validAccount, validAdSetId, "PAUSED");
 
       if (!writeResult.success) {
-        setExecutionState(idempotencyKey, "FAILED", context.userId);
+        await this.journal.markFailed(ensured.executionId, {
+          code: "PROVIDER_REJECTED",
+          message: "Provider reported failure while pausing ad set",
+        });
         return this.failure("Failed to pause ad set");
       }
 
       if (writeResult.adSet.status !== "PAUSED") {
-        setExecutionState(idempotencyKey, "FAILED", context.userId);
+        await this.journal.markFailed(ensured.executionId, {
+          code: "VERIFICATION_FAILED",
+          message: "Ad set status was not updated to PAUSED",
+        });
         return this.failure("Verification failed: ad set status was not updated to PAUSED");
       }
 
-      setExecutionState(idempotencyKey, "SUCCEEDED", context.userId);
+      await this.journal.markSucceeded(ensured.executionId, validAdSetId);
       return this.success({
         action: "pause_adset",
         accountId: validAccount,
@@ -412,6 +502,19 @@ export class MetaPauseAdSetTool extends BaseMetaAdsWriteTool {
         verified: true,
       }, { toolId: this.id, risk: this.risk, userId: context.userId });
     } catch (err) {
+      if (claimed) {
+        if (isAmbiguousWriteError(err)) {
+          await this.journal.markUnknown(ensured.executionId, {
+            code: "AMBIGUOUS_OUTCOME",
+            message: err instanceof Error ? err.message : "Uncertain provider outcome",
+          });
+        } else {
+          await this.journal.markFailed(ensured.executionId, {
+            code: "EXECUTION_ERROR",
+            message: err instanceof Error ? err.message : "Failed to pause ad set",
+          });
+        }
+      }
       const message = err instanceof Error ? err.message : "Failed to pause ad set";
       return this.failure(`Meta API error: ${message}`);
     }
@@ -423,7 +526,7 @@ export class MetaPauseAdSetTool extends BaseMetaAdsWriteTool {
 // ---------------------------------------------------------------------------
 
 export class MetaResumeAdSetTool extends BaseMetaAdsWriteTool {
-  constructor(provider: WriteProvider, authorizer: MetaAccountAuthorizer) {
+  constructor(provider: WriteProvider, authorizer: MetaAccountAuthorizer, journal?: ExecutionJournalPort) {
     super(
       "meta.adset.resume",
       "Resume Meta Ad Set",
@@ -433,7 +536,9 @@ export class MetaResumeAdSetTool extends BaseMetaAdsWriteTool {
         { name: "adSetId", type: "string", description: "Ad set ID to resume", required: true },
       ],
       provider,
-      authorizer
+      authorizer,
+      "1.0.0",
+      journal
     );
   }
 
@@ -450,11 +555,10 @@ export class MetaResumeAdSetTool extends BaseMetaAdsWriteTool {
     if (accessError) return accessError;
 
     const idempotencyKey = buildIdempotencyKey(this.id, validAccount, validAdSetId, "ACTIVE");
-    const idempotencyCheck = this.checkIdempotency(idempotencyKey);
-    if (idempotencyCheck.blocked) {
-      return this.failure(idempotencyCheck.error!);
-    }
+    const ensured = await this.ensureExecutable(idempotencyKey, params, context, BLOCKED_STATUSES);
+    if (!ensured.ok) return this.failure(ensured.error);
 
+    let claimed = false;
     try {
       const result = await this.provider.getAdSets(validAccount);
       const adSet = result.data.find((a) => a.adSetId === validAdSetId);
@@ -478,20 +582,27 @@ export class MetaResumeAdSetTool extends BaseMetaAdsWriteTool {
       if (!transition.valid) return this.failure(transition.error!);
 
       const previousState = adSet.status;
-      setExecutionState(idempotencyKey, "EXECUTING", context.userId);
+      claimed = await this.claimExecution(ensured.executionId);
+      if (!claimed) return this.failure("Execution already executing");
       const writeResult = await this.provider.updateAdSetStatus(validAccount, validAdSetId, "ACTIVE");
 
       if (!writeResult.success) {
-        setExecutionState(idempotencyKey, "FAILED", context.userId);
+        await this.journal.markFailed(ensured.executionId, {
+          code: "PROVIDER_REJECTED",
+          message: "Provider reported failure while resuming ad set",
+        });
         return this.failure("Failed to resume ad set");
       }
 
       if (writeResult.adSet.status !== "ACTIVE") {
-        setExecutionState(idempotencyKey, "FAILED", context.userId);
+        await this.journal.markFailed(ensured.executionId, {
+          code: "VERIFICATION_FAILED",
+          message: "Ad set status was not updated to ACTIVE",
+        });
         return this.failure("Verification failed: ad set status was not updated to ACTIVE");
       }
 
-      setExecutionState(idempotencyKey, "SUCCEEDED", context.userId);
+      await this.journal.markSucceeded(ensured.executionId, validAdSetId);
       return this.success({
         action: "resume_adset",
         accountId: validAccount,
@@ -503,6 +614,19 @@ export class MetaResumeAdSetTool extends BaseMetaAdsWriteTool {
         verified: true,
       }, { toolId: this.id, risk: this.risk, userId: context.userId });
     } catch (err) {
+      if (claimed) {
+        if (isAmbiguousWriteError(err)) {
+          await this.journal.markUnknown(ensured.executionId, {
+            code: "AMBIGUOUS_OUTCOME",
+            message: err instanceof Error ? err.message : "Uncertain provider outcome",
+          });
+        } else {
+          await this.journal.markFailed(ensured.executionId, {
+            code: "EXECUTION_ERROR",
+            message: err instanceof Error ? err.message : "Failed to resume ad set",
+          });
+        }
+      }
       const message = err instanceof Error ? err.message : "Failed to resume ad set";
       return this.failure(`Meta API error: ${message}`);
     }
@@ -514,7 +638,7 @@ export class MetaResumeAdSetTool extends BaseMetaAdsWriteTool {
 // ---------------------------------------------------------------------------
 
 export class MetaPauseAdTool extends BaseMetaAdsWriteTool {
-  constructor(provider: WriteProvider, authorizer: MetaAccountAuthorizer) {
+  constructor(provider: WriteProvider, authorizer: MetaAccountAuthorizer, journal?: ExecutionJournalPort) {
     super(
       "meta.ad.pause",
       "Pause Meta Ad",
@@ -524,7 +648,9 @@ export class MetaPauseAdTool extends BaseMetaAdsWriteTool {
         { name: "adId", type: "string", description: "Ad ID to pause", required: true },
       ],
       provider,
-      authorizer
+      authorizer,
+      "1.0.0",
+      journal
     );
   }
 
@@ -541,11 +667,10 @@ export class MetaPauseAdTool extends BaseMetaAdsWriteTool {
     if (accessError) return accessError;
 
     const idempotencyKey = buildIdempotencyKey(this.id, validAccount, validAdId, "PAUSED");
-    const idempotencyCheck = this.checkIdempotency(idempotencyKey);
-    if (idempotencyCheck.blocked) {
-      return this.failure(idempotencyCheck.error!);
-    }
+    const ensured = await this.ensureExecutable(idempotencyKey, params, context, BLOCKED_STATUSES);
+    if (!ensured.ok) return this.failure(ensured.error);
 
+    let claimed = false;
     try {
       const result = await this.provider.getAds(validAccount);
       const ad = result.data.find((a) => a.adId === validAdId);
@@ -569,20 +694,27 @@ export class MetaPauseAdTool extends BaseMetaAdsWriteTool {
       if (!transition.valid) return this.failure(transition.error!);
 
       const previousState = ad.status;
-      setExecutionState(idempotencyKey, "EXECUTING", context.userId);
+      claimed = await this.claimExecution(ensured.executionId);
+      if (!claimed) return this.failure("Execution already executing");
       const writeResult = await this.provider.updateAdStatus(validAccount, validAdId, "PAUSED");
 
       if (!writeResult.success) {
-        setExecutionState(idempotencyKey, "FAILED", context.userId);
+        await this.journal.markFailed(ensured.executionId, {
+          code: "PROVIDER_REJECTED",
+          message: "Provider reported failure while pausing ad",
+        });
         return this.failure("Failed to pause ad");
       }
 
       if (writeResult.ad.status !== "PAUSED") {
-        setExecutionState(idempotencyKey, "FAILED", context.userId);
+        await this.journal.markFailed(ensured.executionId, {
+          code: "VERIFICATION_FAILED",
+          message: "Ad status was not updated to PAUSED",
+        });
         return this.failure("Verification failed: ad status was not updated to PAUSED");
       }
 
-      setExecutionState(idempotencyKey, "SUCCEEDED", context.userId);
+      await this.journal.markSucceeded(ensured.executionId, validAdId);
       return this.success({
         action: "pause_ad",
         accountId: validAccount,
@@ -594,6 +726,19 @@ export class MetaPauseAdTool extends BaseMetaAdsWriteTool {
         verified: true,
       }, { toolId: this.id, risk: this.risk, userId: context.userId });
     } catch (err) {
+      if (claimed) {
+        if (isAmbiguousWriteError(err)) {
+          await this.journal.markUnknown(ensured.executionId, {
+            code: "AMBIGUOUS_OUTCOME",
+            message: err instanceof Error ? err.message : "Uncertain provider outcome",
+          });
+        } else {
+          await this.journal.markFailed(ensured.executionId, {
+            code: "EXECUTION_ERROR",
+            message: err instanceof Error ? err.message : "Failed to pause ad",
+          });
+        }
+      }
       const message = err instanceof Error ? err.message : "Failed to pause ad";
       return this.failure(`Meta API error: ${message}`);
     }
@@ -605,7 +750,7 @@ export class MetaPauseAdTool extends BaseMetaAdsWriteTool {
 // ---------------------------------------------------------------------------
 
 export class MetaResumeAdTool extends BaseMetaAdsWriteTool {
-  constructor(provider: WriteProvider, authorizer: MetaAccountAuthorizer) {
+  constructor(provider: WriteProvider, authorizer: MetaAccountAuthorizer, journal?: ExecutionJournalPort) {
     super(
       "meta.ad.resume",
       "Resume Meta Ad",
@@ -615,7 +760,9 @@ export class MetaResumeAdTool extends BaseMetaAdsWriteTool {
         { name: "adId", type: "string", description: "Ad ID to resume", required: true },
       ],
       provider,
-      authorizer
+      authorizer,
+      "1.0.0",
+      journal
     );
   }
 
@@ -632,11 +779,10 @@ export class MetaResumeAdTool extends BaseMetaAdsWriteTool {
     if (accessError) return accessError;
 
     const idempotencyKey = buildIdempotencyKey(this.id, validAccount, validAdId, "ACTIVE");
-    const idempotencyCheck = this.checkIdempotency(idempotencyKey);
-    if (idempotencyCheck.blocked) {
-      return this.failure(idempotencyCheck.error!);
-    }
+    const ensured = await this.ensureExecutable(idempotencyKey, params, context, BLOCKED_STATUSES);
+    if (!ensured.ok) return this.failure(ensured.error);
 
+    let claimed = false;
     try {
       const result = await this.provider.getAds(validAccount);
       const ad = result.data.find((a) => a.adId === validAdId);
@@ -660,20 +806,27 @@ export class MetaResumeAdTool extends BaseMetaAdsWriteTool {
       if (!transition.valid) return this.failure(transition.error!);
 
       const previousState = ad.status;
-      setExecutionState(idempotencyKey, "EXECUTING", context.userId);
+      claimed = await this.claimExecution(ensured.executionId);
+      if (!claimed) return this.failure("Execution already executing");
       const writeResult = await this.provider.updateAdStatus(validAccount, validAdId, "ACTIVE");
 
       if (!writeResult.success) {
-        setExecutionState(idempotencyKey, "FAILED", context.userId);
+        await this.journal.markFailed(ensured.executionId, {
+          code: "PROVIDER_REJECTED",
+          message: "Provider reported failure while resuming ad",
+        });
         return this.failure("Failed to resume ad");
       }
 
       if (writeResult.ad.status !== "ACTIVE") {
-        setExecutionState(idempotencyKey, "FAILED", context.userId);
+        await this.journal.markFailed(ensured.executionId, {
+          code: "VERIFICATION_FAILED",
+          message: "Ad status was not updated to ACTIVE",
+        });
         return this.failure("Verification failed: ad status was not updated to ACTIVE");
       }
 
-      setExecutionState(idempotencyKey, "SUCCEEDED", context.userId);
+      await this.journal.markSucceeded(ensured.executionId, validAdId);
       return this.success({
         action: "resume_ad",
         accountId: validAccount,
@@ -685,6 +838,19 @@ export class MetaResumeAdTool extends BaseMetaAdsWriteTool {
         verified: true,
       }, { toolId: this.id, risk: this.risk, userId: context.userId });
     } catch (err) {
+      if (claimed) {
+        if (isAmbiguousWriteError(err)) {
+          await this.journal.markUnknown(ensured.executionId, {
+            code: "AMBIGUOUS_OUTCOME",
+            message: err instanceof Error ? err.message : "Uncertain provider outcome",
+          });
+        } else {
+          await this.journal.markFailed(ensured.executionId, {
+            code: "EXECUTION_ERROR",
+            message: err instanceof Error ? err.message : "Failed to resume ad",
+          });
+        }
+      }
       const message = err instanceof Error ? err.message : "Failed to resume ad";
       return this.failure(`Meta API error: ${message}`);
     }
@@ -711,6 +877,7 @@ abstract class BaseMetaAdsBudgetTool extends BaseTool {
   protected readonly provider: BudgetProvider;
   protected readonly authorizer: MetaAccountAuthorizer;
   protected readonly guardrails: BudgetGuardrailsConfig;
+  protected readonly journal: ExecutionJournalPort;
 
   constructor(
     id: string,
@@ -720,7 +887,8 @@ abstract class BaseMetaAdsBudgetTool extends BaseTool {
     provider: BudgetProvider,
     authorizer: MetaAccountAuthorizer,
     guardrails?: BudgetGuardrailsConfig,
-    version = "1.0.0"
+    version = "1.0.0",
+    journal: ExecutionJournalPort = defaultExecutionJournal
   ) {
     super(
       id,
@@ -737,6 +905,7 @@ abstract class BaseMetaAdsBudgetTool extends BaseTool {
     this.provider = provider;
     this.authorizer = authorizer;
     this.guardrails = guardrails ?? DEFAULT_BUDGET_GUARDRAILS;
+    this.journal = journal;
   }
 
   protected async checkAccess(userId: string, accountId: string): Promise<ToolResult | null> {
@@ -747,21 +916,27 @@ abstract class BaseMetaAdsBudgetTool extends BaseTool {
     return null;
   }
 
-  protected checkIdempotency(idempotencyKey: string): {
-    blocked: boolean;
-    state?: MetaExecutionState;
-    error?: string;
-  } {
-    const existing = getExecutionState(idempotencyKey);
-    if (!existing) return { blocked: false };
-    if (BLOCKED_STATES.has(existing.state)) {
-      return {
-        blocked: true,
-        state: existing.state,
-        error: `Execution already ${existing.state.toLowerCase()}`,
-      };
+  protected async ensureExecutable(
+    idempotencyKey: string,
+    params: Record<string, unknown>,
+    context: ToolContext
+  ): Promise<{ ok: true; executionId: string } | { ok: false; error: string }> {
+    const record = await this.journal.begin({
+      userId: context.userId,
+      toolId: this.id,
+      idempotencyKey,
+      paramsHash: computeParamsHash(params),
+      provider: "meta-ads",
+      traceId: context.traceId,
+    });
+    if (BLOCKED_STATUSES.has(record.status)) {
+      return { ok: false, error: `Execution already ${record.status.toLowerCase()}` };
     }
-    return { blocked: false };
+    return { ok: true, executionId: record.executionId };
+  }
+
+  protected async claimExecution(executionId: string): Promise<boolean> {
+    return (await this.journal.claimForExecution(executionId)) !== null;
   }
 }
 
@@ -773,7 +948,8 @@ export class MetaUpdateCampaignBudgetTool extends BaseMetaAdsBudgetTool {
   constructor(
     provider: BudgetProvider,
     authorizer: MetaAccountAuthorizer,
-    guardrails?: BudgetGuardrailsConfig
+    guardrails?: BudgetGuardrailsConfig,
+    journal?: ExecutionJournalPort
   ) {
     super(
       "meta.campaign.budget.update",
@@ -786,7 +962,9 @@ export class MetaUpdateCampaignBudgetTool extends BaseMetaAdsBudgetTool {
       ],
       provider,
       authorizer,
-      guardrails
+      guardrails,
+      "1.0.0",
+      journal
     );
   }
 
@@ -809,11 +987,10 @@ export class MetaUpdateCampaignBudgetTool extends BaseMetaAdsBudgetTool {
 
     // Idempotency check
     const idempotencyKey = buildIdempotencyKey(this.id, validAccount, validCampaignId, `budget:${requestedBudget}`);
-    const idempotencyCheck = this.checkIdempotency(idempotencyKey);
-    if (idempotencyCheck.blocked) {
-      return this.failure(idempotencyCheck.error!);
-    }
+    const ensured = await this.ensureExecutable(idempotencyKey, params, context);
+    if (!ensured.ok) return this.failure(ensured.error);
 
+    let claimed = false;
     try {
       // Fetch current state
       const result = await this.provider.getCampaigns(validAccount);
@@ -840,12 +1017,16 @@ export class MetaUpdateCampaignBudgetTool extends BaseMetaAdsBudgetTool {
       const summary = buildBudgetChangeSummary(previousBudget, requestedBudget, currency);
 
       // Execute write
-      setExecutionState(idempotencyKey, "EXECUTING", context.userId);
+      claimed = await this.claimExecution(ensured.executionId);
+      if (!claimed) return this.failure("Execution already executing");
       const budgetString = requestedBudget.toFixed(2);
       const writeResult = await this.provider.updateCampaignBudget(validAccount, validCampaignId, budgetString);
 
       if (!writeResult.success) {
-        setExecutionState(idempotencyKey, "FAILED", context.userId);
+        await this.journal.markFailed(ensured.executionId, {
+          code: "PROVIDER_REJECTED",
+          message: "Provider reported failure while updating campaign budget",
+        });
         return this.failure("Failed to update campaign budget");
       }
 
@@ -853,23 +1034,32 @@ export class MetaUpdateCampaignBudgetTool extends BaseMetaAdsBudgetTool {
       const verifyResult = await this.provider.getCampaigns(validAccount);
       const verifiedCampaign = verifyResult.data.find((c) => c.campaignId === validCampaignId);
       if (!verifiedCampaign) {
-        setExecutionState(idempotencyKey, "FAILED", context.userId);
+        await this.journal.markUnknown(ensured.executionId, {
+          code: "VERIFICATION_INCONCLUSIVE",
+          message: "Campaign not found after budget update; outcome uncertain",
+        });
         return this.failure("Campaign not found after budget update");
       }
 
       const actualBudget = parseBudgetValue(verifiedCampaign.dailyBudget);
       if (actualBudget === null) {
-        setExecutionState(idempotencyKey, "FAILED", context.userId);
+        await this.journal.markUnknown(ensured.executionId, {
+          code: "VERIFICATION_INCONCLUSIVE",
+          message: "Cannot read budget from updated campaign; outcome uncertain",
+        });
         return this.failure("Cannot read budget from updated campaign");
       }
 
       const verification = verifyBudgetResult(requestedBudget, actualBudget);
       if (!verification.verified) {
-        setExecutionState(idempotencyKey, "FAILED", context.userId);
+        await this.journal.markUnknown(ensured.executionId, {
+          code: "VERIFICATION_MISMATCH",
+          message: verification.error ?? "Budget mismatch after update; outcome uncertain",
+        });
         return this.failure(verification.error!);
       }
 
-      setExecutionState(idempotencyKey, "SUCCEEDED", context.userId);
+      await this.journal.markSucceeded(ensured.executionId, validCampaignId);
 
       return this.success({
         action: "update_campaign_budget",
@@ -893,6 +1083,19 @@ export class MetaUpdateCampaignBudgetTool extends BaseMetaAdsBudgetTool {
         },
       }, { toolId: this.id, risk: this.risk, userId: context.userId });
     } catch (err) {
+      if (claimed) {
+        if (isAmbiguousWriteError(err)) {
+          await this.journal.markUnknown(ensured.executionId, {
+            code: "AMBIGUOUS_OUTCOME",
+            message: err instanceof Error ? err.message : "Uncertain provider outcome",
+          });
+        } else {
+          await this.journal.markFailed(ensured.executionId, {
+            code: "EXECUTION_ERROR",
+            message: err instanceof Error ? err.message : "Failed to update campaign budget",
+          });
+        }
+      }
       const message = err instanceof Error ? err.message : "Failed to update campaign budget";
       return this.failure(`Meta API error: ${message}`);
     }
@@ -907,7 +1110,8 @@ export class MetaUpdateAdSetBudgetTool extends BaseMetaAdsBudgetTool {
   constructor(
     provider: BudgetProvider,
     authorizer: MetaAccountAuthorizer,
-    guardrails?: BudgetGuardrailsConfig
+    guardrails?: BudgetGuardrailsConfig,
+    journal?: ExecutionJournalPort
   ) {
     super(
       "meta.adset.budget.update",
@@ -920,7 +1124,9 @@ export class MetaUpdateAdSetBudgetTool extends BaseMetaAdsBudgetTool {
       ],
       provider,
       authorizer,
-      guardrails
+      guardrails,
+      "1.0.0",
+      journal
     );
   }
 
@@ -943,11 +1149,10 @@ export class MetaUpdateAdSetBudgetTool extends BaseMetaAdsBudgetTool {
 
     // Idempotency check
     const idempotencyKey = buildIdempotencyKey(this.id, validAccount, validAdSetId, `budget:${requestedBudget}`);
-    const idempotencyCheck = this.checkIdempotency(idempotencyKey);
-    if (idempotencyCheck.blocked) {
-      return this.failure(idempotencyCheck.error!);
-    }
+    const ensured = await this.ensureExecutable(idempotencyKey, params, context);
+    if (!ensured.ok) return this.failure(ensured.error);
 
+    let claimed = false;
     try {
       // Fetch current state
       const result = await this.provider.getAdSets(validAccount);
@@ -974,12 +1179,16 @@ export class MetaUpdateAdSetBudgetTool extends BaseMetaAdsBudgetTool {
       const summary = buildBudgetChangeSummary(previousBudget, requestedBudget, currency);
 
       // Execute write
-      setExecutionState(idempotencyKey, "EXECUTING", context.userId);
+      claimed = await this.claimExecution(ensured.executionId);
+      if (!claimed) return this.failure("Execution already executing");
       const budgetString = requestedBudget.toFixed(2);
       const writeResult = await this.provider.updateAdSetBudget(validAccount, validAdSetId, budgetString);
 
       if (!writeResult.success) {
-        setExecutionState(idempotencyKey, "FAILED", context.userId);
+        await this.journal.markFailed(ensured.executionId, {
+          code: "PROVIDER_REJECTED",
+          message: "Provider reported failure while updating ad set budget",
+        });
         return this.failure("Failed to update ad set budget");
       }
 
@@ -987,23 +1196,32 @@ export class MetaUpdateAdSetBudgetTool extends BaseMetaAdsBudgetTool {
       const verifyResult = await this.provider.getAdSets(validAccount);
       const verifiedAdSet = verifyResult.data.find((a) => a.adSetId === validAdSetId);
       if (!verifiedAdSet) {
-        setExecutionState(idempotencyKey, "FAILED", context.userId);
+        await this.journal.markUnknown(ensured.executionId, {
+          code: "VERIFICATION_INCONCLUSIVE",
+          message: "Ad set not found after budget update; outcome uncertain",
+        });
         return this.failure("Ad set not found after budget update");
       }
 
       const actualBudget = parseBudgetValue(verifiedAdSet.dailyBudget);
       if (actualBudget === null) {
-        setExecutionState(idempotencyKey, "FAILED", context.userId);
+        await this.journal.markUnknown(ensured.executionId, {
+          code: "VERIFICATION_INCONCLUSIVE",
+          message: "Cannot read budget from updated ad set; outcome uncertain",
+        });
         return this.failure("Cannot read budget from updated ad set");
       }
 
       const verification = verifyBudgetResult(requestedBudget, actualBudget);
       if (!verification.verified) {
-        setExecutionState(idempotencyKey, "FAILED", context.userId);
+        await this.journal.markUnknown(ensured.executionId, {
+          code: "VERIFICATION_MISMATCH",
+          message: verification.error ?? "Budget mismatch after update; outcome uncertain",
+        });
         return this.failure(verification.error!);
       }
 
-      setExecutionState(idempotencyKey, "SUCCEEDED", context.userId);
+      await this.journal.markSucceeded(ensured.executionId, validAdSetId);
 
       return this.success({
         action: "update_adset_budget",
@@ -1027,6 +1245,19 @@ export class MetaUpdateAdSetBudgetTool extends BaseMetaAdsBudgetTool {
         },
       }, { toolId: this.id, risk: this.risk, userId: context.userId });
     } catch (err) {
+      if (claimed) {
+        if (isAmbiguousWriteError(err)) {
+          await this.journal.markUnknown(ensured.executionId, {
+            code: "AMBIGUOUS_OUTCOME",
+            message: err instanceof Error ? err.message : "Uncertain provider outcome",
+          });
+        } else {
+          await this.journal.markFailed(ensured.executionId, {
+            code: "EXECUTION_ERROR",
+            message: err instanceof Error ? err.message : "Failed to update ad set budget",
+          });
+        }
+      }
       const message = err instanceof Error ? err.message : "Failed to update ad set budget";
       return this.failure(`Meta API error: ${message}`);
     }
@@ -1168,6 +1399,7 @@ abstract class BaseMetaCampaignTool extends BaseTool {
   protected readonly provider: CampaignProvider;
   protected readonly authorizer: MetaAccountAuthorizer;
   protected readonly guardrails: BudgetGuardrailsConfig;
+  protected readonly journal: ExecutionJournalPort;
 
   constructor(
     id: string,
@@ -1177,7 +1409,8 @@ abstract class BaseMetaCampaignTool extends BaseTool {
     provider: CampaignProvider,
     authorizer: MetaAccountAuthorizer,
     guardrails?: BudgetGuardrailsConfig,
-    version = "1.0.0"
+    version = "1.0.0",
+    journal: ExecutionJournalPort = defaultExecutionJournal
   ) {
     super(
       id,
@@ -1194,6 +1427,7 @@ abstract class BaseMetaCampaignTool extends BaseTool {
     this.provider = provider;
     this.authorizer = authorizer;
     this.guardrails = guardrails ?? DEFAULT_BUDGET_GUARDRAILS;
+    this.journal = journal;
   }
 
   protected async checkAccess(userId: string, accountId: string): Promise<ToolResult | null> {
@@ -1204,24 +1438,28 @@ abstract class BaseMetaCampaignTool extends BaseTool {
     return null;
   }
 
-  protected checkIdempotency(idempotencyKey: string): {
-    blocked: boolean;
-    state?: MetaExecutionState;
-    error?: string;
-  } {
-    const existing = getExecutionState(idempotencyKey);
-    if (!existing) return { blocked: false };
+  protected async ensureExecutable(
+    idempotencyKey: string,
+    params: Record<string, unknown>,
+    context: ToolContext
+  ): Promise<{ ok: true; executionId: string } | { ok: false; error: string }> {
+    const record = await this.journal.begin({
+      userId: context.userId,
+      toolId: this.id,
+      idempotencyKey,
+      paramsHash: computeParamsHash(params),
+      provider: "meta-ads",
+      traceId: context.traceId,
+    });
     // Campaign creation blocks SUCCEEDED to prevent duplicate campaigns.
-    // Other tools allow re-execution after success (idempotent re-check).
-    const blockedStates = new Set([...BLOCKED_STATES, "SUCCEEDED"]);
-    if (blockedStates.has(existing.state)) {
-      return {
-        blocked: true,
-        state: existing.state,
-        error: `Execution already ${existing.state.toLowerCase()}`,
-      };
+    if (CREATE_BLOCKED_STATUSES.has(record.status)) {
+      return { ok: false, error: `Execution already ${record.status.toLowerCase()}` };
     }
-    return { blocked: false };
+    return { ok: true, executionId: record.executionId };
+  }
+
+  protected async claimExecution(executionId: string): Promise<boolean> {
+    return (await this.journal.claimForExecution(executionId)) !== null;
   }
 }
 
@@ -1237,7 +1475,8 @@ export class MetaCreateCampaignTool extends BaseMetaCampaignTool {
   constructor(
     provider: CampaignProvider,
     authorizer: MetaAccountAuthorizer,
-    guardrails?: BudgetGuardrailsConfig
+    guardrails?: BudgetGuardrailsConfig,
+    journal?: ExecutionJournalPort
   ) {
     super(
       "meta.campaign.create",
@@ -1249,7 +1488,9 @@ export class MetaCreateCampaignTool extends BaseMetaCampaignTool {
       ],
       provider,
       authorizer,
-      guardrails
+      guardrails,
+      "1.0.0",
+      journal
     );
   }
 
@@ -1288,13 +1529,13 @@ export class MetaCreateCampaignTool extends BaseMetaCampaignTool {
       `proposal:${proposal.name}`,
       proposal.objective
     );
-    const idempotencyCheck = this.checkIdempotency(idempotencyKey);
-    if (idempotencyCheck.blocked) {
-      return this.failure(idempotencyCheck.error!);
-    }
+    const ensured = await this.ensureExecutable(idempotencyKey, params, context);
+    if (!ensured.ok) return this.failure(ensured.error);
 
+    let claimed = false;
     try {
-      setExecutionState(idempotencyKey, "EXECUTING", context.userId);
+      claimed = await this.claimExecution(ensured.executionId);
+      if (!claimed) return this.failure("Execution already executing");
 
       const input: MetaCampaignInput = {
         name: proposal.name,
@@ -1311,28 +1552,50 @@ export class MetaCreateCampaignTool extends BaseMetaCampaignTool {
         input.lifetimeBudget = String(proposal.lifetimeBudget);
       }
 
-      const writeResult = await this.provider.createCampaign(validAccount, input);
+      let writeResult: Awaited<ReturnType<CampaignProvider["createCampaign"]>>;
+      try {
+        writeResult = await this.provider.createCampaign(validAccount, input);
+      } catch (writeErr) {
+        if (isAmbiguousWriteError(writeErr)) {
+          await this.journal.markUnknown(ensured.executionId, {
+            code: "AMBIGUOUS_OUTCOME",
+            message: writeErr instanceof Error
+              ? writeErr.message
+              : "Uncertain provider outcome during createCampaign",
+          });
+        }
+        throw writeErr;
+      }
 
       if (!writeResult.success) {
-        setExecutionState(idempotencyKey, "FAILED", context.userId);
+        await this.journal.markFailed(ensured.executionId, {
+          code: "PROVIDER_REJECTED",
+          message: "Provider reported failure while creating campaign",
+        });
         return this.failure("Failed to create campaign");
       }
 
       if (!writeResult.campaign?.campaignId) {
-        setExecutionState(idempotencyKey, "FAILED", context.userId);
+        await this.journal.markUnknown(ensured.executionId, {
+          code: "VERIFICATION_INCONCLUSIVE",
+          message: "Campaign was not created (no campaign ID returned); outcome uncertain",
+        });
         return this.failure("Verification failed: campaign was not created (no campaign ID returned)");
       }
 
       const createdCampaign = writeResult.campaign;
 
       if (proposal.status && createdCampaign.status !== proposal.status) {
-        setExecutionState(idempotencyKey, "FAILED", context.userId);
+        await this.journal.markUnknown(ensured.executionId, {
+          code: "VERIFICATION_MISMATCH",
+          message: `Campaign status is "${createdCampaign.status}" but expected "${proposal.status}"`,
+        });
         return this.failure(
           `Verification failed: campaign status is "${createdCampaign.status}" but expected "${proposal.status}"`
         );
       }
 
-      setExecutionState(idempotencyKey, "SUCCEEDED", context.userId);
+      await this.journal.markSucceeded(ensured.executionId, createdCampaign.campaignId);
 
       return this.success({
         action: "create_campaign",
@@ -1353,7 +1616,12 @@ export class MetaCreateCampaignTool extends BaseMetaCampaignTool {
         assumptions: proposal.assumptions,
       }, { toolId: this.id, risk: this.risk, userId: context.userId });
     } catch (err) {
-      setExecutionState(idempotencyKey, "FAILED", context.userId);
+      if (claimed && !isAmbiguousWriteError(err)) {
+        await this.journal.markFailed(ensured.executionId, {
+          code: "EXECUTION_ERROR",
+          message: err instanceof Error ? err.message : "Failed to create campaign",
+        });
+      }
       const message = err instanceof Error ? err.message : "Failed to create campaign";
       return this.failure(`Meta API error: ${message}`);
     }

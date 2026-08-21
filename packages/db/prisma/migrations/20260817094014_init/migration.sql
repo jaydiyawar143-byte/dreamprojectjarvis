@@ -1,3 +1,8 @@
+-- EnableExtension
+-- Required before "vector" column types below (pgvector). Idempotent:
+-- no-op if the extension already exists in this database.
+CREATE EXTENSION IF NOT EXISTS vector;
+
 -- CreateEnum
 CREATE TYPE "Role" AS ENUM ('OWNER', 'ADMIN', 'MEMBER', 'VIEWER');
 

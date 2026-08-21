@@ -4,6 +4,7 @@ import type {
   IApprovalRepository,
   IApprovalManager,
 } from "@jarvis/core";
+import { computeParamsHash } from "@jarvis/core";
 
 export class ApprovalService implements IApprovalManager {
   constructor(private repository: IApprovalRepository) {}
@@ -11,7 +12,13 @@ export class ApprovalService implements IApprovalManager {
   async requestApproval(
     request: Omit<Approval, "id" | "status" | "createdAt">
   ): Promise<Approval> {
-    const approval = await this.repository.create(request);
+    // Bind the approval to the exact approved parameters. The canonical
+    // representation is hashed and never logged; only the digest is stored.
+    const withHash = {
+      ...request,
+      paramsHash: computeParamsHash(request.params),
+    };
+    const approval = await this.repository.create(withHash);
     console.log("[APPROVAL] New approval request:", approval.id);
     return approval;
   }

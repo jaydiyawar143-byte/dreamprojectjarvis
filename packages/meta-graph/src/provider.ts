@@ -16,7 +16,7 @@ import type {
   MetaCampaignInput,
 } from "@jarvis/core";
 import { normalizeAccountId } from "./config.js";
-import { createMetaHttpClient, isSuccessResponse, extractError, type MetaHttpResponse } from "./client.js";
+import { createMetaHttpClient, isSuccessResponse, extractError, type MetaHttpClient, type MetaHttpResponse } from "./client.js";
 import {
   parseAdAccount,
   parseCampaign,
@@ -33,6 +33,7 @@ export interface MetaGraphProviderConfig {
   baseUrl?: string;
   timeoutMs?: number;
   maxRetries?: number;
+  httpClient?: MetaHttpClient;
 }
 
 export interface MetaGraphProvider
@@ -52,7 +53,7 @@ export function createMetaGraphProvider(config: MetaGraphProviderConfig): MetaGr
     maxRetries: config.maxRetries ?? 0,
   };
 
-  const client = createMetaHttpClient(metaConfig);
+  const client = config.httpClient ?? createMetaHttpClient(metaConfig);
 
   function extractNextPagePaging(resp: { paging?: unknown }): string | undefined {
     const p = resp.paging as { next?: string } | undefined;
@@ -75,16 +76,67 @@ export function createMetaGraphProvider(config: MetaGraphProviderConfig): MetaGr
     return resp;
   }
 
-  async function checkAccountAccess(accountId: string): Promise<void> {
-    const accountIdNorm = normalizeAccountId(accountId);
+  const AD_ACCOUNT_FIELDS =
+    "id,name,currency,timezone_name,account_status,spend_cap,amount_spent,balance,business_name";
+
+  async function fetchAdAccountListIds(): Promise<string[]> {
     const resp = await graphGet<{ data: Array<{ id: string }> }>("me/adaccounts", {
       fields: "id",
       limit: 100,
     });
-    const accountIds = (resp.data ?? []).map((a) => String(a.id));
-    if (!accountIds.includes(accountIdNorm) && !accountIds.includes(accountId)) {
-      throw toJarvisError(classifyMetaError(403, { error: { message: "Not authorized to access this Meta account", type: "authorization", code: 403 } }));
+    return (resp.data ?? []).map((a) => String(a.id));
+  }
+
+  function isConfiguredAccount(accountId: string): boolean {
+    try {
+      return normalizeAccountId(accountId) === metaConfig.adAccountId;
+    } catch {
+      return false;
     }
+  }
+
+  /**
+   * Directly verifies the server-configured ad account.
+   *
+   * Business Manager-owned accounts may be absent from /me/adaccounts while
+   * remaining directly accessible. This fallback performs a GET against ONLY
+   * metaConfig.adAccountId (never an arbitrary ID from tool input), validates
+   * the response through the shared Zod schema, and requires the returned
+   * account ID to exactly match the configured account ID. Any non-2xx,
+   * error body, malformed payload, or mismatched ID is treated as
+   * unauthorized.
+   */
+  async function verifyConfiguredAccountDirectly(): Promise<boolean> {
+    try {
+      const resp = await client.request({
+        method: "GET",
+        path: metaConfig.adAccountId,
+        params: { fields: AD_ACCOUNT_FIELDS },
+      });
+      if (!isSuccessResponse(resp)) return false;
+      const parsed = parseAdAccount(resp.body);
+      return parsed !== null && parsed.accountId === metaConfig.adAccountId;
+    } catch {
+      return false;
+    }
+  }
+
+  async function checkAccountAccess(accountId: string): Promise<void> {
+    const accountIdNorm = normalizeAccountId(accountId);
+
+    // 1st mechanism: discovery via /me/adaccounts (auth errors propagate).
+    const accountIds = await fetchAdAccountListIds();
+    if (accountIds.includes(accountIdNorm) || accountIds.includes(accountId)) {
+      return;
+    }
+
+    // 2nd mechanism: direct verification, restricted to the server-configured
+    // account only. Arbitrary IDs from tool input can never reach this path.
+    if (isConfiguredAccount(accountIdNorm) && (await verifyConfiguredAccountDirectly())) {
+      return;
+    }
+
+    throw toJarvisError(classifyMetaError(403, { error: { message: "Not authorized to access this Meta account", type: "authorization", code: 403 } }));
   }
 
   return {
@@ -283,13 +335,13 @@ export function createMetaGraphProvider(config: MetaGraphProviderConfig): MetaGr
         objective: input.objective,
         status: input.status ?? "PAUSED",
         buying_type: input.buyingType ?? "AUCTION",
+        // Meta Graph API v21+ requires special_ad_categories on campaign
+        // creation, even when the campaign targets no special category.
+        special_ad_categories: JSON.stringify(input.specialAdCategories ?? []),
       };
 
       if (input.dailyBudget) body.daily_budget = input.dailyBudget;
       if (input.lifetimeBudget) body.lifetime_budget = input.lifetimeBudget;
-      if (input.specialAdCategories?.length) {
-        body.special_ad_categories = JSON.stringify(input.specialAdCategories);
-      }
 
       const resp = await graphPost(`${accountIdNorm}/campaigns`, body);
       const bodyData = resp.body as Record<string, unknown>;
@@ -309,29 +361,39 @@ export function createMetaGraphProvider(config: MetaGraphProviderConfig): MetaGr
     // =========================================================================
 
     async getAuthorizedAccountIds(_userId: string): Promise<string[]> {
+      const ids = new Set<string>();
       try {
-        const resp = await graphGet<{ data: Array<{ id: string }> }>("me/adaccounts", {
-          fields: "id",
-          limit: 100,
-        });
-        return (resp.data ?? []).map((a) => String(a.id));
+        for (const id of await fetchAdAccountListIds()) {
+          ids.add(id);
+        }
       } catch {
-        return [];
+        // Discovery unavailable; configured-account verification still applies.
       }
+      if (!ids.has(metaConfig.adAccountId) && (await verifyConfiguredAccountDirectly())) {
+        ids.add(metaConfig.adAccountId);
+      }
+      return [...ids];
     },
 
     async isAuthorized(_userId: string, accountId: string): Promise<boolean> {
+      let accountIdNorm: string;
       try {
-        const accountIdNorm = normalizeAccountId(accountId);
-        const resp = await graphGet<{ data: Array<{ id: string }> }>("me/adaccounts", {
-          fields: "id",
-          limit: 100,
-        });
-        const accountIds = (resp.data ?? []).map((a) => String(a.id));
-        return accountIds.includes(accountIdNorm) || accountIds.includes(accountId);
+        accountIdNorm = normalizeAccountId(accountId);
       } catch {
         return false;
       }
+      try {
+        const accountIds = await fetchAdAccountListIds();
+        if (accountIds.includes(accountIdNorm) || accountIds.includes(accountId)) {
+          return true;
+        }
+      } catch {
+        // Discovery unavailable; fall through to configured-account verification.
+      }
+      if (isConfiguredAccount(accountIdNorm)) {
+        return verifyConfiguredAccountDirectly();
+      }
+      return false;
     },
   };
 }

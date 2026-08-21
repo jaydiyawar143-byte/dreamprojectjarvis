@@ -44,6 +44,7 @@ function createMockApprovalRepo(): IApprovalRepository {
         toolId: data.toolId,
         action: data.action,
         params: data.params,
+        paramsHash: data.paramsHash,
         status: "pending",
         expiresAt: data.expiresAt,
         createdAt: new Date().toISOString(),

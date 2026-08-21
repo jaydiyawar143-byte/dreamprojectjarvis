@@ -78,6 +78,7 @@ export interface ToolContext {
   userId: string;
   agentId?: string;
   conversationId?: string;
+  traceId?: string;
 }
 
 // ---------------------------------------------------------------------------

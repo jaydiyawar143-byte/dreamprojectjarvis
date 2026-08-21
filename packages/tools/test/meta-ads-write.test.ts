@@ -16,6 +16,7 @@ import { sanitizeToolResult } from "../src/output-sanitizer.js";
 import { ToolRegistry as TR } from "../src/registry.js";
 import { ToolExecutor } from "../src/executor.js";
 import type { AuditLogger, IPermissionChecker, IApprovalManager, Role, ToolResult, Approval, ApprovalStatus } from "@jarvis/core";
+import { computeParamsHash } from "@jarvis/core";
 
 type WriteProvider = MetaAdsProvider & MetaAdsWriteProvider;
 
@@ -51,7 +52,7 @@ function createApprovalMgr(): { mgr: IApprovalManager; approvals: Map<string, Ap
     mgr: {
       requestApproval: vi.fn().mockImplementation(async (req: Omit<Approval, "id" | "status" | "createdAt">) => {
         counter++;
-        const a: Approval = { id: `a-${counter}`, userId: req.userId, toolId: req.toolId, action: req.action, params: req.params, status: "pending" as ApprovalStatus, expiresAt: req.expiresAt, createdAt: new Date().toISOString() };
+        const a: Approval = { id: `a-${counter}`, userId: req.userId, toolId: req.toolId, action: req.action, params: req.params, paramsHash: computeParamsHash(req.params), status: "pending" as ApprovalStatus, expiresAt: req.expiresAt, createdAt: new Date().toISOString() };
         approvals.set(a.id, a);
         return a;
       }),
@@ -516,7 +517,7 @@ describe("Post-Execution Verification", () => {
     const { logger } = createTrackingAudit();
     const registry = new TR();
     registry.register(new MetaPauseCampaignTool(slowProvider, authorizer));
-    const executor = new ToolExecutor(registry, allowAllPerms, { requestApproval: vi.fn().mockResolvedValue({ id: "a1", status: "approved", expiresAt: new Date(Date.now() + 60000).toISOString() }), findExistingForTool: vi.fn().mockResolvedValue({ id: "a1", status: "approved", expiresAt: new Date(Date.now() + 60000).toISOString() }) } as unknown as IApprovalManager, logger, { defaultTimeoutMs: 100 });
+    const executor = new ToolExecutor(registry, allowAllPerms, { requestApproval: vi.fn(), findExistingForTool: vi.fn().mockResolvedValue({ id: "a1", userId: "user-1", toolId: "meta.campaign.pause", status: "approved", expiresAt: new Date(Date.now() + 60000).toISOString(), paramsHash: computeParamsHash({ accountId: "act_111111111", campaignId: "100000001" }) }) } as unknown as IApprovalManager, logger, { defaultTimeoutMs: 100 });
     const r = await executor.execute({ toolId: "meta.campaign.pause", params: { accountId: "act_111111111", campaignId: "100000001" }, userId: "user-1", role: "admin", traceId: "t-1" });
     expect(r.status).toBe("timed_out");
   });

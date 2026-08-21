@@ -23,3 +23,4 @@ export { PrismaRefreshTokenRepository } from "./repositories/refresh-token-repos
 export { PrismaConversationRepository } from "./repositories/conversation-repository.js";
 export type { CreateConversationInput, AddMessageInput } from "./repositories/conversation-repository.js";
 export { PrismaMemoryRepository } from "./repositories/memory-repository.js";
+export { PrismaToolExecutionRepository } from "./repositories/tool-execution-repository.js";
