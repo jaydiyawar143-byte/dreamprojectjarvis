@@ -1,6 +1,6 @@
 import { BaseTool } from "../base-tool.js";
 import type { ToolResult, ToolContext } from "@jarvis/core";
-import type { MetaAdsProvider, MetaAccountAuthorizer } from "./meta-ads-provider.js";
+import type { MetaAdsProvider, MetaAccountAuthorizer, ProviderCallOptions } from "./meta-ads-provider.js";
 import {
   validateAccountId,
   validateEntityId,
@@ -44,16 +44,21 @@ abstract class BaseMetaAdsTool extends BaseTool {
     this.authorizer = authorizer;
   }
 
-  protected async checkAccess(userId: string, accountId: string): Promise<ToolResult | null> {
+  protected async checkAccess(userId: string, accountId: string, options?: ProviderCallOptions): Promise<ToolResult | null> {
     const validAccount = validateAccountId(accountId);
     if (!validAccount) {
       return this.failure("Invalid account ID format");
     }
-    const authorized = await this.authorizer.isAuthorized(userId, validAccount);
+    const authorized = await this.authorizer.isAuthorized(userId, validAccount, options);
     if (!authorized) {
       return this.failure("Not authorized to access this Meta account");
     }
     return null;
+  }
+
+  /** Phase 10.4 — cancellation options for provider calls. */
+  protected callOpts(context: ToolContext): ProviderCallOptions {
+    return { signal: context.signal };
   }
 
   protected sanitizeAccountResult<T extends Record<string, unknown>>(data: T): T {
@@ -96,11 +101,11 @@ export class MetaGetAccountsTool extends BaseMetaAdsTool {
 
   async execute(params: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
     try {
-      const authorizedIds = await this.authorizer.getAuthorizedAccountIds(context.userId);
+      const authorizedIds = await this.authorizer.getAuthorizedAccountIds(context.userId, this.callOpts(context));
 
       const limit = validateLimit(params.limit);
       const pagination = { limit: 500, after: typeof params.after === "string" ? params.after : undefined };
-      const result = await this.provider.getAdAccounts(pagination);
+      const result = await this.provider.getAdAccounts(pagination, this.callOpts(context));
 
       const filtered = authorizedIds.length > 0
         ? result.data.filter((a) => authorizedIds.includes(a.accountId))
@@ -173,7 +178,7 @@ export class MetaGetCampaignsTool extends BaseMetaAdsTool {
     try {
       const limit = validateLimit(params.limit);
       const pagination = { limit, after: typeof params.after === "string" ? params.after : undefined };
-      const result = await this.provider.getCampaigns(validAccount, pagination);
+      const result = await this.provider.getCampaigns(validAccount, pagination, this.callOpts(context));
 
       return this.success(
         {
@@ -243,7 +248,7 @@ export class MetaGetAdSetsTool extends BaseMetaAdsTool {
     try {
       const limit = validateLimit(params.limit);
       const pagination = { limit, after: typeof params.after === "string" ? params.after : undefined };
-      const result = await this.provider.getAdSets(validAccount, campaignId ?? undefined, pagination);
+      const result = await this.provider.getAdSets(validAccount, campaignId ?? undefined, pagination, this.callOpts(context));
 
       return this.success(
         {
@@ -325,7 +330,8 @@ export class MetaGetAdsTool extends BaseMetaAdsTool {
         validAccount,
         campaignId ?? undefined,
         adSetId ?? undefined,
-        pagination
+        pagination,
+        this.callOpts(context)
       );
 
       return this.success(
@@ -458,7 +464,8 @@ export class MetaGetInsightsTool extends BaseMetaAdsTool {
           fields: fields.length > 0 ? fields : undefined,
           breakdown: breakdown ?? undefined,
         },
-        pagination
+        pagination,
+        this.callOpts(context)
       );
 
       return this.success(

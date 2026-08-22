@@ -46,6 +46,7 @@ enum ToolExecutionStatus {
   FAILED
   UNKNOWN
   RECONCILING
+  SAFE_TO_RETRY
   CANCELLED
 }
 
@@ -148,7 +149,9 @@ model Memory {
   sourceConversationId String?
   sourceMessageId      String?
   createdAt            DateTime                     @default(now())
-  updatedAt            DateTime                     @updatedAt
+  // @default(now()) mirrors the migration-created DB default
+  // (DEFAULT CURRENT_TIMESTAMP); @updatedAt keeps client-side freshness.
+  updatedAt            DateTime                     @default(now()) @updatedAt
   expiresAt            DateTime?
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -261,6 +264,11 @@ model ToolExecution {
   leaseUntil         DateTime?           @map("lease_until")
   heartbeatAt        DateTime?           @map("heartbeat_at")
   approvalId         String?             @map("approval_id")
+  // NOT NULL DEFAULT 0 in the database (phase105 migration); required here to
+  // keep the datamodel in lockstep with deployed migrations (zero-drift rule).
+  reconciliationAttempts      Int        @default(0) @map("reconciliation_attempts")
+  lastReconciliationAt        DateTime?  @map("last_reconciliation_at")
+  lastReconciliationResult    String?    @map("last_reconciliation_result")
   createdAt          DateTime            @default(now()) @map("created_at")
   startedAt          DateTime?           @map("started_at")
   completedAt        DateTime?           @map("completed_at")

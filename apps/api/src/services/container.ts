@@ -1,4 +1,4 @@
-import type { IOrchestrator } from "@jarvis/core";
+import type { IOrchestrator, ShutdownLifecycle } from "@jarvis/core";
 import type { TokenService } from "@jarvis/security";
 import { Orchestrator, AgentRegistry, ConversationalAssistant } from "@jarvis/agents";
 import { OpenAIAdapter } from "@jarvis/ai-openai";
@@ -36,6 +36,7 @@ import {
   PrismaUserRepository,
   PrismaRefreshTokenRepository,
   PrismaToolExecutionRepository,
+  PrismaApprovalRepository,
 } from "@jarvis/db";
 
 export interface Container {
@@ -44,17 +45,23 @@ export interface Container {
   orchestrator: IOrchestrator;
   conversationRepo: PrismaConversationRepository;
   auditLogger: AuditLogger;
+  /**
+   * Phase 10.6 — durable execution journal (Prisma-backed), exposed so the
+   * shutdown controller can run idempotent startup recovery and so hosts
+   * never treat process memory as the source of truth.
+   */
+  executionJournal: PrismaToolExecutionRepository;
+  /**
+   * PHASE 10.7 — durable approval store backing the production approval API.
+   */
+  approvalRepo: PrismaApprovalRepository;
+  /** Registry used by the approval flow to re-validate stored parameters. */
+  toolRegistry: ToolRegistry;
+  /** Lifecycle gate consulted before approving side-effecting actions. */
+  lifecycle?: ShutdownLifecycle;
 }
 
 let _container: Container | null = null;
-
-const noopApprovalRepo = {
-  create: async () => ({ id: "", userId: "", toolId: "", action: "", params: {}, status: "pending" as const, expiresAt: "", createdAt: "" }),
-  findById: async () => null,
-  updateStatus: async () => null,
-  findPending: async () => [],
-  findExistingForTool: async () => null,
-};
 
 function createMetaToolRegistry(): ToolRegistry {
   const registry = new ToolRegistry();
@@ -98,7 +105,14 @@ function createMetaToolRegistry(): ToolRegistry {
   return registry;
 }
 
-export function getContainer(): Container {
+export function getContainer(options?: {
+  /**
+   * Phase 10.6 — lifecycle gate wired into the ToolExecutor so draining
+   * blocks new side-effecting executions (and approval consumption) at the
+   * earliest safe point.
+   */
+  lifecycle?: ShutdownLifecycle;
+}): Container {
   if (_container) return _container;
 
   const tokenSecret = process.env.JWT_SECRET;
@@ -111,6 +125,10 @@ export function getContainer(): Container {
   const auditRepo = new PrismaAuditRepository(prisma);
   const auditLogger = new AuditLogger(auditRepo);
 
+  // Phase 10.6 — durable journal exposed on the container for idempotent
+  // startup recovery and shutdown-time state inspection.
+  const executionJournal = new PrismaToolExecutionRepository(prisma);
+
   const conversationRepo = new PrismaConversationRepository(prisma);
 
   const passwordHasher = new PasswordHasher();
@@ -119,14 +137,17 @@ export function getContainer(): Container {
   const authService = new AuthManager(passwordHasher, tokenService, refreshTokenRepo, userRepo);
 
   const permissionService = new PermissionService();
-  const approvalService = new ApprovalService(noopApprovalRepo);
+  // PHASE 10.7 — real durable approval store replaces the Phase-0 noop repo.
+  const approvalRepo = new PrismaApprovalRepository(prisma);
+  const approvalService = new ApprovalService(approvalRepo);
 
   const toolRegistry = createMetaToolRegistry();
   const toolExecutor = new ToolExecutor(
     toolRegistry,
     permissionService,
     approvalService,
-    auditLogger
+    auditLogger,
+    { lifecycle: options?.lifecycle }
   );
 
   const adapter = new OpenAIAdapter();
@@ -147,6 +168,10 @@ export function getContainer(): Container {
     orchestrator,
     conversationRepo,
     auditLogger,
+    executionJournal,
+    approvalRepo,
+    toolRegistry,
+    lifecycle: options?.lifecycle,
   };
 
   return _container;

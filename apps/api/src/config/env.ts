@@ -23,5 +23,8 @@ export function loadEnvironment() {
     JWT_SECRET: env.JWT_SECRET,
     OPENAI_API_KEY: env.OPENAI_API_KEY,
     CORS_ORIGIN: env.CORS_ORIGIN,
+    // Phase 10.6 — validated bounded grace period (safe default when the
+    // variable is absent; .env is never modified by application code).
+    SHUTDOWN_GRACE_MS: env.JARVIS_SHUTDOWN_GRACE_MS,
   };
 }

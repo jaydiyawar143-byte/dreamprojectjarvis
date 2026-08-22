@@ -203,3 +203,71 @@ export async function getConversation(
 export async function logout(): Promise<void> {
   clearTokens();
 }
+
+// ---------------------------------------------------------------------------
+// PHASE 10.7 — Approvals
+// ---------------------------------------------------------------------------
+
+export interface ApprovalSummaryInfo {
+  actionSummary: string;
+  accountRedacted?: string;
+  budget?: string;
+  targetResource?: string;
+  detailLines: Array<{ label: string; value: string }>;
+}
+
+export type ApprovalStatusValue =
+  | "pending"
+  | "approved"
+  | "consumed"
+  | "rejected"
+  | "expired";
+
+export interface ApprovalRecord extends ApprovalSummaryInfo {
+  approvalId: string;
+  toolId: string;
+  paramsHash?: string;
+  status: ApprovalStatusValue;
+  createdAt: string;
+  expiresAt: string;
+  resolvedAt?: string;
+  params: Record<string, unknown>;
+  executionId?: string;
+  executionStatus?: string;
+}
+
+export interface Paginated<T> {
+  success: boolean;
+  data?: T[];
+  pagination?: { page: number; limit: number; total: number; totalPages: number };
+  error?: ApiError;
+  timestamp: string;
+}
+
+export async function listApprovals(
+  status?: ApprovalStatusValue,
+  page = 1,
+  limit = 20
+): Promise<Paginated<ApprovalRecord>> {
+  const qs = new URLSearchParams({ page: String(page), limit: String(limit) });
+  if (status) qs.set("status", status);
+  return request(`/approvals?${qs.toString()}`);
+}
+
+export async function getApproval(
+  id: string
+): Promise<ApiResponse<ApprovalRecord>> {
+  return request(`/approvals/${id}`);
+}
+
+export async function approveApproval(
+  id: string
+): Promise<ApiResponse<{ approvalId: string; status: string }>> {
+  return request(`/approvals/${id}/approve`, { method: "POST" });
+}
+
+export async function rejectApproval(
+  id: string
+): Promise<ApiResponse<{ approvalId: string; status: string }>> {
+  return request(`/approvals/${id}/reject`, { method: "POST" });
+}

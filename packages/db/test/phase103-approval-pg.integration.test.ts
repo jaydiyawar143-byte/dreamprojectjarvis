@@ -64,6 +64,10 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (testUserId) {
+    // Approval.user has no cascade; delete dependents explicitly so test
+    // runs stop accumulating residue users/executions/approvals.
+    await prisma.toolExecution.deleteMany({ where: { userId: testUserId } }).catch(() => {});
+    await prisma.approval.deleteMany({ where: { userId: testUserId } }).catch(() => {});
     await prisma.user.delete({ where: { id: testUserId } }).catch(() => {});
   }
   await prisma.$disconnect();

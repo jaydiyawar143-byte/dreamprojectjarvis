@@ -14,6 +14,7 @@ export const EXECUTION_JOURNAL_STATUSES = [
   "FAILED",
   "UNKNOWN",
   "RECONCILING",
+  "SAFE_TO_RETRY",
   "CANCELLED",
 ] as const;
 
@@ -30,11 +31,18 @@ export const AMBIGUOUS_STATUSES: ReadonlySet<ExecutionJournalStatus> = new Set([
   "RECONCILING",
 ]);
 
-/** States that block a new execution attempt for reversible actions. */
+/**
+ * States that block a new execution attempt for reversible actions.
+ * SAFE_TO_RETRY is intentionally included (Phase 10.5): the state records
+ * "authoritative NOT_FOUND — an explicit, human-driven retry MAY be allowed
+ * by a future phase", but this phase performs no automatic retry and no new
+ * execution may consume it silently.
+ */
 export const BLOCKED_STATUSES: ReadonlySet<ExecutionJournalStatus> = new Set([
   "EXECUTING",
   "UNKNOWN",
   "RECONCILING",
+  "SAFE_TO_RETRY",
   "CANCELLED",
 ]);
 
@@ -59,7 +67,15 @@ export const CREATE_BLOCKED_STATUSES: ReadonlySet<ExecutionJournalStatus> = new 
  *                                      still single-winner, never automatic)
  *   EXECUTING -> SUCCEEDED | FAILED | UNKNOWN
  *
- * UNKNOWN is terminal until reconciliation (future phase) resolves it.
+ * Reconciliation lifecycle (Phase 10.5):
+ *   UNKNOWN   -> RECONCILING          (single-winner reconciliation claim)
+ *   RECONCILING -> SUCCEEDED          (FOUND: external resource verified)
+ *               | SAFE_TO_RETRY       (authoritative NOT_FOUND; NO automatic
+ *                                      retry happens in this phase — a future
+ *                                      phase may explicitly re-execute)
+ *               | UNKNOWN             (UNCERTAIN / PROVIDER_ERROR / crash
+ *                                      recovery: eligible again after lease)
+ *
  * SUCCEEDED is terminal: a new execution attempt for a creation-type tool is
  * blocked via CREATE_BLOCKED_STATUSES; reversible tools re-check live state
  * and return an idempotent result instead of claiming again.
@@ -72,8 +88,9 @@ export const ALLOWED_TRANSITIONS: Readonly<
   EXECUTING: ["SUCCEEDED", "FAILED", "UNKNOWN", "RECONCILING"],
   SUCCEEDED: [],
   FAILED: ["EXECUTING"],
-  UNKNOWN: ["RECONCILING", "FAILED", "SUCCEEDED"],
-  RECONCILING: ["SUCCEEDED", "FAILED", "UNKNOWN"],
+  UNKNOWN: ["RECONCILING", "FAILED", "SUCCEEDED", "SAFE_TO_RETRY"],
+  RECONCILING: ["SUCCEEDED", "SAFE_TO_RETRY", "UNKNOWN"],
+  SAFE_TO_RETRY: [],
   CANCELLED: [],
 };
 
@@ -103,6 +120,13 @@ export interface ToolExecutionRecord {
    *  Stamped at begin() and re-stamped by atomic consumption; provides the
    *  durable approval <-> execution audit linkage. */
   approvalId?: string;
+  /** Number of COMPLETED reconciliation finalizations (Phase 10.5). */
+  reconciliationAttempts?: number;
+  /** Timestamp of the last completed reconciliation attempt. */
+  lastReconciliationAt?: Date;
+  /** Outcome of the last completed reconciliation attempt
+   *  (FOUND | NOT_FOUND | UNCERTAIN | PROVIDER_ERROR). */
+  lastReconciliationResult?: string;
 }
 
 export interface BeginExecutionInput {
@@ -145,6 +169,31 @@ export interface RecoveryResult {
 export interface ExecutionErrorInfo {
   code?: string;
   message?: string;
+}
+
+/** Options for claimForReconciliation(): durable single-reconciler ownership. */
+export interface ReconciliationClaimOptions {
+  /** Identity of the reconciling worker (e.g. process id + uuid). */
+  ownerId?: string;
+  /** Lease duration in milliseconds; must outlive the provider query. */
+  leaseMs?: number;
+}
+
+/**
+ * Terminal decision of one reconciliation attempt. Applied atomically from
+ * RECONCILING with an ownership guard — a worker that lost its lease can
+ * never finalize.
+ *
+ *   SUCCEEDED     requires externalResourceId (FOUND)
+ *   SAFE_TO_RETRY requires authoritative NOT_FOUND (no auto retry occurs;
+ *                 a future phase decides on explicit re-execution)
+ *   UNKNOWN       UNCERTAIN / PROVIDER_ERROR — eligible again after recovery
+ */
+export interface ReconciliationDecision {
+  status: "SUCCEEDED" | "UNKNOWN" | "SAFE_TO_RETRY";
+  outcome: string;
+  externalResourceId?: string;
+  error?: ExecutionErrorInfo;
 }
 
 /**
@@ -197,4 +246,38 @@ export interface ExecutionJournalPort {
     toolId: string,
     idempotencyKey: string
   ): Promise<ToolExecutionRecord | null>;
+
+  // -------------------------------------------------------------------------
+  // Reconciliation (Phase 10.5)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Atomic UNKNOWN -> RECONCILING claim with a durable lease. Exactly one
+   * concurrent caller receives the record; all others receive null. Records
+   * in any other state are never claimable — reconciliation is always an
+   * explicit, journaled transition, never a background side effect.
+   */
+  claimForReconciliation(
+    executionId: string,
+    options?: ReconciliationClaimOptions
+  ): Promise<ToolExecutionRecord | null>;
+  /**
+   * Ownership-guarded finalization: applies ONLY while the row is still
+   * RECONCILING and owned by `ownerId`. Bumps reconciliationAttempts and
+   * stamps lastReconciliation* metadata. A worker that lost its lease
+   * (crash recovery) can never finalize.
+   */
+  finalizeReconciliation(
+    executionId: string,
+    ownerId: string,
+    decision: ReconciliationDecision
+  ): Promise<ToolExecutionRecord | null>;
+  /** All RECONCILING records whose lease has expired (crash candidates). */
+  findStaleReconciliations(options?: StaleScanOptions): Promise<ToolExecutionRecord[]>;
+  /**
+   * Idempotent crash recovery for reconciliation claims: stale RECONCILING
+   * -> UNKNOWN (eligible again after lease expiry). NEVER converts to FAILED
+   * and NEVER triggers a retry of the underlying write.
+   */
+  recoverStaleReconciliations(options?: RecoveryOptions): Promise<RecoveryResult>;
 }

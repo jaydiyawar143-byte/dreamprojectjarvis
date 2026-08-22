@@ -2,6 +2,8 @@ import type {
   BeginExecutionInput,
   ClaimOptions,
   ExecutionErrorInfo,
+  ReconciliationClaimOptions,
+  ReconciliationDecision,
   RecoveryOptions,
   RecoveryResult,
 } from "@jarvis/core";
@@ -31,6 +33,7 @@ interface ToolExecutionRow {
     | "FAILED"
     | "UNKNOWN"
     | "RECONCILING"
+    | "SAFE_TO_RETRY"
     | "CANCELLED";
   provider: string | null;
   externalResourceId: string | null;
@@ -41,6 +44,9 @@ interface ToolExecutionRow {
   leaseUntil: Date | null;
   heartbeatAt: Date | null;
   approvalId: string | null;
+  reconciliationAttempts: number | null;
+  lastReconciliationAt: Date | null;
+  lastReconciliationResult: string | null;
   createdAt: Date;
   startedAt: Date | null;
   completedAt: Date | null;
@@ -63,6 +69,9 @@ function toRecord(row: ToolExecutionRow): ToolExecutionRecord {
     leaseUntil: row.leaseUntil ?? undefined,
     heartbeatAt: row.heartbeatAt ?? undefined,
     approvalId: row.approvalId ?? undefined,
+    reconciliationAttempts: row.reconciliationAttempts ?? 0,
+    lastReconciliationAt: row.lastReconciliationAt ?? undefined,
+    lastReconciliationResult: row.lastReconciliationResult ?? undefined,
     createdAt: row.createdAt,
     startedAt: row.startedAt ?? undefined,
     completedAt: row.completedAt ?? undefined,
@@ -277,6 +286,20 @@ export class PrismaToolExecutionRepository implements ExecutionJournalPort {
     return row ? toRecord(row) : null;
   }
 
+  /**
+   * PHASE 10.7 — latest durable execution linked to an approval, so the
+   * approval detail view can show whether/where the approved action ran.
+   */
+  async findLatestByApprovalId(
+    approvalId: string
+  ): Promise<ToolExecutionRecord | null> {
+    const row = await this.prisma.toolExecution.findFirst({
+      where: { approvalId },
+      orderBy: { createdAt: "desc" },
+    });
+    return row ? toRecord(row) : null;
+  }
+
   async findByIdempotentKey(
     userId: string,
     toolId: string,
@@ -292,5 +315,123 @@ export class PrismaToolExecutionRepository implements ExecutionJournalPort {
       },
     });
     return row ? toRecord(row) : null;
+  }
+
+  // -------------------------------------------------------------------------
+  // Reconciliation (Phase 10.5)
+  // -------------------------------------------------------------------------
+
+  async claimForReconciliation(
+    executionId: string,
+    options?: ReconciliationClaimOptions
+  ): Promise<ToolExecutionRecord | null> {
+    // Atomic single-winner UNKNOWN -> RECONCILING with a durable lease.
+    // Only UNKNOWN is claimable: SAFE_TO_RETRY/SUCCEEDED are resolved, and
+    // stale RECONCILING rows first flow through recoverStaleReconciliations
+    // (crash recovery) so there is exactly ONE canonical entry state.
+    const now = new Date();
+    const leaseMs = options?.leaseMs ?? DEFAULT_LEASE_MS;
+    const result = await this.prisma.toolExecution.updateMany({
+      where: { executionId, status: "UNKNOWN" },
+      data: {
+        status: "RECONCILING",
+        ownerId: options?.ownerId ?? null,
+        leaseUntil: new Date(now.getTime() + leaseMs),
+        heartbeatAt: now,
+      },
+    });
+    if (result.count === 0) return null;
+    return this.getById(executionId);
+  }
+
+  async finalizeReconciliation(
+    executionId: string,
+    ownerId: string,
+    decision: ReconciliationDecision
+  ): Promise<ToolExecutionRecord | null> {
+    // Ownership guard in the WHERE clause: a worker that lost its lease
+    // (crash recovery reassigned it) can never finalize. The attempt counter
+    // and last-outcome metadata advance in the same atomic update as the
+    // terminal transition.
+    const now = new Date();
+    const current = await this.prisma.toolExecution.findUnique({
+      where: { executionId },
+      select: { reconciliationAttempts: true },
+    });
+    if (!current) return null;
+
+    const terminal = decision.status !== "UNKNOWN";
+    const result = await this.prisma.toolExecution.updateMany({
+      where: { executionId, status: "RECONCILING", ownerId },
+      data: {
+        status: decision.status,
+        completedAt: terminal ? now : undefined,
+        ownerId: null,
+        leaseUntil: null,
+        heartbeatAt: null,
+        externalResourceId:
+          decision.externalResourceId !== undefined
+            ? decision.externalResourceId
+            : undefined,
+        errorCode:
+          decision.error?.code !== undefined
+            ? redactSecrets(decision.error.code)
+            : undefined,
+        errorMessage:
+          decision.error?.message !== undefined
+            ? redactSecrets(decision.error.message)
+            : undefined,
+        reconciliationAttempts: (current.reconciliationAttempts ?? 0) + 1,
+        lastReconciliationAt: now,
+        lastReconciliationResult: redactSecrets(decision.outcome),
+      },
+    });
+    if (result.count === 0) return null;
+    return this.getById(executionId);
+  }
+
+  async findStaleReconciliations(
+    options?: RecoveryOptions
+  ): Promise<ToolExecutionRecord[]> {
+    const now = options?.now ?? new Date();
+    const rows = await this.prisma.toolExecution.findMany({
+      where: {
+        status: "RECONCILING",
+        leaseUntil: { lt: now },
+      },
+      take: options?.batchSize,
+      orderBy: { leaseUntil: "asc" },
+    });
+    return rows.map(toRecord);
+  }
+
+  async recoverStaleReconciliations(
+    options?: RecoveryOptions
+  ): Promise<RecoveryResult> {
+    // Idempotent crash recovery: stale RECONCILING -> UNKNOWN via atomic
+    // conditional update. NEVER FAILED, never retried automatically — the
+    // execution simply becomes reconciliation-eligible again.
+    const stale = await this.findStaleReconciliations(options);
+    const recovered: ToolExecutionRecord[] = [];
+    for (const record of stale) {
+      const result = await this.prisma.toolExecution.updateMany({
+        where: { executionId: record.executionId, status: "RECONCILING" },
+        data: {
+          status: "UNKNOWN",
+          completedAt: new Date(),
+          ownerId: null,
+          leaseUntil: null,
+          heartbeatAt: null,
+          errorCode: "RECONCILIATION_LEASE_EXPIRED",
+          errorMessage:
+            "Worker lease expired while RECONCILING; outcome remains uncertain and requires reconciliation",
+        },
+      });
+      if (result.count > 0) {
+        const done = await this.getById(record.executionId);
+        if (done) recovered.push(done);
+      }
+    }
+    return { recovered };
   }
 }

@@ -53,6 +53,7 @@ export function parseCampaign(data: unknown): MetaCampaign | null {
     endTime: d.end_time ? String(d.end_time) : undefined,
     bidStrategy: d.bid_strategy ? String(d.bid_strategy) : undefined,
     buyingType: d.buying_type ? String(d.buying_type) : undefined,
+    createdAt: d.created_time ? String(d.created_time) : undefined,
   };
   const result = MetaCampaignSchema.safeParse(mapped);
   return result.success ? result.data : null;

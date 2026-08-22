@@ -27,6 +27,17 @@ const baseEnvSchema = z.object({
 
   CORS_ORIGIN: z.string().default("http://localhost:3000"),
   API_PORT: z.coerce.number().default(3001),
+
+  // Phase 10.6 — bounded graceful-shutdown grace period. When absent the
+  // 30s default gives in-flight external writes their full authoritative
+  // window to finish; after expiry nothing is cancelled — durable journal
+  // state (EXECUTING/UNKNOWN) is left for startup recovery/reconciliation.
+  JARVIS_SHUTDOWN_GRACE_MS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(600000)
+    .default(30000),
 });
 
 const serverEnvSchema = baseEnvSchema.extend({

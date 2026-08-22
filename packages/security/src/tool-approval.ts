@@ -10,7 +10,7 @@ import type {
   ToolApprovalCheck,
   ToolExecutionAudit,
 } from "@jarvis/core";
-import { computeParamsHash } from "@jarvis/core";
+import { APPROVAL_TTL_MS, computeParamsHash } from "@jarvis/core";
 
 export interface ToolApprovalConfig {
   approvalTtlMs?: number;
@@ -18,7 +18,9 @@ export interface ToolApprovalConfig {
   autoApproveReadOnly?: boolean;
 }
 
-const DEFAULT_APPROVAL_TTL_MS = 10 * 60 * 1000;
+// PHASE 10.7: the authoritative TTL lives in core; this service no longer
+// defines its own divergent default.
+const DEFAULT_APPROVAL_TTL_MS = APPROVAL_TTL_MS;
 
 const RISK_REQUIRES_APPROVAL: Record<RiskLevel, boolean> = {
   READ_ONLY: false,

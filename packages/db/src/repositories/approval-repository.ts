@@ -134,6 +134,160 @@ export class PrismaApprovalRepository implements IApprovalRepository {
     return row ? toApproval(row) : null;
   }
 
+  // -------------------------------------------------------------------------
+  // PHASE 10.7 — production approval workflow primitives.
+  // -------------------------------------------------------------------------
+
+  /**
+   * Paginated, user-scoped approval listing. A user can only ever see their
+   * own approvals; `status` is an optional filter. Expired-but-unresolved
+   * rows are reported as "expired" (computed at read time — expiry is a
+   * fact about the clock, not a stored transition).
+   */
+  async listByUser(
+    userId: string,
+    options?: {
+      status?: ApprovalStatus;
+      page?: number;
+      limit?: number;
+    }
+  ): Promise<{ items: Approval[]; total: number }> {
+    const limit = Math.min(Math.max(options?.limit ?? 20, 1), 100);
+    const page = Math.max(options?.page ?? 1, 1);
+    const now = new Date();
+
+    const where: Record<string, unknown> = { userId };
+    if (options?.status) {
+      if (
+        options.status === "expired"
+      ) {
+        where.status = { in: ["PENDING", "APPROVED"] };
+        where.expiresAt = { lte: now };
+      } else if (options.status === "pending" || options.status === "approved") {
+        where.status = STATUS_MAP[options.status];
+        where.expiresAt = { gt: now };
+      } else {
+        where.status = STATUS_MAP[options.status];
+      }
+    }
+
+    const [rows, total] = await Promise.all([
+      this.prisma.approval.findMany({
+        where: where as never,
+        orderBy: { createdAt: "desc" },
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+      this.prisma.approval.count({ where: where as never }),
+    ]);
+
+    return {
+      items: rows.map((row) => this.withEffectiveStatus(toApproval(row), now)),
+      total,
+    };
+  }
+
+  /** Effective status: lazily reports expired PENDING/APPROVED as expired. */
+  private withEffectiveStatus(approval: Approval, now: Date): Approval {
+    if (
+      (approval.status === "pending" || approval.status === "approved") &&
+      new Date(approval.expiresAt).getTime() <= now.getTime()
+    ) {
+      return { ...approval, status: "expired" };
+    }
+    return approval;
+  }
+
+  async findByIdForUser(id: string, userId: string): Promise<Approval | null> {
+    const row = await this.prisma.approval.findFirst({ where: { id, userId } });
+    return row ? this.withEffectiveStatus(toApproval(row), new Date()) : null;
+  }
+
+  /**
+   * Strict single-winner approval decision. Conditional UPDATE ... WHERE
+   * status='PENDING' AND expiresAt > now AND userId matches: exactly one
+   * concurrent caller transitions the row; every loser observes the new
+   * state and is classified deterministically.
+   */
+  async decideApproval(
+    id: string,
+    userId: string,
+    decision: "approve" | "reject",
+    options?: { now?: Date }
+  ): Promise<
+    | { outcome: "approved" | "rejected" }
+    | { outcome: "not_found" }
+    | { outcome: "forbidden" }
+    | { outcome: "already_consumed" }
+    | { outcome: "already_rejected"; idempotent: boolean }
+    | { outcome: "expired" }
+    | { outcome: "conflict"; currentState: string }
+  > {
+    const now = options?.now ?? new Date();
+
+    const row = await this.prisma.approval.findUnique({ where: { id } });
+    if (!row) return { outcome: "not_found" };
+    if (row.userId !== userId) return { outcome: "forbidden" };
+
+    if (row.status === "CONSUMED") return { outcome: "already_consumed" };
+    if (row.status === "REJECTED") {
+      return decision === "reject"
+        ? { outcome: "already_rejected", idempotent: true }
+        : { outcome: "already_rejected", idempotent: false };
+    }
+
+    const expired =
+      row.status === "EXPIRED" || row.expiresAt.getTime() <= now.getTime();
+    if (decision === "approve") {
+      if (row.status === "APPROVED") {
+        return expired
+          ? { outcome: "expired" }
+          : { outcome: "conflict", currentState: "APPROVED" };
+      }
+      // PHASE 10.7 fix: an expired PENDING approval must classify as
+      // deterministically EXPIRED (→ HTTP 410). Without this early return it
+      // falls through to the conditional UPDATE (whose expiresAt > now guard
+      // can never match), reaches the loser-classification path and is
+      // misreported as CONFLICT/PENDING (→ 409) even though nobody raced.
+      if (expired) return { outcome: "expired" };
+    } else if (expired && row.status !== "APPROVED") {
+      // Rejecting an already-expired pending approval is a no-op fact.
+      return { outcome: "expired" };
+    }
+
+    const target = decision === "approve" ? "APPROVED" : "REJECTED";
+    const guardStates: ("PENDING" | "APPROVED")[] =
+      decision === "approve"
+        ? ["PENDING"]
+        : ["PENDING", "APPROVED"]; // reject may still veto a not-yet-consumed approval
+
+    const result = await this.prisma.approval.updateMany({
+      where: {
+        id,
+        userId,
+        status: { in: guardStates },
+        ...(decision === "approve" ? { expiresAt: { gt: now } } : {}),
+      },
+      data: { status: target, resolvedAt: now },
+    });
+
+    if (result.count === 1) {
+      return { outcome: decision === "approve" ? "approved" : "rejected" };
+    }
+
+    // Lost the race — re-read and classify the current durable state.
+    const after = await this.prisma.approval.findUnique({ where: { id } });
+    if (!after) return { outcome: "not_found" };
+    if (after.status === "CONSUMED") return { outcome: "already_consumed" };
+    if (after.status === "REJECTED") {
+      return { outcome: "already_rejected", idempotent: false };
+    }
+    return {
+      outcome: "conflict",
+      currentState: after.status,
+    };
+  }
+
   /**
    * PHASE 10.3 — atomic one-time consumption paired with the execution claim.
    *

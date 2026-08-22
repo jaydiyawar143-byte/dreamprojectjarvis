@@ -62,6 +62,14 @@ export interface ToolExecutionRequest {
   idempotencyKey?: string;
   executionId?: string;
   stepIndex?: number;
+  /**
+   * Caller-side cancellation signal (Phase 10.4). Combined with the
+   * executor's authoritative deadline; when either fires the tool's
+   * context signal aborts and the underlying HTTP request is cancelled.
+   * NOTE: aborting does NOT prove an external write did not happen —
+   * journal classification (FAILED vs UNKNOWN) is decided by the tool.
+   */
+  signal?: AbortSignal;
 }
 
 export interface ToolExecutionResult {

@@ -10,6 +10,19 @@ import type {
 } from "@jarvis/core";
 
 // ---------------------------------------------------------------------------
+// ProviderCallOptions — per-call cancellation (Phase 10.4)
+// ---------------------------------------------------------------------------
+// Every provider method accepts an OPTIONAL trailing options object carrying
+// the caller's AbortSignal. Implementations MUST forward it to the HTTP layer
+// so a deadline/abort actually cancels the in-flight request. Implementations
+// written before Phase 10.4 (fewer parameters) remain structurally compatible.
+// ---------------------------------------------------------------------------
+
+export interface ProviderCallOptions {
+  signal?: AbortSignal;
+}
+
+// ---------------------------------------------------------------------------
 // MetaAdsProvider — Read-only interface for Meta Graph API
 // ---------------------------------------------------------------------------
 // Implementations must NEVER expose credentials.
@@ -18,7 +31,7 @@ import type {
 
 export interface MetaAdsProvider {
   /** List ad accounts accessible to the authenticated user. */
-  getAdAccounts(pagination?: MetaPagination): Promise<{
+  getAdAccounts(pagination?: MetaPagination, options?: ProviderCallOptions): Promise<{
     data: MetaAdAccount[];
     nextPage?: string;
   }>;
@@ -26,7 +39,8 @@ export interface MetaAdsProvider {
   /** List campaigns for a given ad account. */
   getCampaigns(
     accountId: string,
-    pagination?: MetaPagination
+    pagination?: MetaPagination,
+    options?: ProviderCallOptions
   ): Promise<{
     data: MetaCampaign[];
     nextPage?: string;
@@ -36,7 +50,8 @@ export interface MetaAdsProvider {
   getAdSets(
     accountId: string,
     campaignId?: string,
-    pagination?: MetaPagination
+    pagination?: MetaPagination,
+    options?: ProviderCallOptions
   ): Promise<{
     data: MetaAdSet[];
     nextPage?: string;
@@ -47,7 +62,8 @@ export interface MetaAdsProvider {
     accountId: string,
     campaignId?: string,
     adSetId?: string,
-    pagination?: MetaPagination
+    pagination?: MetaPagination,
+    options?: ProviderCallOptions
   ): Promise<{
     data: MetaAd[];
     nextPage?: string;
@@ -65,7 +81,8 @@ export interface MetaAdsProvider {
       fields?: string[];
       breakdown?: string;
     },
-    pagination?: MetaPagination
+    pagination?: MetaPagination,
+    options?: ProviderCallOptions
   ): Promise<{
     data: MetaInsights[];
     nextPage?: string;
@@ -84,21 +101,24 @@ export interface MetaAdsWriteProvider {
   updateCampaignStatus(
     accountId: string,
     campaignId: string,
-    status: "ACTIVE" | "PAUSED"
+    status: "ACTIVE" | "PAUSED",
+    options?: ProviderCallOptions
   ): Promise<{ success: boolean; campaign: MetaCampaign }>;
 
   /** Set ad set status (ACTIVE ↔ PAUSED). */
   updateAdSetStatus(
     accountId: string,
     adSetId: string,
-    status: "ACTIVE" | "PAUSED"
+    status: "ACTIVE" | "PAUSED",
+    options?: ProviderCallOptions
   ): Promise<{ success: boolean; adSet: MetaAdSet }>;
 
   /** Set ad status (ACTIVE ↔ PAUSED). */
   updateAdStatus(
     accountId: string,
     adId: string,
-    status: "ACTIVE" | "PAUSED"
+    status: "ACTIVE" | "PAUSED",
+    options?: ProviderCallOptions
   ): Promise<{ success: boolean; ad: MetaAd }>;
 }
 
@@ -114,14 +134,16 @@ export interface MetaAdsBudgetProvider {
   updateCampaignBudget(
     accountId: string,
     campaignId: string,
-    dailyBudget: string
+    dailyBudget: string,
+    options?: ProviderCallOptions
   ): Promise<{ success: boolean; campaign: MetaCampaign }>;
 
   /** Set ad set daily budget. */
   updateAdSetBudget(
     accountId: string,
     adSetId: string,
-    dailyBudget: string
+    dailyBudget: string,
+    options?: ProviderCallOptions
   ): Promise<{ success: boolean; adSet: MetaAdSet }>;
 }
 
@@ -136,7 +158,8 @@ export interface MetaCampaignCreatorProvider {
   /** Create a new campaign under the given ad account. */
   createCampaign(
     accountId: string,
-    input: MetaCampaignInput
+    input: MetaCampaignInput,
+    options?: ProviderCallOptions
   ): Promise<{ success: boolean; campaign: MetaCampaign }>;
 }
 
@@ -149,8 +172,8 @@ export interface MetaCampaignCreatorProvider {
 
 export interface MetaAccountAuthorizer {
   /** Get the list of Meta account IDs the user is authorized to access. */
-  getAuthorizedAccountIds(userId: string): Promise<string[]>;
+  getAuthorizedAccountIds(userId: string, options?: ProviderCallOptions): Promise<string[]>;
 
   /** Check if a user is authorized to access a specific Meta account. */
-  isAuthorized(userId: string, accountId: string): Promise<boolean>;
+  isAuthorized(userId: string, accountId: string, options?: ProviderCallOptions): Promise<boolean>;
 }

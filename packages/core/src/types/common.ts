@@ -29,6 +29,18 @@ export const ApprovalStatusSchema = z.enum([
 
 export type ApprovalStatus = z.infer<typeof ApprovalStatusSchema>;
 
+// ---------------------------------------------------------------------------
+// PHASE 10.7 — ONE authoritative approval TTL.
+//
+// Every code path that creates or validates an approval MUST derive expiry
+// from this single constant. Previous implementations used divergent values
+// (e.g. a 10-minute default in the security package vs a hardcoded 1-hour
+// value in the executor); those are consolidated here so an approval's
+// lifetime is predictable for humans and identical across all surfaces.
+// Expiry is never extended automatically.
+// ---------------------------------------------------------------------------
+export const APPROVAL_TTL_MS = 10 * 60 * 1000;
+
 export const ApprovalSchema = z.object({
   id: z.string(),
   userId: z.string(),

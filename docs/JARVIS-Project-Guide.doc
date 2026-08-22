@@ -1,0 +1,327 @@
+<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word">
+<head>
+<meta charset="utf-8">
+<title>J.A.R.V.I.S — Project Documentation</title>
+<style>
+  body { font-family: Calibri, sans-serif; font-size: 11pt; color:#1a1a2e; margin:40px; line-height:1.45; }
+  h1 { font-size:26pt; color:#0f3460; border-bottom:3px solid #e94560; padding-bottom:8px; }
+  h2 { font-size:17pt; color:#0f3460; border-bottom:2px solid #16213e; padding-bottom:4px; margin-top:28px; }
+  h3 { font-size:13pt; color:#16213e; margin-top:18px; }
+  table { border-collapse:collapse; width:100%; margin:12px 0 20px 0; font-size:10pt; }
+  th { background:#0f3460; color:white; padding:7px 9px; text-align:left; border:1px solid #333; }
+  td { border:1px solid #999; padding:6px 9px; vertical-align:top; }
+  tr:nth-child(even) td { background:#f2f5fa; }
+  .pass { color:#0a7d33; font-weight:bold; }
+  .warn { color:#b8860b; font-weight:bold; }
+  .box  { background:#eef3fb; border:1.5pt solid #0f3460; padding:12px 16px; margin:12px 0; }
+  .warnbox { background:#fff6e5; border:1.5pt solid #b8860b; padding:12px 16px; margin:12px 0; }
+  code, .mono { font-family:Consolas, monospace; font-size:9.5pt; background:#f0f0f0; padding:1px 4px; }
+  .archtable td { text-align:center; font-weight:bold; padding:10px; }
+  .small { font-size:9pt; color:#555; }
+  .phase-add { background:#fffbe6; }
+</style>
+</head>
+<body>
+
+<h1>J.A.R.V.I.S — Project Documentation</h1>
+<p class="small"><b>Version:</b> 1.0 &nbsp;|&nbsp; <b>Last updated:</b> 2026-08-22 (after Phase 10.7 PASS) &nbsp;|&nbsp;
+<b>Maintained by:</b> updated automatically after every completed phase</p>
+
+<div class="box"><b>How to use this document:</b> Open in Microsoft Word (double-click).
+Section 13 is the <i>living phase log</i> — every newly finished phase gets appended there,
+and Section 14's snapshot numbers are refreshed. Nothing else needs manual editing.</div>
+
+<!-- ================= 1 ================= -->
+<h2>1. What is JARVIS?</h2>
+<p><b>JARVIS (Just A Rather Very Intelligent System)</b> is a personal <b>AI Operating System for
+marketing &amp; business</b>. You talk to it in plain language (chat UI); it plans work with an LLM,
+executes through a controlled <b>tool system</b>, manages your <b>Meta (Facebook) ad campaigns</b>,
+remembers facts about your business in a <b>memory engine</b>, and coordinates specialised
+<b>agents</b>. Everything risky is <b>approval-gated</b>: JARVIS proposes, a human approves,
+then — and only then — does the action run, exactly once, exactly as approved.</p>
+
+<table>
+<tr><th>You can ask JARVIS to…</th><th>What happens under the hood</th></tr>
+<tr><td>"Create a campaign called Summer Launch, ₹/$25 daily budget"</td><td>Planner produces structured tool call → executor sees it writes to Meta → creates a PENDING approval with an exact parameter fingerprint → you get an Approvals card → you click Approve → tool runs once against the configured ad account.</td></tr>
+<tr><td>"Pause the campaign cmp_123"</td><td>Same approval gate (side-effecting tool); read-only questions skip approval entirely.</td></tr>
+<tr><td>"What do you remember about my client Acme?"</td><td>Memory engine retrieves stored facts (vector + metadata search).</td></tr>
+<tr><td>"How much did we spend this week?"</td><td>Read-only Meta insights tools — no approval needed.</td></tr>
+</table>
+
+<!-- ================= 2 ================= -->
+<h2>2. Design Principles</h2>
+<table>
+<tr><th>Principle</th><th>Meaning in practice</th></tr>
+<tr><td><b>Modularity</b></td><td>Every agent/tool/integration is a self-contained module behind interfaces (<code>@jarvis/core</code> contracts).</td></tr>
+<tr><td><b>API-first</b></td><td>The Next.js frontend is only a consumer of the Express API; no business logic in the browser.</td></tr>
+<tr><td><b>Security by design</b></td><td>No hardcoded secrets; side effects require human approval; every attempt audited; AI cannot bypass financial guardrails.</td></tr>
+<tr><td><b>Honest reliability</b></td><td>A crash or timeout never pretends success: uncertain outcomes become <code>UNKNOWN</code> and are reconciled against Meta — never auto-retried blindly.</td></tr>
+<tr><td><b>Deterministic errors</b></td><td>APIs return stable machine-readable codes (see §9.4), never raw provider exceptions.</td></tr>
+<tr><td><b>Test-proven</b></td><td>Every claim above has automated proof: 1,025 tests, real-PostgreSQL integration suites, shadow-DB drift checks (§11).</td></tr>
+</table>
+
+<!-- ================= 3 ================= -->
+<h2>3. Technology Stack — what is used and why</h2>
+<table>
+<tr><th>Layer</th><th>Tech</th><th>Why this choice</th></tr>
+<tr><td>Language</td><td>TypeScript (strict)</td><td>One language across UI/API/packages; compile-time safety for a system that moves money.</td></tr>
+<tr><td>Monorepo</td><td>pnpm workspaces + Turborepo</td><td>Fast cached builds/tests; clean package boundaries enforced by imports.</td></tr>
+<tr><td>API</td><td>Node.js + Express + Socket.IO</td><td>Mature middleware ecosystem (auth, routers); sockets for streaming chat.</td></tr>
+<tr><td>Frontend</td><td>Next.js 14 (App Router), React, Zustand, Tailwind-style CSS</td><td>Server components + simple client state; fast dev experience.</td></tr>
+<tr><td>Database</td><td>PostgreSQL + Prisma ORM (+ pgvector)</td><td>Relational integrity for money-touching data; transactions power atomic approval consumption; pgvector stores 1536-dim embeddings for semantic memory.</td></tr>
+<tr><td>AI provider</td><td>OpenAI (via <code>@jarvis/ai-openai</code>)</td><td>Provider-agnostic contract layer means the model is swappable; planning uses structured Zod-validated outputs.</td></tr>
+<tr><td>Validation</td><td>Zod schemas in <code>@jarvis/core</code></td><td>Runtime-validated contracts shared by every package — one source of truth.</td></tr>
+<tr><td>Testing</td><td>Vitest (+ Testing Library/jsdom for UI)</td><td>Fast ESM-native runner; per-package suites + cross-package integration.</td></tr>
+<tr><td>Infra (dev)</td><td>Docker (PostgreSQL container <code>jarvis-postgres</code>)</td><td>Reproducible local database; integration tests run against the real engine.</td></tr>
+</table>
+
+<!-- ================= 4 ================= -->
+<h2>4. Repository Layout (monorepo packages)</h2>
+<table>
+<tr><th>Path</th><th>Package</th><th>Responsibility</th></tr>
+<tr><td><code>apps/web</code></td><td>Frontend</td><td>Login/register, chat UI, <b>Approvals page</b>; stores JWT tokens in sessionStorage; never sees secrets.</td></tr>
+<tr><td><code>apps/api</code></td><td>Backend API</td><td>Express app: auth routes, conversations/chat, <b>/approvals</b> production endpoints, lifecycle-aware health, graceful shutdown controller, DI container.</td></tr>
+<tr><td><code>packages/core</code></td><td>Contracts</td><td>Zod schemas + types everyone shares: AuthContext, JarvisRequest/Response, Tool/ToolResult, Approval, AuditEntry, <b>APPROVAL_TTL_MS</b>, shutdown-lifecycle contract, startup-recovery contract.</td></tr>
+<tr><td><code>packages/security</code></td><td>Security</td><td>Password hashing, JWT access/refresh token service (refresh tokens stored hashed), RBAC permission checker, tool approval service.</td></tr>
+<tr><td><code>packages/db</code></td><td>Data layer</td><td>Prisma schema + repositories (users, conversations, audit log, <b>approvals with atomic decisions</b>, <b>tool-execution journal</b>), migrations.</td></tr>
+<tr><td><code>packages/tools</code></td><td>Tool system</td><td>ToolRegistry, <b>ToolExecutor</b> (validation → permission → approval gate → single deadline → journal), Meta Ads read/write tools, output sanitizer (secret redaction), budget guardrails.</td></tr>
+<tr><td><code>packages/meta-graph</code></td><td>Meta integration</td><td>Meta Graph API client layer + campaign reconciliation logic.</td></tr>
+<tr><td><code>packages/agents</code></td><td>Agent system</td><td>Orchestrator/planner: turns natural language into validated tool plans; agent registry.</td></tr>
+<tr><td><code>packages/memory</code></td><td>Memory engine</td><td>Fact extraction, storage, validation, retrieval (v2 schema with embeddings).</td></tr>
+<tr><td><code>packages/ai-openai</code></td><td>AI adapter</td><td>OpenAI implementation behind provider-agnostic interface.</td></tr>
+<tr><td><code>packages/config</code></td><td>Config</td><td>Typed environment loading incl. <code>JARVIS_SHUTDOWN_GRACE_MS</code>.</td></tr>
+</table>
+
+<!-- ================= 5 ================= -->
+<h2>5. Architecture at a Glance</h2>
+<table class="archtable">
+<tr><td style="background:#dbe8ff">📱 <b>Web App</b><br/><span style="font-weight:normal">(Next.js — Chat · Approvals · Auth)</span></td>
+<td>→</td>
+<td style="background:#dff5df">🖥 <b>API Server</b><br/><span style="font-weight:normal">(Express — Auth · Chat · <b>Approvals API</b> · Health · Shutdown)</span></td></tr>
+<tr><td colspan="3" style="background:#ffffff;border:none;height:8px"></td></tr>
+<tr><td colspan="3" style="background:#efe7ff">🧠 <b>Orchestrator (Agents)</b> — plan → validate → execute steps</td></tr>
+<tr><td colspan="3" style="background:#ffffff;border:none;height:8px"></td></tr>
+<tr><td style="background:#ffe9ec">🔧 <b>Tool Executor</b><br/><span style="font-weight:normal">validate → RBAC → <b>approval gate</b> → deadline → journal</span></td>
+<td style="background:#fff2d9">🛡 <b>Guardrails</b><br/><span style="font-weight:normal">budget caps · account allow-list · secret redaction</span></td>
+<td style="background:#e6fbfb">💾 <b>Memory Engine</b><br/><span style="font-weight:normal">facts + embeddings</span></td></tr>
+<tr><td colspan="3" style="background:#ffffff;border:none;height:8px"></td></tr>
+<tr><td style="background:#f0f0f0">🗄 <b>PostgreSQL</b><br/><span style="font-weight:normal">users · approvals · execution journal · audit log · memory</span></td>
+<td>⇄</td>
+<td style="background:#f0fff0">🌐 <b>Meta Graph API</b><br/><span style="font-weight:normal">the ONLY external write target</span></td></tr>
+</table>
+
+<h3>5.1 Lifecycle of one dangerous request (end-to-end)</h3>
+<div class="box" style="font-family:Consolas,monospace;font-size:9.5pt">
+User: "Create campaign Summer Launch ($25/day)"<br>
+&nbsp;&nbsp;1. <b>Web</b> → POST /api/v1/conversations … (JWT in Authorization header)<br>
+&nbsp;&nbsp;2. <b>Auth middleware</b> verifies token → req.auth = {userId, role}<br>
+&nbsp;&nbsp;3. <b>Orchestrator</b> asks the LLM for a plan → Zod-validates the tool step<br>
+&nbsp;&nbsp;4. <b>ToolExecutor</b>: tool found ✓ · params valid ✓ · role permitted ✓ · risk=WRITE<br>
+&nbsp;&nbsp;5. No valid approval → create <b>PENDING Approval</b> (paramsHash fingerprint, 10-min TTL)<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;→ response: status=<code>approval_pending</code> + approvalId (nothing executed!)<br>
+&nbsp;&nbsp;6. Human opens <b>/approvals</b> → sees server-generated summary (never AI text):<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"Create Meta campaign \"Summer Launch\" with objective OUTCOME_TRAFFIC and daily budget $25.00."<br>
+&nbsp;&nbsp;7. POST /api/v1/approvals/:id/approve → guards (rate-limit → ownership → hash match →<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;tool re-validate → account allow-list → budget cap → not draining) → <b>APPROVED</b><br>
+&nbsp;&nbsp;8. Executor retries tool → <b>atomic consume</b>: UPDATE approval→CONSUMED + claim execution,<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;one transaction, row-locked ⇒ double-click/replay can NEVER run it twice<br>
+&nbsp;&nbsp;9. Provider call (only Meta) → result journaled (SUCCEEDED / FAILED / UNKNOWN)<br>
+&nbsp;10. If UNKNOWN (timeout mid-write) → <b>Reconciler</b> compares with live Meta later;<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;resolves SAFE_TO_RETRY or matches reality — never blind retry, never false success.<br>
+</div>
+
+<!-- ================= 6 ================= -->
+<h2>6. The Approval System (heart of the security model)</h2>
+<h3>6.1 Approval state machine</h3>
+<table class="archtable">
+<tr><td style="background:#fff8cc">PENDING<br/><span style="font-weight:normal">awaiting human</span></td>
+<td>→ approve →</td>
+<td style="background:#ddf7dd">APPROVED<br/><span style="font-weight:normal">authorized, unconsumed</span></td>
+<td>→ execute →</td>
+<td style="background:#d9ede0"><b>CONSUMED</b><br/><span style="font-weight:normal">terminal · never resurrected</span></td></tr>
+<tr><td colspan="5" style="background:#ffffff;border:none;height:6px"></td></tr>
+<tr><td style="background:#fff8cc">PENDING</td><td>→ reject →</td><td style="background:#ffdcdc">REJECTED<br/><span style="font-weight:normal">idempotent · veto allowed until consumed</span></td><td style="border:none"></td><td style="border:none"></td></tr>
+<tr><td style="background:#fff8cc">PENDING/APPROVED</td><td>→ 10 min pass →</td><td style="background:#ececec">EXPIRED<br/><span style="font-weight:normal">reported lazily at read time</span></td><td style="border:none"></td><td style="border:none"></td></tr>
+</table>
+
+<h3>6.2 Guarantees (each proven by tests)</h3>
+<table>
+<tr><th>Guarantee</th><th>Mechanism</th></tr>
+<tr><td><b>Exact parameters</b> — approving "what you saw"</td><td><code>paramsHash</code> = deterministic fingerprint of params stored on approval; recomputed &amp; compared at approve-time AND execute-time. Any change ⇒ fail closed.</td></tr>
+<tr><td><b>Exactly once</b></td><td>Single interactive transaction consumes approval + claims execution (PostgreSQL row locks). Losers roll back with zero side effects.</td></tr>
+<tr><td><b>Single winner</b> under concurrent clicks</td><td>Conditional <code>UPDATE … WHERE status='PENDING' AND expiresAt&gt;now</code>; verified with ×2/×5/×10 parallel requests — always exactly 1×200, rest 409 CONFLICT.</td></tr>
+<tr><td><b>Fresh decisions</b> — TTL</td><td>ONE authoritative constant <code>APPROVAL_TTL_MS = 10 min</code> in core; expired ⇒ HTTP 410 APPROVAL_EXPIRED.</td></tr>
+<tr><td><b>Human-readable truth</b></td><td>Action summaries generated deterministically <i>on the server</i> from stored params; AI prose never used as source of truth; account ids redacted (<code>act_111••••1111</code>).</td></tr>
+<tr><td><b>Nothing lost during deploys</b></td><td>Approving during shutdown drain ⇒ 503 EXECUTION_DRAINING and the approval stays PENDING — decidable again after restart.</td></tr>
+<tr><td><b>Financial caps</b> the AI cannot bypass</td><td>Budget guardrails live in <code>@jarvis/tools</code> (single authority): max daily $10,000 · increase ≤25% and ≤$2,500 · decrease ≤50% and ≤$5,000 — re-checked at decision time ⇒ APPROVAL_BUDGET_EXCEEDED.</td></tr>
+<tr><td><b>Only your account</b></td><td>Target <code>accountId</code> must equal server-configured <code>META_AD_ACCOUNT_ID</code> at decision time ⇒ ACCOUNT_UNAUTHORIZED.</td></tr>
+</table>
+
+<!-- ================= 7 ================= -->
+<h2>7. Reliability Engineering</h2>
+<h3>7.1 Execution Journal (durable ledger for every external action)</h3>
+<table>
+<tr><th>Status</th><th>Meaning</th><th>Who may change it</th></tr>
+<tr><td>PENDING / APPROVED</td><td>Created; waiting for approval / authorized</td><td>Executor, approval decision</td></tr>
+<tr><td>EXECUTING</td><td>Claimed with owner + lease + heartbeat</td><td>Owner worker only</td></tr>
+<tr><td>SUCCEEDED / FAILED</td><td>Certain outcomes</td><td>Terminal</td></tr>
+<tr><td><b>UNKNOWN</b></td><td>Transport ambiguity (timeout/abort/crash) — write MAY have happened</td><td>Only Reconciliation resolves it</td></tr>
+<tr><td>RECONCILING</td><td>Leased comparison against live Meta in progress</td><td>Reconciler (stale lease recoverable)</td></tr>
+<tr><td>SAFE_TO_RETRY</td><td>Proved nothing happened (or safe class) — retry allowed with NEW approval if required</td><td>Reconciler</td></tr>
+</table>
+<h3>7.2 Crash &amp; deploy safety</h3>
+<ul>
+<li><b>Startup recovery</b> (idempotent, runs before listen): stale EXECUTING → UNKNOWN; stale RECONCILING → UNKNOWN. Resolved records are never touched; UNKNOWN stays reconciliation-eligible. A dead process therefore leaves honest residue, never fake FAILED.</li>
+<li><b>Graceful shutdown</b> (<code>SIGINT/SIGTERM</code>): forward-only lifecycle — stop admitting NEW write work (read-only still served), wait (bounded by <code>JARVIS_SHUTDOWN_GRACE_MS</code>, default 30 s, cap 10 min) for in-flight executions via an in-flight registry, then close HTTP, sockets, DB. In-flight work is never interrupted; ambiguous writes remain UNKNOWN by design.</li>
+<li><b>One authoritative deadline</b> per execution: a single AbortController owns timeout; the SAME abort signal propagates executor → tool → provider → fetch, so the underlying request is truly cancelled — while the journal still records honest UNKNOWN if the wire was already cut.</li>
+<li><b>Reconciliation</b> (Phase 10.5): compares UNKNOWN records against live Meta campaigns; deterministic classification into SAFE_TO_RETRY / matched-reality; attempts counted; lease-protected.</li>
+</ul>
+
+<!-- ================= 8 ================= -->
+<h2>8. Authentication, Sessions &amp; Frontend Security</h2>
+<table>
+<tr><th>Aspect</th><th>Implementation</th></tr>
+<tr><td>Login/Register</td><td>Email+password; passwords hashed (bcrypt-class) in <code>@jarvis/security</code>; roles (VIEWER…) drive RBAC permissions per tool resource/action.</td></tr>
+<tr><td>Tokens</td><td>Short-lived <b>JWT access token</b> + long-lived <b>refresh token stored hashed</b> in DB (revocable). Frontend keeps them in sessionStorage and sends <code>Authorization: Bearer …</code>.</td></tr>
+<tr><td>Identity source of truth</td><td>ONLY the verified JWT (<code>req.auth</code>). Body/path-supplied user ids are ignored everywhere — this kills IDOR by construction (foreign resources look like 404, anti-enumeration).</td></tr>
+<tr><td>CSRF posture</td><td>Not applicable by design: tokens travel in a header, never cookies, so browsers cannot attach them implicitly cross-site. (Documented per spec §13.)</td></tr>
+<tr><td>Output hygiene</td><td>Output sanitizer strips anything resembling secrets (<code>sk-…</code>, <code>EAA…</code> tokens, keys) from tool results before they reach users/logs; approval responses and audit entries are asserted secret-free by tests.</td></tr>
+<tr><td>Secrets on disk</td><td>All credentials in <code>.env</code>, which is gitignored (verified); repo scans for key patterns come back clean except intentional fake fixtures inside redaction-test files.</td></tr>
+</table>
+
+<!-- ================= 9 ================= -->
+<h2>9. Production Approval API</h2>
+<h3>9.1 Endpoints</h3>
+<table>
+<tr><th>Method &amp; path</th><th>Purpose</th><th>Notes</th></tr>
+<tr><td><code>GET /api/v1/approvals</code></td><td>List OWN approvals</td><td>Filters: pending/approved/consumed/rejected/expired/all · pagination (limit capped 100, server-side)</td></tr>
+<tr><td><code>GET /api/v1/approvals/:id</code></td><td>Detail + summary + execution link</td><td>Shows exact params, budget, redacted account, expiry, latest execution status</td></tr>
+<tr><td><code>POST /api/v1/approvals/:id/approve</code></td><td>Authorize once</td><td>Full guard chain below; single-winner</td></tr>
+<tr><td><code>POST /api/v1/approvals/:id/reject</code></td><td>Veto</td><td>Idempotent; legal until consumed</td></tr>
+</table>
+<h3>9.2 Approve guard chain (order matters)</h3>
+<div class="box mono" style="font-size:9.5pt">
+rate limit → malformed id (404) → scoped fetch (404 if foreign/missing) → recomputed paramsHash<br>
+vs stored (409 PARAMS_MISMATCH) → tool still exists &amp; validates (409) → configured account<br>
+matches target (403) → budget guardrails (409) → not draining for WRITE tools (503) →<br>
+atomic conditional transition → 200 approved | 409 conflict/consumed/rejected | 410 expired<br>
+</div>
+<h3>9.3 Rate limiting (multi-instance safe)</h3>
+<table>
+<tr><th>Bucket</th><th>Limit</th><th>Window</th></tr>
+<tr><td>approve</td><td>20</td><td>60 s</td></tr>
+<tr><td>reject</td><td>20</td><td>60 s</td></tr>
+<tr><td>list</td><td>120</td><td>60 s</td></tr>
+</table>
+<p class="small">Counted from the shared PostgreSQL AuditLog (not in-memory) so limits hold across all processes;
+every throttled attempt is itself audited (abuse trail). Trade-off documented: O(window) scan — fine for human traffic.</p>
+<h3>9.4 Deterministic error codes</h3>
+<table>
+<tr><th>HTTP</th><th>Code</th><th>When</th></tr>
+<tr><td>401</td><td>AUTHENTICATION_REQUIRED</td><td>Missing/invalid bearer token</td></tr>
+<tr><td>403</td><td>APPROVAL_ACCOUNT_UNAUTHORIZED</td><td>Target ≠ configured ad account</td></tr>
+<tr><td>404</td><td>APPROVAL_NOT_FOUND</td><td>Missing OR foreign (existence hidden)</td></tr>
+<tr><td>409</td><td>APPROVAL_PARAMS_MISMATCH</td><td>Params ≠ recorded hash / no longer valid</td></tr>
+<tr><td>409</td><td>APPROVAL_ALREADY_CONSUMED</td><td>Already executed once</td></tr>
+<tr><td>409</td><td>APPROVAL_ALREADY_REJECTED</td><td>Approving a rejected item</td></tr>
+<tr><td>409</td><td>APPROVAL_BUDGET_EXCEEDED</td><td>Guardrail violation at decision time</td></tr>
+<tr><td>409</td><td>APPROVAL_CONFLICT</td><td>Lost a concurrent race</td></tr>
+<tr><td>410</td><td>APPROVAL_EXPIRED</td><td>TTL passed</td></tr>
+<tr><td>429</td><td>RATE_LIMITED</td><td>Window exceeded</td></tr>
+<tr><td>503</td><td>EXECUTION_DRAINING</td><td>Shutdown in progress (not consumed!)</td></tr>
+</table>
+
+<!-- ================= 10 ================= -->
+<h2>10. Frontend — Approvals UX</h2>
+<ul>
+<li><code>/approvals</code> page: status filter tabs (Pending default), paginated cards, loading / empty / error states.</li>
+<li>Each card: tool id badge, <b>server-generated action sentence</b>, redacted account, formatted budget, expiry timestamp, display-only JSON parameters, Approve/Reject buttons.</li>
+<li>States handled: idle → approving/rejecting (busy, buttons disabled) → approved / rejected (success message, controls removed) → <b>conflict</b> ("already handled") → <b>expired</b> → generic error.</li>
+<li><b>Editing parameters is intentionally impossible</b> — changing a proposal = reject + new proposal (new hash). No edit affordance exists; tests assert its absence.</li>
+<li>UI tests cover: pending render, approve success, conflict message, expired state, reject flow, page loading/error/empty.</li>
+</ul>
+
+<!-- ================= 11 ================= -->
+<h2>11. Testing &amp; Verification Strategy</h2>
+<table>
+<tr><th>Suite</th><th>Tests</th><th>Highlights</th></tr>
+<tr><td>packages/core</td><td>44</td><td>Contract/schema unit tests</td></tr>
+<tr><td>packages/security</td><td>27</td><td>Tokens, hashing, RBAC</td></tr>
+<tr><td>packages/tools</td><td>534</td><td>Executor paths, Meta tools, sanitizer, guardrails, shutdown gating</td></tr>
+<tr><td>packages/meta-graph</td><td>99</td><td>Client + reconciliation service</td></tr>
+<tr><td>packages/agents</td><td>66</td><td>Orchestration/planning</td></tr>
+<tr><td>packages/memory</td><td>76</td><td>Extraction/validation/retrieval</td></tr>
+<tr><td>packages/ai-openai</td><td>3</td><td>Adapter smoke</td></tr>
+<tr><td>packages/db</td><td>79</td><td>Repositories incl. <b>real-PG</b> integration: concurrent approvals, consumption atomicity, recovery, reconciliation</td></tr>
+<tr><td>apps/api</td><td>65</td><td>Auth, chat, health/shutdown, <b>approval API incl. IDOR/concurrency/rate-limit/secrets + §18 real-write-safety chain</b> (endpoint → executor → mock provider with global fetch spy proving ZERO outbound HTTP)</td></tr>
+<tr><td>apps/web</td><td>32</td><td>Chat UI + approvals states (jsdom/RTL)</td></tr>
+<tr><td><b>Total</b></td><td><b>1,025 passing / 0 failing</b></td><td>+ typecheck 23/23 projects · build 13/13 · Prisma migrate status clean</td></tr>
+</table>
+<p>Extra gates run each phase: <b>shadow-DB replay</b> (fresh DB ← all migrations must byte-match the datamodel — zero-drift rule), <b>madge circular-dependency check</b> (none), <b>secret pattern scan</b>, and a <b>data-integrity recount</b> (orphans must stay 0).</p>
+
+<!-- ================= 12 ================= -->
+<h2>12. Running JARVIS Locally</h2>
+<table>
+<tr><th>Step</th><th>Command</th></tr>
+<tr><td>Start database</td><td><code>docker start jarvis-postgres</code> (or docker compose up)</td></tr>
+<tr><td>Install / build / verify</td><td><code>pnpm install</code> · <code>pnpm build</code> · <code>pnpm typecheck</code></td></tr>
+<tr><td>Migrations</td><td><code>pnpm db:generate</code> then <code>pnpm db:migrate</code></td></tr>
+<tr><td>Run everything</td><td><code>pnpm dev</code> (web + api)</td></tr>
+<tr><td>All tests</td><td><code>pnpm -r test</code> (or per-package <code>pnpm vitest run</code>)</td></tr>
+</table>
+<h3>12.1 Key environment variables (.env, gitignored)</h3>
+<table>
+<tr><th>Variable</th><th>Purpose</th></tr>
+<tr><td>DATABASE_URL</td><td>PostgreSQL connection string</td></tr>
+<tr><td>META_ACCESS_TOKEN</td><td>Meta Graph API credential (server-only; never sent to clients)</td></tr>
+<tr><td>META_AD_ACCOUNT_ID</td><td>The ONE ad account JARVIS may touch (allow-list)</td></tr>
+<tr><td>OPENAI_API_KEY</td><td>LLM planner credential</td></tr>
+<tr><td>JWT_SECRET / refresh config</td><td>Token signing</td></tr>
+<tr><td>JARVIS_SHUTDOWN_GRACE_MS</td><td>Graceful-drain window (default 30000, max 600000)</td></tr>
+</table>
+
+<!-- ================= 13 ================= -->
+<h2>13. Phase Log (LIVING SECTION — append every new phase here)</h2>
+<table>
+<tr><th>#</th><th>Name</th><th>What it delivered</th><th>Verdict</th></tr>
+<tr><td>1–9</td><td>Foundation &amp; features (summary)</td><td>Monorepo scaffold · auth/JWT+RBAC · chat orchestrator · agent registry · tool system with Meta Ads read/write tools · Memory v1→v2 engine (embeddings) + validation · audit logging · Web chat/login UI · server-side budget guardrails (9.2) · output secret-sanitizer. <span class="small">(Details in git history &amp; docs/ARCHITECTURE.md.)</span></td><td class="pass">DONE</td></tr>
+<tr><td>10.1–10.2</td><td>Execution journal + leases</td><td>Durable ToolExecution ledger (migration <code>phase10_execution_journal</code>); owner/lease/heartbeat claims (<code>phase10_execution_lease</code>) enabling crash-safe recovery.</td><td class="pass">DONE</td></tr>
+<tr><td>10.3</td><td>Atomic one-time approval consumption</td><td><code>consumeForExecution</code>: single transaction consumes approval + claims execution; paramsHash binding added (<code>approval_params_hash</code> migration); NULL hash fails closed; double-consume impossible. <span class="small">(Legacy synthetic residue from this era's FK bug preserved deliberately — see §14.)</span></td><td class="pass">DONE</td></tr>
+<tr><td>10.4</td><td>Single authoritative deadline</td><td>One AbortController per execution; abort signal propagated executor→tool→provider→fetch; timeouts classified honestly (FAILED vs UNKNOWN) instead of racing promises.</td><td class="pass">DONE</td></tr>
+<tr><td>10.5</td><td>Meta reconciliation</td><td>SAFE_TO_RETRY state machine · MetaCampaignReconciler · ReconciliationService · migration <code>phase105_reconciliation</code> (incl. <code>reconciliation_attempts</code>) · 52 tests. UNKNOWN records provably resolvable without blind retries.</td><td class="pass">PASS</td></tr>
+<tr><td>10.6</td><td>Graceful shutdown + startup recovery</td><td>Core ShutdownLifecycle (admission gate by risk, in-flight registry, drain summaries) · idempotent startup recovery (stale EXECUTING/RECONCILING → UNKNOWN) · signal handlers with ordered teardown (drain→http→io→db) · lifecycle-aware /health (stays 200 with honest flags) · <code>JARVIS_SHUTDOWN_GRACE_MS</code> · +42 tests → 983 total.</td><td class="pass">PASS</td></tr>
+<tr class="phase-add"><td>10.7</td><td><b>Production Approval API + UX</b></td><td>Authenticated /api/v1/approvals (list/detail/approve/reject) · identity-from-JWT-only IDOR protection · strict single-winner approve (PG-proof ×10) · idempotent reject/veto rules · deterministic error codes · server-generated summaries + redaction · DB-backed rate limiting (20/min mutations, 120/min list) with abuse auditing · decision-time re-checks: paramsHash, tool validity, account allow-list, budget guardrails · draining blocks writes WITHOUT consuming · frontend /approvals with all UI states (no param editing) · TTL unified to core APPROVAL_TTL_MS=10min · fixed expired-classification bug (would have been 409, now correct 410) · hardened budget guardrail enforcement · aligned 2 pre-existing schema/migration drifts · §18 real-write-safety chain proves zero outbound Meta calls · <b>+42 tests → 1,025 total</b>.</td><td class="pass">PASS</td></tr>
+</table>
+<div class="warnbox"><b>Maintenance rule:</b> after finishing any future phase, ADD a row here (use the highlighted style) and refresh §14's numbers. Do not rewrite history rows.</div>
+
+<!-- ================= 14 ================= -->
+<h2>14. Current Snapshot <span class="small">(refresh after each phase)</span></h2>
+<table>
+<tr><th>Metric</th><th>Value (2026-08-22, post-10.7)</th></tr>
+<tr><td>Automated tests</td><td><b>1,025 passing / 0 failing</b> across 10 suites</td></tr>
+<tr><td>Typecheck / Build</td><td>23/23 projects · 13/13 bundles green</td></tr>
+<tr><td>Database migrations</td><td>10 applied · schema up to date · shadow replay aligned (zero drift; sole exception: intentional legacy backup table <code>_Memory_v1_backup</code> awaiting manual-cleanup decision)</td></tr>
+<tr><td>Circular dependencies</td><td>0 (madge)</td></tr>
+<tr><td>Secret scan</td><td>Clean (only intentional fake fixtures inside redaction tests) · <code>.env</code> gitignored</td></tr>
+<tr><td>Data integrity</td><td>Users 11 · ToolExecutions 16 (historical UNKNOWN residue, preserved) · Approvals 16 (all CONSUMED residue owned by preserved phase103 fixtures) · Orphans 0</td></tr>
+<tr><td>Real Meta writes from tests</td><td><b>0</b> (proven by network spy) · Campaigns created by tests: 0</td></tr>
+<tr><td>Known operational notes</td><td>Dev servers restarted manually with <code>pnpm dev</code> after Prisma-client regenerations · CSRF N/A (header-borne tokens)</td></tr>
+</table>
+
+<!-- ================= 15 ================= -->
+<h2>15. Glossary</h2>
+<table>
+<tr><th>Term</th><th>Meaning</th></tr>
+<tr><td>Approval</td><td>Durable record authorizing ONE execution of ONE tool with EXACT parameters (hash-bound, time-boxed).</td></tr>
+<tr><td>paramsHash</td><td>Deterministic fingerprint of proposal parameters; binds approval↔execution so nothing can be swapped post-approval.</td></tr>
+<tr><td>Consumption</td><td>Atomic transition APPROVED→CONSUMED paired with claiming an execution; the exactly-once mechanism.</td></tr>
+<tr><td>Journal</td><td>ToolExecution ledger — durable source of truth for what happened externally.</td></tr>
+<tr><td>UNKNOWN</td><td>Honest "we don't know if Meta received the write" state; only reconciliation resolves it.</td></tr>
+<tr><td>Draining</td><td>Shutdown phase: no NEW write admissions; in-flight work finishes; approvals stay decidable-after-restart.</td></tr>
+<tr><td>Shadow replay</td><td>Deploy all migrations into a throwaway DB and diff against the datamodel — catches silent drift.</td></tr>
+<tr><td>IDOR</td><td>Insecure Direct Object Reference — prevented by scoping every query to the JWT userId.</td></tr>
+</table>
+
+<p class="small" style="margin-top:30px">J.A.R.V.I.S Project Guide · generated from the development record · next update due with the next completed phase.</p>
+</body>
+</html>

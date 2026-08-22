@@ -6,6 +6,8 @@ import type {
   ExecutionErrorInfo,
   ExecutionJournalPort,
   ExecutionJournalStatus,
+  ReconciliationClaimOptions,
+  ReconciliationDecision,
   RecoveryOptions,
   RecoveryResult,
   ToolExecutionRecord,
@@ -36,6 +38,74 @@ export function isAmbiguousWriteError(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err);
   const haystack = `${name} ${message}`;
   return AMBIGUOUS_ERROR_PATTERNS.some((p) => p.test(haystack));
+}
+
+// ---------------------------------------------------------------------------
+// classifyWriteOutcome — Phase 10.4 timeout/abort classification
+// ---------------------------------------------------------------------------
+// Maps a provider-layer failure to the journal state it may safely produce:
+//
+//   A/B  request never transmitted / cancelled before any external side
+//        effect                          -> FAILED (safe, known outcome)
+//   C    explicit provider failure (4xx) -> FAILED
+//   D/E  network timeout after transmission, connection drop, in-flight
+//        abort of a write request        -> UNKNOWN (outcome uncertain)
+//   F    explicit provider success       -> SUCCEEDED (no error reaches here)
+//
+// The transport layer (meta-graph MetaRequestAbortedError) reports whether
+// the request had been transmitted and whether a side effect was possible;
+// everything else falls back to conservative pattern matching where ANY
+// ambiguity maps to UNKNOWN — never to an ordinary FAILED retry loop.
+// ---------------------------------------------------------------------------
+
+/** Stable journal error codes recorded for timeout/abort outcomes. */
+export const TIMEOUT_ERROR_CODES = {
+  /** Abort fired before the HTTP request was transmitted — no side effect possible. */
+  CANCELLED_BEFORE_SEND: "CANCELLED_BEFORE_SEND",
+  /** Request cancelled but provably side-effect-free (e.g. GET verification read). */
+  REQUEST_CANCELLED: "REQUEST_CANCELLED",
+  /** Ambiguous outcome — the write may have executed; requires reconciliation. */
+  AMBIGUOUS_OUTCOME: "AMBIGUOUS_OUTCOME",
+} as const;
+
+/**
+ * Shape of the typed transport error thrown by @jarvis/meta-graph's HTTP
+ * client on abort/timeout. Declared structurally so this package does NOT
+ * depend on meta-graph (dependency direction: meta-graph -> tools).
+ */
+interface TransportAbortShape {
+  name: string;
+  phase?: "before-send" | "in-flight";
+  sideEffectPossible?: boolean;
+}
+
+function isTransportAbort(err: unknown): err is TransportAbortShape & Error {
+  return err instanceof Error && err.name === "MetaRequestAbortedError";
+}
+
+export type WriteOutcomeClassification =
+  | { kind: "ambiguous"; status: "UNKNOWN"; code: typeof TIMEOUT_ERROR_CODES.AMBIGUOUS_OUTCOME }
+  | { kind: "cancelled-before-send"; status: "FAILED"; code: typeof TIMEOUT_ERROR_CODES.CANCELLED_BEFORE_SEND }
+  | { kind: "cancelled-no-side-effect"; status: "FAILED"; code: typeof TIMEOUT_ERROR_CODES.REQUEST_CANCELLED }
+  | { kind: "known-failure"; status: "FAILED"; code: "EXECUTION_ERROR" };
+
+export function classifyWriteOutcome(err: unknown): WriteOutcomeClassification {
+  if (isTransportAbort(err)) {
+    if (err.phase === "before-send") {
+      return { kind: "cancelled-before-send", status: "FAILED", code: TIMEOUT_ERROR_CODES.CANCELLED_BEFORE_SEND };
+    }
+    if (err.sideEffectPossible === false) {
+      return { kind: "cancelled-no-side-effect", status: "FAILED", code: TIMEOUT_ERROR_CODES.REQUEST_CANCELLED };
+    }
+    // Aborted in flight on a potentially side-effecting request: even though
+    // the signal cancelled the socket, the server may already have applied
+    // the write. Outcome is uncertain -> UNKNOWN, never auto-retryable FAILED.
+    return { kind: "ambiguous", status: "UNKNOWN", code: TIMEOUT_ERROR_CODES.AMBIGUOUS_OUTCOME };
+  }
+  if (isAmbiguousWriteError(err)) {
+    return { kind: "ambiguous", status: "UNKNOWN", code: TIMEOUT_ERROR_CODES.AMBIGUOUS_OUTCOME };
+  }
+  return { kind: "known-failure", status: "FAILED", code: "EXECUTION_ERROR" };
 }
 
 /**
@@ -222,6 +292,109 @@ export class MemoryExecutionJournal implements ExecutionJournalPort {
     return null;
   }
 
+  // -------------------------------------------------------------------------
+  // Reconciliation (Phase 10.5) — reference semantics
+  // -------------------------------------------------------------------------
+
+  async claimForReconciliation(
+    executionId: string,
+    options?: ReconciliationClaimOptions
+  ): Promise<ToolExecutionRecord | null> {
+    // Atomic single-winner UNKNOWN -> RECONCILING with a durable lease.
+    const now = new Date();
+    const leaseMs = options?.leaseMs ?? DEFAULT_LEASE_MS;
+    const record = this.findAndTransition(executionId, ["UNKNOWN"], "RECONCILING");
+    if (record) {
+      record.ownerId = options?.ownerId;
+      record.heartbeatAt = now;
+      record.leaseUntil = new Date(now.getTime() + leaseMs);
+    }
+    return record;
+  }
+
+  async finalizeReconciliation(
+    executionId: string,
+    ownerId: string,
+    decision: ReconciliationDecision
+  ): Promise<ToolExecutionRecord | null> {
+    // Ownership-guarded: only the current RECONCILING owner may finalize.
+    for (const record of this.rows.values()) {
+      if (record.executionId !== executionId) continue;
+      if (record.status !== "RECONCILING" || record.ownerId !== ownerId) return null;
+      const now = new Date();
+      record.status = decision.status;
+      if (decision.externalResourceId !== undefined) {
+        record.externalResourceId = decision.externalResourceId;
+      }
+      if (decision.error?.code !== undefined) record.errorCode = decision.error.code;
+      if (decision.error?.message !== undefined) record.errorMessage = decision.error.message;
+      record.reconciliationAttempts = (record.reconciliationAttempts ?? 0) + 1;
+      record.lastReconciliationAt = now;
+      record.lastReconciliationResult = decision.outcome;
+      if (decision.status !== "UNKNOWN") {
+        // Terminal resolution (SUCCEEDED / SAFE_TO_RETRY).
+        record.completedAt = now;
+      }
+      // UNKNOWN finalizations drop the lease immediately: the record is
+      // eligible for another reconciliation attempt right away.
+      this.clearLease(record);
+      return record;
+    }
+    return null;
+  }
+
+  async findStaleReconciliations(
+    options?: RecoveryOptions
+  ): Promise<ToolExecutionRecord[]> {
+    const now = options?.now ?? new Date();
+    const stale = [...this.rows.values()]
+      .filter(
+        (r) =>
+          r.status === "RECONCILING" &&
+          r.leaseUntil !== undefined &&
+          r.leaseUntil.getTime() < now.getTime()
+      )
+      .sort(
+        (a, b) => (a.leaseUntil?.getTime() ?? 0) - (b.leaseUntil?.getTime() ?? 0)
+      );
+    return options?.batchSize !== undefined ? stale.slice(0, options.batchSize) : stale;
+  }
+
+  async recoverStaleReconciliations(
+    options?: RecoveryOptions
+  ): Promise<RecoveryResult> {
+    // Idempotent by construction: the conditional transition only applies
+    // while the row is still RECONCILING. Stale claims map back to UNKNOWN —
+    // NEVER FAILED, never retried automatically.
+    const stale = await this.findStaleReconciliations(options);
+    const recovered: ToolExecutionRecord[] = [];
+    for (const record of stale) {
+      const done = this.transitionIfStatus(record.executionId, "RECONCILING", "UNKNOWN");
+      if (!done) continue;
+      done.completedAt = new Date();
+      done.errorCode = "RECONCILIATION_LEASE_EXPIRED";
+      done.errorMessage =
+        "Worker lease expired while RECONCILING; outcome remains uncertain and requires reconciliation";
+      this.clearLease(done);
+      recovered.push(done);
+    }
+    return { recovered };
+  }
+
+  private transitionIfStatus(
+    executionId: string,
+    from: ExecutionJournalStatus,
+    to: ExecutionJournalStatus
+  ): ToolExecutionRecord | null {
+    for (const record of this.rows.values()) {
+      if (record.executionId !== executionId) continue;
+      if (record.status !== from) return null;
+      record.status = to;
+      return record;
+    }
+    return null;
+  }
+
   async findByIdempotentKey(
     userId: string,
     toolId: string,
@@ -300,6 +473,18 @@ export function withSafeTerminalTransitions(
     getById: (executionId) => journal.getById(executionId),
     findByIdempotentKey: (userId, toolId, idempotencyKey) =>
       journal.findByIdempotentKey(userId, toolId, idempotencyKey),
+    claimForReconciliation: (executionId, options) =>
+      journal.claimForReconciliation(executionId, options),
+    findStaleReconciliations: (options) =>
+      journal.findStaleReconciliations(options),
+    recoverStaleReconciliations: (options) =>
+      journal.recoverStaleReconciliations(options),
+    // Journal unavailable mid-reconciliation: the record stays RECONCILING
+    // until lease expiry maps it back to UNKNOWN (eligible again). Finalize
+    // failures must never escape — a lost finalization is recovered, not
+    // retried against the provider.
+    finalizeReconciliation: (executionId, ownerId, decision) =>
+      swallow(journal.finalizeReconciliation(executionId, ownerId, decision)),
     markSucceeded: (executionId, externalResourceId) =>
       swallow(journal.markSucceeded(executionId, externalResourceId)),
     markFailed: (executionId, error) =>

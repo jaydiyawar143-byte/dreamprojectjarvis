@@ -47,6 +47,9 @@ export const MetaCampaignSchema = z.object({
   endTime: z.string().optional(),
   bidStrategy: z.string().optional(),
   buyingType: z.string().optional(),
+  /** ISO-8601 creation timestamp from the provider (Phase 10.5 reconciliation
+   *  correlation window). Absent on payloads that omit created_time. */
+  createdAt: z.string().optional(),
 });
 
 export type MetaCampaign = z.infer<typeof MetaCampaignSchema>;

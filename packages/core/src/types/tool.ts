@@ -86,6 +86,15 @@ export interface ToolContext {
    * any external side effect. A consumed approval can never be reused.
    */
   approvalId?: string;
+  /**
+   * Cancellation signal for THIS execution (Phase 10.4). Owned by the
+   * ToolExecutor's single authoritative deadline controller; fires when the
+   * execution deadline expires or the caller aborts. Tools MUST forward it
+   * to their provider so the underlying HTTP request is actually cancelled.
+   * A timeout/abort NEVER proves an external write did not happen — tools
+   * classify the outcome into the journal (FAILED vs UNKNOWN).
+   */
+  signal?: AbortSignal;
 }
 
 // ---------------------------------------------------------------------------

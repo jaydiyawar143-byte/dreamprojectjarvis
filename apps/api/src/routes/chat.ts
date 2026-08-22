@@ -10,6 +10,28 @@ export function createChatRouter(container: Container): Router {
   const router = Router();
   const requireAuth = createAuthMiddleware(container.tokenService);
 
+  // ---------------------------------------------------------------------------
+  // Phase 10.4 — CLIENT DISCONNECT POLICY (authoritative)
+  //
+  // An HTTP client disconnect does NOT cancel the underlying orchestration,
+  // tool executions, or external Meta writes. Rationale:
+  //
+  //   1. Durable-execution semantics: a write claimed in the execution journal
+  //      must reach a terminal state (SUCCEEDED / FAILED / UNKNOWN) recorded
+  //      server-side; tying that outcome to a browser connection lifetime
+  //      would manufacture exactly the ambiguous-failure duplicates the
+  //      journal exists to prevent.
+  //   2. A disconnect is indistinguishable from a flaky network at the moment
+  //      it happens; aborting a possibly-transmitted write would turn a known
+  //      success into an UNKNOWN requiring manual reconciliation.
+  //   3. The response may be lost, but the conversation message and audit
+  //      trail are persisted independently of the socket.
+  //
+  // The request AbortSignal is therefore deliberately NOT forwarded into the
+  // orchestrator/tool executor. If cancellation of long-running work is ever
+  // needed, it must be an explicit API with UNKNOWN-safe journal handling —
+  // never req.on("close") -> abort().
+  // ---------------------------------------------------------------------------
   router.post("/", requireAuth, async (req: AuthenticatedRequest, res: Response) => {
     const traceId = randomUUID();
 
