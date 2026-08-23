@@ -107,6 +107,44 @@ export function parseAd(data: unknown): MetaAd | null {
 export function parseInsights(data: unknown): MetaInsights | null {
   if (!data || typeof data !== "object") return null;
   const d = data as Record<string, unknown>;
+
+  // Meta Graph API can return roas as string or array of action objects (e.g. purchase_roas)
+  let roasVal: string | undefined;
+  if (typeof d.roas === "string" || typeof d.roas === "number") {
+    roasVal = String(d.roas);
+  } else if (Array.isArray(d.purchase_roas) && d.purchase_roas.length > 0) {
+    const first = d.purchase_roas[0] as Record<string, unknown> | undefined;
+    if (first && first.value !== undefined) roasVal = String(first.value);
+  } else if (Array.isArray(d.roas) && d.roas.length > 0) {
+    const first = d.roas[0] as Record<string, unknown> | undefined;
+    if (first && first.value !== undefined) roasVal = String(first.value);
+  }
+
+  // Parse actions array if present
+  const actions = Array.isArray(d.actions)
+    ? (d.actions.filter((a) => a && typeof a === "object") as Record<string, unknown>[])
+    : undefined;
+
+  const actionValues = Array.isArray(d.action_values)
+    ? (d.action_values.filter((a) => a && typeof a === "object") as Record<string, unknown>[])
+    : undefined;
+
+  // Extract conversions if explicit or fallback to count of purchase/lead actions
+  let conversionsVal: string | undefined;
+  if (d.conversions !== undefined && d.conversions !== null) {
+    conversionsVal = String(d.conversions);
+  } else if (actions) {
+    const convAction = actions.find(
+      (a) =>
+        String(a.action_type) === "purchase" ||
+        String(a.action_type) === "lead" ||
+        String(a.action_type) === "offsite_conversion.fb_pixel_purchase"
+    );
+    if (convAction && convAction.value !== undefined) {
+      conversionsVal = String(convAction.value);
+    }
+  }
+
   return {
     impressions: String(d.impressions ?? "0"),
     clicks: String(d.clicks ?? "0"),
@@ -115,8 +153,20 @@ export function parseInsights(data: unknown): MetaInsights | null {
     cpc: d.cpc ? String(d.cpc) : undefined,
     cpm: d.cpm ? String(d.cpm) : undefined,
     ctr: d.ctr ? String(d.ctr) : undefined,
+    frequency: d.frequency ? String(d.frequency) : undefined,
+    conversions: conversionsVal,
+    costPerConversion: d.cost_per_conversion ? String(d.cost_per_conversion) : undefined,
+    results: d.results ? String(d.results) : undefined,
+    costPerResult: d.cost_per_result ? String(d.cost_per_result) : undefined,
+    roas: roasVal,
+    actions,
+    actionValues,
     dateStart: d.date_start ? String(d.date_start) : undefined,
     dateStop: d.date_stop ? String(d.date_stop) : undefined,
+    accountId: d.account_id ? String(d.account_id) : undefined,
+    campaignId: d.campaign_id ? String(d.campaign_id) : undefined,
+    adsetId: d.adset_id ? String(d.adset_id) : undefined,
+    adId: d.ad_id ? String(d.ad_id) : undefined,
   };
 }
 

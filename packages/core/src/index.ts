@@ -18,6 +18,18 @@ export * from "./types/tool-execution.js";
 export * from "./types/reconciliation.js";
 export * from "./lifecycle.js";
 export * from "./startup-recovery.js";
+export * from "./kpi-engine.js";
+export * from "./types/performance-aggregation.js";
+export * from "./performance-aggregator.js";
+export * from "./types/anomaly-detection.js";
+export * from "./anomaly-engine.js";
+export * from "./types/diagnosis.js";
+export * from "./evidence-builder.js";
+export * from "./diagnosis-prompt.js";
+export * from "./diagnosis-verification.js";
+export * from "./diagnosis-engine.js";
+export * from "./types/recommendation.js";
+export * from "./recommendation-engine.js";
 export * from "./utils/params-hash.js";
 export * from "./utils/redact-secrets.js";
 
