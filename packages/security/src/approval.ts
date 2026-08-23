@@ -59,4 +59,24 @@ export class ApprovalService implements IApprovalManager {
   ): Promise<Approval | null> {
     return this.repository.findExistingForTool(toolId, userId);
   }
+
+  /**
+   * Phase 11.6A — every candidate approval for (toolId, userId), newest
+   * first. Backed by the repository's user-scoped listing; enables the
+   * executor to pick the approval that actually binds to the current
+   * params instead of a single latest-row lookup.
+   */
+  async findApprovalsForTool(
+    toolId: string,
+    userId: string
+  ): Promise<Approval[]> {
+    if (!this.repository.listByUser) {
+      // Repository without listing support: degrade to the single latest
+      // candidate so callers keep their previous semantics.
+      const existing = await this.findExistingForTool(toolId, userId);
+      return existing ? [existing] : [];
+    }
+    const { items } = await this.repository.listByUser(userId, { limit: 100 });
+    return items.filter((a) => a.toolId === toolId);
+  }
 }

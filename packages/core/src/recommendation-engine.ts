@@ -422,7 +422,8 @@ export class RecommendationEngine {
         actionType,
         evidence.accountId,
         evidence.entityId,
-        proposal.requestedDailyBudget
+        proposal.requestedDailyBudget,
+        level
       );
     } else {
       const wantsPause = familyOf(actionType) === "PAUSE";
@@ -599,14 +600,9 @@ export class RecommendationEngine {
   // ---------------------------------------------------------------------------
 
   /**
-   * Re-check a recommendation immediately before execution:
-   *   1. status must still be PROPOSED or APPROVED,
-   *   2. not expired (single TTL),
-   *   3. requesting user + account must match (authorization binding),
-   *   4. stored paramsHash must still match recomputed params (tamper check),
-   *   5. live external state must hash identically (STATE_CHANGED otherwise),
-   *   6. budget transitions must STILL satisfy guardrails against live budget.
-   * Any failure ⇒ block with STALE/EXPIRED/INVALID. Never mutates Meta.
+   * Re-check a recommendation immediately before execution. Thin wrapper over
+   * the standalone verifier so the engine and the Phase 11.6A execution
+   * bridge share ONE implementation.
    */
   async verifyFreshForExecution(args: {
     record: RecommendationRecord;
@@ -617,65 +613,10 @@ export class RecommendationEngine {
     | { ok: true }
     | { ok: false; result: "EXPIRED" | "STALE" | "INVALID"; reasons: string[] }
   > {
-    const { record, liveState, requestingUserId } = args;
-    const now = args.now ?? this.nowFn();
-    const reasons: string[] = [];
-
-    if (record.status !== "PROPOSED" && record.status !== "APPROVED") {
-      reasons.push(`STATUS_NOT_EXECUTABLE:${record.status}`);
-      return { ok: false, result: "INVALID", reasons };
-    }
-    if (new Date(record.expiresAt).getTime() <= now.getTime()) {
-      return { ok: false, result: "EXPIRED", reasons: ["TTL_EXPIRED"] };
-    }
-    if (record.userId !== requestingUserId) {
-      return { ok: false, result: "INVALID", reasons: ["USER_MISMATCH"] };
-    }
-    // Tamper check: recompute paramsHash from the bound tool parameters.
-    try {
-      const budget = typeof record.proposedState["dailyBudget"] === "number"
-        ? (record.proposedState["dailyBudget"] as number)
-        : undefined;
-      const params = buildExecutableParams(
-        record.actionType,
-        record.accountId,
-        record.entityId,
-        budget
-      );
-      if (computeParamsHash(params) !== record.paramsHash) {
-        return { ok: false, result: "INVALID", reasons: ["PARAMS_HASH_MISMATCH"] };
-      }
-    } catch {
-      return { ok: false, result: "INVALID", reasons: ["PARAMS_UNBUILDABLE"] };
-    }
-    if (!liveState) {
-      return { ok: false, result: "STALE", reasons: ["ENTITY_NOT_FOUND"] };
-    }
-    const liveHash = computeExternalStateHash(record.accountId, record.entityId, liveState);
-    if (liveHash !== record.stateHash) {
-      reasons.push(...diffStateReasons(record, liveState));
-      return { ok: false, result: "STALE", reasons };
-    }
-    if (isBudgetAction(record.actionType)) {
-      const currentBudget = liveState.dailyBudget ?? null;
-      const requested = record.proposedState["dailyBudget"];
-      if (currentBudget === null || currentBudget <= 0 || typeof requested !== "number") {
-        return { ok: false, result: "STALE", reasons: ["BUDGET_REMOVED"] };
-      }
-      const absoluteChange = round2(requested - currentBudget);
-      const percentChange =
-        Math.round((absoluteChange / currentBudget) * 10000) / 100;
-      const check = validateBudgetProposal({
-        currentBudget,
-        requestedDailyBudget: requested,
-        percentChange,
-        absoluteChange,
-      });
-      if (!check.valid) {
-        return { ok: false, result: "STALE", reasons: ["GUARDRAIL_VS_LIVE_STATE", ...check.errors] };
-      }
-    }
-    return { ok: true };
+    return verifyRecommendationFreshness({
+      ...args,
+      now: args.now ?? this.nowFn(),
+    });
   }
 
   private invalid(detail: string): RecommendationOutcome {
@@ -710,6 +651,92 @@ export class RecommendationEngine {
       },
     };
   }
+}
+
+// ---------------------------------------------------------------------------
+// Standalone execution-boundary freshness verification (spec §5)
+// ---------------------------------------------------------------------------
+// Shared by RecommendationEngine.verifyFreshForExecution AND the Phase 11.6A
+// bridge so there is exactly ONE stale-state implementation:
+//   1. status must still be PROPOSED or APPROVED,
+//   2. not expired (single TTL),
+//   3. requesting user must match (authorization binding),
+//   4. stored paramsHash must still match recomputed params (tamper check),
+//   5. live external state must hash identically (STATE_CHANGED otherwise),
+//   6. budget transitions must STILL satisfy guardrails against live budget.
+// Any failure blocks with STALE/EXPIRED/INVALID. Never mutates Meta.
+// ---------------------------------------------------------------------------
+
+export type FreshnessVerification =
+  | { ok: true }
+  | { ok: false; result: "EXPIRED" | "STALE" | "INVALID"; reasons: string[] };
+
+export function verifyRecommendationFreshness(args: {
+  record: RecommendationRecord;
+  liveState: ExternalEntityState | null;
+  requestingUserId: string;
+  now?: Date;
+}): FreshnessVerification {
+  const { record, liveState, requestingUserId } = args;
+  const now = args.now ?? new Date();
+  const reasons: string[] = [];
+
+  if (record.status !== "PROPOSED" && record.status !== "APPROVED") {
+    reasons.push(`STATUS_NOT_EXECUTABLE:${record.status}`);
+    return { ok: false, result: "INVALID", reasons };
+  }
+  if (new Date(record.expiresAt).getTime() <= now.getTime()) {
+    return { ok: false, result: "EXPIRED", reasons: ["TTL_EXPIRED"] };
+  }
+  if (record.userId !== requestingUserId) {
+    return { ok: false, result: "INVALID", reasons: ["USER_MISMATCH"] };
+  }
+  // Tamper check: recompute paramsHash from the bound tool parameters.
+  try {
+    const budget = typeof record.proposedState["dailyBudget"] === "number"
+      ? (record.proposedState["dailyBudget"] as number)
+      : undefined;
+    const params = buildExecutableParams(
+      record.actionType,
+      record.accountId,
+      record.entityId,
+      budget,
+      record.entityLevel
+    );
+    if (computeParamsHash(params) !== record.paramsHash) {
+      return { ok: false, result: "INVALID", reasons: ["PARAMS_HASH_MISMATCH"] };
+    }
+  } catch {
+    return { ok: false, result: "INVALID", reasons: ["PARAMS_UNBUILDABLE"] };
+  }
+  if (!liveState) {
+    return { ok: false, result: "STALE", reasons: ["ENTITY_NOT_FOUND"] };
+  }
+  const liveHash = computeExternalStateHash(record.accountId, record.entityId, liveState);
+  if (liveHash !== record.stateHash) {
+    reasons.push(...diffStateReasons(record, liveState));
+    return { ok: false, result: "STALE", reasons };
+  }
+  if (isBudgetAction(record.actionType)) {
+    const currentBudget = liveState.dailyBudget ?? null;
+    const requested = record.proposedState["dailyBudget"];
+    if (currentBudget === null || currentBudget <= 0 || typeof requested !== "number") {
+      return { ok: false, result: "STALE", reasons: ["BUDGET_REMOVED"] };
+    }
+    const absoluteChange = round2(requested - currentBudget);
+    const percentChange =
+      Math.round((absoluteChange / currentBudget) * 10000) / 100;
+    const check = validateBudgetProposal({
+      currentBudget,
+      requestedDailyBudget: requested,
+      percentChange,
+      absoluteChange,
+    });
+    if (!check.valid) {
+      return { ok: false, result: "STALE", reasons: ["GUARDRAIL_VS_LIVE_STATE", ...check.errors] };
+    }
+  }
+  return { ok: true };
 }
 
 function budgetRiskInputs(

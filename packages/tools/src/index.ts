@@ -68,3 +68,15 @@ export {
   runStartupRecovery,
   type StartupRecoveryReport,
 } from "./startup-recovery.js";
+export {
+  RecommendationExecutionService,
+  createExecutorBackedExternalStatePort,
+  resolveToolForAction,
+  RECOMMENDATION_ACTION_TOOLS,
+  type RecommendationExecutionDeps,
+  type RecommendationExecutionInput,
+  type RecommendationExecutionOutcome,
+  type RecommendationExecutionStorePort,
+  type AllowlistResolution,
+  type StatePortContext,
+} from "./recommendation-bridge.js";

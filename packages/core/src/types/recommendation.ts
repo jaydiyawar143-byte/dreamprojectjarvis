@@ -548,7 +548,8 @@ export function buildExecutableParams(
   actionType: RecommendationAction,
   accountId: string,
   entityId: string,
-  proposedDailyBudget?: number
+  proposedDailyBudget?: number,
+  entityLevel?: AggregationLevel
 ): Record<string, unknown> {
   switch (actionType) {
     case "PAUSE_CAMPAIGN":
@@ -562,7 +563,17 @@ export function buildExecutableParams(
       if (proposedDailyBudget === undefined || !Number.isFinite(proposedDailyBudget)) {
         throw new Error("Budget action requires proposedDailyBudget");
       }
-      return { accountId, adSetId: entityId, requestedDailyBudget: proposedDailyBudget };
+      // Phase 11.6A fix: budget tools differ by target level —
+      // meta.campaign.budget.update takes campaignId, meta.adset.budget.update
+      // takes adSetId. The level is REQUIRED for budget actions so the exact
+      // tool parameters (and therefore paramsHash) are unambiguous.
+      if (entityLevel === "CAMPAIGN") {
+        return { accountId, campaignId: entityId, requestedDailyBudget: proposedDailyBudget };
+      }
+      if (entityLevel === "AD_SET") {
+        return { accountId, adSetId: entityId, requestedDailyBudget: proposedDailyBudget };
+      }
+      throw new Error("Budget action requires entityLevel CAMPAIGN or AD_SET");
     }
     case "PAUSE_AD":
     case "RESUME_AD":

@@ -292,7 +292,8 @@ describe("Phase 11.5 — Record contract integrity", () => {
       rec.actionType,
       rec.accountId,
       rec.entityId,
-      rec.proposedState["dailyBudget"] as number | undefined
+      rec.proposedState["dailyBudget"] as number | undefined,
+      rec.entityLevel
     );
     expect(rec.paramsHash).toBe(computeParamsHash(params));
   });
@@ -616,7 +617,7 @@ describe("Phase 11.5 — Stale-state protection (verifyFreshForExecution)", () =
     // must still be stopped at the execution gate.
     const live = activeCampaignState(1000);
     const proposed = 1600;
-    const params = buildExecutableParams("DECREASE_BUDGET", "act_1", "cmp_1", proposed);
+    const params = buildExecutableParams("DECREASE_BUDGET", "act_1", "cmp_1", proposed, "CAMPAIGN");
     const forged = RecommendationRecordSchema.parse({
       schemaVersion: 1,
       recommendationId: "rec_forged",

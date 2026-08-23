@@ -114,6 +114,15 @@ export interface IApprovalRepository {
   updateStatus(id: string, status: ApprovalStatus, resolvedAt?: string): Promise<Approval | null>;
   findPending(): Promise<Approval[]>;
   findExistingForTool(toolId: string, userId: string): Promise<Approval | null>;
+  /**
+   * Phase 11.6A: optional user-scoped listing used by
+   * IApprovalManager.findApprovalsForTool. When absent, managers degrade
+   * to single-candidate lookups.
+   */
+  listByUser?(
+    userId: string,
+    options?: { status?: ApprovalStatus; page?: number; limit?: number }
+  ): Promise<{ items: Approval[]; total: number }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -169,6 +178,17 @@ export interface IApprovalManager {
     toolId: string,
     userId: string
   ): Promise<Approval | null>;
+  /**
+   * Phase 11.6A: all candidate approvals for (toolId, userId), newest first.
+   * Optional — when present, execution gates may resolve the approval that
+   * actually BINDS to the current params instead of relying on a single
+   * latest-row lookup, which an unrelated pending/rejected proposal would
+   * otherwise shadow.
+   */
+  findApprovalsForTool?(
+    toolId: string,
+    userId: string
+  ): Promise<Approval[]>;
 }
 
 // ---------------------------------------------------------------------------

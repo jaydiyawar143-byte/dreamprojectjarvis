@@ -129,19 +129,15 @@ export class ToolExecutor implements IToolExecutor {
     // its id is forwarded to the tool, which atomically CONSUMES it (verifying
     // user/tool/paramsHash/state/expiry) together with the execution claim —
     // one-time enforcement is durable, not executor-local.
+    //
+    // Phase 11.6A: when the manager exposes findApprovalsForTool, resolve
+    // the approval that actually BINDS to these exact params across ALL
+    // candidates instead of a single latest-row lookup — an unrelated
+    // pending/rejected proposal for different params must never shadow an
+    // approval a human explicitly granted for this execution.
     let approvalIdForExecution: string | undefined;
 
     if (tool.requiresApproval) {
-      const existing =
-        await this.approvalManager.findExistingForTool(
-          request.toolId,
-          request.userId
-        );
-
-      // An approval authorizes ONLY the exact parameters a human approved.
-      // The stored paramsHash must match a recomputed hash of the current
-      // params. Missing hash (legacy approval) or mismatch (changed params)
-      // invalidates reuse — fail closed and require a fresh approval.
       const paramsBound = (approval: {
         paramsHash?: string;
         toolId?: string;
@@ -153,47 +149,89 @@ export class ToolExecutor implements IToolExecutor {
         !!approval.paramsHash &&
         approval.paramsHash === computeParamsHash(request.params);
 
-      let hasValidApproval = false;
+      type ApprovalLike = {
+        id: string;
+        status: string;
+        expiresAt: string | Date;
+        paramsHash?: string;
+        toolId?: string;
+        userId?: string;
+      };
 
-      if (existing) {
-        if (
-          existing.status === "approved" &&
-          new Date(existing.expiresAt) > new Date() &&
-          paramsBound(existing)
-        ) {
-          hasValidApproval = true;
-          approvalIdForExecution = existing.id;
-        } else if (existing.status === "rejected") {
-          const completedAt = new Date();
-          await this.audit(request, executionId, "rejected", startedAt);
-          return {
-            executionId,
-            toolId: request.toolId,
-            status: "approval_denied",
-            approvalId: existing.id,
-            error: "Approval was rejected",
-            startedAt,
-            completedAt,
-            durationMs: completedAt.getTime() - startedAt.getTime(),
-          };
-        } else if (existing.status === "pending" && paramsBound(existing)) {
-          const completedAt = new Date();
-          await this.audit(request, executionId, "pending", startedAt);
-          return {
-            executionId,
-            toolId: request.toolId,
-            status: "approval_pending",
-            approvalId: existing.id,
-            startedAt,
-            completedAt,
-            durationMs: completedAt.getTime() - startedAt.getTime(),
-          };
+      let approvedBound: ApprovalLike | undefined;
+      let rejectedLatest: ApprovalLike | undefined;
+      let pendingBound: ApprovalLike | undefined;
+
+      if (this.approvalManager.findApprovalsForTool) {
+        const candidates =
+          await this.approvalManager.findApprovalsForTool(
+            request.toolId,
+            request.userId
+          );
+        for (const candidate of candidates) {
+          if (!approvedBound && paramsBound(candidate) &&
+            candidate.status === "approved" &&
+            new Date(candidate.expiresAt) > new Date()
+          ) {
+            approvedBound = candidate;
+          }
+          if (!pendingBound && paramsBound(candidate) && candidate.status === "pending") {
+            pendingBound = candidate;
+          }
+          if (!rejectedLatest && candidate.status === "rejected") {
+            rejectedLatest = candidate;
+          }
         }
-        // expired, approved-but-expired, or params not bound to this
-        // approval → fall through to request a fresh approval
+      } else {
+        const existing = await this.approvalManager.findExistingForTool(
+          request.toolId,
+          request.userId
+        );
+        if (existing) {
+          if (
+            existing.status === "approved" &&
+            new Date(existing.expiresAt) > new Date() &&
+            paramsBound(existing)
+          ) {
+            approvedBound = existing;
+          } else if (existing.status === "rejected") {
+            rejectedLatest = existing;
+          } else if (existing.status === "pending" && paramsBound(existing)) {
+            pendingBound = existing;
+          }
+        }
       }
 
-      if (!hasValidApproval) {
+      if (approvedBound) {
+        approvalIdForExecution = approvedBound.id;
+      } else if (rejectedLatest) {
+        const completedAt = new Date();
+        await this.audit(request, executionId, "rejected", startedAt);
+        return {
+          executionId,
+          toolId: request.toolId,
+          status: "approval_denied",
+          approvalId: rejectedLatest.id,
+          error: "Approval was rejected",
+          startedAt,
+          completedAt,
+          durationMs: completedAt.getTime() - startedAt.getTime(),
+        };
+      } else if (pendingBound) {
+        const completedAt = new Date();
+        await this.audit(request, executionId, "pending", startedAt);
+        return {
+          executionId,
+          toolId: request.toolId,
+          status: "approval_pending",
+          approvalId: pendingBound.id,
+          startedAt,
+          completedAt,
+          durationMs: completedAt.getTime() - startedAt.getTime(),
+        };
+      }
+
+      if (!approvalIdForExecution) {
         const approval = await this.approvalManager.requestApproval({
           userId: request.userId,
           agentId: request.agentId,

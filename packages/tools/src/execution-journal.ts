@@ -292,6 +292,24 @@ export class MemoryExecutionJournal implements ExecutionJournalPort {
     return null;
   }
 
+  /**
+   * Most recent rows for a (user, tool) pair, newest first. Used by the
+   * Phase 11.6A recommendation bridge to locate the journal row an attempt
+   * produced (journal row ids are tools-layer owned, not executor ids).
+   */
+  async listByUserTool(
+    userId: string,
+    toolId: string,
+    limit = 25
+  ): Promise<ToolExecutionRecord[]> {
+    return [...this.rows.values()]
+      .filter((r) => r.userId === userId && r.toolId === toolId)
+      .sort(
+        (a, b) => b.createdAt.getTime() - a.createdAt.getTime()
+      )
+      .slice(0, limit);
+  }
+
   // -------------------------------------------------------------------------
   // Reconciliation (Phase 10.5) — reference semantics
   // -------------------------------------------------------------------------

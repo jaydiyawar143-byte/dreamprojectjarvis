@@ -78,7 +78,7 @@ function makeRecord(overrides: Partial<RecommendationRecord> & { entityId?: stri
   const userId = overrides.userId ?? testUserId!;
   const state: ExternalEntityState = activeCampaignState(1000);
   const proposed = 800;
-  const params = buildExecutableParams("DECREASE_BUDGET", accountId, entityId, proposed);
+  const params = buildExecutableParams("DECREASE_BUDGET", accountId, entityId, proposed, "CAMPAIGN");
   const base: RecommendationRecord = {
     schemaVersion: 1,
     recommendationId: `rec_${crypto.randomUUID()}`,
@@ -109,7 +109,9 @@ function makeRecord(overrides: Partial<RecommendationRecord> & { entityId?: stri
     requiresApproval: true,
     createdAt: NOW_ISO,
     updatedAt: NOW_ISO,
-    expiresAt: new Date(new Date(NOW_ISO).getTime() + 30 * 60_000).toISOString(),
+    // Relative to REAL wall-clock time: expireOverdue sweeps globally, so a
+    // hardcoded same-day timestamp becomes stale as soon as the clock passes.
+    expiresAt: new Date(Date.now() + 30 * 60_000).toISOString(),
     staleReasons: [],
   };
   const merged = { ...base, ...overrides };
@@ -400,7 +402,8 @@ describe.skipIf(!dbUp)("PHASE 11.5 — real PostgreSQL recommendation store", ()
       loaded.actionType,
       loaded.accountId,
       loaded.entityId,
-      loaded.proposedState["dailyBudget"] as number
+      loaded.proposedState["dailyBudget"] as number,
+      loaded.entityLevel
     );
     expect(computeParamsHash(params)).toBe(loaded.paramsHash);
   });

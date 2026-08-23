@@ -1138,6 +1138,12 @@ export class MetaUpdateCampaignBudgetTool extends BaseMetaAdsBudgetTool {
       const previousBudget = currentBudget;
       const currency = (await this.provider.getAdAccounts(undefined, this.callOpts(context))).data[0]?.currency ?? "USD";
 
+      // Validate transition against guardrails
+      const transition = validateBudgetTransition(previousBudget, requestedBudget, this.guardrails);
+      if (!transition.valid) {
+        return this.failure(`Budget limit exceeded: ${transition.errors.join("; ")}`);
+      }
+
       // Desired state already achieved — idempotent no-op (mirrors the
       // pause/resume tools): succeed without claiming or writing again.
       if (currentBudget === requestedBudget) {
@@ -1157,12 +1163,6 @@ export class MetaUpdateCampaignBudgetTool extends BaseMetaAdsBudgetTool {
           idempotent: true,
           message: "Campaign daily budget is already set to the requested amount",
         }, { toolId: this.id, risk: this.risk, userId: context.userId });
-      }
-
-      // Validate transition against guardrails
-      const transition = validateBudgetTransition(previousBudget, requestedBudget, this.guardrails);
-      if (!transition.valid) {
-        return this.failure(`Budget limit exceeded: ${transition.errors.join("; ")}`);
       }
 
       // Build change summary
@@ -1321,6 +1321,12 @@ export class MetaUpdateAdSetBudgetTool extends BaseMetaAdsBudgetTool {
       const previousBudget = currentBudget;
       const currency = (await this.provider.getAdAccounts(undefined, this.callOpts(context))).data[0]?.currency ?? "USD";
 
+      // Validate transition against guardrails
+      const transition = validateBudgetTransition(previousBudget, requestedBudget, this.guardrails);
+      if (!transition.valid) {
+        return this.failure(`Budget limit exceeded: ${transition.errors.join("; ")}`);
+      }
+
       // Desired state already achieved — idempotent no-op (mirrors the
       // pause/resume tools): succeed without claiming or writing again.
       if (currentBudget === requestedBudget) {
@@ -1340,12 +1346,6 @@ export class MetaUpdateAdSetBudgetTool extends BaseMetaAdsBudgetTool {
           idempotent: true,
           message: "Ad set daily budget is already set to the requested amount",
         }, { toolId: this.id, risk: this.risk, userId: context.userId });
-      }
-
-      // Validate transition against guardrails
-      const transition = validateBudgetTransition(previousBudget, requestedBudget, this.guardrails);
-      if (!transition.valid) {
-        return this.failure(`Budget limit exceeded: ${transition.errors.join("; ")}`);
       }
 
       // Build change summary
