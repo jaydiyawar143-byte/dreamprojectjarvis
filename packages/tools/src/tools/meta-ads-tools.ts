@@ -90,7 +90,13 @@ export class MetaGetAccountsTool extends BaseMetaAdsTool {
         {
           name: "after",
           type: "string",
-          description: "Pagination cursor for next page",
+          description: "Pagination cursor",
+          required: false,
+        },
+        {
+          name: "timeIncrement",
+          type: "number",
+          description: "Split range into N-day rows (1 = daily). 1-90.",
           required: false,
         },
       ],
@@ -445,6 +451,14 @@ export class MetaGetInsightsTool extends BaseMetaAdsTool {
     const level = validateInsightLevel(params.level);
     const fields = validateMetrics(params.fields);
     const breakdown = validateBreakdown(params.breakdown);
+    let timeIncrement: number | undefined;
+    if (params.timeIncrement !== undefined) {
+      const raw = Number(params.timeIncrement);
+      if (!Number.isInteger(raw) || raw < 1 || raw > 90) {
+        return this.failure("timeIncrement must be an integer between 1 and 90");
+      }
+      timeIncrement = raw;
+    }
     const campaignIds = Array.isArray(params.campaignIds)
       ? (params.campaignIds as unknown[])
           .filter((id): id is string => typeof id === "string")
@@ -463,6 +477,7 @@ export class MetaGetInsightsTool extends BaseMetaAdsTool {
           campaignIds,
           fields: fields.length > 0 ? fields : undefined,
           breakdown: breakdown ?? undefined,
+          timeIncrement,
         },
         pagination,
         this.callOpts(context)

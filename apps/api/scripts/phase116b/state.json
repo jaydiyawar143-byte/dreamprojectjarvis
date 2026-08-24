@@ -1,0 +1,23 @@
+{
+  "stage": "no-safe-target",
+  "startedAt": "2026-08-24T07:26:59.955Z",
+  "userId": "cmt6ux4h200009ujlopj07jzt",
+  "account": {
+    "id": "act_2478566669291624",
+    "currency": "INR",
+    "timezone": "America/Los_Angeles",
+    "status": 1
+  },
+  "inventoryBaseline": {
+    "campaigns": 1,
+    "adSets": 0,
+    "ads": 0,
+    "ids": {
+      "campaigns": [
+        "120248995539100390"
+      ],
+      "adSets": [],
+      "ads": []
+    }
+  }
+}

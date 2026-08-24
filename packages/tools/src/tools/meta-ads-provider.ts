@@ -80,6 +80,8 @@ export interface MetaAdsProvider {
       adIds?: string[];
       fields?: string[];
       breakdown?: string;
+      /** Phase 11.6B read plumbing: Meta `time_increment` (daily granularity). */
+      timeIncrement?: number;
     },
     pagination?: MetaPagination,
     options?: ProviderCallOptions

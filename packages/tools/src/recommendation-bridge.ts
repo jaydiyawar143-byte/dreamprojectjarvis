@@ -814,18 +814,27 @@ export function createExecutorBackedExternalStatePort(
       return Array.isArray(list) ? (list as Record<string, unknown>[]) : null;
     };
 
-    const campaigns = await readList("meta.campaigns", { accountId }, "campaigns");
-    let raw = campaigns ? findIn(campaigns, "campaignId", entityId) : undefined;
+    // PHASE 11.6B FIX: an entity may live at ANY level. A readable campaigns
+    // list that lacks the id must NOT short-circuit the ad-set/ad fallbacks —
+    // previously `findIn` returning null (readable, absent) satisfied neither
+    // the retry guard (=== undefined) nor produced a hit, so AD-level state
+    // resolution always failed with ENTITY_NOT_FOUND once /campaigns was
+    // fetchable. Now each readable level is searched in order; the FIRST hit
+    // wins; unreadable lists simply cannot contribute.
+    let raw: Record<string, unknown> | null = null;
 
-    if (raw === undefined) {
+    const campaigns = await readList("meta.campaigns", { accountId }, "campaigns");
+    if (campaigns) raw = findIn(campaigns, "campaignId", entityId);
+
+    if (!raw) {
       const adSets = await readList("meta.adsets", { accountId }, "adSets");
-      raw = adSets ? findIn(adSets, "adSetId", entityId) : undefined;
+      if (adSets) raw = findIn(adSets, "adSetId", entityId);
     }
-    if (raw === undefined) {
+    if (!raw) {
       const ads = await readList("meta.ads", { accountId }, "ads");
-      raw = ads ? findIn(ads, "adId", entityId) : undefined;
+      if (ads) raw = findIn(ads, "adId", entityId);
     }
-    if (!raw) return null; // unreadable account or absent entity
+    if (!raw) return null; // absent entity (or account wholly unreadable)
 
     const status = metaStatusToEntityStatus(String(raw["status"] ?? ""));
     if (!status) return null;

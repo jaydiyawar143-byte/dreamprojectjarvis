@@ -287,6 +287,24 @@ export class PrismaToolExecutionRepository implements ExecutionJournalPort {
   }
 
   /**
+   * PHASE 11.6B — newest journal rows for (userId, toolId). Satisfies the
+   * RecommendationExecutionService journal read model used for authoritative
+   * ambiguity classification after a claim.
+   */
+  async findRecentByTool(
+    userId: string,
+    toolId: string,
+    limit = 25
+  ): Promise<ToolExecutionRecord[]> {
+    const rows = await this.prisma.toolExecution.findMany({
+      where: { userId, toolId },
+      orderBy: { createdAt: "desc" },
+      take: limit,
+    });
+    return rows.map(toRecord);
+  }
+
+  /**
    * PHASE 10.7 — latest durable execution linked to an approval, so the
    * approval detail view can show whether/where the approved action ran.
    */

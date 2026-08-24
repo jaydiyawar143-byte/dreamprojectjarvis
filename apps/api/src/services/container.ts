@@ -1,4 +1,4 @@
-import type { IOrchestrator, ShutdownLifecycle } from "@jarvis/core";
+import type { IOrchestrator, IToolExecutor, ShutdownLifecycle } from "@jarvis/core";
 import type { TokenService } from "@jarvis/security";
 import { Orchestrator, AgentRegistry, ConversationalAssistant } from "@jarvis/agents";
 import { OpenAIAdapter } from "@jarvis/ai-openai";
@@ -37,6 +37,7 @@ import {
   PrismaRefreshTokenRepository,
   PrismaToolExecutionRepository,
   PrismaApprovalRepository,
+  PrismaRecommendationRepository,
 } from "@jarvis/db";
 
 export interface Container {
@@ -57,13 +58,25 @@ export interface Container {
   approvalRepo: PrismaApprovalRepository;
   /** Registry used by the approval flow to re-validate stored parameters. */
   toolRegistry: ToolRegistry;
+  /**
+   * PHASE 11.6B — executor exposed for recommendation execution route so
+   * the RecommendationExecutionService can route all writes through the
+   * SAME Phase 10 authority (approval + journal + concurrency).
+   */
+  executor: IToolExecutor;
+  /**
+   * PHASE 11.6B — durable recommendation store for the execution route.
+   */
+  recommendationRepo: PrismaRecommendationRepository;
   /** Lifecycle gate consulted before approving side-effecting actions. */
   lifecycle?: ShutdownLifecycle;
 }
 
 let _container: Container | null = null;
 
-function createMetaToolRegistry(): ToolRegistry {
+function createMetaToolRegistry(
+  approvalConsumption: PrismaApprovalRepository
+): ToolRegistry {
   const registry = new ToolRegistry();
   const metaAccessToken = process.env.META_ACCESS_TOKEN;
   const metaAccountId = process.env.META_AD_ACCOUNT_ID;
@@ -87,19 +100,19 @@ function createMetaToolRegistry(): ToolRegistry {
     registry.register(new MetaGetInsightsTool(realProvider, realProvider));
 
     // Phase 9.1: Write tools (pause/resume)
-    registry.register(new MetaPauseCampaignTool(realProvider, realProvider, executionJournal));
-    registry.register(new MetaResumeCampaignTool(realProvider, realProvider, executionJournal));
-    registry.register(new MetaPauseAdSetTool(realProvider, realProvider, executionJournal));
-    registry.register(new MetaResumeAdSetTool(realProvider, realProvider, executionJournal));
-    registry.register(new MetaPauseAdTool(realProvider, realProvider, executionJournal));
-    registry.register(new MetaResumeAdTool(realProvider, realProvider, executionJournal));
+    registry.register(new MetaPauseCampaignTool(realProvider, realProvider, executionJournal, approvalConsumption));
+    registry.register(new MetaResumeCampaignTool(realProvider, realProvider, executionJournal, approvalConsumption));
+    registry.register(new MetaPauseAdSetTool(realProvider, realProvider, executionJournal, approvalConsumption));
+    registry.register(new MetaResumeAdSetTool(realProvider, realProvider, executionJournal, approvalConsumption));
+    registry.register(new MetaPauseAdTool(realProvider, realProvider, executionJournal, approvalConsumption));
+    registry.register(new MetaResumeAdTool(realProvider, realProvider, executionJournal, approvalConsumption));
 
     // Phase 9.2: Budget tools
-    registry.register(new MetaUpdateCampaignBudgetTool(realProvider, realProvider, undefined, executionJournal));
-    registry.register(new MetaUpdateAdSetBudgetTool(realProvider, realProvider, undefined, executionJournal));
+    registry.register(new MetaUpdateCampaignBudgetTool(realProvider, realProvider, undefined, executionJournal, approvalConsumption));
+    registry.register(new MetaUpdateAdSetBudgetTool(realProvider, realProvider, undefined, executionJournal, approvalConsumption));
 
     // Phase 9.3: Campaign creation
-    registry.register(new MetaCreateCampaignTool(realProvider, realProvider, undefined, executionJournal));
+    registry.register(new MetaCreateCampaignTool(realProvider, realProvider, undefined, executionJournal, approvalConsumption));
   }
 
   return registry;
@@ -141,7 +154,7 @@ export function getContainer(options?: {
   const approvalRepo = new PrismaApprovalRepository(prisma);
   const approvalService = new ApprovalService(approvalRepo);
 
-  const toolRegistry = createMetaToolRegistry();
+  const toolRegistry = createMetaToolRegistry(approvalRepo);
   const toolExecutor = new ToolExecutor(
     toolRegistry,
     permissionService,
@@ -162,6 +175,8 @@ export function getContainer(options?: {
 
   const orchestrator = new Orchestrator(agentRegistry, toolExecutor, auditLogger);
 
+  const recommendationRepo = new PrismaRecommendationRepository(prisma);
+
   _container = {
     tokenService,
     authService,
@@ -171,6 +186,8 @@ export function getContainer(options?: {
     executionJournal,
     approvalRepo,
     toolRegistry,
+    executor: toolExecutor,
+    recommendationRepo,
     lifecycle: options?.lifecycle,
   };
 

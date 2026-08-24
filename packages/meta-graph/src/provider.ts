@@ -237,7 +237,7 @@ export function createMetaGraphProvider(config: MetaGraphProviderConfig): MetaGr
       accountId: string,
       dateRange: MetaDateRange,
       level: "account" | "campaign" | "adset" | "ad",
-      filters?: { campaignIds?: string[]; adSetIds?: string[]; adIds?: string[]; fields?: string[]; breakdown?: string },
+      filters?: { campaignIds?: string[]; adSetIds?: string[]; adIds?: string[]; fields?: string[]; breakdown?: string; timeIncrement?: number },
       pagination?: MetaPagination,
       options?: ProviderCallOptions
     ) {
@@ -247,6 +247,10 @@ export function createMetaGraphProvider(config: MetaGraphProviderConfig): MetaGr
         level,
         limit: pagination?.limit ?? 25,
       };
+
+      if (filters?.timeIncrement !== undefined) {
+        params.time_increment = filters.timeIncrement;
+      }
 
       if (filters?.fields?.length) {
         params.fields = filters.fields.join(",");

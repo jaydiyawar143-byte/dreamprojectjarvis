@@ -40,6 +40,7 @@ export {
   createMockMetaProvider,
   createFailingMetaProvider,
   createEmptyMetaProvider,
+  type MockMetaProviderConfig,
 } from "./tools/meta-ads-mock.js";
 export {
   validateAccountId,
