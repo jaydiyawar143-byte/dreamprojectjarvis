@@ -24,6 +24,16 @@ import {
   type RecommendationRecord,
   type RecommendationRisk,
 } from "./types/recommendation.js";
+import type { OutcomeRecord } from "./types/outcome.js";
+import {
+  evaluateHistoricalEvidenceForContext,
+  type HistoricalEvaluationContext,
+} from "./historical-outcome-engine.js";
+import {
+  computeConfidenceAssessment,
+  computeHistoricalEvidenceHash,
+  computePriority,
+} from "./recommendation-confidence.js";
 import { computeParamsHash } from "./utils/params-hash.js";
 import { redactSecrets } from "./utils/redact-secrets.js";
 import { z } from "zod";
@@ -36,16 +46,47 @@ import { z } from "zod";
 // the RecommendationStorePort. Every branch is deterministic and auditable.
 // Fail-closed everywhere: any contract mismatch ⇒ INVALID_INPUT, never a
 // guessed recommendation.
+//
+// Phase 11.8B — OPTIONAL historical enhancement:
+//   When a HistoricalOutcomePort is configured, finalized outcomes for the
+//   SAME account + user are loaded through ONE bounded server-side query and
+//   deterministically folded into confidence/priority. The engine NEVER trusts
+//   client-supplied historical claims — only server-validated records from
+//   the port. Without the port the engine behaves exactly as Phase 11.5
+//   (historical evidence is an enhancement, not a dependency).
 // ---------------------------------------------------------------------------
 
 export const DEFAULT_RECOMMENDATION_TTL_MS = 30 * 60 * 1000; // 30 minutes
 export const MIN_SAMPLE_COUNT = 5;
+/** Hard cap on outcomes fetched per generate() call — bounded queries (spec §20). */
+export const DEFAULT_MAX_HISTORICAL_OUTCOMES = 10_000;
+
+/**
+ * Server-validated historical outcome lookup (spec §19). Implemented by the
+ * DB layer's OutcomeStorePort.findFinalizedOutcomes; scoped to userId +
+ * accountId so cross-account/cross-user data can never reach the engine.
+ */
+export interface HistoricalOutcomePort {
+  findFinalizedOutcomes(
+    userId: string,
+    filters: { accountId: string; limit?: number }
+  ): Promise<OutcomeRecord[]>;
+}
 
 export interface RecommendationEngineConfig {
   /** Single configurable TTL for PROPOSED recommendations. */
   ttlMs?: number;
   /** Max budget-changing recommendations created per account per rolling day. */
   maxBudgetActionsPerAccountPerDay?: number;
+  /**
+   * Optional Phase 11.8B history source. Absent ⇒ Phase 11.5 behavior.
+   * MUST be backed by server-validated, account+user-scoped storage.
+   */
+  historyPort?: HistoricalOutcomePort;
+  /** Bounded fetch size for historical outcomes (default 10,000). */
+  maxHistoricalOutcomes?: number;
+  /** Recency half-life in days forwarded to the Phase 11.8A weighting. */
+  historicalHalfLifeDays?: number;
 }
 
 const DEFAULT_MAX_BUDGET_ACTIONS_PER_DAY = 4;
@@ -102,6 +143,16 @@ export interface RecommendationAuditRecord {
   reason?: string;
   detail?: string;
   conflictingIds?: string[];
+  traceId?: string;
+  /** Phase 11.8B — confidence BEFORE historical evidence was folded in. */
+  confidenceBeforeHistory?: string;
+  /** Phase 11.8B — final combined confidence (== record.confidence). */
+  confidenceAfterHistory?: string;
+  priority?: string;
+  /** Number of server-validated historical outcomes that matched. */
+  historicalEvidenceCount?: number;
+  /** Tamper-evident hash over the historical contribution. */
+  historicalEvidenceHash?: string;
 }
 
 export type NoRecommendationReason =
@@ -112,6 +163,7 @@ export type NoRecommendationReason =
   | "WARMUP_PERIOD"
   | "INSUFFICIENT_DATA_QUALITY"
   | "LOW_CONFIDENCE"
+  | "CONTRADICTORY_HISTORICAL_EVIDENCE"
   | "NO_NEGATIVE_ANOMALIES"
   | "INSUFFICIENT_SEVERITY"
   | "ENTITY_NOT_FOUND"
@@ -134,6 +186,8 @@ const GenerateInputSchema = z
     userId: z.string().min(1),
     diagnosis: DiagnosisResultSchema,
     evidence: EvidencePackageSchema,
+    /** Optional correlation id for audit trails. Never a trust boundary. */
+    traceId: z.string().max(128).optional(),
   })
   .strict();
 
@@ -147,6 +201,26 @@ function significantNegativeAnomalies(evidence: EvidencePackage) {
   return evidence.anomalies.filter(
     (a) => a.direction === "NEGATIVE_ANOMALY" && a.severity !== "NORMAL"
   );
+}
+
+/**
+ * Phase 11.8B — deterministic primary metric for historical similarity.
+ * The metric of the most severe significant negative anomaly wins (CRITICAL
+ * before WARNING, input order as tiebreak); falls back to SPEND when no
+ * anomaly names a known outcome metric. Pure function, no randomness.
+ */
+const KNOWN_OUTCOME_METRICS: ReadonlySet<string> = new Set([
+  "CPA", "CPC", "CTR", "CVR", "ROAS", "REVENUE", "CONVERSIONS",
+  "SPEND", "IMPRESSIONS", "CLICKS", "CPM", "FREQUENCY",
+]);
+
+function derivePrimaryMetric(evidence: EvidencePackage): string {
+  const severityRank = (s: string) => (s === "CRITICAL" ? 2 : s === "WARNING" ? 1 : 0);
+  const ordered = [...significantNegativeAnomalies(evidence)].sort(
+    (a, b) => severityRank(b.severity) - severityRank(a.severity)
+  );
+  const candidate = ordered[0]?.metric;
+  return candidate !== undefined && KNOWN_OUTCOME_METRICS.has(candidate) ? candidate : "SPEND";
 }
 
 function stepUp(r: RecommendationRisk): RecommendationRisk {
@@ -240,6 +314,9 @@ function buildPreconditions(a: RecommendationAction): string[] {
 export class RecommendationEngine {
   private readonly ttlMs: number;
   private readonly maxBudgetPerDay: number;
+  private readonly historyPort: HistoricalOutcomePort | null;
+  private readonly maxHistoricalOutcomes: number;
+  private readonly historicalHalfLifeDays: number | undefined;
 
   constructor(
     private readonly store: RecommendationStorePort,
@@ -250,6 +327,10 @@ export class RecommendationEngine {
     this.ttlMs = config.ttlMs ?? DEFAULT_RECOMMENDATION_TTL_MS;
     this.maxBudgetPerDay =
       config.maxBudgetActionsPerAccountPerDay ?? DEFAULT_MAX_BUDGET_ACTIONS_PER_DAY;
+    this.historyPort = config.historyPort ?? null;
+    this.maxHistoricalOutcomes =
+      config.maxHistoricalOutcomes ?? DEFAULT_MAX_HISTORICAL_OUTCOMES;
+    this.historicalHalfLifeDays = config.historicalHalfLifeDays;
   }
 
   /**
@@ -537,9 +618,95 @@ export class RecommendationEngine {
       }
     }
 
+    // --- Phase 11.8B: server-validated historical evidence (optional) --------
+    // Loaded through ONE bounded server-side query scoped to userId+accountId.
+    // The engine computes HistoricalEvidence ITSELF from those records —
+    // client input can never inject fabricated history (spec §19).
+    let historicalEvidence = null;
+    let rejectedForeignRows = 0;
+    if (this.historyPort) {
+      const raw = await this.historyPort.findFinalizedOutcomes(userId, {
+        accountId: evidence.accountId,
+        limit: this.maxHistoricalOutcomes,
+      });
+      // Defense-in-depth isolation filter: only rows owned by this exact
+      // account AND user may contribute (spec §15).
+      const scoped = raw.filter(
+        (o) =>
+          o.accountId === evidence.accountId &&
+          o.userId === userId &&
+          typeof o.outcomeId === "string" &&
+          o.outcomeId.trim().length > 0
+      );
+      rejectedForeignRows = raw.length - scoped.length;
+      const ctx: HistoricalEvaluationContext = {
+        accountId: evidence.accountId,
+        userId,
+        entityLevel: level,
+        entityId: evidence.entityId,
+        actionType,
+        diagnosisCategory: diagnosis.category,
+        objective: external.objective ?? null,
+        primaryMetric: derivePrimaryMetric(evidence),
+      };
+      historicalEvidence = evaluateHistoricalEvidenceForContext(
+        ctx,
+        scoped,
+        this.historicalHalfLifeDays !== undefined
+          ? { halfLifeDays: this.historicalHalfLifeDays }
+          : {},
+        now
+      );
+    }
+
+    // Deterministic confidence + priority (spec §2–§10)
+    const assessmentResult = computeConfidenceAssessment({
+      diagnosis,
+      evidence,
+      historical: historicalEvidence,
+    });
+    // Backward compatibility (spec §16): without a history port the stored
+    // confidence keeps the exact Phase 11.5 semantics (diagnosis.confidence).
+    const recordConfidence = historicalEvidence
+      ? assessmentResult.level
+      : diagnosis.confidence;
+
+    // No-action path: weak current evidence + contradictory/mixed history must
+    // NOT produce an action (spec §11). Strong current evidence survives a
+    // mixed past — the downgrade is recorded instead. (Defense-in-depth: the
+    // Phase 11.5 gates above already refuse every weak-current shape.)
+    if (
+      historicalEvidence &&
+      assessmentResult.beforeHistory === "LOW" &&
+      (assessmentResult.assessment.historicalConsistency === "MIXED" ||
+        assessmentResult.assessment.historicalConsistency === "CONSISTENT_NEGATIVE")
+    ) {
+      return this.noRec(
+        "CONTRADICTORY_HISTORICAL_EVIDENCE",
+        "Weak current evidence combined with contradictory historical outcomes; refusing action.",
+        at,
+        input,
+        diagnosis
+      );
+    }
+
     // --- Assemble record -------------------------------------------------------------------------
     const risk = assessRisk(actionType, diagnosis, evidence, budgetRiskInputs(currentState, proposedState));
     const createdAt = now.toISOString();
+    const historicalStrength = assessmentResult.assessment.historicalEvidence;
+    const consistencyLabel = assessmentResult.assessment.historicalConsistency;
+    const priority = computePriority({
+      actionType,
+      entityLevel: level,
+      risk,
+      confidence: recordConfidence,
+      anomalies: evidence.anomalies,
+      historicalStrength,
+      historicalConsistency: consistencyLabel,
+    });
+    const explanation = historicalEvidence
+      ? assessmentResult.assessment
+      : { ...assessmentResult.assessment, level: recordConfidence };
     const record = RecommendationRecordSchema.parse({
       schemaVersion: RECOMMENDATION_SCHEMA_VERSION,
       recommendationId: crypto.randomUUID(),
@@ -548,6 +715,7 @@ export class RecommendationEngine {
       entityLevel: level,
       entityId: evidence.entityId,
       diagnosisId: diagnosis.diagnosisId,
+      diagnosisCategory: diagnosis.category,
       anomalyIds: [...diagnosis.anomalyIds],
       actionType,
       currentState,
@@ -561,7 +729,11 @@ export class RecommendationEngine {
         rationale: impactRationale(actionType, sigNeg.length),
       },
       risk,
-      confidence: diagnosis.confidence,
+      confidence: recordConfidence,
+      priority,
+      historicalEvidenceIds:
+        historicalEvidence?.matchingOutcomeIds.slice(0, 500) ?? [],
+      confidenceExplanation: explanation,
       preconditions: buildPreconditions(actionType),
       paramsHash,
       stateHash,
@@ -591,6 +763,16 @@ export class RecommendationEngine {
         actionType,
         risk,
         confidence: record.confidence,
+        traceId: input.traceId,
+        confidenceBeforeHistory: assessmentResult.beforeHistory,
+        confidenceAfterHistory: recordConfidence,
+        priority,
+        historicalEvidenceCount: historicalEvidence?.summaryStatistics.sampleSize ?? 0,
+        historicalEvidenceHash: computeHistoricalEvidenceHash(historicalEvidence),
+        detail:
+          rejectedForeignRows > 0
+            ? `${rejectedForeignRows} foreign-scoped outcome row(s) rejected by isolation guard`
+            : undefined,
       },
     };
   }

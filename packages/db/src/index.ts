@@ -28,3 +28,8 @@ export {
   PrismaRecommendationRepository,
   DuplicateRecommendationError,
 } from "./repositories/recommendation-repository.js";
+export {
+  PrismaOutcomeRepository,
+  DuplicateOutcomeError,
+  FinalizedOutcomeImmutableError,
+} from "./repositories/outcome-repository.js";

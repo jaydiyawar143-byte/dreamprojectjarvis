@@ -30,6 +30,12 @@ export * from "./diagnosis-verification.js";
 export * from "./diagnosis-engine.js";
 export * from "./types/recommendation.js";
 export * from "./recommendation-engine.js";
+export * from "./types/outcome.js";
+export * from "./outcome-engine.js";
+export * from "./outcome-worker.js";
+export * from "./historical-outcome-engine.js";
+export * from "./recommendation-confidence.js";
+export * from "./opportunity-scoring.js";
 export * from "./utils/params-hash.js";
 export * from "./utils/redact-secrets.js";
 

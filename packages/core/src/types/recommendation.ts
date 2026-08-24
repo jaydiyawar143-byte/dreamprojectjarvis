@@ -1,4 +1,4 @@
-﻿import { z } from "zod";
+import { z } from "zod";
 import {
   ConfidenceLevelSchema,
   EvidencePackageSchema,
@@ -505,6 +505,53 @@ export const ACTIVE_STATUSES: readonly RecommendationStatus[] = [
 ];
 
 // ---------------------------------------------------------------------------
+// Phase 11.8B — Deterministic confidence assessment (structured explanation)
+// ---------------------------------------------------------------------------
+// Historical outcomes are SUPPORTING EVIDENCE ONLY. They are never causal
+// proof and must never guarantee future performance. Every field below is
+// produced by a pure deterministic function — no LLM, no randomness, and no
+// free-form AI reasoning.
+// ---------------------------------------------------------------------------
+
+/**
+ * Sample-quality classification for historical evidence (spec §4).
+ * Thresholds are configurable in the confidence model; the labels are fixed:
+ *   0        -> NO_HISTORY
+ *   1–2      -> VERY_LOW_SAMPLE
+ *   3–9      -> LOW_SAMPLE
+ *   10+      -> STRONGER_HISTORY
+ * A larger sample NEVER by itself claims statistical significance.
+ */
+export const SampleQualitySchema = z.enum([
+  "NO_HISTORY",
+  "VERY_LOW_SAMPLE",
+  "LOW_SAMPLE",
+  "STRONGER_HISTORY",
+]);
+export type SampleQuality = z.infer<typeof SampleQualitySchema>;
+
+export const ConfidenceAssessmentSchema = z.object({
+  /** Final combined confidence after historical evidence (or before, if none). */
+  level: z.enum(["LOW", "MEDIUM", "HIGH"]),
+  /** Pre-history current-evidence strength (diagnosis + evidence package). */
+  currentEvidence: z.enum(["LOW", "MEDIUM", "HIGH"]),
+  /** Historical evidence strength label. */
+  historicalEvidence: z.enum(["NONE", "WEAK", "MODERATE", "STRONG"]),
+  sampleQuality: SampleQualitySchema,
+  historicalSampleSize: z.number().int().nonnegative(),
+  historicalConsistency: z.enum([
+    "NONE",
+    "CONSISTENT_POSITIVE",
+    "CONSISTENT_NEGATIVE",
+    "MIXED",
+  ]),
+  /** OutcomeIds of relevant NEGATIVE historical outcomes (traceable). */
+  contradictoryEvidence: z.array(z.string()).max(500),
+  limitations: z.array(z.string()).max(20),
+}).strict();
+export type ConfidenceAssessment = z.infer<typeof ConfidenceAssessmentSchema>;
+
+// ---------------------------------------------------------------------------
 // Recommendation record
 // ---------------------------------------------------------------------------
 
@@ -517,6 +564,7 @@ export const RecommendationRecordSchema = z
     entityLevel: AggregationLevelSchema,
     entityId: z.string().min(1),
     diagnosisId: z.string().min(1),
+    diagnosisCategory: z.string().nullable().optional(),
     anomalyIds: z.array(z.string()).max(50),
     actionType: RecommendationActionSchema,
     currentState: z.record(z.unknown()),
@@ -526,6 +574,9 @@ export const RecommendationRecordSchema = z
     expectedImpact: ExpectedImpactSchema,
     risk: RecommendationRiskSchema,
     confidence: ConfidenceLevelSchema,
+    priority: z.enum(["LOW", "MEDIUM", "HIGH"]).default("MEDIUM"),
+    historicalEvidenceIds: z.array(z.string()).default([]),
+    confidenceExplanation: ConfidenceAssessmentSchema.nullable().optional(),
     preconditions: z.array(z.string()).max(20),
     paramsHash: z.string().min(16),
     stateHash: z.string().min(16),

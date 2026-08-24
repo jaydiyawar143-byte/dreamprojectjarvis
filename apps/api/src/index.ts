@@ -11,6 +11,8 @@ import { createAuthRouter } from "./routes/auth.js";
 import { createChatRouter } from "./routes/chat.js";
 import { createConversationsRouter } from "./routes/conversations.js";
 import { createApprovalsRouter } from "./routes/approvals.js";
+import { createRecommendationsRouter } from "./routes/recommendations.js";
+import { createOutcomesRouter } from "./routes/outcomes.js";
 import { getContainer } from "./services/container.js";
 import {
   ShutdownLifecycle,
@@ -69,6 +71,8 @@ app.use("/api/v1/auth", createAuthRouter(container.authService, container.tokenS
 app.use("/api/v1/chat", createChatRouter(container));
 app.use("/api/v1/conversations", createConversationsRouter(container));
 app.use("/api/v1/approvals", createApprovalsRouter(container));
+app.use("/api/v1/recommendations", createRecommendationsRouter(container));
+app.use("/api/v1", createOutcomesRouter(container));
 
 io.on("connection", (socket) => {
   console.log(`Client connected: ${socket.id}`);

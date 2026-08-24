@@ -305,9 +305,29 @@ model MarketingAccount {
   snapshots       MetricSnapshot[]
   recommendations PerformanceRecommendation[]
   outcomes        DecisionRecord[]
+  outcomeRecords  OutcomeRecord[]
 
   @@index([userId])
   @@map("MarketingAccount")
+}
+
+// Phase 11.7A enums — Outcome Measurement Foundation
+enum OutcomeEnum {
+  POSITIVE
+  NEGATIVE
+  NEUTRAL
+  INCONCLUSIVE
+  NOT_MEASURABLE
+  FAILED_ACTION
+}
+
+enum MeasurementState {
+  SCHEDULED
+  COLLECTING
+  WAITING_FOR_DATA
+  WAITING_FOR_ATTRIBUTION
+  READY
+  FINALIZED
 }
 
 enum PerformanceLevel {
@@ -398,6 +418,7 @@ model PerformanceRecommendation {
 
   // --- Phase 11.5 evidence/state binding --------------------------------
   diagnosisId       String?                @map("diagnosis_id")
+  diagnosisCategory String?                @map("diagnosis_category")
   anomalyIds        Json                   @default("[]") @map("anomaly_ids")
   currentState      Json?                  @map("current_state")
   proposedState     Json?                  @map("proposed_state")
@@ -407,7 +428,9 @@ model PerformanceRecommendation {
   identityHash      String?                @map("identity_hash")
   requiresApproval  Boolean                @default(true) @map("requires_approval")
   staleReasons      Json?                  @map("stale_reasons")
-
+  priority          String                 @default("MEDIUM") @map("priority")
+  historicalEvidenceIds Json               @default("[]") @map("historical_evidence_ids")
+  confidenceExplanation Json?                @map("confidence_explanation")
   approvalId        String?                @map("approval_id")
   executionId       String?                @map("execution_id")
 
@@ -420,6 +443,7 @@ model PerformanceRecommendation {
 
   account MarketingAccount @relation(fields: [accountId], references: [accountId], onDelete: Cascade)
   outcome DecisionRecord?
+  outcomeRecord OutcomeRecord?
 
   @@index([userId, status])
   @@index([accountId, targetId])
@@ -449,3 +473,90 @@ model DecisionRecord {
   @@index([accountId])
   @@map("DecisionRecord")
 }
+
+// ---------------------------------------------------------------------------
+// Phase 11.7A — OutcomeRecord
+// ---------------------------------------------------------------------------
+// Authoritative, immutable-once-finalized measurement of whether an approved
+// marketing action produced its intended outcome.
+//
+// Rules enforced at the repository layer:
+//   - baselineSnapshot is written ONCE at creation and NEVER updated.
+//   - isFinal = true → no further updates are allowed (idempotent finalize).
+//   - Unique per recommendationId → one outcome per recommendation.
+//   - Account + userId isolation enforced on every read/write.
+// ---------------------------------------------------------------------------
+model OutcomeRecord {
+  // --- Core identifiers ---
+  outcomeId          String            @id @default(cuid())   @map("outcome_id")
+  recommendationId   String            @unique                 @map("recommendation_id")
+  executionId        String                                    @map("execution_id")
+  userId             String                                    @map("user_id")
+  accountId          String                                    @map("account_id")
+  diagnosisCategory  String?                                   @map("diagnosis_category")
+
+  // --- Entity context ---
+  entityType         PerformanceLevel                          @map("entity_type")
+  entityId           String                                    @map("entity_id")
+  actionType         OptimizationActionType                    @map("action_type")
+  objective          String?                                   @map("objective")
+  primaryMetric      String                                    @map("primary_metric")
+
+  // --- Immutable baseline (written once at create, NEVER updated) ---
+  baselineSnapshot   Json                                      @map("baseline_snapshot")
+
+  // --- Current measurement (updated as data arrives, frozen at FINALIZED) ---
+  measurementKpis    Json?                                     @map("measurement_kpis")
+  comparison         Json?                                     @map("comparison")
+
+  // --- Outcome verdict (null until FINALIZED) ---
+  outcomeEnum        OutcomeEnum?                              @map("outcome_enum")
+  confidence         Float?                                    @map("confidence")
+  dataQuality        String?                                   @map("data_quality")
+
+  // --- Attribution & confounders ---
+  attributionStatus  String                                    @map("attribution_status")
+  confounders        Json                                      @default("[]") @map("confounders")
+  measurementWindow  Json                                      @map("measurement_window")
+
+  // --- Lifecycle ---
+  measurementState   MeasurementState  @default(SCHEDULED) @map("measurement_state")
+  /// Once isFinal = true, all columns are frozen. Repository MUST enforce this.
+  isFinal            Boolean           @default(false)         @map("is_final")
+  measuredAt         DateTime?                                 @map("measured_at")
+  createdAt          DateTime          @default(now())          @map("created_at")
+  updatedAt          DateTime          @updatedAt               @map("updated_at")
+
+  recommendation PerformanceRecommendation @relation(fields: [recommendationId], references: [id], onDelete: Cascade)
+  account        MarketingAccount           @relation(fields: [accountId], references: [accountId], onDelete: Cascade)
+  revisions      OutcomeRevision[]
+
+  @@index([userId, accountId], map: "outcome_records_user_account_idx")
+  @@index([userId, accountId, diagnosisCategory], map: "outcome_records_user_account_category_idx")
+  @@index([accountId, measurementState], map: "outcome_records_account_state_idx")
+  @@index([recommendationId], map: "outcome_records_recommendation_idx")
+  @@index([createdAt], map: "outcome_records_created_at_idx")
+  @@map("OutcomeRecord")
+}
+
+model OutcomeRevision {
+  id                 String            @id @default(cuid())   @map("id")
+  outcomeId          String                                    @map("outcome_id")
+  revisionNumber     Int                                       @map("revision_number")
+  outcomeEnum        OutcomeEnum                               @map("outcome_enum")
+  confidence         Float                                     @map("confidence")
+  dataQuality        String                                    @map("data_quality")
+  attributionStatus  String                                    @map("attribution_status")
+  confounders        Json                                      @map("confounders")
+  measurementKpis    Json                                      @map("measurement_kpis")
+  comparison         Json                                      @map("comparison")
+  measuredAt         DateTime                                  @map("measured_at")
+  createdAt          DateTime          @default(now())          @map("created_at")
+
+  outcomeRecord      OutcomeRecord     @relation(fields: [outcomeId], references: [outcomeId], onDelete: Cascade)
+
+  @@unique([outcomeId, revisionNumber], map: "outcome_revisions_unique_idx")
+  @@index([outcomeId], map: "outcome_revisions_outcome_idx")
+  @@map("OutcomeRevision")
+}
+

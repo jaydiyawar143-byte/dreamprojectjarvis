@@ -79,6 +79,7 @@ interface DbRowShape {
   proposedChange: unknown;
   paramsHash: string;
   diagnosisId: string | null;
+  diagnosisCategory: string | null;
   anomalyIds: unknown;
   currentState: unknown;
   proposedState: unknown;
@@ -88,6 +89,9 @@ interface DbRowShape {
   identityHash: string | null;
   requiresApproval: boolean;
   staleReasons: unknown;
+  priority: string;
+  historicalEvidenceIds: unknown;
+  confidenceExplanation: unknown;
   approvalId: string | null;
   executionId: string | null;
   expiresAt: Date;
@@ -124,6 +128,7 @@ function toRecord(row: DbRowShape): RecommendationRecord {
     entityLevel: row.targetLevel,
     entityId: row.targetId,
     diagnosisId: row.diagnosisId ?? "unknown_diagnosis",
+    diagnosisCategory: row.diagnosisCategory ?? null,
     anomalyIds: Array.isArray(row.anomalyIds) ? (row.anomalyIds as string[]) : [],
     actionType: DB_TO_ACTION[row.actionType],
     currentState:
@@ -139,6 +144,13 @@ function toRecord(row: DbRowShape): RecommendationRecord {
     expectedImpact,
     risk: (row.riskLevel as RecommendationRecord["risk"]) ?? "LOW",
     confidence: floatToConfidence(row.confidence),
+    priority: (row.priority as RecommendationRecord["priority"]) ?? "MEDIUM",
+    historicalEvidenceIds: Array.isArray(row.historicalEvidenceIds)
+      ? (row.historicalEvidenceIds as string[])
+      : [],
+    confidenceExplanation: row.confidenceExplanation
+      ? (row.confidenceExplanation as RecommendationRecord["confidenceExplanation"])
+      : null,
     preconditions: Array.isArray(row.preconditions) ? (row.preconditions as string[]) : [],
     paramsHash: row.paramsHash,
     stateHash: row.stateHash ?? "",
@@ -202,6 +214,7 @@ export class PrismaRecommendationRepository implements RecommendationStorePort {
           proposedChange: (record.proposedState ?? {}) as unknown as Prisma.InputJsonValue,
           paramsHash: record.paramsHash,
           diagnosisId: record.diagnosisId,
+          diagnosisCategory: record.diagnosisCategory ?? null,
           anomalyIds: record.anomalyIds as unknown as Prisma.InputJsonValue,
           currentState: record.currentState as unknown as Prisma.InputJsonValue,
           proposedState: record.proposedState as unknown as Prisma.InputJsonValue,
@@ -211,6 +224,9 @@ export class PrismaRecommendationRepository implements RecommendationStorePort {
           identityHash: record.identityHash,
           requiresApproval: true,
           staleReasons: (record.staleReasons ?? []) as unknown as Prisma.InputJsonValue,
+          priority: record.priority,
+          historicalEvidenceIds: record.historicalEvidenceIds as unknown as Prisma.InputJsonValue,
+          confidenceExplanation: record.confidenceExplanation as unknown as Prisma.InputJsonValue,
           expiresAt: new Date(record.expiresAt),
           createdAt: new Date(record.createdAt),
           approvedAt: record.approvalId ? new Date() : null,
