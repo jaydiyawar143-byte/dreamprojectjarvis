@@ -1,0 +1,46 @@
+sequenceDiagram
+    participant U as User
+    participant A as Agent
+    participant R as Recommendation
+    participant AP as Approval Gate
+    participant J as Execution Journal
+    participant T as Tool
+    participant M as Meta Graph API
+    participant O as Outcome Engine
+    participant H as Historical Intel
+
+    U->>A: "Execute this recommendation"
+    A->>R: Generate recommendation
+    R-->>A: Recommendation + paramsHash
+    A->>AP: Request approval
+    AP-->>U: "Approve this action?"
+    U->>AP: Approve
+    
+    AP->>J: Begin execution (lease)
+    J->>J: Record PENDING → APPROVED → EXECUTING
+    
+    J->>T: Execute with approved params
+    T->>T: Verify paramsHash
+    T->>M: POST write operation
+    M-->>T: Success / Timeout / Error
+    
+    alt Success
+        T-->>J: Mark SUCCEEDED
+        J->>AP: Consume approval (atomic)
+        AP-->>A: Execution complete
+        A->>O: Schedule outcome measurement
+    else Timeout
+        T-->>J: Mark UNKNOWN
+        J->>O: Schedule reconciliation
+        O->>M: GET verify state
+        M-->>O: State confirmed
+        O-->>J: Finalize outcome
+    else Error
+        T-->>J: Mark FAILED
+        J-->>A: Execution failed
+    end
+    
+    O-->>O: Measure post-action metrics
+    O-->>H: Store outcome
+    H-->>H: Feed into historical evidence
+    H-->>R: Inform future confidence

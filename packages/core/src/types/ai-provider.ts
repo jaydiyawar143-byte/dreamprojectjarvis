@@ -3,6 +3,7 @@ export interface AIMessage {
   content: string;
   name?: string;
   toolCallId?: string;
+  toolCalls?: AIToolCall[];
 }
 
 export interface AIToolDefinition {

@@ -15,7 +15,7 @@ export function convertMessages(messages: AIMessage[]): OpenAIMessage[] {
   return messages.map((msg) => {
     const converted: OpenAIMessage = {
       role: msg.role,
-      content: msg.content,
+      content: msg.content ?? "",
     };
 
     if (msg.name) {
@@ -24,6 +24,17 @@ export function convertMessages(messages: AIMessage[]): OpenAIMessage[] {
 
     if (msg.role === "tool" && msg.toolCallId) {
       converted.tool_call_id = msg.toolCallId;
+    }
+
+    if (msg.role === "assistant" && msg.toolCalls && msg.toolCalls.length > 0) {
+      converted.tool_calls = msg.toolCalls.map((tc) => ({
+        id: tc.id,
+        type: "function" as const,
+        function: {
+          name: tc.name,
+          arguments: JSON.stringify(tc.arguments),
+        },
+      }));
     }
 
     return converted;
@@ -95,7 +106,7 @@ export function convertResponse(
   return {
     message: {
       role: "assistant",
-      content: choice.message.content,
+      content: choice.message.content ?? "",
       toolCalls,
     },
     finishReason,

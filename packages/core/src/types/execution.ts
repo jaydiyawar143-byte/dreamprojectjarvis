@@ -51,6 +51,7 @@ export type ToolExecutionStatus =
 
 export interface ToolExecutionRequest {
   toolId: string;
+  toolCallId?: string;
   params: Record<string, unknown>;
   userId: string;
   role: Role;
@@ -75,6 +76,7 @@ export interface ToolExecutionRequest {
 export interface ToolExecutionResult {
   executionId: string;
   toolId: string;
+  toolCallId?: string;
   status: ToolExecutionStatus;
   result?: ToolResult;
   approvalId?: string;
@@ -82,6 +84,25 @@ export interface ToolExecutionResult {
   startedAt: Date;
   completedAt?: Date;
   durationMs?: number;
+}
+
+export interface ToolExecutionEntry {
+  toolId: string;
+  toolCallId?: string;
+  status: ToolExecutionStatus;
+  success: boolean;
+  error?: string;
+  durationMs?: number;
+}
+
+export interface ToolExecutionSummary {
+  total: number;
+  succeeded: number;
+  failed: number;
+  denied: number;
+  allSucceeded: boolean;
+  allFailed: boolean;
+  executions: ToolExecutionEntry[];
 }
 
 export interface IToolExecutor {

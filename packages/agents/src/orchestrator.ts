@@ -10,6 +10,8 @@ import type {
   IToolExecutor,
   AuditLogger,
   ToolExecutionResult,
+  ToolExecutionSummary,
+  ToolExecutionEntry,
   IMemoryStore,
   IMemoryExtractor,
   IEmbeddingProvider,
@@ -126,6 +128,7 @@ export class Orchestrator implements IOrchestrator {
         metadata: request.metadata,
       };
 
+      let allToolResults: ToolExecutionResult[] = [];
       let totalToolExecutions = 0;
       let depth = 0;
 
@@ -133,7 +136,35 @@ export class Orchestrator implements IOrchestrator {
         const output = await agent.process(currentInput);
 
         if (!output.actions || output.actions.length === 0) {
+          const toolSummary = this.buildToolExecutionSummary(allToolResults);
+
+          if (toolSummary.total > 0 && toolSummary.allFailed) {
+            const failedTools = toolSummary.executions
+              .filter((e) => !e.success)
+              .map((e) => `${e.toolId}: ${e.error ?? e.status}`)
+              .join("; ");
+
+            await this.auditRequest(context, "failure", startedAt, `All tool executions failed: ${failedTools}`);
+
+            this.logStructuredToolExecution(context, toolSummary, startedAt);
+
+            return this.buildErrorResponse(
+              new JarvisError(
+                "TOOL_EXECUTION_FAILED",
+                "Data retrieval failed. Meta Ads data could not be fetched.",
+                {
+                  toolExecution: toolSummary,
+                  reason: failedTools,
+                }
+              ),
+              traceId,
+              context
+            );
+          }
+
           await this.auditRequest(context, "success", startedAt);
+
+          this.logStructuredToolExecution(context, toolSummary, startedAt);
 
           this.extractMemoryAsync(
             request.message,
@@ -142,11 +173,18 @@ export class Orchestrator implements IOrchestrator {
             context.conversationId,
           ).catch(() => {});
 
+          const responseMetadata: Record<string, unknown> = {
+            ...output.metadata,
+          };
+          if (toolSummary.total > 0) {
+            responseMetadata.toolExecution = toolSummary;
+          }
+
           return this.buildSuccessResponse(
             output.message,
             traceId,
             context,
-            output.metadata
+            responseMetadata
           );
         }
 
@@ -162,6 +200,7 @@ export class Orchestrator implements IOrchestrator {
           output.actions,
           context
         );
+        allToolResults.push(...toolResults);
         totalToolExecutions += output.actions.length;
 
         currentInput = {
@@ -373,7 +412,7 @@ export class Orchestrator implements IOrchestrator {
   }
 
   private async executeTools(
-    actions: Array<{ toolId: string; params: Record<string, unknown> }>,
+    actions: Array<{ toolId: string; toolCallId?: string; params: Record<string, unknown> }>,
     context: SessionContext
   ): Promise<ToolExecutionResult[]> {
     const results: ToolExecutionResult[] = [];
@@ -385,6 +424,7 @@ export class Orchestrator implements IOrchestrator {
 
       const request: ToolExecutionRequest = {
         toolId: action.toolId,
+        toolCallId: action.toolCallId,
         params: action.params,
         userId: context.auth.userId,
         role: context.auth.role,
@@ -416,6 +456,7 @@ export class Orchestrator implements IOrchestrator {
             const approvalResult: ToolExecutionResult = {
               executionId,
               toolId: action.toolId,
+              toolCallId: action.toolCallId,
               status: "approval_required",
               approvalId: check.approvalId,
               error: check.reason,
@@ -431,6 +472,7 @@ export class Orchestrator implements IOrchestrator {
             const deniedResult: ToolExecutionResult = {
               executionId,
               toolId: action.toolId,
+              toolCallId: action.toolCallId,
               status: "permission_denied",
               error: check.reason,
               startedAt: stepStartedAt,
@@ -444,10 +486,74 @@ export class Orchestrator implements IOrchestrator {
       }
 
       const result = await this.toolExecutor.execute(request);
+      result.toolCallId = action.toolCallId;
       results.push(result);
     }
 
     return results;
+  }
+
+  // -----------------------------------------------------------------------
+  // Tool execution summary & structured logging
+  // -----------------------------------------------------------------------
+
+  private buildToolExecutionSummary(results: ToolExecutionResult[]): ToolExecutionSummary {
+    const executions: ToolExecutionEntry[] = results.map((r) => ({
+      toolId: r.toolId,
+      toolCallId: r.toolCallId,
+      status: r.status,
+      success: r.status === "completed",
+      error: r.error,
+      durationMs: r.durationMs,
+    }));
+
+    const succeeded = executions.filter((e) => e.status === "completed").length;
+    const failed = executions.filter((e) =>
+      ["failed", "timed_out"].includes(e.status)
+    ).length;
+    const denied = executions.filter((e) =>
+      ["permission_denied", "approval_required", "approval_pending", "approval_denied"].includes(e.status)
+    ).length;
+
+    return {
+      total: executions.length,
+      succeeded,
+      failed,
+      denied,
+      allSucceeded: executions.length > 0 && succeeded === executions.length,
+      allFailed: executions.length > 0 && (succeeded + denied) === 0 && failed > 0,
+      executions,
+    };
+  }
+
+  private logStructuredToolExecution(
+    context: SessionContext,
+    summary: ToolExecutionSummary,
+    startedAt: Date
+  ): void {
+    const totalDurationMs = Date.now() - startedAt.getTime();
+    const redactedExecutions = summary.executions.map((e) => ({
+      tool: e.toolId,
+      status: e.status,
+      success: e.success,
+      error: e.error,
+      durationMs: e.durationMs,
+    }));
+
+    console.log(JSON.stringify({
+      level: "info",
+      event: "tool_execution_summary",
+      traceId: context.traceId,
+      userId: context.auth.userId,
+      totalTools: summary.total,
+      succeeded: summary.succeeded,
+      failed: summary.failed,
+      denied: summary.denied,
+      allSucceeded: summary.allSucceeded,
+      allFailed: summary.allFailed,
+      totalDurationMs,
+      executions: redactedExecutions,
+    }));
   }
 
   // -----------------------------------------------------------------------

@@ -1,0 +1,27 @@
+graph LR
+    Raw["Raw Meta Data<br/>Spend, Impressions,<br/>Clicks, Reach,<br/>Conversions, Revenue"]
+    
+    KPI["KPI Engine<br/>CTR, CPC, CPM,<br/>CPA, ROAS, CVR,<br/>Frequency"]
+    
+    Agg["Performance<br/>Aggregator<br/>Time windows,<br/>Period comparison"]
+    
+    Anomaly["Anomaly<br/>Engine<br/>Median/MAD,<br/>Z-score,<br/>Severity"]
+    
+    Evidence["Evidence<br/>Builder<br/>Structured package,<br/>Content hash"]
+    
+    Diagnosis["Diagnosis<br/>Engine (AI)<br/>Facts, Inferences,<br/>Hypotheses"]
+    
+    Rec["Recommendation<br/>Engine<br/>Action catalog,<br/>Budget guardrails,<br/>paramsHash"]
+    
+    Confidence["Confidence<br/>Engine<br/>Historical evidence,<br/>Consistency,<br/>LOW/MED/HIGH"]
+    
+    Scoring["Opportunity<br/>Scoring<br/>Weighted formula,<br/>Priority bands"]
+
+    Raw --> KPI
+    KPI --> Agg
+    Agg --> Anomaly
+    Anomaly --> Evidence
+    Evidence --> Diagnosis
+    Diagnosis --> Rec
+    Rec --> Confidence
+    Confidence --> Scoring

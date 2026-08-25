@@ -1,0 +1,30 @@
+graph TD
+    Analyze["1. Analyze Performance<br/>KPIs + Anomaly Detection"]
+    Diagnose["2. Diagnose Causes<br/>AI-Powered Analysis"]
+    Recommend["3. Generate Recommendations<br/>Deterministic Actions"]
+    Score["4. Score Opportunities<br/>Business Importance"]
+    Approve["5. Human Approval<br/>Safety Gate"]
+    Execute["6. Execute Action<br/>Meta Graph API"]
+    Measure["7. Measure Outcome<br/>Baseline vs Post-Action"]
+    Record["8. Record Historical Evidence<br/>Outcome Database"]
+    
+    Analyze --> Diagnose
+    Diagnose --> Recommend
+    Recommend --> Score
+    Score --> Approve
+    Approve -->|"approved"| Execute
+    Execute --> Measure
+    Measure --> Record
+    Record -->|"informs future"| Analyze
+    
+    Approve -->|"rejected"| Recommend
+    Measure -->|"outcome feeds"| Score
+    
+    style Analyze fill:#e1f5fe
+    style Diagnose fill:#f3e5f5
+    style Recommend fill:#e8f5e8
+    style Score fill:#fff3e0
+    style Approve fill:#fce4ec
+    style Execute fill:#e0f2f1
+    style Measure fill:#f1f8e9
+    style Record fill:#ede7f6

@@ -1,0 +1,84 @@
+graph TB
+    subgraph "Frontend"
+        Web["Next.js 14<br/>App Router"]
+    end
+
+    subgraph "Backend"
+        API["Express API<br/>+ Socket.IO"]
+        Auth["Auth Middleware<br/>JWT + RBAC"]
+    end
+
+    subgraph "Agent System"
+        Orch["Orchestrator"]
+        Agent["Conversational Agent"]
+        Planner["Tool Planner"]
+    end
+
+    subgraph "Tool System"
+        Reg["Tool Registry"]
+        Exec["Tool Executor"]
+        Journal["Execution Journal"]
+        Approval["Approval Gate"]
+    end
+
+    subgraph "Intelligence Pipeline"
+        KPI["KPI Engine"]
+        Agg["Performance Aggregator"]
+        Anomaly["Anomaly Engine"]
+        Evidence["Evidence Builder"]
+        Diagnosis["Diagnosis Engine (AI)"]
+        Rec["Recommendation Engine"]
+        Confidence["Confidence Engine"]
+        Scoring["Opportunity Scoring"]
+    end
+
+    subgraph "Outcome System"
+        Outcome["Outcome Engine"]
+        Worker["Outcome Worker"]
+        Historical["Historical Intelligence"]
+    end
+
+    subgraph "Integrations"
+        MetaR["Meta Graph API<br/>(Read)"]
+        MetaW["Meta Graph API<br/>(Write)"]
+        OpenAI["OpenAI API"]
+        Anthropic["Anthropic API"]
+    end
+
+    subgraph "Data Layer"
+        PG["PostgreSQL<br/>+ pgvector"]
+        Memory["Memory Engine"]
+    end
+
+    Web --> API
+    API --> Auth
+    Auth --> Orch
+    Orch --> Agent
+    Agent --> Planner
+    Planner --> Reg
+    Reg --> Exec
+    Exec --> Approval
+    Approval --> Journal
+    Journal --> MetaW
+
+    Agent --> KPI
+    KPI --> Agg
+    Agg --> Anomaly
+    Anomaly --> Evidence
+    Evidence --> Diagnosis
+    Diagnosis --> OpenAI
+    Diagnosis --> Anthropic
+    Diagnosis --> Rec
+    Rec --> Confidence
+    Confidence --> Scoring
+
+    Exec --> Outcome
+    Outcome --> Worker
+    Worker --> Historical
+    Historical --> Confidence
+
+    Reg --> MetaR
+    MetaR --> PG
+    MetaW --> PG
+    Agent --> Memory
+    Memory --> PG

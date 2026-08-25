@@ -1,0 +1,73 @@
+graph TD
+    subgraph "Phase 9 — Meta Integration"
+        P93["9.3: AI-Assisted<br/>Campaign Creation"]
+        P93R["9.3-R: Real Meta<br/>Graph API Provider"]
+    end
+
+    subgraph "Phase 10 — Production Readiness"
+        P10["10: Production<br/>Readiness Audit"]
+        P102["10.2: Concurrency<br/>& Crash Recovery"]
+        P103["10.3: Approval<br/>Persistence"]
+        P104["10.4: Timeout<br/>Classification"]
+        P105["10.5: Reconciliation<br/>Service"]
+        P106["10.6: Shutdown<br/>Lifecycle"]
+        P107["10.7: Approval<br/>API"]
+    end
+
+    subgraph "Phase 11 — Marketing Intelligence"
+        P111["11.1: KPI Engine"]
+        P112["11.2: Performance<br/>Aggregation"]
+        P113["11.3: Anomaly<br/>Detection"]
+        P114["11.4: Evidence &<br/>Diagnosis (AI)"]
+        P115["11.5: Recommendation<br/>Engine"]
+        P116A["11.6A: Execution<br/>Bridge"]
+        P116B["11.6B: Real<br/>Smoke Test"]
+        P117A["11.7A: Outcome<br/>Foundation"]
+        P117B["11.7B: Outcome<br/>Worker"]
+        P118A["11.8A: Historical<br/>Intelligence"]
+        P118B["11.8B: Confidence<br/>Engine"]
+        P119A["11.9A: Opportunity<br/>Scoring"]
+    end
+
+    P93 --> P93R
+    P93R --> P10
+    P10 --> P102
+    P102 --> P103
+    P103 --> P104
+    P104 --> P105
+    P105 --> P106
+    P106 --> P107
+    P107 --> P111
+    P111 --> P112
+    P112 --> P113
+    P113 --> P114
+    P114 --> P115
+    P115 --> P116A
+    P116A --> P116B
+    P116B --> P117A
+    P117A --> P117B
+    P117B --> P118A
+    P118A --> P118B
+    P118B --> P119A
+
+    style P93 fill:#bbdefb
+    style P93R fill:#bbdefb
+    style P10 fill:#ffcdd2
+    style P102 fill:#c8e6c9
+    style P103 fill:#c8e6c9
+    style P104 fill:#c8e6c9
+    style P105 fill:#c8e6c9
+    style P106 fill:#c8e6c9
+    style P107 fill:#c8e6c9
+    style P111 fill:#fff9c4
+    style P112 fill:#fff9c4
+    style P113 fill:#fff9c4
+    style P114 fill:#f3e5f5
+    style P115 fill:#e8f5e8
+    style P116A fill:#e0f2f1
+    style P116B fill:#e0f2f1
+    style P117A fill:#fce4ec
+    style P117B fill:#fce4ec
+    style P118A fill:#ede7f6
+    style P118B fill:#ede7f6
+    style P119A fill:#fff3e0

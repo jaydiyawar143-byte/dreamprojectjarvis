@@ -52,6 +52,7 @@ export const AgentOutputSchema = z.object({
     .array(
       z.object({
         toolId: z.string(),
+        toolCallId: z.string().optional(),
         params: z.record(z.unknown()),
       })
     )
