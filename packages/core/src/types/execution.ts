@@ -71,6 +71,7 @@ export interface ToolExecutionRequest {
    * journal classification (FAILED vs UNKNOWN) is decided by the tool.
    */
   signal?: AbortSignal;
+  approvalId?: string;
 }
 
 export interface ToolExecutionResult {

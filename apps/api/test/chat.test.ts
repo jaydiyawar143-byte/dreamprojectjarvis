@@ -88,7 +88,7 @@ function createMockOrchestrator(
 
 function createMockConversationRepo(): PrismaConversationRepository & {
   getConversations: () => Map<string, Conversation>;
-  getMessages: () => Map<string, ConversationMessage[]>;
+  getAllMessages: () => Map<string, ConversationMessage[]>;
 } {
   const conversations = new Map<string, Conversation>();
   const messages = new Map<string, ConversationMessage[]>();
@@ -145,10 +145,10 @@ function createMockConversationRepo(): PrismaConversationRepository & {
       return false;
     },
     getConversations: () => conversations,
-    getMessages: () => messages,
+    getAllMessages: () => messages,
   } as PrismaConversationRepository & {
     getConversations: () => Map<string, Conversation>;
-    getMessages: () => Map<string, ConversationMessage[]>;
+    getAllMessages: () => Map<string, ConversationMessage[]>;
   };
 }
 
@@ -488,7 +488,7 @@ describe("POST /api/v1/chat", () => {
 
     const convs = mockConversationRepo.getConversations();
     const convId = Array.from(convs.keys())[0];
-    const msgs = mockConversationRepo.getMessages().get(convId) ?? [];
+    const msgs = mockConversationRepo.getAllMessages().get(convId) ?? [];
     const userMsg = msgs.find((m) => m.role === "user");
     expect(userMsg).toBeDefined();
     expect(userMsg!.content).toBe("Hello JARVIS");
@@ -502,7 +502,7 @@ describe("POST /api/v1/chat", () => {
 
     const convs = mockConversationRepo.getConversations();
     const convId = Array.from(convs.keys())[0];
-    const msgs = mockConversationRepo.getMessages().get(convId) ?? [];
+    const msgs = mockConversationRepo.getAllMessages().get(convId) ?? [];
     const assistantMsg = msgs.find((m) => m.role === "assistant");
     expect(assistantMsg).toBeDefined();
     expect(assistantMsg!.content).toBe("Hello! I am JARVIS.");
@@ -596,5 +596,122 @@ describe("POST /api/v1/chat", () => {
     expect(bodyStr).not.toContain("Internal stack trace");
     expect(bodyStr).not.toContain("at ");
     expect(bodyStr).not.toContain(".ts:");
+  });
+
+  it("21. Multi-turn: history loaded from DB on second turn", async () => {
+    const res1 = await makeRequest(router, {
+      headers: { authorization: `Bearer ${userToken}` },
+      body: { message: "Create a campaign called Summer Push" },
+    });
+    expect((res1.body as any).success).toBe(true);
+    const conversationId = (res1.body as any).data.conversationId;
+
+    const res2 = await makeRequest(router, {
+      headers: { authorization: `Bearer ${userToken}` },
+      body: { message: "What did I just ask you to create?", conversationId },
+    });
+    expect((res2.body as any).success).toBe(true);
+
+    const requests = mockOrchestrator.getProcessedRequests();
+    const secondRequest = requests[requests.length - 1];
+    expect(secondRequest.conversationHistory).toBeDefined();
+    expect(secondRequest.conversationHistory!.length).toBeGreaterThanOrEqual(2);
+
+    const historyRoles = secondRequest.conversationHistory!.map((m) => m.role);
+    expect(historyRoles).toContain("user");
+    expect(historyRoles).toContain("assistant");
+  });
+
+  it("22. Multi-turn: current message not duplicated in history", async () => {
+    const res1 = await makeRequest(router, {
+      headers: { authorization: `Bearer ${userToken}` },
+      body: { message: "First message" },
+    });
+    const conversationId = (res1.body as any).data.conversationId;
+
+    await makeRequest(router, {
+      headers: { authorization: `Bearer ${userToken}` },
+      body: { message: "Second message", conversationId },
+    });
+
+    const requests = mockOrchestrator.getProcessedRequests();
+    const secondRequest = requests[requests.length - 1];
+
+    expect(secondRequest.message).toBe("Second message");
+
+    const historyUserContents = secondRequest.conversationHistory!
+      .filter((m) => m.role === "user")
+      .map((m) => m.content);
+
+    expect(historyUserContents).toContain("First message");
+    expect(historyUserContents).not.toContain("Second message");
+  });
+
+  it("23. Multi-turn: conversation history only contains user/assistant (no system/tool)", async () => {
+    const res1 = await makeRequest(router, {
+      headers: { authorization: `Bearer ${userToken}` },
+      body: { message: "Hello" },
+    });
+    const conversationId = (res1.body as any).data.conversationId;
+
+    await makeRequest(router, {
+      headers: { authorization: `Bearer ${userToken}` },
+      body: { message: "Follow up", conversationId },
+    });
+
+    const requests = mockOrchestrator.getProcessedRequests();
+    const secondRequest = requests[requests.length - 1];
+
+    for (const msg of secondRequest.conversationHistory!) {
+      expect(["user", "assistant"]).toContain(msg.role);
+    }
+  });
+
+  it("24. Conversation isolation: User A history invisible to User B", async () => {
+    const userAToken = tokenService.generateAccessToken({
+      userId: "user-alpha",
+      role: "member",
+      email: "alpha@test.com",
+    });
+    const userBToken = tokenService.generateAccessToken({
+      userId: "user-beta",
+      role: "member",
+      email: "beta@test.com",
+    });
+
+    const resA1 = await makeRequest(router, {
+      headers: { authorization: `Bearer ${userAToken}` },
+      body: { message: "My secret Q4 budget is 50000" },
+    });
+    const convIdA = (resA1.body as any).data.conversationId;
+
+    const resB1 = await makeRequest(router, {
+      headers: { authorization: `Bearer ${userBToken}` },
+      body: { message: "Tell me about the budget" },
+    });
+    const convIdB = (resB1.body as any).data.conversationId;
+
+    await makeRequest(router, {
+      headers: { authorization: `Bearer ${userBToken}` },
+      body: { message: "What is the Q4 budget?", conversationId: convIdB },
+    });
+
+    const requests = mockOrchestrator.getProcessedRequests();
+    const lastRequest = requests[requests.length - 1];
+    const allHistory = (lastRequest.conversationHistory ?? []).map((m) => m.content).join(" ");
+    expect(allHistory).not.toContain("50000");
+    expect(allHistory).not.toContain("secret Q4 budget");
+  });
+
+  it("25. New conversation (no conversationId) sends empty history", async () => {
+    await makeRequest(router, {
+      headers: { authorization: `Bearer ${userToken}` },
+      body: { message: "Hello" },
+    });
+
+    const requests = mockOrchestrator.getProcessedRequests();
+    const lastRequest = requests[requests.length - 1];
+    expect(lastRequest.conversationHistory).toBeDefined();
+    expect(lastRequest.conversationHistory!.length).toBe(0);
   });
 });

@@ -16,11 +16,13 @@ interface ChatState {
   loading: boolean;
   sending: boolean;
   error: string | null;
+  lastFailedMessage: string | null;
 
   loadConversations: () => Promise<void>;
   selectConversation: (id: string) => Promise<void>;
   newConversation: () => void;
   sendMessage: (content: string) => Promise<void>;
+  retryMessage: () => Promise<void>;
   clearError: () => void;
 }
 
@@ -31,6 +33,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   loading: false,
   sending: false,
   error: null,
+  lastFailedMessage: null,
 
   loadConversations: async () => {
     const res = await listConversations();
@@ -40,7 +43,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   selectConversation: async (id: string) => {
-    set({ activeConversationId: id, messages: [], loading: true, error: null });
+    set({ activeConversationId: id, messages: [], loading: true, error: null, lastFailedMessage: null });
     const res = await getConversation(id);
     if (res.success && res.data) {
       set({ messages: res.data.messages, loading: false });
@@ -50,7 +53,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   newConversation: () => {
-    set({ activeConversationId: null, messages: [], error: null });
+    set({ activeConversationId: null, messages: [], error: null, lastFailedMessage: null });
   },
 
   sendMessage: async (content: string) => {
@@ -62,7 +65,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       createdAt: new Date().toISOString(),
     };
 
-    set({ messages: [...messages, userMsg], sending: true, error: null });
+    set({ messages: [...messages, userMsg], sending: true, error: null, lastFailedMessage: null });
 
     const res = await sendChatMessage(content, activeConversationId ?? undefined);
 
@@ -71,6 +74,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         id: `temp-${Date.now()}-assistant`,
         role: "assistant",
         content: res.data.message,
+        metadata: {
+          ...res.data.metadata,
+          ...(res.data.pendingAction && { pendingAction: res.data.pendingAction }),
+        },
         createdAt: new Date().toISOString(),
       };
 
@@ -86,9 +93,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set({
         sending: false,
         error: res.error?.message || "Failed to send message",
+        lastFailedMessage: content,
       });
     }
   },
 
-  clearError: () => set({ error: null }),
+  retryMessage: async () => {
+    const { lastFailedMessage } = get();
+    if (lastFailedMessage) {
+      await get().sendMessage(lastFailedMessage);
+    }
+  },
+
+  clearError: () => set({ error: null, lastFailedMessage: null }),
 }));

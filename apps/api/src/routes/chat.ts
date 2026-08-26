@@ -5,6 +5,8 @@ import { JarvisRequestSchema, JarvisError } from "@jarvis/core";
 import type { SessionContext, AuthContext } from "@jarvis/core";
 import { createAuthMiddleware, type AuthenticatedRequest } from "../middleware/auth.js";
 import type { Container } from "../services/container.js";
+import { detectIntent } from "@jarvis/agents";
+import type { PendingAction } from "@jarvis/core";
 
 export function createChatRouter(container: Container): Router {
   const router = Router();
@@ -12,25 +14,6 @@ export function createChatRouter(container: Container): Router {
 
   // ---------------------------------------------------------------------------
   // Phase 10.4 — CLIENT DISCONNECT POLICY (authoritative)
-  //
-  // An HTTP client disconnect does NOT cancel the underlying orchestration,
-  // tool executions, or external Meta writes. Rationale:
-  //
-  //   1. Durable-execution semantics: a write claimed in the execution journal
-  //      must reach a terminal state (SUCCEEDED / FAILED / UNKNOWN) recorded
-  //      server-side; tying that outcome to a browser connection lifetime
-  //      would manufacture exactly the ambiguous-failure duplicates the
-  //      journal exists to prevent.
-  //   2. A disconnect is indistinguishable from a flaky network at the moment
-  //      it happens; aborting a possibly-transmitted write would turn a known
-  //      success into an UNKNOWN requiring manual reconciliation.
-  //   3. The response may be lost, but the conversation message and audit
-  //      trail are persisted independently of the socket.
-  //
-  // The request AbortSignal is therefore deliberately NOT forwarded into the
-  // orchestrator/tool executor. If cancellation of long-running work is ever
-  // needed, it must be an explicit API with UNKNOWN-safe journal handling —
-  // never req.on("close") -> abort().
   // ---------------------------------------------------------------------------
   router.post("/", requireAuth, async (req: AuthenticatedRequest, res: Response) => {
     const traceId = randomUUID();
@@ -105,6 +88,201 @@ export function createChatRouter(container: Container): Router {
 
       sessionContext.conversationId = conversationId;
 
+      const existingMessages = await container.conversationRepo.getMessages(conversationId);
+
+      const conversationHistory = existingMessages
+        .filter((m) => m.role === "user" || m.role === "assistant")
+        .map((m) => ({
+          id: m.id,
+          role: m.role as "user" | "assistant",
+          content: m.content,
+          createdAt: m.createdAt,
+          ...(m.metadata && { metadata: m.metadata }),
+        }));
+
+      // -----------------------------------------------------------------------
+      // PHASE 11.9 — INTENT DETECTION + PENDING ACTION RESOLUTION
+      // -----------------------------------------------------------------------
+      let pendingAction: PendingAction | null = null;
+      if (container.pendingActionService && conversationId) {
+        pendingAction = await container.pendingActionService.getActivePendingAction(
+          conversationId,
+          authContext.userId
+        );
+      }
+
+      const intent = detectIntent(jarvisRequest.message, pendingAction);
+
+      // Handle CONFIRM intent
+      if (intent.type === "CONFIRM" && pendingAction && container.pendingActionService) {
+        // Save user message
+        await container.conversationRepo.addMessage({
+          conversationId,
+          role: "user",
+          content: jarvisRequest.message,
+        });
+
+        const confirmResult = await container.pendingActionService.confirmPendingAction(
+          conversationId,
+          authContext.userId
+        );
+
+        if (confirmResult.success && confirmResult.pendingAction) {
+          // Execute the tool — the executor resolves sanitized names internally
+          const executionResult = await container.executor.execute({
+            toolId: pendingAction.toolId,
+            params: pendingAction.params,
+            userId: authContext.userId,
+            role: authContext.role,
+            conversationId,
+            traceId,
+            ipAddress: req.ip,
+            approvalId: pendingAction.approvalId,
+          });
+
+            let assistantMessage: string;
+            if (executionResult.status === "completed" && executionResult.result?.success) {
+              assistantMessage = `Action executed successfully: ${pendingAction.action}.\nResult: ${JSON.stringify(executionResult.result.data, null, 2)}`;
+            } else {
+              assistantMessage = `Action failed: ${pendingAction.action}.\nError: ${executionResult.error ?? "Unknown error"}`;
+            }
+
+            await container.conversationRepo.addMessage({
+              conversationId,
+              role: "assistant",
+              content: assistantMessage,
+              metadata: {
+                traceId,
+                pendingActionId: pendingAction.id,
+                executionStatus: executionResult.status,
+              },
+            });
+
+            res.status(200).json({
+              success: true,
+              data: {
+                message: assistantMessage,
+                conversationId,
+                metadata: {
+                  traceId,
+                  pendingActionId: pendingAction.id,
+                  executionStatus: executionResult.status,
+                },
+              },
+              traceId,
+              timestamp: new Date().toISOString(),
+            });
+            return;
+          }
+
+        // If confirm failed, fall through to normal flow
+        const errorMsg = confirmResult.message;
+        await container.conversationRepo.addMessage({
+          conversationId,
+          role: "assistant",
+          content: errorMsg,
+          metadata: { traceId },
+        });
+
+        res.status(200).json({
+          success: true,
+          data: { message: errorMsg, conversationId },
+          traceId,
+          timestamp: new Date().toISOString(),
+        });
+        return;
+      }
+
+      // Handle REJECT intent
+      if (intent.type === "REJECT" && pendingAction && container.pendingActionService) {
+        await container.conversationRepo.addMessage({
+          conversationId,
+          role: "user",
+          content: jarvisRequest.message,
+        });
+
+        const rejectResult = await container.pendingActionService.rejectPendingAction(
+          conversationId,
+          authContext.userId
+        );
+
+        const assistantMessage = rejectResult.message;
+        await container.conversationRepo.addMessage({
+          conversationId,
+          role: "assistant",
+          content: assistantMessage,
+          metadata: { traceId },
+        });
+
+        res.status(200).json({
+          success: true,
+          data: { message: assistantMessage, conversationId },
+          traceId,
+          timestamp: new Date().toISOString(),
+        });
+        return;
+      }
+
+      // Handle MODIFY intent
+      if (intent.type === "MODIFY" && pendingAction && container.pendingActionService && intent.extractedParams) {
+        await container.conversationRepo.addMessage({
+          conversationId,
+          role: "user",
+          content: jarvisRequest.message,
+        });
+
+        const modifyResult = await container.pendingActionService.modifyPendingAction(
+          conversationId,
+          authContext.userId,
+          intent.extractedParams
+        );
+
+        const assistantMessage = modifyResult.message;
+        await container.conversationRepo.addMessage({
+          conversationId,
+          role: "assistant",
+          content: assistantMessage,
+          metadata: {
+            traceId,
+            pendingAction: {
+              id: modifyResult.pendingAction.id,
+              toolId: modifyResult.pendingAction.toolId,
+              action: modifyResult.pendingAction.action,
+              params: modifyResult.pendingAction.params,
+              riskLevel: modifyResult.pendingAction.riskLevel,
+              state: modifyResult.pendingAction.state,
+              approvalId: modifyResult.pendingAction.approvalId,
+              expiresAt: modifyResult.pendingAction.expiresAt,
+            },
+          },
+        });
+
+        res.status(200).json({
+          success: true,
+          data: {
+            message: assistantMessage,
+            conversationId,
+            pendingAction: {
+              id: modifyResult.pendingAction.id,
+              toolId: modifyResult.pendingAction.toolId,
+              action: modifyResult.pendingAction.action,
+              params: modifyResult.pendingAction.params,
+              riskLevel: modifyResult.pendingAction.riskLevel,
+              state: modifyResult.pendingAction.state,
+              approvalId: modifyResult.pendingAction.approvalId,
+              expiresAt: modifyResult.pendingAction.expiresAt,
+              summary: modifyResult.message,
+            },
+          },
+          traceId,
+          timestamp: new Date().toISOString(),
+        });
+        return;
+      }
+
+      // -----------------------------------------------------------------------
+      // NORMAL FLOW — route to orchestrator
+      // -----------------------------------------------------------------------
       await container.conversationRepo.addMessage({
         conversationId,
         role: "user",
@@ -112,9 +290,18 @@ export function createChatRouter(container: Container): Router {
       });
 
       const response = await container.orchestrator.process(
-        { ...jarvisRequest, conversationId },
+        { ...jarvisRequest, conversationId, conversationHistory },
         sessionContext
       );
+
+      // Check if the response contains a pending action (from orchestrator)
+      let pendingActionData: Record<string, unknown> | undefined;
+      if (response.success && response.data?.metadata) {
+        const meta = response.data.metadata as Record<string, unknown>;
+        if (meta.pendingAction) {
+          pendingActionData = meta.pendingAction as Record<string, unknown>;
+        }
+      }
 
       if (response.success && response.data?.message) {
         await container.conversationRepo.addMessage({
@@ -124,12 +311,16 @@ export function createChatRouter(container: Container): Router {
           metadata: {
             model: response.data.metadata,
             traceId,
+            ...(pendingActionData && { pendingAction: pendingActionData }),
           },
         });
       }
 
       if (response.data) {
         response.data.conversationId = conversationId;
+        if (pendingActionData) {
+          (response.data as Record<string, unknown>).pendingAction = pendingActionData;
+        }
       }
 
       res.status(response.success ? 200 : mapErrorCode(response.error?.code)).json(response);

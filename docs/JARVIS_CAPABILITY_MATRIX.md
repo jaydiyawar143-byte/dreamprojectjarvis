@@ -135,6 +135,11 @@ These three statuses are **not the same thing.** A capability may be implemented
 | Eligibility gates | YES | YES | YES | 11.9A | PROPOSED/APPROVED only | — |
 | Conflict detection | YES | YES | YES | 11.9A | Per-entity exclusivity | — |
 | Explainability | YES | YES | YES | 11.9A | Score breakdown provided | — |
+| Opportunity queue API | YES | YES | YES | 11.9B | `apps/api/src/routes/opportunities.ts`, 30 tests | Read-only, no mutations |
+| Opportunity queue web UI | YES | YES | YES | 11.9B | `apps/web/src/app/opportunities/page.tsx`, detail page | — |
+| Opportunity detail review | YES | YES | YES | 11.9B | Score breakdown, evidence, action preview | — |
+| Approval handoff | YES | YES | YES | 11.9B | Routes through existing Phase 10 approval flow | — |
+| IDOR protection (queue) | YES | YES | YES | 11.9B | Server-computed scores, accountId from env | — |
 
 ### Conversational Access
 
@@ -173,4 +178,4 @@ These three statuses are **not the same thing.** A capability may be implemented
 ---
 
 *Document version: 1.0*
-*Last updated: 2026-08-25*
+*Last updated: 2026-08-26*

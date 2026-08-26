@@ -8,6 +8,7 @@ import type {
   AIToolCall,
   AICompletionResponse,
   ToolExecutionResult,
+  ConversationMessage,
 } from "@jarvis/core";
 
 export interface ConversationalAssistantConfig {
@@ -69,17 +70,18 @@ export class ConversationalAssistant extends BaseAgent {
           messages = this.buildToolResultMessages(
             state.userMessage,
             state.assistantResponse,
-            toolResults
+            toolResults,
+            input.conversationHistory
           );
         } else {
-          messages = this.buildInitialMessages(input.message);
+          messages = this.buildInitialMessages(input.message, input.conversationHistory);
           this.conversationStates.set(conversationId, {
             userMessage: input.message,
             assistantResponse: { message: { role: "assistant", content: "" }, finishReason: "stop", model: "" },
           });
         }
       } else {
-        messages = this.buildInitialMessages(input.message);
+        messages = this.buildInitialMessages(input.message, input.conversationHistory);
         this.conversationStates.delete(conversationId);
       }
 
@@ -138,7 +140,7 @@ export class ConversationalAssistant extends BaseAgent {
     }
   }
 
-  private buildInitialMessages(userMessage: string): AIMessage[] {
+  private buildInitialMessages(userMessage: string, conversationHistory?: ConversationMessage[]): AIMessage[] {
     const messages: AIMessage[] = [];
 
     if (this.providerSystemPrompt) {
@@ -146,6 +148,15 @@ export class ConversationalAssistant extends BaseAgent {
         role: "system",
         content: this.providerSystemPrompt,
       });
+    }
+
+    if (conversationHistory && conversationHistory.length > 0) {
+      for (const msg of conversationHistory) {
+        messages.push({
+          role: msg.role as "user" | "assistant",
+          content: msg.content,
+        });
+      }
     }
 
     messages.push({
@@ -159,7 +170,8 @@ export class ConversationalAssistant extends BaseAgent {
   private buildToolResultMessages(
     originalUserMessage: string,
     assistantResponse: AICompletionResponse,
-    toolResults: ToolExecutionResult[]
+    toolResults: ToolExecutionResult[],
+    conversationHistory?: ConversationMessage[]
   ): AIMessage[] {
     const messages: AIMessage[] = [];
 
@@ -168,6 +180,15 @@ export class ConversationalAssistant extends BaseAgent {
         role: "system",
         content: this.providerSystemPrompt,
       });
+    }
+
+    if (conversationHistory && conversationHistory.length > 0) {
+      for (const msg of conversationHistory) {
+        messages.push({
+          role: msg.role as "user" | "assistant",
+          content: msg.content,
+        });
+      }
     }
 
     messages.push({
@@ -216,6 +237,16 @@ export class ConversationalAssistant extends BaseAgent {
     lines.push(`TOOL: ${tr.toolId}`);
     lines.push(`STATUS: ${tr.status.toUpperCase()}`);
 
+    if (tr.status === "approval_required" && tr.approvalId) {
+      lines.push(`APPROVAL_ID: ${tr.approvalId}`);
+      lines.push("ACTION: The tool execution is pending human approval. Present the approval request to the user with the approval ID so they can approve or reject it. Do NOT say you cannot proceed.");
+    }
+
+    if (tr.status === "approval_pending" && tr.approvalId) {
+      lines.push(`APPROVAL_ID: ${tr.approvalId}`);
+      lines.push("ACTION: Waiting for human approval. Inform the user that their approval is pending.");
+    }
+
     if (tr.error) {
       lines.push(`ERROR: ${tr.error}`);
     }
@@ -240,7 +271,7 @@ export class ConversationalAssistant extends BaseAgent {
         lines.push(`DATA_RETRIEVAL_FAILED: ${tr.result.error ?? "unknown error"}`);
         lines.push("DO NOT fabricate or estimate metrics. Data was NOT retrieved from Meta API.");
       }
-    } else {
+    } else if (tr.status !== "approval_required" && tr.status !== "approval_pending") {
       lines.push("DATA: (no result — tool did not execute)");
       lines.push("DO NOT fabricate or estimate metrics. Data was NOT retrieved from Meta API.");
     }

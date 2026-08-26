@@ -3,10 +3,10 @@
 import { useChatStore } from "@/lib/chat-store";
 import { MessageList } from "./message-list";
 import { MessageInput } from "./message-input";
-import { AlertCircle, X } from "lucide-react";
+import { AlertCircle, X, RefreshCw } from "lucide-react";
 
 export function ChatArea() {
-  const { messages, loading, sending, error, clearError, activeConversationId } =
+  const { messages, loading, sending, error, clearError, activeConversationId, retryMessage, lastFailedMessage } =
     useChatStore();
 
   return (
@@ -14,12 +14,23 @@ export function ChatArea() {
       {error && (
         <div className="bg-red-900/30 border border-red-800 text-red-300 px-4 py-3 flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <AlertCircle size={16} />
+            <AlertCircle size={16} className="shrink-0" />
             <span className="text-sm">{error}</span>
           </div>
-          <button onClick={clearError} className="text-red-400 hover:text-red-300">
-            <X size={16} />
-          </button>
+          <div className="flex items-center gap-2">
+            {lastFailedMessage && (
+              <button
+                onClick={retryMessage}
+                className="flex items-center gap-1 text-xs text-red-300 hover:text-red-200 bg-red-800/40 px-2 py-1 rounded transition-colors"
+              >
+                <RefreshCw size={12} />
+                Retry
+              </button>
+            )}
+            <button onClick={clearError} className="text-red-400 hover:text-red-300">
+              <X size={16} />
+            </button>
+          </div>
         </div>
       )}
 
@@ -31,7 +42,7 @@ export function ChatArea() {
           </div>
         </div>
       ) : (
-        <MessageList messages={messages} loading={loading} sending={sending} />
+        <MessageList messages={messages} loading={loading} sending={sending} onRetry={retryMessage} activeConversationId={activeConversationId} />
       )}
 
       <MessageInput disabled={sending} conversationId={activeConversationId} />

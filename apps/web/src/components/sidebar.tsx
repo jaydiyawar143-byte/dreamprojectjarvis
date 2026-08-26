@@ -1,9 +1,10 @@
 "use client";
 
 import { useEffect } from "react";
+import Link from "next/link";
 import { useChatStore } from "@/lib/chat-store";
 import { useAuth } from "@/lib/auth";
-import { MessageSquare, Plus, LogOut, User } from "lucide-react";
+import { MessageSquare, Plus, LogOut, User, Inbox, CheckSquare } from "lucide-react";
 
 export function Sidebar() {
   const { user, logout } = useAuth();
@@ -27,6 +28,26 @@ export function Sidebar() {
             <Plus size={18} />
           </button>
         </div>
+      </div>
+
+      {/* Navigation links */}
+      <div className="px-2 py-2 border-b border-gray-800 space-y-1">
+        <Link
+          href="/opportunities"
+          data-testid="nav-opportunities"
+          className="flex items-center gap-2 w-full px-3 py-2 rounded-lg text-sm text-gray-400 hover:bg-gray-800/50 hover:text-gray-200 transition-colors"
+        >
+          <Inbox size={14} className="shrink-0" />
+          <span>Opportunity Queue</span>
+        </Link>
+        <Link
+          href="/approvals"
+          data-testid="nav-approvals"
+          className="flex items-center gap-2 w-full px-3 py-2 rounded-lg text-sm text-gray-400 hover:bg-gray-800/50 hover:text-gray-200 transition-colors"
+        >
+          <CheckSquare size={14} className="shrink-0" />
+          <span>Approvals</span>
+        </Link>
       </div>
 
       <div className="flex-1 overflow-y-auto p-2 space-y-1">

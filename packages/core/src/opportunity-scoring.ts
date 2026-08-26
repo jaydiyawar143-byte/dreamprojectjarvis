@@ -36,7 +36,79 @@ import type { ConfidenceAssessment } from "./types/recommendation.js";
 export const OPPORTUNITY_SCORING_VERSION = 1;
 
 // ---------------------------------------------------------------------------
-// Contract
+// Phase 11.9B — Queue display status
+// ---------------------------------------------------------------------------
+// Maps from the authoritative RecommendationStatus (Phase 11.5 lifecycle) to
+// a human-readable display state for the opportunity queue. This is NOT a
+// second state machine — it is a pure projection read directly from the
+// existing durable status field + the expiry timestamp.
+//
+// REVIEWED is reserved for future UI mark-as-read flows. The queue
+// derives it from client-side state only (no server write required).
+// ---------------------------------------------------------------------------
+
+export const OpportunityQueueDisplayStatusSchema = z.enum([
+  "NEW",
+  "REVIEWED",
+  "APPROVAL_PENDING",
+  "APPROVED",
+  "REJECTED",
+  "EXPIRED",
+  "EXECUTED",
+  "FAILED",
+]);
+export type OpportunityQueueDisplayStatus = z.infer<
+  typeof OpportunityQueueDisplayStatusSchema
+>;
+
+/**
+ * Deterministic projection: existing RecommendationStatus + expiry time →
+ * a safe human-facing display label for the queue UI.
+ *
+ * Rules (in order; first match wins):
+ *   - expiresAt in the past                       → EXPIRED
+ *   - status EXPIRED | STALE                      → EXPIRED
+ *   - status EXECUTED                             → EXECUTED
+ *   - status FAILED                               → FAILED
+ *   - status REJECTED                             → REJECTED
+ *   - status EXECUTING | (APPROVED + approvalId)  → APPROVAL_PENDING
+ *   - status APPROVED (no approvalId yet)         → APPROVED
+ *   - status PROPOSED + approvalId                → APPROVAL_PENDING
+ *   - status PROPOSED (no approvalId)             → NEW
+ *
+ * Never invents status; never writes to the database.
+ */
+export function mapRecommendationStatusToDisplayStatus(
+  status: string,
+  expiresAt: string,
+  approvalId?: string,
+  now: Date = new Date()
+): OpportunityQueueDisplayStatus {
+  // Temporal expiry always wins regardless of status field.
+  if (new Date(expiresAt).getTime() <= now.getTime()) return "EXPIRED";
+  switch (status) {
+    case "EXPIRED":
+    case "STALE":
+      return "EXPIRED";
+    case "EXECUTED":
+      return "EXECUTED";
+    case "FAILED":
+      return "FAILED";
+    case "REJECTED":
+      return "REJECTED";
+    case "EXECUTING":
+      return "APPROVAL_PENDING";
+    case "APPROVED":
+      return approvalId ? "APPROVAL_PENDING" : "APPROVED";
+    case "PROPOSED":
+      return approvalId ? "APPROVAL_PENDING" : "NEW";
+    default:
+      return "EXPIRED"; // unknown status → treat as expired (fail-closed)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 11.9A — Scoring label enums (must precede queue schemas)
 // ---------------------------------------------------------------------------
 
 export const OpportunityPriorityBandSchema = z.enum([
@@ -88,6 +160,128 @@ export const OpportunityRationaleSchema = z
   })
   .strict();
 export type OpportunityRationale = z.infer<typeof OpportunityRationaleSchema>;
+
+// ---------------------------------------------------------------------------
+// Phase 11.9B — Safe public-facing queue item types
+// ---------------------------------------------------------------------------
+// These types are the API boundary: they contain ONLY what a human reviewer
+// needs to make an informed decision. Internal hashes, raw SQL fields, tokens,
+// and any implementation detail not relevant to the decision are omitted.
+// ---------------------------------------------------------------------------
+
+/**
+ * One item in the ranked opportunity queue. Suitable for the queue list view.
+ * All server-computed; client cannot forge score, priority, or evidence.
+ */
+export const OpportunityQueueItemSchema = z
+  .object({
+    recommendationId: z.string(),
+    accountId: z.string(),
+    entityId: z.string(),
+    entityType: z.string(), // CAMPAIGN | AD_SET | AD
+    actionType: z.string(),
+    objective: z.string().nullable().optional(),
+    // --- Scoring (server-computed from Phase 11.9A engine) ---------------
+    score: z.number().int().min(0).max(100),
+    priority: OpportunityPriorityBandSchema,
+    severity: OpportunitySeverityLabelSchema,
+    confidence: z.enum(["HIGH", "MEDIUM", "LOW"]),
+    expectedImpact: OpportunityImpactLabelSchema,
+    risk: z.enum(["LOW", "MEDIUM", "HIGH"]),
+    urgency: OpportunityUrgencyLabelSchema,
+    reversibility: OpportunityReversibilitySchema,
+    historicalEvidenceStrength: OpportunityHistoricalStrengthSchema,
+    // --- Human-readable summary (deterministic templates, never AI text) --
+    explanation: z.string().max(600), // one-paragraph "Why now?"
+    rationale: OpportunityRationaleSchema,
+    // --- Evidence references (IDs only — no raw payload in the list view) -
+    diagnosisId: z.string(),
+    anomalyCount: z.number().int().min(0),
+    historicalSampleSize: z.number().int().min(0),
+    // --- Lifecycle -------------------------------------------------------
+    displayStatus: OpportunityQueueDisplayStatusSchema,
+    status: z.string(), // raw RecommendationStatus for downstream routing
+    approvalId: z.string().optional(),
+    conflicted: z.boolean(),
+    conflictWith: z.array(z.string()).max(50),
+    createdAt: z.string(),
+    expiresAt: z.string(),
+    scoringVersion: z.literal(OPPORTUNITY_SCORING_VERSION),
+    calculatedAt: z.string(),
+  })
+  .strict();
+export type OpportunityQueueItem = z.infer<typeof OpportunityQueueItemSchema>;
+
+/**
+ * Full detail for the human review panel (single-opportunity view).
+ * Extends the list item with full evidence breakdown, current/proposed state,
+ * and rich historical context for informed decision-making.
+ *
+ * Secrets (tokens, keys) are NEVER present. Internal engine details that add
+ * no decision value are omitted.
+ */
+export const OpportunityQueueItemDetailSchema = OpportunityQueueItemSchema
+  .omit({ rationale: true }) // replaced with fuller breakdown below
+  .extend({
+    // --- Diagnosis context -----------------------------------------------
+    diagnosisCategory: z.string().nullable().optional(),
+    reason: z.string().max(2000), // JARVIS explanation from Phase 11.5
+    // --- Evidence (safe subset: no raw payloads, no secrets) -------------
+    currentMetrics: z.record(z.unknown()),
+    metricDetails: z.array(
+      z.object({
+        metric: z.string(),
+        currentValue: z.number().nullable(),
+        baselineValue: z.number().nullable(),
+        changePercent: z.number().nullable(),
+        direction: z.string(),
+      })
+    ),
+    anomalies: z.array(
+      z.object({
+        metric: z.string(),
+        severity: z.string(),
+        direction: z.string(),
+        percentDeviation: z.number().nullable(),
+        detectedAt: z.string(),
+      })
+    ),
+    currency: z.string().optional(),
+    // --- Current / proposed target state (no secrets) --------------------
+    currentState: z.record(z.unknown()),
+    proposedState: z.record(z.unknown()),
+    // --- Historical evidence (summarized — outcome IDs only, no raw data) -
+    historicalConsistency: z.string().optional(),
+    contradictoryEvidenceCount: z.number().int().min(0),
+    sampleQuality: z.string().optional(),
+    historicalLimitations: z.array(z.string()).max(20),
+    // --- Full rationale breakdown ----------------------------------------
+    positiveFactors: z.array(z.string()).max(10),
+    negativeFactors: z.array(z.string()).max(10),
+    riskNote: z.string().max(300),
+    historicalNote: z.string().max(300).nullable(),
+    limitations: z.array(z.string()).max(20),
+    // --- Preconditions for approval readiness ----------------------------
+    preconditions: z.array(z.string()).max(20),
+    requiresApproval: z.literal(true),
+    // --- Approval requirements (Phase 10 constraint summary) -------------
+    approvalRequirements: z.object({
+      requiresHumanApproval: z.literal(true),
+      boundToUser: z.boolean(),
+      boundToTool: z.string(),
+      paramsHashProtected: z.boolean(),
+      expiresAt: z.string(),
+      staleStateProtected: z.boolean(),
+    }),
+  })
+  .strict();
+export type OpportunityQueueItemDetail = z.infer<
+  typeof OpportunityQueueItemDetailSchema
+>;
+
+// ---------------------------------------------------------------------------
+// Contract
+// ---------------------------------------------------------------------------
 
 export const OpportunityScoreSchema = z
   .object({

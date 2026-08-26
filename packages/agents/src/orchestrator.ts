@@ -63,6 +63,7 @@ export class Orchestrator implements IOrchestrator {
   private readonly memoryConfig: Required<MemoryContextConfig>;
   private readonly toolRegistry: { get(toolId: string): ITool | undefined; getAll(): ITool[] } | null;
   private readonly toolApprovalService: IToolApprovalService | null;
+  private readonly pendingActionService: import("./pending-action-service.js").PendingActionService | null;
   private readonly toolDescriptionBuilder: ToolDescriptionBuilder;
   private readonly toolPlanValidator: ToolPlanValidator;
   private readonly toolPlanParser: ToolPlanParser;
@@ -87,6 +88,7 @@ export class Orchestrator implements IOrchestrator {
     };
     this.toolRegistry = config.toolRegistry ?? null;
     this.toolApprovalService = config.toolApprovalService ?? null;
+    this.pendingActionService = (config as unknown as { pendingActionService?: import("./pending-action-service.js").PendingActionService }).pendingActionService ?? null;
     this.toolDescriptionBuilder = new ToolDescriptionBuilder();
     this.toolPlanValidator = new ToolPlanValidator();
     this.toolPlanParser = new ToolPlanParser();
@@ -122,15 +124,29 @@ export class Orchestrator implements IOrchestrator {
         context.auth.userId,
       );
 
+      if (process.env.NODE_ENV === "development") {
+        console.log(JSON.stringify({
+          level: "debug",
+          event: "context_resolution",
+          conversationId: context.conversationId,
+          hasHistory: (request.conversationHistory?.length ?? 0) > 0,
+          historyLength: request.conversationHistory?.length ?? 0,
+          messagePreview: request.message.substring(0, 120),
+          agentId: agent.id,
+        }));
+      }
+
       let currentInput: AgentInput = {
         message: userMessage,
         conversationId: context.conversationId,
+        conversationHistory: request.conversationHistory ?? [],
         metadata: request.metadata,
       };
 
       let allToolResults: ToolExecutionResult[] = [];
       let totalToolExecutions = 0;
       let depth = 0;
+      let pendingActionData: Record<string, unknown> | undefined;
 
       while (depth < this.maxOrchestrationDepth) {
         const output = await agent.process(currentInput);
@@ -179,6 +195,9 @@ export class Orchestrator implements IOrchestrator {
           if (toolSummary.total > 0) {
             responseMetadata.toolExecution = toolSummary;
           }
+          if (pendingActionData) {
+            responseMetadata.pendingAction = pendingActionData;
+          }
 
           return this.buildSuccessResponse(
             output.message,
@@ -196,16 +215,35 @@ export class Orchestrator implements IOrchestrator {
           );
         }
 
-        const toolResults = await this.executeTools(
+        const { results: toolResults, pendingAction } = await this.executeTools(
           output.actions,
           context
         );
         allToolResults.push(...toolResults);
+        if (pendingAction) {
+          pendingActionData = pendingAction;
+        }
         totalToolExecutions += output.actions.length;
+
+        if (process.env.NODE_ENV === "development") {
+          console.log(JSON.stringify({
+            level: "debug",
+            event: "tool_execution_round",
+            conversationId: context.conversationId,
+            depth: depth + 1,
+            toolsCalled: output.actions.map((a) => a.toolId),
+            results: toolResults.map((r) => ({
+              toolId: r.toolId,
+              status: r.status,
+              hasApprovalId: !!r.approvalId,
+            })),
+          }));
+        }
 
         currentInput = {
           message: output.message,
           conversationId: context.conversationId,
+          conversationHistory: request.conversationHistory ?? [],
           metadata: {
             ...request.metadata,
             toolResults,
@@ -414,13 +452,61 @@ export class Orchestrator implements IOrchestrator {
   private async executeTools(
     actions: Array<{ toolId: string; toolCallId?: string; params: Record<string, unknown> }>,
     context: SessionContext
-  ): Promise<ToolExecutionResult[]> {
+  ): Promise<{ results: ToolExecutionResult[]; pendingAction?: Record<string, unknown> }> {
     const results: ToolExecutionResult[] = [];
     const executionId = crypto.randomUUID();
+    let capturedPendingAction: Record<string, unknown> | undefined;
 
     for (let i = 0; i < actions.length; i++) {
       const action = actions[i]!;
       const stepStartedAt = new Date();
+
+      // Check if this is a write tool that needs pending-action flow
+      const tool = this.toolRegistry?.get(action.toolId);
+      const needsConfirmation = tool?.requiresApproval === true;
+
+      if (needsConfirmation && this.pendingActionService && context.conversationId) {
+        // Create a pending action instead of executing directly
+        const pendingService = this.pendingActionService as import("./pending-action-service.js").PendingActionService;
+        try {
+          const { pendingAction, message } = await pendingService.createPendingAction({
+            conversationId: context.conversationId,
+            userId: context.auth.userId,
+            toolId: action.toolId,
+            action: action.toolId,
+            params: action.params,
+            riskLevel: (tool?.risk ?? "EXTERNAL_SIDE_EFFECT") as import("@jarvis/core").RiskLevel,
+          });
+
+          // Return a result that tells the agent to present the pending action
+          const pendingResult: ToolExecutionResult = {
+            executionId,
+            toolId: action.toolId,
+            toolCallId: action.toolCallId,
+            status: "approval_required",
+            approvalId: pendingAction.approvalId,
+            error: message,
+            startedAt: stepStartedAt,
+            completedAt: new Date(),
+            durationMs: Date.now() - stepStartedAt.getTime(),
+          };
+          results.push(pendingResult);
+          capturedPendingAction = {
+            id: pendingAction.id,
+            toolId: pendingAction.toolId,
+            action: pendingAction.action,
+            params: pendingAction.params,
+            riskLevel: pendingAction.riskLevel,
+            state: pendingAction.state,
+            approvalId: pendingAction.approvalId,
+            expiresAt: pendingAction.expiresAt,
+            summary: message,
+          };
+          continue;
+        } catch {
+          // Fall through to normal execution if pending action creation fails
+        }
+      }
 
       const request: ToolExecutionRequest = {
         toolId: action.toolId,
@@ -437,10 +523,10 @@ export class Orchestrator implements IOrchestrator {
       };
 
       if (this.toolApprovalService && this.toolRegistry) {
-        const tool = this.toolRegistry.get(action.toolId);
-        if (tool) {
+        const toolForApproval = this.toolRegistry.get(action.toolId);
+        if (toolForApproval) {
           const check = await this.toolApprovalService.checkPreExecution(
-            tool,
+            toolForApproval,
             action.params,
             {
               userId: context.auth.userId,
@@ -490,7 +576,7 @@ export class Orchestrator implements IOrchestrator {
       results.push(result);
     }
 
-    return results;
+    return { results, pendingAction: capturedPendingAction };
   }
 
   // -----------------------------------------------------------------------

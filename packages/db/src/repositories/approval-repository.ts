@@ -35,10 +35,12 @@ function toApproval(row: {
   id: string;
   userId: string;
   agentId: string | null;
+  conversationId: string | null;
   toolId: string;
   action: string;
   params: unknown;
   paramsHash: string | null;
+  riskLevel: string | null;
   status: "PENDING" | "APPROVED" | "CONSUMED" | "REJECTED" | "EXPIRED";
   expiresAt: Date;
   resolvedAt: Date | null;
@@ -48,10 +50,12 @@ function toApproval(row: {
     id: row.id,
     userId: row.userId,
     agentId: row.agentId ?? undefined,
+    conversationId: row.conversationId ?? undefined,
     toolId: row.toolId,
     action: row.action,
     params: row.params as Record<string, unknown>,
     paramsHash: row.paramsHash ?? undefined,
+    riskLevel: row.riskLevel ?? undefined,
     status: REVERSE_STATUS_MAP[row.status],
     expiresAt: row.expiresAt.toISOString(),
     resolvedAt: row.resolvedAt?.toISOString() ?? null,
@@ -76,10 +80,12 @@ export class PrismaApprovalRepository implements IApprovalRepository {
       data: {
         userId: data.userId,
         agentId: data.agentId ?? null,
+        conversationId: data.conversationId ?? null,
         toolId: data.toolId,
         action: data.action,
         params: data.params as unknown as Prisma.InputJsonValue,
         paramsHash: data.paramsHash ?? null,
+        riskLevel: data.riskLevel ?? null,
         status: "PENDING",
         expiresAt: new Date(data.expiresAt),
       },
@@ -369,5 +375,46 @@ export class PrismaApprovalRepository implements IApprovalRepository {
     if (row.status === "REJECTED") return "approval was rejected";
     if (row.status === "EXPIRED" || row.expiresAt <= now) return "approval has expired";
     return `approval is ${row.status.toLowerCase()}`;
+  }
+
+  // -------------------------------------------------------------------------
+  // PHASE 11.9 — Conversation-scoped pending action lookups
+  // -------------------------------------------------------------------------
+
+  async findPendingByConversationId(
+    conversationId: string,
+    userId: string
+  ): Promise<Approval | null> {
+    const now = new Date();
+    const row = await this.prisma.approval.findFirst({
+      where: {
+        conversationId,
+        userId,
+        status: "PENDING",
+        expiresAt: { gt: now },
+      },
+      orderBy: { createdAt: "desc" },
+    });
+    return row ? toApproval(row) : null;
+  }
+
+  async updateParams(
+    id: string,
+    params: Record<string, unknown>,
+    paramsHash: string
+  ): Promise<Approval | null> {
+    try {
+      const result = await this.prisma.approval.updateMany({
+        where: { id, status: "PENDING" },
+        data: {
+          params: params as unknown as Prisma.InputJsonValue,
+          paramsHash,
+        },
+      });
+      if (result.count === 0) return null;
+      return await this.findById(id);
+    } catch {
+      return null;
+    }
   }
 }

@@ -406,6 +406,90 @@ export class PrismaRecommendationRepository implements RecommendationStorePort {
     ]);
     return { items: rows.map(toRecord), total };
   }
+
+  /**
+   * Phase 11.9B — Account-scoped query for the opportunity queue.
+   *
+   * Security:
+   *   - userId AND accountId are always server-supplied (from JWT + ENV).
+   *   - Client-supplied accountId is NEVER used here; it is validated by the
+   *     route before calling this method and passed from process.env only.
+   *   - Cursor is an opaque recommendationId (not a raw offset), so clients
+   *     cannot enumerate rows by manipulating page numbers.
+   *
+   * Returns ALL non-terminal recommendations so the scoring engine can rank
+   * and the queue service can apply display-status filters post-score.
+   * Terminal statuses (EXECUTED/FAILED) are excluded by default unless
+   * `includeTerminal` is set (for the detail view).
+   */
+  async listForOpportunityQueue(
+    userId: string,
+    accountId: string,
+    options?: {
+      entityType?: string;
+      actionType?: string;
+      limit?: number;
+      cursor?: string;
+      includeTerminal?: boolean;
+    }
+  ): Promise<{ items: RecommendationRecord[]; total: number }> {
+    const limit = Math.min(Math.max(options?.limit ?? 50, 1), 200);
+
+    // Base where clause: strict userId + accountId — never trusts caller to filter
+    const where: Record<string, unknown> = { userId, accountId };
+
+    if (!options?.includeTerminal) {
+      // Non-terminal statuses only — terminal rows are never executable
+      where.status = { notIn: ["EXECUTED", "FAILED"] };
+    }
+
+    // Optional entity/action filters (UI-driven, but safe — they narrow, not bypass)
+    if (options?.entityType) {
+      where.targetLevel = options.entityType.toUpperCase();
+    }
+    if (options?.actionType) {
+      // Map spec action name to DB enum if needed
+      const dbAction =
+        options.actionType === "PAUSE_AD_SET" ? "PAUSE_ADSET" :
+        options.actionType === "RESUME_AD_SET" ? "RESUME_ADSET" :
+        options.actionType;
+      where.actionType = dbAction;
+    }
+
+    // Fetch all matching records; the scoring engine does the ranking + pagination
+    // to preserve deterministic order (raw DB pagination would interleave with scoring)
+    const [rows, total] = await Promise.all([
+      this.prisma.performanceRecommendation.findMany({
+        where: where as never,
+        orderBy: [{ createdAt: "desc" }, { id: "asc" }],
+        take: limit,
+        ...(options?.cursor
+          ? {
+              cursor: { id: options.cursor },
+              skip: 1,
+            }
+          : {}),
+      }),
+      this.prisma.performanceRecommendation.count({ where: where as never }),
+    ]);
+
+    return { items: rows.map(toRecord), total };
+  }
+
+  /**
+   * Phase 11.9B — Fetch a single recommendation for the opportunity detail view.
+   * Strictly scoped to userId + accountId (IDOR-safe).
+   */
+  async getForOpportunityDetail(
+    recommendationId: string,
+    userId: string,
+    accountId: string
+  ): Promise<RecommendationRecord | null> {
+    const row = await this.prisma.performanceRecommendation.findFirst({
+      where: { id: recommendationId, userId, accountId },
+    });
+    return row ? toRecord(row) : null;
+  }
 }
 
 /** Re-export for consumers building ExternalStatePort implementations. */

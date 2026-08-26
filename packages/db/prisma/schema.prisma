@@ -188,19 +188,24 @@ model KnowledgeChunk {
 }
 
 model Approval {
-  id         String         @id @default(cuid())
-  userId     String
-  agentId    String?
-  toolId     String
-  action     String
-  params     Json
-  paramsHash String?
-  status     ApprovalStatus @default(PENDING)
-  expiresAt  DateTime
-  resolvedAt DateTime?
-  createdAt  DateTime       @default(now())
+  id             String         @id @default(cuid())
+  userId         String
+  agentId        String?
+  conversationId String?
+  toolId         String
+  action         String
+  params         Json
+  paramsHash     String?
+  riskLevel      String?
+  status         ApprovalStatus @default(PENDING)
+  expiresAt      DateTime
+  resolvedAt     DateTime?
+  createdAt      DateTime       @default(now())
 
   user User @relation(fields: [userId], references: [id])
+
+  @@index([conversationId])
+  @@index([conversationId, status])
 }
 
 model AuditLog {

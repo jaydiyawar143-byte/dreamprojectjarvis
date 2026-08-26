@@ -66,6 +66,8 @@ export interface OrchestratorConfig {
   toolRegistry?: { get(toolId: string): ITool | undefined; getAll(): ITool[] };
   /** Tool approval service for pre-execution gates. */
   toolApprovalService?: IToolApprovalService;
+  /** Pending action service for write-tool confirmation flow. */
+  pendingActionService?: unknown;
 }
 
 // ---------------------------------------------------------------------------

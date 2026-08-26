@@ -2,14 +2,20 @@
 
 import { useEffect, useRef } from "react";
 import type { ConversationMessage } from "@/lib/api";
+import { ToolExecutionCard } from "./tool-execution-card";
+import { InlineApprovalCard } from "./inline-approval-card";
+import { PendingActionCard, type PendingActionData } from "./pending-action-card";
+import { MessageActions } from "./message-actions";
 
 interface Props {
   messages: ConversationMessage[];
   loading: boolean;
   sending: boolean;
+  onRetry?: () => void;
+  activeConversationId?: string | null;
 }
 
-export function MessageList({ messages, loading, sending }: Props) {
+export function MessageList({ messages, loading, sending, onRetry, activeConversationId }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -27,22 +33,59 @@ export function MessageList({ messages, loading, sending }: Props) {
   return (
     <div className="flex-1 overflow-y-auto px-4 py-6">
       <div className="max-w-3xl mx-auto space-y-6">
-        {messages.map((msg) => (
-          <div key={msg.id} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
-            <div
-              className={`max-w-[80%] rounded-2xl px-4 py-3 ${
-                msg.role === "user"
-                  ? "bg-indigo-600 text-white"
-                  : "bg-gray-800 text-gray-100"
-              }`}
-            >
-              <p className="whitespace-pre-wrap text-sm leading-relaxed">{msg.content}</p>
-              <p className={`text-xs mt-1 ${msg.role === "user" ? "text-indigo-200" : "text-gray-500"}`}>
-                {new Date(msg.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-              </p>
+        {messages.map((msg, idx) => {
+          const meta = msg.metadata as Record<string, unknown> | undefined;
+          const toolCalls = meta?.toolCalls as Array<{ id: string; name: string; arguments?: Record<string, unknown> }> | undefined;
+          const toolResults = meta?.toolResults as Array<{ toolId: string; status: string; result?: unknown }> | undefined;
+          const approval = meta?.approval as { approvalId: string; summary: string; expiresAt?: string; detailLines?: Array<{ label: string; value: string }> } | undefined;
+          const pendingAction = meta?.pendingAction as PendingActionData | undefined;
+          const canRetry = msg.role === "user" && idx === messages.length - 1 && onRetry;
+
+          return (
+            <div key={msg.id} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"} group`}>
+              <div
+                className={`max-w-[80%] rounded-2xl px-4 py-3 ${
+                  msg.role === "user"
+                    ? "bg-indigo-600 text-white"
+                    : "bg-gray-800 text-gray-100"
+                }`}
+              >
+                <p className="whitespace-pre-wrap text-sm leading-relaxed">{msg.content}</p>
+
+                {msg.role === "assistant" && pendingAction && pendingAction.state === "WAITING_CONFIRMATION" && (
+                  <PendingActionCard
+                    pendingAction={pendingAction}
+                    conversationId={activeConversationId ?? ""}
+                  />
+                )}
+
+                {msg.role === "assistant" && !pendingAction && toolCalls && (
+                  <ToolExecutionCard toolCalls={toolCalls} toolResults={toolResults} />
+                )}
+
+                {msg.role === "assistant" && !pendingAction && approval && (
+                  <InlineApprovalCard
+                    approvalId={approval.approvalId}
+                    summary={approval.summary}
+                    expiresAt={approval.expiresAt}
+                    detailLines={approval.detailLines}
+                  />
+                )}
+
+                <div className="flex items-center justify-between">
+                  <p className={`text-xs mt-1 ${msg.role === "user" ? "text-indigo-200" : "text-gray-500"}`}>
+                    {new Date(msg.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                  </p>
+                  <MessageActions
+                    content={msg.content}
+                    role={msg.role as "user" | "assistant"}
+                    onRetry={canRetry ? onRetry : undefined}
+                  />
+                </div>
+              </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
         {sending && (
           <div className="flex justify-start">
             <div className="bg-gray-800 rounded-2xl px-4 py-3">

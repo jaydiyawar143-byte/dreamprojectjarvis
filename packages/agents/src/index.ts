@@ -5,3 +5,5 @@ export { Orchestrator } from "./orchestrator.js";
 export { MockAIProvider } from "./mock-ai-provider.js";
 export { ToolPlanValidator, ToolPlanParser, ToolDescriptionBuilder } from "./tool-planner.js";
 export type { PlanValidationResult } from "./tool-planner.js";
+export { PendingActionService } from "./pending-action-service.js";
+export { detectIntent, isPendingActionExpired, approvalStatusToPendingState, summarizePendingAction } from "./intent-detector.js";

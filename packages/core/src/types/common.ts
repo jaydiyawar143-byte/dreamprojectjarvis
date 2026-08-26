@@ -45,6 +45,7 @@ export const ApprovalSchema = z.object({
   id: z.string(),
   userId: z.string(),
   agentId: z.string().optional(),
+  conversationId: z.string().optional(),
   toolId: z.string(),
   action: z.string(),
   params: z.record(z.unknown()),
@@ -52,6 +53,7 @@ export const ApprovalSchema = z.object({
   // parameters a human approved. Absent on legacy approvals, which must
   // never authorize approval-gated (write) tool execution.
   paramsHash: z.string().optional(),
+  riskLevel: z.string().optional(),
   status: ApprovalStatusSchema,
   expiresAt: z.string().datetime(),
   resolvedAt: z.string().datetime().nullable().optional(),
@@ -289,4 +291,60 @@ export interface ToolAuditEntry {
   ipAddress?: string;
   error?: { code: string; message: string };
   timestamp: Date;
+}
+
+// ---------------------------------------------------------------------------
+// PHASE 11.9 — Pending Action State Machine
+// ---------------------------------------------------------------------------
+
+export const PendingActionStateSchema = z.enum([
+  "NONE",
+  "WAITING_CONFIRMATION",
+  "APPROVED",
+  "REJECTED",
+  "EXECUTING",
+  "COMPLETED",
+  "FAILED",
+]);
+
+export type PendingActionState = z.infer<typeof PendingActionStateSchema>;
+
+export interface PendingAction {
+  id: string;
+  conversationId: string;
+  userId: string;
+  toolId: string;
+  action: string;
+  params: Record<string, unknown>;
+  paramsHash?: string;
+  riskLevel: string;
+  state: PendingActionState;
+  approvalId: string;
+  expiresAt: string;
+  createdAt: string;
+}
+
+export type IntentType = "CONFIRM" | "REJECT" | "MODIFY" | "NEW_ACTION" | "CLARIFY";
+
+export interface IntentResult {
+  type: IntentType;
+  confidence: number;
+  extractedParams?: Record<string, unknown>;
+}
+
+// ---------------------------------------------------------------------------
+// Extended approval repository for conversation-scoped lookups
+// ---------------------------------------------------------------------------
+
+export interface IApprovalRepositoryExtended extends IApprovalRepository {
+  findPendingByConversationId(
+    conversationId: string,
+    userId: string
+  ): Promise<Approval | null>;
+
+  updateParams(
+    id: string,
+    params: Record<string, unknown>,
+    paramsHash: string
+  ): Promise<Approval | null>;
 }

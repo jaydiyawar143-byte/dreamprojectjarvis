@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import { useChatStore } from "@/lib/chat-store";
 import { Send } from "lucide-react";
 
@@ -13,6 +13,19 @@ export function MessageInput({ disabled }: Props) {
   const [value, setValue] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const sendMessage = useChatStore((s) => s.sendMessage);
+  const lastFailedMessage = useChatStore((s) => s.lastFailedMessage);
+  const sending = useChatStore((s) => s.sending);
+
+  useEffect(() => {
+    if (lastFailedMessage && !sending) {
+      setValue(lastFailedMessage);
+      if (textareaRef.current) {
+        textareaRef.current.style.height = "auto";
+        textareaRef.current.style.height = textareaRef.current.scrollHeight + "px";
+        textareaRef.current.focus();
+      }
+    }
+  }, [lastFailedMessage, sending]);
 
   async function handleSend() {
     const text = value.trim();

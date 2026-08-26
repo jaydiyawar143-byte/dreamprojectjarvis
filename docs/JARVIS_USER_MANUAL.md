@@ -47,10 +47,11 @@ JARVIS implements an integrated intelligence pipeline:
 2. **Understand** — Normalizes raw metrics into standard marketing KPIs (CTR, CPC, CPM, CPA, ROAS, CVR, Frequency).
 3. **Diagnose** — Detects statistical anomalies and uses AI to analyze possible causes with evidence-backed reasoning.
 4. **Recommend** — Generates specific, actionable recommendations with confidence levels and risk assessments.
-5. **Approve** — Routes every recommendation through a human approval gate. No action executes without your consent.
-6. **Execute** — Carries out approved actions through the Meta Graph API with idempotency, timeout protection, and crash recovery.
-7. **Measure** — After execution, measures whether the action actually produced the expected result.
-8. **Learn** — Records outcomes as historical evidence that improves future diagnosis, recommendations, and confidence scores.
+5. **Prioritize** — Scores and ranks opportunities by business importance. Presents a filterable queue for human review.
+6. **Approve** — Routes every recommendation through a human approval gate. No action executes without your consent.
+7. **Execute** — Carries out approved actions through the Meta Graph API with idempotency, timeout protection, and crash recovery.
+8. **Measure** — After execution, measures whether the action actually produced the expected result.
+9. **Learn** — Records outcomes as historical evidence that improves future diagnosis, recommendations, and confidence scores.
 
 ### JARVIS philosophy
 
@@ -291,6 +292,51 @@ OVERALL QUALITY: COMPLETE (all expected records present)
 **Permissions required:** Meta READ access
 **Approval required:** No (analysis only)
 **Meta WRITE occurs:** No
+
+---
+
+#### Example 6: "Show me my opportunity queue"
+
+**What you do:**
+> Navigate to the Opportunity Queue in the web interface, or ask "show my opportunities."
+
+**What JARVIS does:**
+1. Retrieves all pending recommendations for your account.
+2. Scores each by business importance using a weighted formula (severity, impact, urgency, confidence, historical evidence, reversibility).
+3. Deduplicates conflicting recommendations for the same entity.
+4. Returns a ranked, filterable list.
+5. Computes a full detail view with score breakdown, evidence, and action preview when you click into an item.
+
+**What you see:**
+```
+OPPORTUNITY QUEUE — 4 opportunities
+
+#1 — CRITICAL (Score: 92)
+  Pause "Spring Sale" — CPA +29%, frequency 1.6x
+  Confidence: HIGH | Risk: LOW | Historical: 8/10 positive
+  Action: PAUSE_CAMPAIGN
+
+#2 — HIGH (Score: 74)
+  Decrease Brand Awareness budget — ROAS declining
+  Confidence: MEDIUM | Risk: LOW | Historical: 3/5 positive
+  Action: DECREASE_BUDGET
+
+#3 — MEDIUM (Score: 58)
+  Pause "Lead Gen" ad set — Conversions dropped 15%
+  Confidence: LOW | Risk: LOW
+  Action: PAUSE_AD_SET
+
+#4 — LOW (Score: 31)
+  Resume "Retargeting" ad — Was paused 30 days ago
+  Confidence: LOW | Risk: MEDIUM
+  Action: RESUME_AD
+```
+
+Clicking an item shows a detail page with server-computed score breakdown, current vs. baseline metrics, and Approve/Reject buttons. Approving routes through the existing approval flow — no autonomous execution occurs.
+
+**Permissions required:** Meta READ access
+**Approval required:** No (queue browsing); Yes (approval handoff)
+**Meta WRITE occurs:** No (browsing); only after explicit approval through the standard approval flow
 
 ---
 

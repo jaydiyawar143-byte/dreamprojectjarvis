@@ -36,6 +36,7 @@ export * from "./outcome-worker.js";
 export * from "./historical-outcome-engine.js";
 export * from "./recommendation-confidence.js";
 export * from "./opportunity-scoring.js";
+export * from "./opportunity-queue-service.js";
 export * from "./utils/params-hash.js";
 export * from "./utils/redact-secrets.js";
 

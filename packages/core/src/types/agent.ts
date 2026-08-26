@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { ITool } from "./tool.js";
 import type { AuditEntry } from "./common.js";
 import type { IMemoryStore } from "./memory.js";
+import { ConversationMessageSchema } from "./conversation.js";
 
 export const AgentCategorySchema = z.enum([
   "communication",
@@ -41,6 +42,7 @@ export type AgentConfig = z.infer<typeof AgentConfigSchema>;
 export const AgentInputSchema = z.object({
   message: z.string(),
   conversationId: z.string().optional(),
+  conversationHistory: z.array(ConversationMessageSchema).optional().default([]),
   metadata: z.record(z.unknown()).optional(),
 });
 

@@ -78,6 +78,7 @@ graph TD
 | 11.8A | Historical Outcome Intelligence | COMPLETE |
 | 11.8B | Recommendation Confidence | COMPLETE |
 | 11.9A | Opportunity Scoring | COMPLETE |
+| 11.9B | Opportunity Queue + Human Decision UI | COMPLETE |
 
 ---
 
@@ -702,6 +703,110 @@ JARVIS:
 
 ---
 
+## Phase 11.9B — Opportunity Queue + Human Decision Interface
+
+### 1. Problem Before This Phase
+
+Phase 11.9A produced a ranked list of scored opportunities, but the ranking lived only in memory — there was no persistent queue, no user-facing interface to browse or review opportunities, and no handoff path to the existing approval system.
+
+### 2. Objective
+
+Deliver a ranked, read-only opportunity queue with a web-based human review interface and an approval handoff that routes through the existing Phase 10 approval flow. Zero autonomous execution. Zero Meta writes. Zero LLM calls.
+
+### 3. What Changed
+
+**Core service** (`packages/core/src/opportunity-queue-service.ts`, 527L):
+- `buildOpportunityQueue()` — Scores, ranks, deduplicates, and paginates opportunities. Reuses the Phase 11.9A scoring engine deterministically.
+- `buildOpportunityDetail()` — Produces a full detail view for a single opportunity with server-computed score breakdown and display status.
+- `explainNoOpportunities()` — Returns a structured "no opportunities" explanation when the queue is empty.
+- Stale/conflict detection, expiration checks, and priority band classification.
+
+**API routes** (`apps/api/src/routes/opportunities.ts`, 252L):
+- `GET /api/v1/opportunities` — Paginated ranked queue with filters (priority, status, entityType, actionType, limit).
+- `GET /api/v1/opportunities/:id` — Full detail for human review.
+- IDOR protection: `accountId` always comes from `process.env.META_AD_ACCOUNT_ID`, never from the client.
+- `isValidId()` guard prevents probing with malformed IDs.
+- Score, priority, and historical evidence are server-computed — clients cannot inject forged values.
+- No mutation endpoints. No POST. No execute.
+
+**DB repository** (`packages/db/src/repositories/recommendation-repository.ts`):
+- `listForOpportunityQueue(userId, accountId)` — Fetches all eligible records scoped by user+account.
+- `getForOpportunityDetail(recommendationId, userId, accountId)` — Fetches a single record with IDOR-safe access control.
+
+**Web UI:**
+- `apps/web/src/app/opportunities/page.tsx` (275L) — Queue list page with filters, priority badges, loading/empty states.
+- `apps/web/src/app/opportunities/[id]/page.tsx` (594L) — Detail review page with score breakdown, evidence, action preview, approve/reject buttons.
+- `apps/web/src/components/opportunity-card.tsx` (211L) — Reusable card component with priority, confidence, entity type, and action type display.
+- `apps/web/src/lib/api.ts` — Frontend API client with `listOpportunities` and `getOpportunity`.
+
+### 4. Security Architecture
+
+- All operations scoped to `req.auth.userId` — IDOR-safe.
+- `accountId` ALWAYS comes from `process.env.META_AD_ACCOUNT_ID`, never from the client.
+- Score/priority/historical evidence are server-computed via the Phase 11.9A engine.
+- NO mutation endpoints. No POST. No execute. ZERO Meta writes on any path.
+- ZERO LLM calls on any path through this module.
+- Secrets (tokens, keys) never appear in output.
+- Approval handoff routes through the existing Phase 10 approval flow — no new approval logic introduced.
+
+### 5. Technical Changes
+
+**New files:**
+- `packages/core/src/opportunity-queue-service.ts`
+- `apps/api/src/routes/opportunities.ts`
+- `apps/api/test/opportunities.test.ts` (30 test cases)
+- `apps/web/src/app/opportunities/page.tsx`
+- `apps/web/src/app/opportunities/[id]/page.tsx`
+- `apps/web/src/components/opportunity-card.tsx`
+
+**Modified files:**
+- `packages/core/src/index.ts` — Added opportunity-queue-service exports
+- `packages/db/src/repositories/recommendation-repository.ts` — Added queue/detail repository methods
+- `apps/api/src/services/container.ts` — Exposed `recommendationRepo` on container
+- `apps/api/src/routes/index.ts` — Registered opportunities router
+
+### 6. Test Results
+
+- **30/30 opportunity API tests pass** (queue creation, ranking, pagination, filters, IDOR, isolation, stale state, conflicts, expiration, forged values, approval handoff, zero Meta writes, deterministic ordering, error handling, secret redaction).
+- **23/23 typecheck** passes.
+- **Prisma Client generation** passes.
+
+### 7. Before vs After Example
+
+**BEFORE:**
+
+User has 12 pending recommendations.
+User: "Which one should I review first?"
+JARVIS: "Here are 12 recommendations." [unsorted list, no detail view]
+
+**AFTER:**
+
+User opens the Opportunity Queue at `/opportunities`.
+JARVIS displays a ranked, filterable table:
+
+  #1 — CRITICAL (Score: 92) — Pause "Spring Sale"
+        CPA +29% | Confidence: HIGH | Risk: LOW
+  #2 — HIGH (Score: 74) — Decrease Brand Awareness budget
+        ROAS declining | Confidence: MEDIUM | Risk: LOW
+  #3 — MEDIUM (Score: 58) — ...
+
+User clicks #1 → Detail page with:
+  - Server-computed score breakdown
+  - Evidence preview (current vs baseline metrics)
+  - Action preview (what will change)
+  - Approve button → routes to existing Phase 10 approval flow
+  - Reject button → marks as REJECTED
+
+No autonomous execution. No Meta writes. Full human control.
+
+*(Example data — synthetic)*
+
+### 8. Phase Verdict
+
+**PASS**
+
+---
+
 ## Phase 11 Summary
 
 | Sub-phase | Name | Verdict | Tests |
@@ -718,6 +823,7 @@ JARVIS:
 | 11.8A | Historical Intelligence | PASS | 40+ |
 | 11.8B | Recommendation Confidence | PASS | 48 |
 | 11.9A | Opportunity Scoring | PASS | 33 |
+| 11.9B | Opportunity Queue + Human Decision UI | PASS | 30 |
 
 ### Final Test Count
 
@@ -730,10 +836,11 @@ After Phase 11, users can:
 2. Get data-driven anomaly detection with statistical significance.
 3. Receive AI-powered diagnosis with fact/inference separation.
 4. Get specific, actionable recommendations with confidence levels.
-5. Review ranked opportunities by business importance.
-6. Approve and execute recommendations safely.
-7. Measure whether executed actions actually worked.
-8. Build historical evidence for future decisions.
+5. Browse a ranked, filterable opportunity queue in the web UI.
+6. Review opportunity details with server-computed scores and evidence.
+7. Approve or reject opportunities via the existing approval flow.
+8. Measure whether executed actions actually worked.
+9. Build historical evidence for future decisions.
 
 ### Known Limitations
 
@@ -746,4 +853,4 @@ After Phase 11, users can:
 ---
 
 *Document version: 1.0*
-*Last updated: 2026-08-25*
+*Last updated: 2026-08-26*

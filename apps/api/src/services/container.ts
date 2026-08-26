@@ -1,6 +1,6 @@
 import type { IOrchestrator, IToolExecutor, ITool, AIToolDefinition, ShutdownLifecycle } from "@jarvis/core";
 import type { TokenService } from "@jarvis/security";
-import { Orchestrator, AgentRegistry, ConversationalAssistant } from "@jarvis/agents";
+import { Orchestrator, AgentRegistry, ConversationalAssistant, PendingActionService } from "@jarvis/agents";
 import { OpenAIAdapter } from "@jarvis/ai-openai";
 import {
   ToolExecutor,
@@ -71,6 +71,8 @@ export interface Container {
   recommendationRepo: PrismaRecommendationRepository;
   /** Lifecycle gate consulted before approving side-effecting actions. */
   lifecycle?: ShutdownLifecycle;
+  /** PHASE 11.9 — pending action service for write-tool confirmation flow. */
+  pendingActionService?: import("@jarvis/agents").PendingActionService;
 }
 
 /**
@@ -204,13 +206,6 @@ export function getContainer(options?: {
   const approvalService = new ApprovalService(approvalRepo);
 
   const toolRegistry = createMetaToolRegistry(approvalRepo);
-  const toolExecutor = new ToolExecutor(
-    toolRegistry,
-    permissionService,
-    approvalService,
-    auditLogger,
-    { lifecycle: options?.lifecycle }
-  );
 
   const adapter = new OpenAIAdapter();
 
@@ -221,10 +216,12 @@ export function getContainer(options?: {
     "",
     "You have tools to read and manage Meta Ads campaigns. The Meta ad account ID is already configured in the system — you do NOT need to ask the user for it.",
     "",
+    `IMPORTANT: Your configured Meta Ad Account ID is: ${process.env.META_AD_ACCOUNT_ID}. When calling any Meta tool that requires an "accountId" parameter, you MUST use exactly this value: "${process.env.META_AD_ACCOUNT_ID}". Never invent, guess, or use a different account ID.`,
+    "",
     "When the user asks about their Meta Ads performance, campaigns, ad sets, ads, or insights, use the appropriate tool to fetch real data. Do NOT say you cannot access the account.",
     "",
     "For read-only queries (performance, metrics, lists), use the tools directly.",
-    "For write operations (pause, resume, budget changes, create campaign), explain what you will do and get confirmation first.",
+    "For write operations (pause, resume, budget changes, create campaign), call the tool directly. The system will handle the confirmation and approval flow automatically.",
     "",
     "DATE RANGE DEFAULTS:",
     "- If the user asks about 'current performance' or 'recent performance' or doesn't specify dates, use the last 30 days.",
@@ -242,6 +239,23 @@ export function getContainer(options?: {
     "- When presenting real data, include provenance: source (Meta API), account ID, and date range.",
     "- If a tool returns DATA: (empty — no data returned), state that no data was found for the specified criteria.",
     "- Never say 'Source: Meta API' unless the tool actually returned real data with STATUS: COMPLETED.",
+    "",
+    "MULTI-TURN CONTEXT RESOLUTION:",
+    "- You have access to the FULL conversation history. Use it to resolve references.",
+    "- When the user says short follow-ups like 'yes', 'please do', 'do it', 'proceed', 'create it', 'go ahead', 'haan', 'kar do', 'nahi tum karo', 'same', 'same details', 'proceed with that' — resolve them against the immediately preceding conversation context.",
+    "- NEVER re-ask for information that was ALREADY provided in the conversation.",
+    "- If all required information for a requested action is available in the conversation history, proceed directly.",
+    "- If information is genuinely missing for a required action, ask ONLY for the specific missing fields.",
+    "- Do NOT invent or guess values the user has not provided.",
+    "- For write operations: call the tool directly with all the parameters the user has provided. The system will create a pending action and handle the confirmation flow.",
+    "- When the user confirms (e.g. 'please do', 'yes', 'go ahead'), the system will automatically execute the confirmed action. You do not need to call the tool again.",
+    "",
+    "APPROVAL HANDLING:",
+    "- The system will automatically intercept write tool calls and create pending actions for user confirmation.",
+    "- When the system returns a pending action, present the details to the user and ask them to confirm.",
+    "- NEVER say 'I cannot proceed' or 'unfortunately I cannot' when you see a pending action. This is a normal part of the workflow.",
+    "- When the user confirms (e.g. 'haan kar do', 'yes', 'go ahead'), the system will automatically execute the action.",
+    "- When the tool returns STATUS: COMPLETED with DATA, the action was executed successfully. Present the results to the user.",
   ].join("\n");
 
   const agent = new ConversationalAssistant({
@@ -257,6 +271,8 @@ export function getContainer(options?: {
 
   // Wrap registry so the orchestrator resolves sanitized LLM tool names
   // (e.g. "meta-insights") back to original registry IDs (e.g. "meta.insights").
+  // The executor ALSO needs this mapping — it receives the sanitized name from
+  // the LLM and must resolve it before looking up the tool in the real registry.
   const resolvingRegistry = sanitizedToOriginal.size > 0
     ? {
         get(toolId: string) {
@@ -267,9 +283,24 @@ export function getContainer(options?: {
       }
     : toolRegistry;
 
+  const toolExecutor = new ToolExecutor(
+    resolvingRegistry,
+    permissionService,
+    approvalService,
+    auditLogger,
+    { lifecycle: options?.lifecycle }
+  );
+
+  // PHASE 11.9 — Pending action service for write-tool confirmation flow
+  const pendingActionService = new PendingActionService({
+    approvalRepo,
+    toolRegistry: resolvingRegistry,
+  });
+
   const orchestrator = new Orchestrator(agentRegistry, toolExecutor, auditLogger, {
     toolRegistry: resolvingRegistry,
     toolApprovalService,
+    pendingActionService: pendingActionService as unknown,
   });
 
   const recommendationRepo = new PrismaRecommendationRepository(prisma);
@@ -286,6 +317,7 @@ export function getContainer(options?: {
     executor: toolExecutor,
     recommendationRepo,
     lifecycle: options?.lifecycle,
+    pendingActionService,
   };
 
   return _container;
