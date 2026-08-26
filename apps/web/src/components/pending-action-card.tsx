@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import React, { useState } from "react";
 import {
   CheckCircle2,
   XCircle,
@@ -8,6 +8,7 @@ import {
   Shield,
   Wrench,
   RefreshCw,
+  Loader2,
 } from "lucide-react";
 import {
   confirmPendingAction,
@@ -24,6 +25,11 @@ export interface PendingActionData {
   approvalId: string;
   expiresAt: string;
   summary?: string;
+  executionResult?: {
+    status: string;
+    data?: Record<string, unknown>;
+    error?: string;
+  };
 }
 
 type UiState =
@@ -31,11 +37,7 @@ type UiState =
   | "executing"
   | "completed"
   | "failed"
-  | "approving"
-  | "rejecting"
-  | "approved"
-  | "rejected"
-  | "error";
+  | "rejected";
 
 interface Props {
   pendingAction: PendingActionData;
@@ -45,6 +47,7 @@ interface Props {
 }
 
 function toolDisplayName(toolId: string): string {
+  const normalized = toolId.replace(/-/g, ".");
   const map: Record<string, string> = {
     "meta.campaign.create": "Create Campaign",
     "meta.campaign.pause": "Pause Campaign",
@@ -57,7 +60,42 @@ function toolDisplayName(toolId: string): string {
     "meta.ad.pause": "Pause Ad",
     "meta.ad.resume": "Resume Ad",
   };
-  return map[toolId] ?? toolId;
+  return map[normalized] ?? toolId;
+}
+
+function paramValue(v: unknown): string {
+  return String(v ?? "");
+}
+
+function renderProposalParams(p: Record<string, unknown>): React.ReactNode {
+  return (
+    <>
+      {p.name != null && (
+        <div className="text-sm text-gray-200">
+          <span className="text-gray-400">Name: </span>
+          {paramValue(p.name)}
+        </div>
+      )}
+      {p.objective != null && (
+        <div className="text-sm text-gray-200">
+          <span className="text-gray-400">Objective: </span>
+          {paramValue(p.objective).replace("OUTCOME_", "")}
+        </div>
+      )}
+      {p.daily_budget != null && (
+        <div className="text-sm text-gray-200">
+          <span className="text-gray-400">Budget: </span>
+          Rs {paramValue(p.daily_budget)}/day
+        </div>
+      )}
+      {p.status != null && (
+        <div className="text-sm text-gray-200">
+          <span className="text-gray-400">Status: </span>
+          {paramValue(p.status)}
+        </div>
+      )}
+    </>
+  );
 }
 
 export function PendingActionCard({
@@ -70,26 +108,28 @@ export function PendingActionCard({
   const [message, setMessage] = useState<string | null>(null);
 
   const expired = new Date(pendingAction.expiresAt) <= new Date();
-  const effectiveState: UiState =
-    ui !== "idle" ? ui : expired ? "error" : ui;
-  const busy =
-    ui === "approving" ||
-    ui === "rejecting" ||
-    ui === "executing";
+
+  if (ui === "idle" && expired) {
+    setUi("failed");
+    setMessage("This approval has expired.");
+  }
 
   async function handleConfirm() {
-    setUi("approving");
+    setUi("executing");
     setMessage(null);
 
     try {
       const res = await confirmPendingAction(pendingAction.id, conversationId);
 
       if (res.success) {
-        setUi("approved");
+        setUi("completed");
         if (res.data?.executionResult?.status === "completed") {
-          setMessage("Confirmed and executed successfully!");
+          setMessage("Executed successfully!");
+        } else if (res.data?.executionResult?.status === "failed") {
+          setUi("failed");
+          setMessage(String(res.data.executionResult.error) || "Execution failed.");
         } else {
-          setMessage("Confirmed! Executing...");
+          setMessage("Confirmed and executed.");
         }
         onConfirmed?.();
         return;
@@ -97,20 +137,20 @@ export function PendingActionCard({
 
       const code = res.error?.code ?? "";
       if (code === "PENDING_ACTION_NOT_FOUND") {
-        setUi("error");
+        setUi("failed");
         setMessage("This action has expired or was already processed.");
       } else {
-        setUi("error");
+        setUi("failed");
         setMessage(res.error?.message || "Failed to confirm.");
       }
     } catch {
-      setUi("error");
+      setUi("failed");
       setMessage("Network error. Please try again.");
     }
   }
 
   async function handleReject() {
-    setUi("rejecting");
+    setUi("executing");
     setMessage(null);
 
     try {
@@ -118,49 +158,61 @@ export function PendingActionCard({
 
       if (res.success) {
         setUi("rejected");
-        setMessage("Rejected. This action will not be executed.");
+        setMessage("Cancelled. This action will not be executed.");
         onRejected?.();
         return;
       }
 
-      setUi("error");
+      setUi("failed");
       setMessage(res.error?.message || "Failed to reject.");
     } catch {
-      setUi("error");
+      setUi("failed");
       setMessage("Network error. Please try again.");
     }
   }
-
-  const decided =
-    effectiveState === "approved" ||
-    effectiveState === "rejected" ||
-    (effectiveState === "error" && expired);
 
   const isHighRisk =
     pendingAction.riskLevel === "HIGH_IMPACT" ||
     pendingAction.riskLevel === "FINANCIAL";
 
+  const showButtons = ui === "idle" && !expired;
+  const isExecuted = ui === "completed" && message?.includes("successfully");
+
   return (
     <div
       data-testid="pending-action-card"
-      data-state={effectiveState}
+      data-state={ui === "idle" ? (expired ? "expired" : "PENDING_APPROVAL") : ui === "completed" ? "EXECUTED" : ui === "rejected" ? "CANCELLED" : ui === "executing" ? "EXECUTING" : ui === "failed" ? "FAILED" : ui}
       data-risk={pendingAction.riskLevel}
       className={`mt-2 rounded-lg border p-3 space-y-2 ${
         isHighRisk
           ? "border-red-700/40 bg-red-900/10"
-          : "border-yellow-700/40 bg-yellow-900/10"
+          : ui === "completed"
+            ? "border-green-700/40 bg-green-900/10"
+            : ui === "rejected"
+              ? "border-gray-700/40 bg-gray-900/10"
+              : "border-yellow-700/40 bg-yellow-900/10"
       }`}
     >
       {/* Header */}
       <div className="flex items-center gap-2">
-        {isHighRisk ? (
+        {ui === "completed" ? (
+          <CheckCircle2 size={14} className="text-green-400 shrink-0" />
+        ) : ui === "rejected" ? (
+          <XCircle size={14} className="text-gray-400 shrink-0" />
+        ) : isHighRisk ? (
           <Shield size={14} className="text-red-400 shrink-0" />
         ) : (
           <Wrench size={14} className="text-yellow-400 shrink-0" />
         )}
         <span
           className={`text-xs font-medium ${
-            isHighRisk ? "text-red-300" : "text-yellow-300"
+            ui === "completed"
+              ? "text-green-300"
+              : ui === "rejected"
+                ? "text-gray-400"
+                : isHighRisk
+                  ? "text-red-300"
+                  : "text-yellow-300"
           }`}
         >
           {toolDisplayName(pendingAction.toolId)}
@@ -170,7 +222,7 @@ export function PendingActionCard({
             High Risk
           </span>
         )}
-        {pendingAction.expiresAt && (
+        {ui === "idle" && pendingAction.expiresAt && (
           <span className="text-xs text-gray-500 ml-auto flex items-center gap-1">
             <Clock size={11} />
             {new Date(pendingAction.expiresAt).toLocaleTimeString([], {
@@ -186,31 +238,32 @@ export function PendingActionCard({
         {pendingAction.params.name != null && (
           <div className="text-sm text-gray-200">
             <span className="text-gray-400">Name: </span>
-            {String(pendingAction.params.name as string)}
+            {paramValue(pendingAction.params.name)}
           </div>
         )}
         {pendingAction.params.objective != null && (
           <div className="text-sm text-gray-200">
             <span className="text-gray-400">Objective: </span>
-            {String(pendingAction.params.objective as string).replace("OUTCOME_", "")}
+            {paramValue(pendingAction.params.objective).replace("OUTCOME_", "")}
           </div>
         )}
+        {typeof pendingAction.params.proposal === "object" && pendingAction.params.proposal != null && renderProposalParams(pendingAction.params.proposal as Record<string, unknown>)}
         {pendingAction.params.dailyBudget != null && (
           <div className="text-sm text-gray-200">
             <span className="text-gray-400">Budget: </span>
-            ₹{String(pendingAction.params.dailyBudget)}/day
+            Rs {paramValue(pendingAction.params.dailyBudget)}/day
           </div>
         )}
-        {pendingAction.params.status != null && (
+        {pendingAction.params.status != null && typeof pendingAction.params.status === "string" && (
           <div className="text-sm text-gray-200">
             <span className="text-gray-400">Status: </span>
-            {String(pendingAction.params.status as string)}
+            {paramValue(pendingAction.params.status)}
           </div>
         )}
         {pendingAction.params.campaignId != null && (
           <div className="text-sm text-gray-200">
             <span className="text-gray-400">Campaign ID: </span>
-            {String(pendingAction.params.campaignId as string)}
+            {paramValue(pendingAction.params.campaignId)}
           </div>
         )}
       </div>
@@ -221,44 +274,61 @@ export function PendingActionCard({
           data-testid="pending-action-message"
           role="status"
           className={`text-xs ${
-            effectiveState === "error" || effectiveState === "rejected"
+            ui === "failed"
               ? "text-red-300"
-              : effectiveState === "approved" || effectiveState === "completed"
-                ? "text-green-300"
-                : "text-gray-300"
+              : ui === "rejected"
+                ? "text-gray-400"
+                : ui === "completed"
+                  ? "text-green-300"
+                  : "text-gray-300"
           }`}
         >
           {message}
         </p>
       )}
 
-      {/* Action buttons */}
-      {!decided && (
+      {/* EXECUTING state */}
+      {ui === "executing" && (
+        <div className="flex items-center gap-2 text-xs text-gray-400">
+          <Loader2 size={13} className="animate-spin" />
+          <span>Executing...</span>
+        </div>
+      )}
+
+      {/* PENDING_APPROVAL state: Confirm + Reject buttons */}
+      {showButtons && (
         <div className="flex gap-2 pt-1">
           <button
             data-testid="confirm-button"
-            disabled={busy}
             onClick={handleConfirm}
-            className="flex items-center gap-1 rounded bg-green-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-green-600 disabled:opacity-50 transition-colors"
+            className="flex items-center gap-1 rounded bg-green-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-green-600 transition-colors"
           >
             <CheckCircle2 size={13} />
-            {busy && ui === "approving" ? "Confirming..." : "Confirm"}
+            Confirm
           </button>
           <button
             data-testid="reject-button"
-            disabled={busy}
             onClick={handleReject}
-            className="flex items-center gap-1 rounded bg-red-800 px-3 py-1.5 text-xs font-medium text-white hover:bg-red-700 disabled:opacity-50 transition-colors"
+            className="flex items-center gap-1 rounded bg-red-800 px-3 py-1.5 text-xs font-medium text-white hover:bg-red-700 transition-colors"
           >
             <XCircle size={13} />
-            {busy && ui === "rejecting" ? "Rejecting..." : "Reject"}
+            Reject
           </button>
         </div>
       )}
 
-      {/* Retry after failure */}
-      {effectiveState === "error" && !expired && (
+      {/* EXECUTED state */}
+      {isExecuted && (
+        <div className="flex items-center gap-2 text-xs text-green-400">
+          <CheckCircle2 size={13} />
+          <span>Executed</span>
+        </div>
+      )}
+
+      {/* FAILED state: Retry */}
+      {ui === "failed" && !expired && (
         <button
+          data-testid="retry-button"
           onClick={() => {
             setUi("idle");
             setMessage(null);
@@ -266,8 +336,16 @@ export function PendingActionCard({
           className="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-300"
         >
           <RefreshCw size={12} />
-          Try again
+          Retry
         </button>
+      )}
+
+      {/* CANCELLED state */}
+      {ui === "rejected" && (
+        <div className="flex items-center gap-2 text-xs text-gray-400">
+          <XCircle size={13} />
+          <span>Cancelled</span>
+        </div>
       )}
     </div>
   );

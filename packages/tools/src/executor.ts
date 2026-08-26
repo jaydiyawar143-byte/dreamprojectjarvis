@@ -162,7 +162,50 @@ export class ToolExecutor implements IToolExecutor {
       let rejectedLatest: ApprovalLike | undefined;
       let pendingBound: ApprovalLike | undefined;
 
-      if (this.approvalManager.findApprovalsForTool) {
+      // PHASE 11.9C: When caller provides an explicit approvalId (from the
+      // pending-action flow), look up THAT specific approval first. If it is
+      // approved and valid, use it directly — bypass the broad search that
+      // can miss it and cause a new approval to be created (the "loop").
+      if (request.approvalId) {
+        const existing = await this.approvalManager.findExistingForTool(
+          request.toolId,
+          request.userId
+        );
+        if (existing && existing.id === request.approvalId) {
+          if (
+            existing.status === "approved" &&
+            new Date(existing.expiresAt) > new Date() &&
+            paramsBound(existing)
+          ) {
+            approvedBound = existing;
+          } else if (existing.status === "rejected") {
+            rejectedLatest = existing;
+          }
+        }
+        // If the specific approval wasn't found via findExistingForTool
+        // (which does findFirst), also try the broader list query
+        if (!approvedBound && !rejectedLatest) {
+          if (this.approvalManager.findApprovalsForTool) {
+            const candidates =
+              await this.approvalManager.findApprovalsForTool(
+                request.toolId,
+                request.userId
+              );
+            const match = candidates.find((c) => c.id === request.approvalId);
+            if (match) {
+              if (
+                match.status === "approved" &&
+                new Date(match.expiresAt) > new Date() &&
+                paramsBound(match)
+              ) {
+                approvedBound = match;
+              } else if (match.status === "rejected") {
+                rejectedLatest = match;
+              }
+            }
+          }
+        }
+      } else if (this.approvalManager.findApprovalsForTool) {
         const candidates =
           await this.approvalManager.findApprovalsForTool(
             request.toolId,

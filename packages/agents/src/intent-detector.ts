@@ -2,6 +2,8 @@ import type { IntentResult, PendingAction } from "@jarvis/core";
 
 const CONFIRM_PATTERNS: RegExp[] = [
   /^(yes|y|haan|haa|haan kar do|haa kar do|yes please|sure|okay|ok|go ahead|proceed|do it|please do|create it|kar do|bana do|banaa do|theek hai|i approve|approve|confirm|bana de|banao|yes do it|go for it|do it please|please go ahead|sounds good|perfect|great|done|let's do it|let's go|i'm in|count me in|absolutely|definitely|of course|why not|yeah|yep|yup|ji haan|ji|haanji|chalein|chal)$/i,
+  /^yes[,.]?\s+(?:please|do|go|approve|confirm|proceed|karo|banao|kar)\b/i,
+  /^(?:please|kindly|sure|okay|ok)[,.]?\s+(?:do|go|approve|confirm|proceed|create)\b/i,
 ];
 
 const REJECT_PATTERNS: RegExp[] = [
