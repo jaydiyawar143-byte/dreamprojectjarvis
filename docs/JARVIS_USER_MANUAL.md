@@ -362,6 +362,8 @@ JARVIS clearly labels its responses:
 - **A/B test automatically.** Controlled experimentation is planned for a future phase.
 - **Manage multiple ad platforms.** Currently Meta (Facebook/Instagram) is the only supported advertising platform.
 - **Access landing page or website data.** JARVIS works with Meta advertising metrics only. Website analytics are not integrated.
+- **Run a dedicated Meta Ads agent.** Currently all Meta tool activity flows through the single `conversational-assistant`. A dedicated Meta Ads agent is the focus of **Sprint 2** (see the [baseline audit](../SPRINT_2.0_META_ADS_BASELINE_AUDIT.md) and [change boundary](../SPRINT_2_META_ADS_CHANGE_BOUNDARY.md)).
+- **Automatically generate recommendations on demand.** JARVIS can *list*, *rank* (opportunity queue), and *execute* recommendations that exist in the database, but the end-to-end "analyze → generate" pipeline runs today only via a standalone CLI smoke script (`apps/api/scripts/phase116b/propose.ts`), not through the chat/API on demand.
 
 ---
 
@@ -412,6 +414,17 @@ For phase-by-phase history, see the [Phase Documents](./phases/).
 
 For system diagrams, see [Diagrams](./diagrams/).
 
+## Sprint 2.2 — Dedicated Meta Ads Agent Domain Intelligence
+
+- **Status:** IMPLEMENTED and VERIFIED
+- **Features:** 
+  - **Meta Hierarchy Awareness:** Operates with a concrete model of Meta's hierarchy (Account -> Campaign -> Ad Set -> Ad -> Creative) and respects levels when mapping IDs.
+  - **Objective-Aware KPI Analysis:** Evaluates campaigns using target-objective priorities (e.g. CTR/CPC for traffic, CPA/CVR/ROAS for conversion).
+  - **KPI Diagnostic Reasoning:** Follows metric relationship patterns (e.g. CPM cost pressure, creative fatigue indicators) to form diagnostic hypotheses.
+  - **Evidence-First Formatting:** Formats substantive recommendations using a structured evidence-first template: Observed Evidence -> Interpretation -> Alternative Explanation -> Confidence -> Recommended Action.
+  - **Execution Boundaries:** Adheres strictly to the existing human approval, paramsHash, and execution journal flows. Never performs real Graph writes in tests.
+- **Verification:** Expanded agents tests suite (`packages/agents/test/meta-ads-agent.test.ts`) to **24** tests covering hierarchy, pacing, fatigue, evidence layouts, budget rules, memory integrations, and safety boundaries.
+
 ---
 
 ## Glossary
@@ -435,5 +448,6 @@ For system diagrams, see [Diagrams](./diagrams/).
 
 ---
 
-*Document version: 1.0*
-*Last updated: 2026-08-25*
+*Document version: 1.6*
+*Last updated: 2026-08-27*
+*Sprint 2.2 complete: Dedicated MetaAdsAgent domain intelligence reasoning implemented, verified, and E2E tested (24 scenarios).*

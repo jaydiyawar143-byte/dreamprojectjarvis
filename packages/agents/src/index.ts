@@ -1,6 +1,7 @@
 export { AgentRegistry } from "./registry.js";
 export { BaseAgent } from "./base-agent.js";
 export { ConversationalAssistant } from "./agents/conversational-assistant.js";
+export { MetaAdsAgent } from "./agents/meta-ads-agent.js";
 export { Orchestrator } from "./orchestrator.js";
 export { MockAIProvider } from "./mock-ai-provider.js";
 export { ToolPlanValidator, ToolPlanParser, ToolDescriptionBuilder } from "./tool-planner.js";

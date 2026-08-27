@@ -1,0 +1,144 @@
+%% SPRINT 2.0 - META ADS CURRENT-STATE ARCHITECTURE (BASELINE)
+%% READ-ONLY inventory of existing capability. No behavior altered.
+%% Entry points are color-coded:
+%%   GREEN  = user-accessible via HTTP/API route
+%%   PURPLE = standalone CLI smoke script (NOT a production route)
+%%   RED    = implemented module but NOT wired anywhere in production
+%%   ORANGE = DB persistence layer (read/write via repositories)
+
+flowchart TB
+    subgraph Boundary["META (Graph API v21) - external"]
+        MG["Meta Graph API\nad accounts / campaigns / ad sets / ads / insights"]
+    end
+
+    subgraph MGrapher["@jarvis/meta-graph provider layer"]
+        Prov["createMetaGraphProvider()\n(only real when META_ACCESS_TOKEN + META_AD_ACCOUNT_ID set)"]
+        Auth["MetaAccountAuthorizer\n(isAuthorized / ACTIVE check)"]
+        Reconcile["Reconciler\n(campaign client-signal reconcile)"]
+        VResp["Response Validator"]
+        ErrH["Error Handler / classification"]
+    end
+
+    subgraph Tools["@jarvis/tools tool layer"]
+        ReadTools["5 READ tools:\nmeta.accounts / meta.campaigns\nmeta.ad-sets / meta.ads / meta.insights"]
+        WriteTools["WRITE tools (approval-bound):\nmeta.campaign.pause/resume\nmeta.adset.pause/resume\nmeta.ad.pause/resume\nmeta.campaign/adset.budget.update\nmeta.create-campaign"]
+        BudgetG["Budget Guardrails\n(max $10k, +25%/-50%, abs caps)"]
+        ValidT["meta-ads validators"]
+        Registry["ToolRegistry (by tool.id)\n+ resolvingRegistry wrapper (sanitizeToolName)"]
+        Exec["ToolExecutor\n(approval + paramsHash + timeout 30s + ShutdownLifecycle)"]
+        EJournal["ExecutionJournal"]
+        Bridge["recommendation-bridge (Phase 11.6A)"]
+    end
+
+    subgraph Agents["@jarvis/agents orchestration"]
+        Orch["Orchestrator\n(maxToolExec=10, depth=5, relevance=0.3)\nwith isMetaAdsQuery intent router"]
+        Reg2["AgentRegistry\n('conversational-assistant' & 'meta-ads-agent')"]
+        Intent["intent-detector\n(CONFIRM/REJECT/MODIFY/NEW/CLARIFY)"]
+        PAS["PendingActionService\n(backed by Approval table)"]
+    end
+
+    subgraph Core["@jarvis/core intelligence engines"]
+        KPI["KPI Engine (11.1)"]
+        Agg["Performance Aggregator (11.2)"]
+        Anom["Anomaly Engine (11.3)"]
+        Evid["Evidence Builder (11.4)"]
+        Diag["Diagnosis Engine (11.4, LLM)"]
+        Rec["Recommendation Engine (11.5)"]
+        Conf["Recommendation Confidence (11.8B)"]
+        Hist["Historical Outcome Engine (11.8A)"]
+        Score["Opportunity Scoring (11.9A)"]
+        Queue["Opportunity Queue Service (11.9B)"]
+        OEng["Outcome Engine (11.7A)"]
+        OWork["Outcome Worker (11.7B)"]
+    end
+
+    subgraph API["apps/api routes"]
+        R6["GET /api/v1/opportunities\nGET /opportunities/:id (read-only)"]
+        R5["GET /api/v1/recommendations\nGET /:id\nPOST /:id/execute"]
+        R7["GET /recommendations/:id/outcome\nGET /outcomes/:id (read-only)"]
+        R8["GET /api/v1/pending-actions\nPOST /:id/confirm|reject|modify"]
+        R9["GET/POST /api/v1/approvals\nPOST /:id/approve|reject"]
+        Chat["POST /api/v1/chat"]
+    end
+
+    subgraph Scripts["apps/api/scripts/phase116b (standalone smoke CLI)"]
+        Propose["propose.ts - ONLY end-to-end entry:\nKPI->Agg->Anomaly->Evidence->Diagnose->Recommend->DB"]
+        Execute["execute.ts"]
+        MockLife["mock-lifecycle.ts"]
+    end
+
+    subgraph DB["@jarvis/db - PostgreSQL (Prisma)"]
+        TTool["ToolExecution"]
+        PRec["PerformanceRecommendation"]
+        ORec["OutcomeRecord / OutcomeRevision"]
+        Appr["Approval"]
+        Mkt["MarketingAccount"]
+        MSnap["MetricSnapshot"]
+        DRec["DecisionRecord"]
+    end
+
+    MG <--> Prov
+    Prov --> Auth
+    Prov --> VResp
+    Prov --> ErrH
+    Prov --> Reconcile
+
+    ReadTools --> Prov
+    ReadTools & WriteTools --> BudgetG & ValidT
+    WriteTools --> Registry
+    ReadTools --> Registry
+
+    Exec --> Registry
+    Exec --> EJournal
+    Bridge --> Exec
+
+    Orch --> Exec
+    Orch --> Reg2
+    Orch --> Intent
+    Orch --> PAS
+    PAS --> Appr
+    Bridge --> PAS
+
+    ReadTools --> Rec
+    Rec --> Conf --> Hist
+    Diag --> Rec
+    Anom --> Evid --> Diag
+    KPI --> Agg --> Anom
+    Rec --> Score --> Queue
+
+    OEng --> OWork
+
+    %% ---- USER ACCESSIBLE (GREEN) ----
+    Chat --> Orch --> R6 & R5 & R7 & R8 & R9
+    Queue --> R6
+    PRec --> Queue
+
+    %% ---- STANDALONE SCRIPT (PURPLE) ----
+    Propose --> KPI & Agg & Anom & Evid & Diag & Rec
+    Propose --> PRec
+
+    %% ---- PRODUCTION DB (ORANGE) ----
+    Exec --> TTool
+    Rec --> PRec
+    OWork --> OEng
+    OWork --> Mkt & MSnap & ORec
+    Bridge --> DRec
+
+    %% ---- NOT WIRED IN PRODUCTION (RED) ----
+    OWork -. "no scheduler/cron/route invokes" .-> X_OW_X["Outcome Worker: implemented + tested only"]
+    Diag -. "only via script" .-> X_D_X["Diagnosis: no production trigger in routes"]
+    Hist -. "internal to Rec" .-> X_H_X["Historical: internal only"]
+
+    classDef green fill:#1f7a3d,color:#fff,stroke:#0f4d24
+    classDef purple fill:#6a4fa3,color:#fff,stroke:#462e73
+    classDef red fill:#a33434,color:#fff,stroke:#6b1f1f
+    classDef orange fill:#c77d1e,color:#fff,stroke:#8a510f
+    classDef blue fill:#2563eb,color:#fff,stroke:#163d91
+    classDef grey fill:#374151,color:#fff,stroke:#1f2937
+
+    class R6,R5,R7,R8,R9,Chat green
+    class Propose,Execute,MockLife purple
+    class OWork,X_OW_X,X_D_X,X_H_X red
+    class TTool,PRec,ORec,Appr,Mkt,MSnap,DRec orange
+    class MG,MGrapher blue
+    class Prov,Auth,Reconcile,VResp,ErrH,MG blue

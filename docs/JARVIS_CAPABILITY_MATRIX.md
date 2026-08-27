@@ -141,6 +141,16 @@ These three statuses are **not the same thing.** A capability may be implemented
 | Approval handoff | YES | YES | YES | 11.9B | Routes through existing Phase 10 approval flow | — |
 | IDOR protection (queue) | YES | YES | YES | 11.9B | Server-computed scores, accountId from env | — |
 
+### Dedicated Meta Ads Agent (Sprint 2 Scope)
+
+| Capability | Implemented | Verified | User-Accessible | Phase | Evidence | Limitations |
+|-----------|-------------|----------|----------------|-------|----------|-------------|
+| Dedicated Meta Ads agent (Sprint 2.1) | YES | YES | YES | Sprint 2.1 | `packages/agents/src/agents/meta-ads-agent.ts`, `packages/agents/test/meta-ads-agent.test.ts` (24 tests) | Specialized Meta reasoning |
+| Auto-namespace intent-based routing | YES | YES | YES | Sprint 2.1 | `packages/agents/src/orchestrator.ts` (`isMetaAdsQuery` routing) | Fallback to default ConversationalAssistant |
+| Meta Ads domain reasoning (Sprint 2.2) | YES | YES | YES | Sprint 2.2 | Campaign hierarchy, objective-aware KPIs, relationships, creative fatigue, delivery states | Reuses existing engines, no duplicate engines |
+| Meta agent write execution | YES | YES | YES | Sprint 2.1 | Writes handled via existing Tools & Approval Service | Bounded by human approval |
+| Real Meta write via new agent | 0 | N/A | N/A | Sprint 2.1 | audit requirement | **Must stay 0** |
+
 ### Conversational Access
 
 | Capability | Implemented | Verified | User-Accessible | Phase | Evidence | Limitations |
@@ -155,15 +165,21 @@ These three statuses are **not the same thing.** A capability may be implemented
 
 | Capability | Implemented | Verified | User-Accessible | Phase | Evidence | Limitations |
 |-----------|-------------|----------|----------------|-------|----------|-------------|
-| Long-term memory | YES | YES | YES | — | `packages/memory/src/memory-engine.ts` | pgvector embeddings |
-| Memory extraction | YES | YES | PARTIAL | — | `packages/memory/src/memory-extraction-service.ts` | Agent integration incomplete |
+| Persistent memory wiring (Sprint 1.1A) | YES | YES | YES | Sprint 1.1A | `apps/api/src/services/container.ts` L319–357, `packages/db/src/repositories/memory-repository.ts`, `apps/api/test/sprint-1.1a-memory-wiring.test.ts` (24 tests) | Production container wired |
+| Memory store (PrismaMemoryRepository) | YES | YES | YES | Sprint 1.1A | `packages/db/src/repositories/memory-repository.ts`, Memory table in PostgreSQL w/ pgvector | Only reachable with live DB |
+| MemoryEngine | YES | YES | YES | Sprint 1.1A | `packages/memory/src/memory-engine.ts` | Requires persistent store + embedding provider |
+| Memory extraction service (Sprint 1.1B) | YES | YES | YES | Sprint 1.1B | `packages/memory/src/memory-extraction-service.ts`, `apps/api/test/sprint-1.1b-memory-extraction.test.ts` (11 tests) | Runs in background post-conversation |
+| Embedding generation | YES | YES | YES | Sprint 1.1A | `packages/ai-openai/src/openai-embedding-provider.ts` | Requires OPENAI_API_KEY; graceful degradation if absent |
 | Knowledge base (RAG) | YES | YES | PARTIAL | — | `packages/memory/src/knowledge-base.ts` | Document upload UI incomplete |
-| Embedding generation | YES | YES | YES | — | `packages/ai-openai/src/openai-embedding-provider.ts` | Requires OpenAI API key |
+| Memory recall in conversation (Sprint 1.1C) | YES | YES | YES | Sprint 1.1C | `packages/agents/src/orchestrator.ts` L122, `apps/api/test/sprint-1.1c-memory-recall.test.ts` (10 tests) | Active context retrieval; scoped by userId |
+| Full memory E2E lifecycle (Sprint 1.1D) | YES | YES | YES | Sprint 1.1D | `apps/api/test/sprint-1.1d-memory-e2e.test.ts` (12 tests) | Complete extract → persist → recall behavioral verification |
 
 ### What Is NOT Implemented
 
 | Capability | Status | Notes |
 |-----------|--------|-------|
+| User-triggered recommendation generation (HTTP) | NOT IMPLEMENTED | Pipeline generation exists only via `apps/api/scripts/phase116b/propose.ts` (standalone CLI, not a route/worker) |
+| Outcome worker automation | NOT IMPLEMENTED | `OutcomeWorker` implemented + tested but never wired to a scheduler/cron/route |
 | Autonomous optimization | NOT IMPLEMENTED | By design — every write requires human approval |
 | A/B experimentation | NOT IMPLEMENTED | Explicitly deferred to Phase 12 |
 | Multi-platform advertising | NOT IMPLEMENTED | Only Meta (Facebook/Instagram) supported |
@@ -177,5 +193,6 @@ These three statuses are **not the same thing.** A capability may be implemented
 
 ---
 
-*Document version: 1.0*
-*Last updated: 2026-08-26*
+*Document version: 1.6*
+*Last updated: 2026-08-27*
+*Sprint 2.2 complete: Dedicated MetaAdsAgent domain intelligence reasoning implemented, verified, and E2E tested (24 scenarios).*

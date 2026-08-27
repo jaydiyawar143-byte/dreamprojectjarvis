@@ -1,7 +1,8 @@
-import type { IOrchestrator, IToolExecutor, ITool, AIToolDefinition, ShutdownLifecycle } from "@jarvis/core";
+import type { IOrchestrator, IToolExecutor, ITool, AIToolDefinition, ShutdownLifecycle, IMemoryStore, IEmbeddingProvider } from "@jarvis/core";
 import type { TokenService } from "@jarvis/security";
-import { Orchestrator, AgentRegistry, ConversationalAssistant, PendingActionService } from "@jarvis/agents";
-import { OpenAIAdapter } from "@jarvis/ai-openai";
+import type { IMemoryExtractor } from "@jarvis/core";
+import { Orchestrator, AgentRegistry, ConversationalAssistant, MetaAdsAgent, PendingActionService } from "@jarvis/agents";
+import { OpenAIAdapter, OpenAIEmbeddingProvider } from "@jarvis/ai-openai";
 import {
   ToolExecutor,
   ToolRegistry,
@@ -39,7 +40,9 @@ import {
   PrismaToolExecutionRepository,
   PrismaApprovalRepository,
   PrismaRecommendationRepository,
+  PrismaMemoryRepository,
 } from "@jarvis/db";
+import { MemoryExtractionService } from "@jarvis/memory";
 
 export interface Container {
   tokenService: TokenService;
@@ -73,6 +76,15 @@ export interface Container {
   lifecycle?: ShutdownLifecycle;
   /** PHASE 11.9 — pending action service for write-tool confirmation flow. */
   pendingActionService?: import("@jarvis/agents").PendingActionService;
+  /**
+   * Sprint 1.1A — persistent memory store wired into the production container.
+   * Null when OPENAI_API_KEY is absent (graceful degradation).
+   */
+  memoryStore: IMemoryStore | null;
+  /** Sprint 1.1A — embedding provider. Null when OPENAI_API_KEY is absent. */
+  embeddingProvider: IEmbeddingProvider | null;
+  /** Sprint 1.1A — memory extractor. Null when OPENAI_API_KEY is absent. */
+  memoryExtractor: IMemoryExtractor | null;
 }
 
 /**
@@ -264,8 +276,46 @@ export function getContainer(options?: {
     tools: agentTools,
   });
 
+  const metaAdsSystemPrompt = [
+    "You are the JARVIS Meta Ads Agent, a specialized domain expert for Meta Ads (Facebook & Instagram).",
+    "You have campaign hierarchy awareness: Account -> Campaign -> Ad Set -> Ad -> Creative.",
+    "You understand performance metrics: Spend, CTR, CPC, CPM, CPA, ROAS, Conversions, Budget, and Delivery states.",
+    "",
+    "=== REASONING & ACCURACY RULES ===",
+    "1. FACT vs INFERENCE vs HYPOTHESIS: Clearly distinguish verified facts from logical inferences and hypotheses.",
+    "   - FACT: Data directly returned from a tool.",
+    "   - INFERENCE: Calculations or direct logical conclusions based on raw numbers.",
+    "   - HYPOTHESIS: Possibilities to explain trends that need testing.",
+    "2. NO FABRICATION: Never fabricate or hallucinate any campaign IDs, ad IDs, account IDs, or metric values.",
+    "3. WRITE CONFIRMATION: Never claim a mutation occurred unless you receive tool execution status confirmation.",
+    "4. NO GUARANTEES: Never guarantee performance improvements or campaign success.",
+    "",
+    "=== WORKFLOW RULES ===",
+    "1. READ-FIRST FOR ANALYSIS: When users ask analytical questions, always fetch the data first using read tools, analyze, and then explain. Never perform or suggest write mutations.",
+    "2. RECOMMENDATION FLOW: When recommending optimizations, present the data evidence, metric anomalies, diagnosis, specific recommendations, risk profiles, and confidence level. Do NOT execute any write directly; present options clearly to the user.",
+    "3. WRITE SAFETY & APPROVALS: For modification requests, select the appropriate write tool. The system automatically intercepts these write tools to generate pending actions for human approval. Inform the user of the pending approval ID cleanly and instruct them to confirm.",
+    "4. SECURITY: Never reveal Meta access tokens or internal API credentials.",
+    "",
+    "=== RESPONSE FORMATTING ===",
+    "When providing analytical reports or diagnostic insights, prefer this structured layout if suitable:",
+    "- **Summary**: High-level overview.",
+    "- **Evidence**: Metrics, anomalies, and facts.",
+    "- **Diagnosis**: Explanation of performance trends.",
+    "- **Recommendation**: Concrete optimization action.",
+    "- **Risk & Confidence**: Risk level and confidence score.",
+    "- **Next Step**: Actionable prompt.",
+    "Do not force this format for simple conversational queries. Respect memory context preferences."
+  ].join("\n");
+
+  const metaAgent = new MetaAdsAgent({
+    provider: adapter,
+    systemPrompt: metaAdsSystemPrompt,
+    tools: agentTools,
+  });
+
   const agentRegistry = new AgentRegistry();
   agentRegistry.register(agent);
+  agentRegistry.register(metaAgent);
 
   const toolApprovalService = new ToolApprovalService(approvalRepo, auditRepo, permissionService);
 
@@ -297,10 +347,65 @@ export function getContainer(options?: {
     toolRegistry: resolvingRegistry,
   });
 
+  // ---------------------------------------------------------------------------
+  // Sprint 1.1A — Persistent Memory Store Wiring
+  // Wire PrismaMemoryRepository → MemoryExtractionService → Orchestrator.
+  // Graceful degradation: if OPENAI_API_KEY is absent, memory is disabled but
+  // the application still starts (matches the existing Meta credentials pattern).
+  // ---------------------------------------------------------------------------
+
+  let memoryStore: IMemoryStore | null = null;
+  let embeddingProvider: IEmbeddingProvider | null = null;
+  let memoryExtractor: IMemoryExtractor | null = null;
+
+  try {
+    // PrismaMemoryRepository is always safe to instantiate — no API key needed.
+    memoryStore = new PrismaMemoryRepository(prisma);
+
+    // OpenAIEmbeddingProvider throws if OPENAI_API_KEY is absent.
+    embeddingProvider = new OpenAIEmbeddingProvider();
+
+    // MemoryExtractionService reuses the same OpenAIAdapter already wired for
+    // the ConversationalAssistant — no second AI client is created.
+    memoryExtractor = new MemoryExtractionService({
+      aiProvider: adapter,
+      store: memoryStore,
+      embeddingProvider,
+    });
+
+    console.log(JSON.stringify({
+      level: "info",
+      event: "memory_wiring",
+      status: "persistent_memory_wired",
+      store: memoryStore.id,
+      embeddingProvider: embeddingProvider.id,
+    }));
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.log(JSON.stringify({
+      level: "warn",
+      event: "memory_wiring",
+      status: "memory_disabled",
+      reason: message,
+    }));
+    // Reset all to null so partial state is never used
+    memoryStore = null;
+    embeddingProvider = null;
+    memoryExtractor = null;
+  }
+
   const orchestrator = new Orchestrator(agentRegistry, toolExecutor, auditLogger, {
     toolRegistry: resolvingRegistry,
     toolApprovalService,
     pendingActionService: pendingActionService as unknown,
+    // Sprint 1.1A: wire persistent memory into orchestrator
+    ...(memoryStore !== null && embeddingProvider !== null
+      ? {
+          memoryStore,
+          embeddingProvider,
+          ...(memoryExtractor !== null ? { memoryExtractor } : {}),
+        }
+      : {}),
   });
 
   const recommendationRepo = new PrismaRecommendationRepository(prisma);
@@ -318,6 +423,10 @@ export function getContainer(options?: {
     recommendationRepo,
     lifecycle: options?.lifecycle,
     pendingActionService,
+    // Sprint 1.1A — expose memory stack for diagnostics and tests
+    memoryStore,
+    embeddingProvider,
+    memoryExtractor,
   };
 
   return _container;

@@ -6,6 +6,7 @@ import type {
   NormalizedPerformanceRecord,
   PerformanceSummary,
   PerformanceWindowType,
+  PerformanceWindowComparison,
 } from "./types/performance-aggregation.js";
 
 // ---------------------------------------------------------------------------
@@ -289,9 +290,14 @@ export function aggregatePerformanceRecords(
     source: options.source ?? "meta-graph",
   };
 }
-
 /**
- * 
+ * Compare two PerformanceSummary objects and calculate absolute and percentage deltas for all KPIs.
+ */
+export function comparePerformanceSummaries(
+  current: PerformanceSummary,
+  previous: PerformanceSummary
+): PerformanceWindowComparison {
+  if (current.currency !== previous.currency) {
     throw new Error(
       `CURRENCY_MISMATCH: Cannot compare summaries with different currencies (${current.currency} vs ${previous.currency})`
     );

@@ -102,14 +102,14 @@ export class Orchestrator implements IOrchestrator {
     const startedAt = new Date();
 
     try {
-      const agent = this.selectAgent(request.agentId);
+      const agent = this.selectAgent(request.agentId, request.message);
       await this.initializeAgent(agent, context);
 
       const agentContext = {
         userId: context.auth.userId,
         conversationId: context.conversationId,
         traceId: context.traceId,
-        memoryManager: createNoopMemoryStore(),
+        memoryManager: this.memoryStore ?? createNoopMemoryStore(),
         toolRegistry: this.toolRegistry ?? {
           get: () => undefined,
           getAll: () => [],
@@ -301,10 +301,31 @@ export class Orchestrator implements IOrchestrator {
   private async recallMemories(
     query: string,
     userId: string,
-  ): Promise<  MemoryRecallResult[]> {
+  ): Promise<MemoryRecallResult[]> {
     if (!this.memoryStore) return [];
 
     try {
+      const isAvailable = await this.memoryStore.isAvailable();
+      if (!isAvailable) return [];
+
+      const queryEmbedding = await this.getQueryEmbedding(query);
+      if (queryEmbedding && queryEmbedding.length > 0) {
+        try {
+          const results = await this.memoryStore.recall({
+            userId,
+            query,
+            embedding: queryEmbedding,
+            limit: this.memoryConfig.maxMemories,
+            minImportance: this.memoryConfig.relevanceThreshold,
+          });
+          if (results && results.length > 0) {
+            return results;
+          }
+        } catch {
+          // Fall through to manual list-and-loop logic on DB recall failure
+        }
+      }
+
       const listResult = await this.memoryStore.list({
         userId,
         limit: 50,
@@ -313,12 +334,11 @@ export class Orchestrator implements IOrchestrator {
 
       if (listResult.memories.length === 0) return [];
 
-      const results:   MemoryRecallResult[] = [];
+      const results: MemoryRecallResult[] = [];
       for (const memory of listResult.memories) {
         const embedding = (memory.metadata?.embedding as number[]) ?? null;
         if (!embedding || embedding.length === 0) continue;
 
-        const queryEmbedding = await this.getQueryEmbedding(query);
         if (!queryEmbedding) continue;
 
         let dot = 0;
@@ -410,7 +430,7 @@ export class Orchestrator implements IOrchestrator {
   // Existing methods (unchanged)
   // -----------------------------------------------------------------------
 
-  private selectAgent(agentId?: string): IAgent {
+  private selectAgent(agentId?: string, message?: string): IAgent {
     if (agentId) {
       const agent = this.agentRegistry.get(agentId);
       if (!agent) {
@@ -423,6 +443,14 @@ export class Orchestrator implements IOrchestrator {
         throw new JarvisError("AGENT_ERROR", `Agent is in error state: ${agentId}`);
       }
       return agent;
+    }
+
+    // Try Meta intent routing if query relates to Meta Ads
+    if (message && isMetaAdsQuery(message)) {
+      const metaAgent = this.agentRegistry.get("meta-ads-agent");
+      if (metaAgent && metaAgent.getStatus() !== "disabled" && metaAgent.getStatus() !== "error") {
+        return metaAgent;
+      }
     }
 
     const agents = this.agentRegistry.getAll();
@@ -439,7 +467,7 @@ export class Orchestrator implements IOrchestrator {
         userId: context.auth.userId,
         conversationId: context.conversationId,
         traceId: context.traceId,
-        memoryManager: createNoopMemoryStore(),
+        memoryManager: this.memoryStore ?? createNoopMemoryStore(),
         toolRegistry: this.toolRegistry ?? {
           get: () => undefined,
           getAll: () => [],
@@ -721,4 +749,46 @@ export class Orchestrator implements IOrchestrator {
       },
     });
   }
+}
+
+function isMetaAdsQuery(message: string): boolean {
+  const normalized = message.toLowerCase();
+  
+  if (normalized.includes("python") || 
+      normalized.includes("javascript") || 
+      normalized.includes("typescript") || 
+      normalized.includes("calendar event") ||
+      normalized.includes("write a script") ||
+      normalized.includes("summarize this document")) {
+    return false;
+  }
+
+  const metaKeywords = [
+    /\bmeta\b/i,
+    /\bfacebook\b/i,
+    /\bcampaign\b/i,
+    /\bcampaigns\b/i,
+    /\badset\b/i,
+    /\badsets\b/i,
+    /\bad\s+set\b/i,
+    /\bad\s+sets\b/i,
+    /\bads\b/i,
+    /\bcreatives\b/i,
+    /\bcpa\b/i,
+    /\bctr\b/i,
+    /\broas\b/i,
+    /\bcpc\b/i,
+    /\bcpm\b/i,
+    /\bbudget\b/i,
+    /\bbudgets\b/i,
+    /\bconversations?\b/i,
+    /\binsights\b/i,
+    /\bbadh\s+raha\b/i,
+    /\bworst\s+perform\b/i,
+  ];
+
+  const singleAdPattern = /\bad\b/i;
+  const matchesKeyword = metaKeywords.some((pattern) => pattern.test(normalized)) || singleAdPattern.test(normalized);
+  
+  return matchesKeyword;
 }
