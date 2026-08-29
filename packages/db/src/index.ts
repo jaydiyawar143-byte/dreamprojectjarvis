@@ -33,3 +33,4 @@ export {
   DuplicateOutcomeError,
   FinalizedOutcomeImmutableError,
 } from "./repositories/outcome-repository.js";
+export { PrismaKnowledgeRepository } from "./repositories/knowledge-repository.js";

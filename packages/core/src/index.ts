@@ -38,6 +38,7 @@ export * from "./recommendation-confidence.js";
 export * from "./opportunity-scoring.js";
 export * from "./opportunity-queue-service.js";
 export * from "./utils/params-hash.js";
+export * from "./types/knowledge.js";
 export * from "./utils/redact-secrets.js";
 
 // Re-export deprecated memory-provider types under unique names for backward compat

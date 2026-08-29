@@ -78,6 +78,7 @@ model User {
   refreshTokens RefreshToken[]
   executions    ToolExecution[]
   marketingAccounts MarketingAccount[]
+  knowledgeDocuments KnowledgeDocument[]
 }
 
 model RefreshToken {
@@ -163,15 +164,22 @@ model Memory {
 }
 
 model KnowledgeDocument {
-  id        String   @id @default(cuid())
-  title     String
-  content   String
-  source    String?
-  metadata  Json?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id           String   @id @default(cuid())
+  userId       String
+  title        String
+  documentType String?
+  mimeType     String?
+  content      String
+  source       String?
+  status       String   @default("UPLOADED")
+  metadata     Json?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
+  user   User             @relation(fields: [userId], references: [id], onDelete: Cascade)
   chunks KnowledgeChunk[]
+
+  @@index([userId])
 }
 
 model KnowledgeChunk {
@@ -182,7 +190,7 @@ model KnowledgeChunk {
   chunkIndex Int
   metadata   Json?
 
-  document KnowledgeDocument @relation(fields: [documentId], references: [id])
+  document KnowledgeDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
 
   @@index([documentId])
 }

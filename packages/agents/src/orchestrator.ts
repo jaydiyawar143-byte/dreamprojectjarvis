@@ -26,6 +26,7 @@ import type {
   MemoryRecord,
   MemoryContextConfig,
   ITool,
+  ConversationMessage,
 } from "@jarvis/core";
 import { JarvisError } from "@jarvis/core";
 import type { AgentRegistry } from "./registry.js";
@@ -102,7 +103,8 @@ export class Orchestrator implements IOrchestrator {
     const startedAt = new Date();
 
     try {
-      const agent = this.selectAgent(request.agentId, request.message);
+      const agent = this.selectAgent(request);
+      context.agentId = agent.id;
       await this.initializeAgent(agent, context);
 
       const agentContext = {
@@ -430,7 +432,8 @@ export class Orchestrator implements IOrchestrator {
   // Existing methods (unchanged)
   // -----------------------------------------------------------------------
 
-  private selectAgent(agentId?: string, message?: string): IAgent {
+  private selectAgent(request: JarvisRequest): IAgent {
+    const agentId = request.agentId;
     if (agentId) {
       const agent = this.agentRegistry.get(agentId);
       if (!agent) {
@@ -446,7 +449,7 @@ export class Orchestrator implements IOrchestrator {
     }
 
     // Try Meta intent routing if query relates to Meta Ads
-    if (message && isMetaAdsQuery(message)) {
+    if (request.message && isMetaAdsQuery(request.message, request.conversationHistory)) {
       const metaAgent = this.agentRegistry.get("meta-ads-agent");
       if (metaAgent && metaAgent.getStatus() !== "disabled" && metaAgent.getStatus() !== "error") {
         return metaAgent;
@@ -751,44 +754,94 @@ export class Orchestrator implements IOrchestrator {
   }
 }
 
-function isMetaAdsQuery(message: string): boolean {
+function isMetaAdsQuery(message: string, history?: ConversationMessage[]): boolean {
   const normalized = message.toLowerCase();
-  
-  if (normalized.includes("python") || 
-      normalized.includes("javascript") || 
-      normalized.includes("typescript") || 
-      normalized.includes("calendar event") ||
-      normalized.includes("write a script") ||
-      normalized.includes("summarize this document")) {
+
+  // 1. Explicit non-Meta platforms or generic tech tools (Highest priority overrides context / keywords)
+  const nonMetaPlatformTriggers = [
+    /\bgoogle\b/i,
+    /\blinkedin\b/i,
+    /\badwords\b/i,
+    /\bgmail\b/i,
+    /\bemail\b/i,
+    /\bpython\b/i,
+    /\bjavascript\b/i,
+    /\btypescript\b/i,
+    /\bcalendar\b/i,
+    /\bpdf\b/i,
+    /\bwebsite\b/i,
+    /\bexcel\b/i,
+  ];
+
+  const hasExplicitNonMetaPlatform = nonMetaPlatformTriggers.some((pattern) => pattern.test(normalized));
+  if (hasExplicitNonMetaPlatform) {
     return false;
   }
 
-  const metaKeywords = [
+  // 2. Explicit Meta Ads triggers
+  const explicitMetaTriggers = [
     /\bmeta\b/i,
     /\bfacebook\b/i,
-    /\bcampaign\b/i,
-    /\bcampaigns\b/i,
+    /\binsta\b/i,
+    /\binstagram\b/i,
+  ];
+
+  const hasExplicitMeta = explicitMetaTriggers.some((pattern) => pattern.test(normalized));
+  if (hasExplicitMeta) {
+    return true;
+  }
+
+  // 3. Strong Meta Ads domain terminologies
+  const strongDomainTriggers = [
+    /\bcpa\b/i,
+    /\broas\b/i,
+    /\bctr\b/i,
+    /\bcpc\b/i,
+    /\bcpm\b/i,
     /\badset\b/i,
     /\badsets\b/i,
     /\bad\s+set\b/i,
     /\bad\s+sets\b/i,
-    /\bads\b/i,
-    /\bcreatives\b/i,
-    /\bcpa\b/i,
-    /\bctr\b/i,
-    /\broas\b/i,
-    /\bcpc\b/i,
-    /\bcpm\b/i,
-    /\bbudget\b/i,
-    /\bbudgets\b/i,
-    /\bconversations?\b/i,
-    /\binsights\b/i,
+    /\bcreatives?\b/i,
     /\bbadh\s+raha\b/i,
     /\bworst\s+perform\b/i,
   ];
 
-  const singleAdPattern = /\bad\b/i;
-  const matchesKeyword = metaKeywords.some((pattern) => pattern.test(normalized)) || singleAdPattern.test(normalized);
-  
-  return matchesKeyword;
+  const hasStrongDomainIntent = strongDomainTriggers.some((pattern) => pattern.test(normalized));
+  if (hasStrongDomainIntent) {
+    return true;
+  }
+
+  // 4. Generic Meta keywords (requires history context to disambiguate)
+  const genericMetaKeywords = [
+    /\bcampaign\b/i,
+    /\bcampaigns\b/i,
+    /\bad\b/i,
+    /\bads\b/i,
+    /\bbudget\b/i,
+    /\bbudgets\b/i,
+    /\bperformance\b/i,
+    /\boptimize\b/i,
+    /\bpause\b/i,
+    /\bresume\b/i,
+    /\banalytics\b/i,
+    /\baccount\b/i,
+  ];
+
+  const hasGenericMetaKeyword = genericMetaKeywords.some((pattern) => pattern.test(normalized));
+  if (hasGenericMetaKeyword) {
+    if (history && history.length > 0) {
+      const recentMessages = history.slice(-3); // Look at the last 3 turns
+      for (const msg of recentMessages) {
+        const content = msg.content.toLowerCase();
+        const isMeta = explicitMetaTriggers.some(p => p.test(content)) ||
+                       strongDomainTriggers.some(p => p.test(content));
+        if (isMeta) {
+          return true;
+        }
+      }
+    }
+  }
+
+  return false;
 }

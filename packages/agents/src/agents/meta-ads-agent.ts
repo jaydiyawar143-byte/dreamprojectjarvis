@@ -9,6 +9,7 @@ import type {
   AICompletionResponse,
   ToolExecutionResult,
   ConversationMessage,
+  AgentContext,
 } from "@jarvis/core";
 
 export interface MetaAdsAgentConfig {
@@ -32,6 +33,13 @@ export class MetaAdsAgent extends BaseAgent {
   private providerTools?: AIToolDefinition[];
 
   private conversationStates = new Map<string, ConversationState>();
+  private activeContexts = new Map<string, AgentContext>();
+
+  override async initialize(context: AgentContext): Promise<void> {
+    await super.initialize(context);
+    const convoId = context.conversationId ?? "__default__";
+    this.activeContexts.set(convoId, context);
+  }
 
   constructor(config: MetaAdsAgentConfig) {
     const defaultPrompt = [
@@ -97,7 +105,7 @@ export class MetaAdsAgent extends BaseAgent {
       "",
       "=== READ-FIRST & WRITE SAFETY ===",
       "For analysis, read data first using tools, analyze, and then explain. Do not execute a write merely to answer an analytical question.",
-      "For write requests (e.g. 'pause this ad set'), select the appropriate write tool. The system will intercept it for human approval. Never reveal Meta access tokens or internal API credentials.",
+      "For write requests (e.g. 'pause this ad set'), select the appropriate write tool. The system will intercept it for human approval. Never reveal Meta auth keys or internal API credentials.",
       "",
       "=== USER PREFERENCES ===",
       "You must respect user preferences found within `<user_memories>` (for example, if a preference says 'Keep explanations concise', your analysis must be concise)."
@@ -124,9 +132,10 @@ export class MetaAdsAgent extends BaseAgent {
 
   async process(input: AgentInput): Promise<AgentOutput> {
     this.status = "processing";
+    const conversationId = input.conversationId ?? "__default__";
 
     try {
-      const conversationId = input.conversationId ?? "__default__";
+      const currentContext = this.activeContexts.get(conversationId) ?? this.context;
       const toolResults = input.metadata?.toolResults as
         | ToolExecutionResult[]
         | undefined;
@@ -135,12 +144,12 @@ export class MetaAdsAgent extends BaseAgent {
       let accountContextStr = "No Meta accounts currently authorized.";
       let activeAccountId: string | undefined;
 
-      const accountsTool = this.context?.toolRegistry?.get("meta.accounts");
+      const accountsTool = currentContext?.toolRegistry?.get("meta.accounts");
       if (accountsTool) {
         const toolCtx = {
-          userId: this.context!.userId,
+          userId: currentContext!.userId,
           conversationId: input.conversationId,
-          traceId: this.context!.traceId,
+          traceId: currentContext!.traceId,
         };
         const result = await accountsTool.execute({}, toolCtx);
         if (result.success && result.data && Array.isArray((result.data as any).accounts)) {
@@ -155,7 +164,7 @@ export class MetaAdsAgent extends BaseAgent {
 
             // Bounded Campaign Summary preloading
             let campaignSummaryStr = "\nCampaign Summary: unavailable";
-            const campaignsTool = this.context?.toolRegistry?.get("meta.campaigns");
+            const campaignsTool = currentContext?.toolRegistry?.get("meta.campaigns");
             if (campaignsTool) {
               const campRes = await campaignsTool.execute({ accountId: activeAccountId }, toolCtx);
               if (campRes.success && campRes.data && Array.isArray((campRes.data as any).campaigns)) {
@@ -277,6 +286,8 @@ export class MetaAdsAgent extends BaseAgent {
     } catch (error) {
       this.status = "error";
       throw error;
+    } finally {
+      this.activeContexts.delete(conversationId);
     }
   }
 

@@ -427,6 +427,43 @@ For system diagrams, see [Diagrams](./diagrams/).
 
 ---
 
+## Sprint 2.3 — Meta Account Context & Preloading
+
+- **Status:** IMPLEMENTED and VERIFIED
+- **Features:**
+  - **Authoritative Account Context:** Automatically resolves active account context using server-side configurations (`meta.accounts`) to prevent LLM account ID hallucinations.
+  - **Concurrency & Isolation Safety:** Implements request-scoped context tracking keyed by conversation ID to guarantee zero leakage between concurrent multi-user requests.
+  - **No Fabrication:** Retricts response metadata to available schema elements (currency, timezone, status), handling empty or missing fields gracefully without guessing.
+  - **Bounded Campaign Preloading:** Loads identity details alongside campaign status summaries (total/active/paused campaign counts) to provide instant domain intelligence with minimal overhead.
+  - **Injection Resistance:** Blocks prompt injection and malicious memories trying to force unauthorized account IDs.
+- **Verification:** Added 20 focused verification assertions to `packages/agents/test/meta-ads-agent.test.ts` covering authoritative context, concurrent isolation, prompt injection, and credential safety.
+
+---
+
+## Sprint 2.4 — Meta Ads Intent Routing Hardening
+
+- **Status:** IMPLEMENTED and VERIFIED
+- **Features:**
+  - **Hardened Platform Overrides (Precedence):** Enforces highest priority platform checks. Unrelated queries containing other ad platforms (e.g. "Google Ads", "LinkedIn Ads") or general engineering tools (e.g. "Python", "Gmail") are immediately routed away from `MetaAdsAgent`.
+  - **Strong Domain Intent matching:** Routes domain terms like `CPA`, `ROAS`, `CTR`, `CPC`, `CPM`, or `adset` directly to `MetaAdsAgent` even without explicit "Meta" keyword.
+  - **Context-Aware Routing (History checks):** Dynamically inspects the last 3 messages in the conversation history. If Meta context is established, generic ambiguous triggers (e.g. "campaign", "budget", "performance", "optimize") route to `MetaAdsAgent`.
+  - **Stale Context Escape:** Ensures that non-Meta queries (e.g., "Ab Gmail summarize karo") instantly escape the `MetaAdsAgent` context to be resolved by the default assistant, avoiding stale context traps.
+  - **Security Bounds:** Routing logic operates purely on session metadata. It never grants database or Meta Graph authorizations and performs no state mutations.
+- **Verification:** Implemented 20 focused routing test cases (`packages/agents/test/meta-ads-agent.test.ts`), verifying explicit triggers, Hindi/Hinglish requests, negatives, overrides, context, stale context escape, and security boundaries.
+
+---
+
+## Sprint 3.1 — Knowledge Schema & Repository
+
+- **Status:** IMPLEMENTED and VERIFIED
+- **Features:**
+  - **Secure Ownership Isolation:** Establishes `userId` relation on the `KnowledgeDocument` schema to isolate tenant resources. User A is prevented from listing or querying User B's documents or chunks.
+  - **Durable Cascade Deletion:** Configures cascading delete behaviors. Deleting a user or a document cleanly purges associated chunks without leaving orphaned table rows.
+  - **Prisma Knowledge Repository:** Implements `PrismaKnowledgeRepository` supporting CRUD operations, lifecycle status tracking (e.g. `UPLOADED`, `PROCESSING`, `INDEXED`, `FAILED`), and transactional chunk ingestion.
+- **Verification:** Integrated 20 unit tests in [knowledge-repository.test.ts](file:///d:/dreamprojectjarvis/dreamprojectjarvis/packages/db/test/knowledge-repository.test.ts) verifying document creation, retrieval, listing, cascade purge, and tenant boundaries.
+
+---
+
 ## Glossary
 
 | Term | Definition |
@@ -448,6 +485,6 @@ For system diagrams, see [Diagrams](./diagrams/).
 
 ---
 
-*Document version: 1.6*
-*Last updated: 2026-08-27*
-*Sprint 2.2 complete: Dedicated MetaAdsAgent domain intelligence reasoning implemented, verified, and E2E tested (24 scenarios).*
+*Document version: 1.9*
+*Last updated: 2026-08-29*
+*Sprint 3.1 complete: Knowledge schema and repository database foundations implemented and fully tested.*

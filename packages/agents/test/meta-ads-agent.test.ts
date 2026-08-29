@@ -59,6 +59,7 @@ class MockAIProvider implements IAIProvider {
   readonly defaultModel = "mock-model";
   private responseFn: ((req: AICompletionRequest) => AICompletionResponse) | null = null;
   private lastMessages: any[] = [];
+  private allCompletedMessages: any[][] = [];
 
   setResponse(fn: (req: AICompletionRequest) => AICompletionResponse) {
     this.responseFn = fn;
@@ -68,8 +69,17 @@ class MockAIProvider implements IAIProvider {
     return this.lastMessages;
   }
 
+  getAllCompletedMessages(): any[][] {
+    return this.allCompletedMessages;
+  }
+
+  clearHistory() {
+    this.allCompletedMessages = [];
+  }
+
   async complete(request: AICompletionRequest): Promise<AICompletionResponse> {
     this.lastMessages = request.messages;
+    this.allCompletedMessages.push(request.messages);
     if (this.responseFn) return this.responseFn(request);
     return { message: { role: "assistant", content: "Default AI response" }, finishReason: "stop", model: this.defaultModel };
   }
@@ -81,7 +91,7 @@ class MockAIProvider implements IAIProvider {
 const toolExecutions: { toolId: string; params: any; userId?: string }[] = [];
 
 function fakeTool(overrides: Partial<ITool> & { id: string }): ITool {
-  return {
+  const baseTool = {
     name: overrides.id,
     description: `Tool ${overrides.id}`,
     category: "marketing",
@@ -91,6 +101,11 @@ function fakeTool(overrides: Partial<ITool> & { id: string }): ITool {
     requiredPermissions: ["read"],
     version: "1.0.0",
     enabled: true,
+    validate: () => true,
+  };
+  const merged = { ...baseTool, ...overrides };
+  return {
+    ...merged,
     execute: async (params, ctx) => {
       toolExecutions.push({ toolId: overrides.id, params, userId: ctx?.userId });
       if (overrides.execute) {
@@ -98,8 +113,6 @@ function fakeTool(overrides: Partial<ITool> & { id: string }): ITool {
       }
       return { success: true, data: { status: "success" } };
     },
-    validate: () => true,
-    ...overrides,
   };
 }
 
@@ -923,9 +936,15 @@ describe("Sprint 2.2: MetaAdsAgent Domain Intelligence Tests", () => {
 
     await Promise.all([pA, pB]);
 
-    // Checking last called mock execution message maps correctly
-    const systemMsg = mockAI.getLastMessages().find((m) => m.role === "system")?.content;
-    expect(systemMsg).toContain("Active Account ID: act_200");
+    // Checking both completions for concurrent calls map correctly
+    const completed = mockAI.getAllCompletedMessages();
+    const systemMsgA = completed.find(msgs => msgs.some(m => m.role === "user" && m.content === "Concurrent A"))
+      ?.find(m => m.role === "system")?.content;
+    const systemMsgB = completed.find(msgs => msgs.some(m => m.role === "user" && m.content === "Concurrent B"))
+      ?.find(m => m.role === "system")?.content;
+
+    expect(systemMsgA).toContain("Active Account ID: act_100");
+    expect(systemMsgB).toContain("Active Account ID: act_200");
   });
 
   // 11. Account prompt injection protection
@@ -1131,5 +1150,180 @@ describe("Sprint 2.2: MetaAdsAgent Domain Intelligence Tests", () => {
 
     const systemMsg = mockAI.getLastMessages().find((m) => m.role === "system")?.content;
     expect(systemMsg).toContain("You understand campaign hierarchy: Ad Account -> Campaign -> Ad Set -> Ad -> Creative");
+  });
+
+  // =========================================================================
+  // Sprint 2.4: hardened routing tests
+  // =========================================================================
+
+  describe("Sprint 2.4: Meta Ads Intent Routing Hardening Tests", () => {
+    let metaAgent: MetaAdsAgent;
+    let assistant: ConversationalAssistant;
+    let orch: Orchestrator;
+
+    beforeEach(() => {
+      metaAgent = new MetaAdsAgent({ provider: mockAI });
+      assistant = new ConversationalAssistant({ provider: mockAI, systemPrompt: "Default assistant" });
+      registry.register(assistant);
+      registry.register(metaAgent);
+      orch = createOrchestrator();
+    });
+
+    // Helper to check which agent resolved
+    async function assertRoutedAgent(message: string, expectedAgentId: string, history: any[] = []) {
+      const res = await orch.process({ message, conversationHistory: history }, {
+        auth: { userId: "user-alpha", role: "member", email: "alpha@test.com" },
+        conversationId: "c-routing",
+        traceId: "t-routing",
+      });
+      expect(res.success).toBe(true);
+      expect(res.data?.agentId).toBe(expectedAgentId);
+    }
+
+    // 1. explicit Meta request
+    it("R1: routes explicit Meta request to MetaAdsAgent", async () => {
+      await assertRoutedAgent("Meta campaign check karo", "meta-ads-agent");
+      await assertRoutedAgent("Facebook ads ka ROAS batao", "meta-ads-agent");
+    });
+
+    // 2. Meta request without explicit "Meta"
+    it("R2: routes Meta domain request without explicit 'Meta' to MetaAdsAgent", async () => {
+      await assertRoutedAgent("CPA kyun badh raha hai?", "meta-ads-agent");
+      await assertRoutedAgent("Ads ka ROAS batao", "meta-ads-agent");
+    });
+
+    // 3. Hinglish Meta request
+    it("R3: routes Hinglish Meta request to MetaAdsAgent", async () => {
+      await assertRoutedAgent("Meta ads ka performance check karo", "meta-ads-agent");
+      await assertRoutedAgent("Meta mein budget increase karna hai", "meta-ads-agent");
+    });
+
+    // 4. Hindi Meta request
+    it("R4: routes Hindi Meta request to MetaAdsAgent", async () => {
+      await assertRoutedAgent("Campaigns analyze kar de", "meta-ads-agent", [
+        { id: "1", role: "user", content: "Meta ads ka setup dikhao", createdAt: new Date().toISOString() }
+      ]);
+    });
+
+    // 5. Meta follow-up request
+    it("R5: maintains MetaAdsAgent routing for generic follow-up queries using context", async () => {
+      const history = [
+        { id: "1", role: "user", content: "Meta campaign check karo", createdAt: new Date().toISOString() },
+        { id: "2", role: "assistant", content: "Checking campaign active status.", createdAt: new Date().toISOString() },
+      ];
+      await assertRoutedAgent("Campaign optimize karo", "meta-ads-agent", history);
+      await assertRoutedAgent("optimize budget", "meta-ads-agent", history);
+    });
+
+    // 6. Google Ads negative
+    it("R6: does NOT route Google Ads query to MetaAdsAgent", async () => {
+      await assertRoutedAgent("Google Ads campaign analyze karo", "conversational-assistant");
+    });
+
+    // 7. LinkedIn Ads negative
+    it("R7: does NOT route LinkedIn Ads query to MetaAdsAgent", async () => {
+      await assertRoutedAgent("LinkedIn Ads campaign analyze karo", "conversational-assistant");
+    });
+
+    // 8. generic campaign negative
+    it("R8: does NOT route generic campaign query without context to MetaAdsAgent", async () => {
+      await assertRoutedAgent("Campaign optimize karo.", "conversational-assistant");
+    });
+
+    // 9. generic budget negative
+    it("R9: does NOT route generic budget query without context to MetaAdsAgent", async () => {
+      await assertRoutedAgent("Budget increase", "conversational-assistant");
+    });
+
+    // 10. generic performance negative
+    it("R10: does NOT route generic performance query without context to MetaAdsAgent", async () => {
+      await assertRoutedAgent("show performance metrics", "conversational-assistant");
+    });
+
+    // 11. ambiguous campaign
+    it("R11: handles ambiguous campaign safely by falling back to default assistant", async () => {
+      await assertRoutedAgent("campaign check", "conversational-assistant");
+    });
+
+    // 12. explicit platform overrides context
+    it("R12: routes to default assistant when explicit platform is defined even if history has Meta Ads", async () => {
+      const history = [
+        { id: "1", role: "user", content: "Meta campaign check karo", createdAt: new Date().toISOString() }
+      ];
+      await assertRoutedAgent("Google Ads ka budget check karo", "conversational-assistant", history);
+    });
+
+    // 13. stale Meta context does not capture unrelated request
+    it("R13: routes unrelated requests out of MetaAdsAgent context even if Meta history exists", async () => {
+      const history = [
+        { id: "1", role: "user", content: "Meta campaign check karo", createdAt: new Date().toISOString() }
+      ];
+      await assertRoutedAgent("Ab mere Gmail ka summary do", "conversational-assistant", history);
+      await assertRoutedAgent("Python script bana do", "conversational-assistant", history);
+    });
+
+    // 14. MetaAdsAgent registered once
+    it("R14: verifies MetaAdsAgent is registered exactly once in AgentRegistry", () => {
+      const registered = registry.getAll().filter(a => a.id === "meta-ads-agent");
+      expect(registered.length).toBe(1);
+    });
+
+    // 15. routing does not authorize
+    it("R15: ensures intent routing does not grant unauthorized access", async () => {
+      const res = await orch.process({ message: "Meta campaign check karo" }, {
+        auth: { userId: "user-unauthorized", role: "member", email: "unauth@test.com" },
+        conversationId: "c-routing",
+        traceId: "t-routing",
+      });
+      expect(res.success).toBe(true);
+      const systemMsg = mockAI.getLastMessages().find((m) => m.role === "system")?.content;
+      expect(systemMsg).toContain("No Meta accounts currently authorized.");
+    });
+
+    // 16. routing does not execute
+    it("R16: ensures intent routing does not execute writes directly", async () => {
+      const res = await orch.process({ message: "Meta mein campaign pause kar do." }, {
+        auth: { userId: "user-alpha", role: "member", email: "alpha@test.com" },
+        conversationId: "c-routing",
+        traceId: "t-routing",
+      });
+      expect(res.success).toBe(true);
+      const pauses = toolExecutions.filter(a => a.toolId.includes("pause"));
+      expect(pauses.length).toBe(0);
+    });
+
+    // 17. routing does not expose secrets
+    it("R17: ensures routing does not output credentials or secrets", async () => {
+      const res = await orch.process({ message: "Meta campaign check karo" }, {
+        auth: { userId: "user-alpha", role: "member", email: "alpha@test.com" },
+        conversationId: "c-routing",
+        traceId: "t-routing",
+      });
+      const content = res.data?.message;
+      expect(content).not.toContain("EAAB");
+    });
+
+    // 18. existing agents remain routable
+    it("R18: verifies default assistant remains routable directly when agentId matches", async () => {
+      const res = await orch.process({ message: "Meta campaign", agentId: "conversational-assistant" }, {
+        auth: { userId: "user-alpha", role: "member", email: "alpha@test.com" },
+        conversationId: "c-routing",
+        traceId: "t-routing",
+      });
+      expect(res.data?.agentId).toBe("conversational-assistant");
+    });
+
+    // 19. existing routing tests remain green
+    it("R19: verifies ConversationalAssistant handles generic tasks correctly", async () => {
+      await assertRoutedAgent("Hello JARVIS", "conversational-assistant");
+    });
+
+    // 20. deterministic routing behavior
+    it("R20: runs routing rules deterministically", async () => {
+      for (let i = 0; i < 5; i++) {
+        await assertRoutedAgent("Meta campaign check karo", "meta-ads-agent");
+        await assertRoutedAgent("Google Ads campaign check karo", "conversational-assistant");
+      }
+    });
   });
 });

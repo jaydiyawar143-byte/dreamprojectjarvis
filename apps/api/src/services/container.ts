@@ -41,6 +41,7 @@ import {
   PrismaApprovalRepository,
   PrismaRecommendationRepository,
   PrismaMemoryRepository,
+  PrismaKnowledgeRepository,
 } from "@jarvis/db";
 import { MemoryExtractionService } from "@jarvis/memory";
 
@@ -85,6 +86,7 @@ export interface Container {
   embeddingProvider: IEmbeddingProvider | null;
   /** Sprint 1.1A — memory extractor. Null when OPENAI_API_KEY is absent. */
   memoryExtractor: IMemoryExtractor | null;
+  knowledgeRepo?: PrismaKnowledgeRepository;
 }
 
 /**
@@ -211,6 +213,7 @@ export function getContainer(options?: {
   const userRepo = new PrismaUserRepository(prisma);
   const refreshTokenRepo = new PrismaRefreshTokenRepository(prisma);
   const authService = new AuthManager(passwordHasher, tokenService, refreshTokenRepo, userRepo);
+  const knowledgeRepo = new PrismaKnowledgeRepository(prisma);
 
   const permissionService = new PermissionService();
   // PHASE 10.7 — real durable approval store replaces the Phase-0 noop repo.
@@ -427,6 +430,7 @@ export function getContainer(options?: {
     memoryStore,
     embeddingProvider,
     memoryExtractor,
+    knowledgeRepo,
   };
 
   return _container;

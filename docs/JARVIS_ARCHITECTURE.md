@@ -662,6 +662,87 @@ We upgraded the `MetaAdsAgent` to understand campaign structures, performance me
 
 ---
 
-*Document version: 1.6*
-*Last updated: 2026-08-27*
-*Sprints 1.1A-D: Memory system complete, verified, and E2E validated. Sprint 2.2: Meta Ads Agent domain intelligence reasoning implemented, verified, and E2E tested (24 scenarios).*
+## Meta Account Context & Preloading (Sprint 2.3 — 2026-08-29)
+
+### What Changed
+
+We standardise server-authoritative account context fetching and initial bounding preloading. We address concurrency leaks and prompt injection bypasses.
+
+### Architecture Highlights
+
+1. **Server-Authoritative Context Fetching:**
+   - In [`packages/agents/src/agents/meta-ads-agent.ts`](file:///d:/dreamprojectjarvis/dreamprojectjarvis/packages/agents/src/agents/meta-ads-agent.ts), during the start of agent processing, the agent executes `meta.accounts` tool.
+   - Restricts LLM account ID fabrication by locking actions to the retrieved active account ID (`act_100` / `act_200`).
+2. **Concurrency & Isolation Safety:**
+   - Introduced request-scoped context tracking using `activeContexts` Map keyed by `conversationId`.
+   - Prevents multi-user request cross-leakage where concurrent executions on the singleton agent would otherwise overwrite `this.context`.
+3. **Bounded Campaign Preloading:**
+   - Automatically preloads a lightweight, bounded campaign status summary (total/active/paused campaign counts) using existing read tools (`meta.campaigns`), providing initial campaign context with zero repeated database or API queries.
+4. **Injection Protection:**
+   - System prompts lock execution parameters to the authoritative context, resisting prompt injection queries (e.g. *"Use account act_fake999 instead"*) or malicious memory preferences trying to hijack account scopes.
+5. **Verification Suite Expansion:**
+   - Extended [`packages/agents/test/meta-ads-agent.test.ts`](file:///d:/dreamprojectjarvis/dreamprojectjarvis/packages/agents/test/meta-ads-agent.test.ts) to a total of **44** tests to cover authoritative context resolution, multi-user/concurrency isolation, prompt injections, and credentials containment.
+
+---
+
+## Meta Ads Intent Routing Hardening (Sprint 2.4 — 2026-08-29)
+
+### What Changed
+
+We hardened the intent routing logic to reliably separate Meta Ads queries from general or competing queries (e.g. Google Ads, LinkedIn Ads, general tools like Python and Gmail) and implemented context-aware conversation history parsing to retain agent context across multi-turn interactions.
+
+### Architecture Highlights
+
+1. **Precedence-based Pipeline:**
+   - **Stage 1 (Platform Override):** Checks the incoming message against explicit non-Meta triggers (Google, LinkedIn, Python, Gmail, etc.). If matched, immediately bypasses Meta routing (highest precedence).
+   - **Stage 2 (Explicit Meta):** Checks for explicit Meta keywords (`meta`, `facebook`, `instagram`, `insta`). If present, routes to `MetaAdsAgent`.
+   - **Stage 3 (Strong Domain Intent):** Evaluates specialized domain terminologies (`cpa`, `roas`, `ctr`, `cpc`, `cpm`, `adset`, etc.). If present, routes to `MetaAdsAgent`.
+   - **Stage 4 (Context-Aware Generic):** If generic keywords (e.g., `campaign`, `budget`, `performance`, `optimize`, `pause`) are matched, the router scans the last 3 turns of conversation history. If Meta context was established in history, routes to `MetaAdsAgent`. Otherwise, falls back to `ConversationalAssistant` (safe fallback).
+2. **Context Tracker Enrichment:**
+   - Updated the `Orchestrator` `process` loop to assign `context.agentId` with the selected agent's ID upon resolving the agent. This tracks agent resolution deterministically and feeds back to client responses.
+3. **Stale Context Escape:**
+   - Solves the trap of sticking inside the same agent by ensuring a user's sudden shift of focus (e.g. *"Ab Gmail summarize karo"*) is instantly caught by Platform Overrides and routed back to the default Conversational Assistant.
+4. **Verification Suite Expansion:**
+   - Appended **20** intent routing tests to `packages/agents/test/meta-ads-agent.test.ts` (bringing the total to **235 tests** in the agent package), verifying platform overrides, Hinglish/Hindi routing, negatives, context, stale context escape, and security boundaries.
+
+---
+
+*Document version: 1.8*
+*Last updated: 2026-08-29*
+*Sprint 2.4 complete: Intent routing hardening with platform overrides and context-aware conversation history check implemented and verified.*
+
+---
+
+## Knowledge Schema & Repository Foundation (Sprint 3.1 — 2026-08-29)
+
+### What Changed
+
+We implemented the persistent database and repository foundation for RAG/Knowledge Documents and Chunks, building the secure database layer for Sprint 3.
+
+```
+   Knowledge Document (Source Upload)
+              ↓
+      KnowledgeDocument (Table: metadata, userId, title, documentType, status)
+              ↓ [Cascade Delete]
+      KnowledgeChunk (Table: content, chunkIndex, embedding [vector])
+```
+
+### Architecture Highlights
+
+1. **User/Tenant Ownership Isolation:**
+   - Updated the Prisma schema to add `userId` relation to `KnowledgeDocument`, securing the isolation boundary. User A is prevented from viewing or listing User B's documents or chunks.
+2. **Cascade Delete and Referential Integrity:**
+   - Configured `onDelete: Cascade` constraint on both `KnowledgeDocument` (User relation) and `KnowledgeChunk` (KnowledgeDocument relation), guaranteeing that deleting a User or a Document automatically purges all related child records without leaving orphaned database rows.
+3. **Prisma Knowledge Repository:**
+   - Created `PrismaKnowledgeRepository` implementing `IKnowledgeRepository` inside [knowledge-repository.ts](file:///d:/dreamprojectjarvis/dreamprojectjarvis/packages/db/src/repositories/knowledge-repository.ts).
+   - Supports atomic creation, updates, listing, updates of document statuses (e.g. `UPLOADED`, `PROCESSING`, `INDEXED`, `FAILED`), transactional creation of chunk rows, and deletion of docs/chunks.
+4. **Prisma Client Generation & Registration:**
+   - Regenerated Prisma Client and registered the new repository service in the API container [container.ts](file:///d:/dreamprojectjarvis/dreamprojectjarvis/apps/api/src/services/container.ts).
+5. **Durable Testing:**
+   - Added **20** unit tests in [knowledge-repository.test.ts](file:///d:/dreamprojectjarvis/dreamprojectjarvis/packages/db/test/knowledge-repository.test.ts) covering creation, retrieval, listing, status transitions, transactional chunk rollbacks, and ownership isolation checks.
+
+---
+
+*Document version: 1.9*
+*Last updated: 2026-08-29*
+*Sprint 3.1 complete: Knowledge schema and repository database foundations implemented and fully tested.*

@@ -1,5 +1,5 @@
-%% SPRINT 2.0 - META ADS CURRENT-STATE ARCHITECTURE (BASELINE)
-%% READ-ONLY inventory of existing capability. No behavior altered.
+%% SPRINT 2.3 - META ADS CURRENT-STATE ARCHITECTURE (META CONTEXT & PRELOADING)
+%% Server-authoritative account preloading and concurrent isolation added.
 %% Entry points are color-coded:
 %%   GREEN  = user-accessible via HTTP/API route
 %%   PURPLE = standalone CLI smoke script (NOT a production route)
@@ -31,8 +31,9 @@ flowchart TB
     end
 
     subgraph Agents["@jarvis/agents orchestration"]
-        Orch["Orchestrator\n(maxToolExec=10, depth=5, relevance=0.3)\nwith isMetaAdsQuery intent router"]
-        Reg2["AgentRegistry\n('conversational-assistant' & 'meta-ads-agent')"]
+        Orch["Orchestrator\n(maxToolExec=10, depth=5, relevance=0.3)"]
+        Router["Intent Router (isMetaAdsQuery)\n- Platform precedence\n- Strong domain triggers\n- Context-aware history checks"]
+        Reg2["AgentRegistry\n('conversational-assistant' & 'meta-ads-agent')\n- MetaAdsAgent isolates contexts by conversationId\n- Locks to server-authoritative Account ID"]
         Intent["intent-detector\n(CONFIRM/REJECT/MODIFY/NEW/CLARIFY)"]
         PAS["PendingActionService\n(backed by Approval table)"]
     end
@@ -93,7 +94,9 @@ flowchart TB
     Bridge --> Exec
 
     Orch --> Exec
-    Orch --> Reg2
+    Orch --> Router
+    Router -->|Meta Ads query -> MetaAdsAgent| Reg2
+    Router -->|Other query -> ConversationalAssistant| Reg2
     Orch --> Intent
     Orch --> PAS
     PAS --> Appr
