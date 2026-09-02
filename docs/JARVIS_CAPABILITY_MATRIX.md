@@ -171,7 +171,12 @@ These three statuses are **not the same thing.** A capability may be implemented
 | MemoryEngine | YES | YES | YES | Sprint 1.1A | `packages/memory/src/memory-engine.ts` | Requires persistent store + embedding provider |
 | Memory extraction service (Sprint 1.1B) | YES | YES | YES | Sprint 1.1B | `packages/memory/src/memory-extraction-service.ts`, `apps/api/test/sprint-1.1b-memory-extraction.test.ts` (11 tests) | Runs in background post-conversation |
 | Embedding generation | YES | YES | YES | Sprint 1.1A | `packages/ai-openai/src/openai-embedding-provider.ts` | Requires OPENAI_API_KEY; graceful degradation if absent |
-| Knowledge base (RAG) | PARTIAL | YES | NO | Sprint 3.1 | Knowledge base schema and `PrismaKnowledgeRepository` in [knowledge-repository.ts](file:///d:/dreamprojectjarvis/dreamprojectjarvis/packages/db/src/repositories/knowledge-repository.ts), 20 tests | RAG query pipeline, parsing, and UI upload not yet implemented (persistence layer only) |
+| Knowledge base (RAG) | PARTIAL | YES | NO | Sprint 3.1 | Knowledge base schema and `PrismaKnowledgeRepository` in [knowledge-repository.ts](file:///d:/dreamprojectjarvis/dreamprojectjarvis/packages/db/src/repositories/knowledge-repository.ts), 20 tests | RAG query pipeline and UI upload not yet implemented (persistence layer only) |
+| Document text extraction — PDF/DOCX/TXT/MD (Sprint 3.2) | YES | YES | NO | Sprint 3.2 | `packages/memory/src/extraction/`, `DocumentExtractionService`, 179 tests | Extraction only — no chunking, embeddings, or upload route, so not yet reachable by a user |
+| File/MIME/size validation (Sprint 3.2) | YES | YES | NO | Sprint 3.2 | `document-validator.ts` — extension allowlist, MIME/extension agreement, magic-byte signatures, configurable size cap | Rejects path separators outright; extractor takes a file name, never a path |
+| Deterministic text normalization (Sprint 3.2) | YES | YES | NO | Sprint 3.2 | `text-normalizer.ts` — BOM, NFC, line endings, exotic spaces, control characters; idempotent | Shared by every format so identical text hashes identically |
+| PDF page metadata (Sprint 3.2) | YES | YES | NO | Sprint 3.2 | Per-page offsets into the normalized text; `pdf-parse` v2 backend | Pages with no text layer are recorded with a zero-length range |
+| Document section metadata (Sprint 3.2) | YES | YES | NO | Sprint 3.2 | Markdown ATX headings; DOCX headings via `mammoth` HTML conversion | DOCX `docProps/core.xml` properties are not read; title falls back to the first heading |
 | Memory recall in conversation (Sprint 1.1C) | YES | YES | YES | Sprint 1.1C | `packages/agents/src/orchestrator.ts` L122, `apps/api/test/sprint-1.1c-memory-recall.test.ts` (10 tests) | Active context retrieval; scoped by userId |
 | Full memory E2E lifecycle (Sprint 1.1D) | YES | YES | YES | Sprint 1.1D | `apps/api/test/sprint-1.1d-memory-e2e.test.ts` (12 tests) | Complete extract → persist → recall behavioral verification |
 
@@ -179,7 +184,8 @@ These three statuses are **not the same thing.** A capability may be implemented
 
 | Capability | Status | Notes |
 |-----------|--------|-------|
-| Document Ingestion & Parsing | NOT IMPLEMENTED | PDF/DOCX extraction engine and chunking logic not implemented |
+| Document Chunking | NOT IMPLEMENTED | Text splitting and overlap logic not implemented (Sprint 3.3). Extraction itself landed in Sprint 3.2 |
+| Document Upload Route | NOT IMPLEMENTED | No `POST /api/v1/knowledge/upload` route or file storage, so extraction is not reachable from the UI (Sprint 3.5) |
 | RAG Semantic Vector Retrieval | NOT IMPLEMENTED | Similarity vector search query logic not implemented |
 | User-triggered recommendation generation (HTTP) | NOT IMPLEMENTED | Pipeline generation exists only via `apps/api/scripts/phase116b/propose.ts` (standalone CLI, not a route/worker) |
 | Outcome worker automation | NOT IMPLEMENTED | `OutcomeWorker` implemented + tested but never wired to a scheduler/cron/route |
@@ -196,6 +202,6 @@ These three statuses are **not the same thing.** A capability may be implemented
 
 ---
 
-*Document version: 1.9*
-*Last updated: 2026-08-29*
-*Sprint 3.1 complete: Knowledge schema and repository database foundations implemented and fully tested.*
+*Document version: 2.0*
+*Last updated: 2026-09-02*
+*Sprint 3.2 complete: Deterministic document text extraction for PDF, DOCX, TXT and MD, with secure validation and page/section metadata. Not yet user-accessible — no upload route exists.*

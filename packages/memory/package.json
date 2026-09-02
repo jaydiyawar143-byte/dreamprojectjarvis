@@ -18,14 +18,16 @@
     "lint": "eslint src/"
   },
   "dependencies": {
-    "openai": "^4.50.0",
+    "@jarvis/ai-openai": "workspace:*",
     "@jarvis/core": "workspace:*",
     "@jarvis/db": "workspace:*",
-    "@jarvis/ai-openai": "workspace:*"
+    "mammoth": "^1.12.2",
+    "openai": "^4.50.0",
+    "pdf-parse": "^2.4.5"
   },
   "devDependencies": {
-    "typescript": "^5.5.0",
     "@types/node": "^20.14.0",
+    "typescript": "^5.5.0",
     "vitest": "^4.1.10"
   }
 }

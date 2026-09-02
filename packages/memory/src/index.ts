@@ -5,6 +5,8 @@ export type { MemoryEngineConfig } from "./memory-engine.js";
 export { MemoryExtractionService } from "./memory-extraction-service.js";
 export type { MemoryExtractionServiceConfig } from "./memory-extraction-service.js";
 
+export * from "./extraction/index.js";
+
 export { PrismaMemoryRepository } from "@jarvis/db";
 
 export { OpenAIEmbeddingProvider } from "@jarvis/ai-openai";
@@ -29,4 +31,12 @@ export type {
   MemoryExtractionRequest,
   MemoryExtractionResult,
   ExtractionMessage,
+  IDocumentExtractor,
+  DocumentExtractionRequest,
+  DocumentExtractionResult,
+  ExtractedPage,
+  ExtractedSection,
+  ExtractedDocumentMetadata,
+  SupportedDocumentFormat,
+  DocumentFormatDescriptor,
 } from "@jarvis/core";

@@ -464,6 +464,21 @@ For system diagrams, see [Diagrams](./diagrams/).
 
 ---
 
+## Sprint 3.2 — Document Extraction
+
+- **Status:** IMPLEMENTED and VERIFIED — **not yet user-accessible.** There is no upload route or UI, so this capability is reachable only from code until Sprint 3.5.
+- **Features:**
+  - **Four supported formats:** PDF, DOCX, TXT and Markdown (`.md` / `.markdown`). Anything else is rejected rather than best-effort parsed.
+  - **Layered validation:** the extension decides the format; a declared MIME type must agree with it; PDF and DOCX must carry their real byte signature (`%PDF-`, `PK\x03\x04`), so a renamed executable is refused. File names must be names, not paths — separators and traversal sequences are rejected outright. The size cap is configurable and defaults to 20 MB.
+  - **Deterministic text:** every format passes through one shared normalizer (BOM, Unicode NFC, line endings, non-breaking and zero-width characters, control characters, blank-line runs). The same words from a PDF, a DOCX and a text file produce byte-identical output and the same SHA-256 `contentHash`.
+  - **Page metadata:** PDF pages are reported with offsets that address exactly their own text within the extracted document. A scanned page with no text layer is still listed, with a zero-length range, so page numbering stays aligned with the source.
+  - **Section metadata:** Markdown ATX headings and DOCX headings become a flat, non-overlapping sequence of sections in document order, each with a level and an offset range.
+  - **Clear failures:** unsupported (`DOCUMENT_UNSUPPORTED_FORMAT`), oversized (`DOCUMENT_TOO_LARGE`), empty or text-free (`DOCUMENT_EMPTY`), invalid or non-UTF-8 (`DOCUMENT_INVALID`), damaged (`DOCUMENT_CORRUPTED`) and unexpected parser failures (`DOCUMENT_EXTRACTION_FAILED`). Underlying parser messages are never passed through to the caller.
+  - **Scope boundary:** extraction only. No chunking, embeddings, vector search, upload endpoint, or orchestrator involvement. `toKnowledgeDocumentInput` produces exactly the payload the Sprint 3.1 repository already accepts, leaving persistence to the caller.
+- **Verification:** 179 tests across [text-normalizer.test.ts](file:///d:/dreamprojectjarvis/dreamprojectjarvis/packages/memory/test/text-normalizer.test.ts) (24), [document-validator.test.ts](file:///d:/dreamprojectjarvis/dreamprojectjarvis/packages/memory/test/document-validator.test.ts) (86) and [document-extraction.test.ts](file:///d:/dreamprojectjarvis/dreamprojectjarvis/packages/memory/test/document-extraction.test.ts) (69), covering all four formats against real generated PDF and DOCX fixtures plus every failure mode.
+
+---
+
 ## Glossary
 
 | Term | Definition |
@@ -485,6 +500,6 @@ For system diagrams, see [Diagrams](./diagrams/).
 
 ---
 
-*Document version: 1.9*
-*Last updated: 2026-08-29*
-*Sprint 3.1 complete: Knowledge schema and repository database foundations implemented and fully tested.*
+*Document version: 2.0*
+*Last updated: 2026-09-02*
+*Sprint 3.2 complete: Document text extraction for PDF, DOCX, TXT and MD implemented and fully tested.*
