@@ -1,0 +1,6 @@
+# Driver runtime artifacts -- regenerated on every run, never committed.
+node_modules/
+screenshots/
+logs/
+.driver-state.json
+package-lock.json

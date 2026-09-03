@@ -8,3 +8,12 @@ export { ToolPlanValidator, ToolPlanParser, ToolDescriptionBuilder } from "./too
 export type { PlanValidationResult } from "./tool-planner.js";
 export { PendingActionService } from "./pending-action-service.js";
 export { detectIntent, isPendingActionExpired, approvalStatusToPendingState, summarizePendingAction } from "./intent-detector.js";
+export {
+  shouldRetrieveKnowledge,
+  selectKnowledgeChunks,
+  formatKnowledgeBlock,
+  describeSource,
+  DEFAULT_MAX_KNOWLEDGE_CHUNKS,
+  DEFAULT_KNOWLEDGE_MIN_SCORE,
+  DEFAULT_KNOWLEDGE_BUDGET_CHARS,
+} from "./knowledge-context.js";

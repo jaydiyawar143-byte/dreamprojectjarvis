@@ -16,3 +16,115 @@ body {
   color: rgb(var(--foreground-rgb));
   background: rgb(var(--background-rgb));
 }
+
+/* ---------------------------------------------------------------------------
+   Auth / HUD system layer.
+   Everything here is decorative and scoped to the auth experience, so it can
+   never leak into the chat, approvals or opportunities screens.
+   --------------------------------------------------------------------------- */
+
+/* Technical grid. One repeating-linear-gradient pair beats hundreds of DOM
+   nodes, and it animates on transform only. */
+.sys-grid {
+  background-image:
+    linear-gradient(to right, rgba(62, 224, 242, 0.075) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(62, 224, 242, 0.075) 1px, transparent 1px);
+  background-size: 56px 56px;
+}
+
+/* Radial atmospheric falloff so the grid dissolves toward the edges instead of
+   tiling to a hard rectangle. */
+.sys-grid-mask {
+  -webkit-mask-image: radial-gradient(ellipse 78% 62% at 50% 45%, #000 20%, transparent 100%);
+  mask-image: radial-gradient(ellipse 78% 62% at 50% 45%, #000 20%, transparent 100%);
+}
+
+/* Film grain. Inline SVG turbulence — no image asset, no network request. */
+.sys-grain {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.42'/%3E%3C/svg%3E");
+}
+
+/* Thin illuminated hairline used for HUD rules and panel seams. */
+.sys-hairline {
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(62, 224, 242, 0.42) 22%,
+    rgba(62, 224, 242, 0.42) 78%,
+    transparent
+  );
+}
+
+/* The console's glass body. Kept as a class so the blur radius is tuned in one
+   place — backdrop-filter is the single most expensive thing on this screen. */
+.sys-glass {
+  background: linear-gradient(
+    160deg,
+    rgba(10, 18, 28, 0.82) 0%,
+    rgba(5, 10, 17, 0.74) 55%,
+    rgba(8, 15, 24, 0.8) 100%
+  );
+  backdrop-filter: blur(22px) saturate(130%);
+  -webkit-backdrop-filter: blur(22px) saturate(130%);
+}
+
+/* Inner rim light along the top edge of the console. */
+.sys-rim::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  background: linear-gradient(
+    160deg,
+    rgba(62, 224, 242, 0.4),
+    rgba(62, 224, 242, 0.05) 38%,
+    transparent 60%,
+    rgba(62, 224, 242, 0.14)
+  );
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+}
+
+/* Focus ring used across every interactive auth control. High contrast on
+   purpose — this is the keyboard user's only positional cue. */
+.sys-focus:focus-visible {
+  outline: 2px solid rgba(62, 224, 242, 0.9);
+  outline-offset: 2px;
+}
+
+/* Chrome/Safari autofill repaints inputs white. Force the console palette. */
+.sys-input:-webkit-autofill,
+.sys-input:-webkit-autofill:hover,
+.sys-input:-webkit-autofill:focus {
+  -webkit-text-fill-color: #e6f6fb;
+  -webkit-box-shadow: 0 0 0 1000px rgba(7, 13, 22, 0.98) inset;
+  caret-color: #3ee0f2;
+  transition: background-color 9999s ease-in-out 0s;
+}
+
+/* ---------------------------------------------------------------------------
+   Reduced motion.
+   A global brake: every decorative loop stops, and Framer Motion is told
+   separately (useReducedMotion) to collapse its transitions. Content still
+   renders — nothing is animation-gated.
+   --------------------------------------------------------------------------- */
+@media (prefers-reduced-motion: reduce) {
+  .sys-grid,
+  .sys-particle,
+  .sys-ring,
+  .sys-sweep,
+  .sys-scanline,
+  [class*="animate-"] {
+    animation: none !important;
+    transition: none !important;
+  }
+
+  .sys-particle {
+    opacity: 0.28 !important;
+  }
+}

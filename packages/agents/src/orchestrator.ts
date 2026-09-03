@@ -27,10 +27,20 @@ import type {
   MemoryContextConfig,
   ITool,
   ConversationMessage,
+  IKnowledgeRetriever,
+  KnowledgeContextConfig,
 } from "@jarvis/core";
 import { JarvisError } from "@jarvis/core";
 import type { AgentRegistry } from "./registry.js";
 import { ToolDescriptionBuilder, ToolPlanValidator, ToolPlanParser } from "./tool-planner.js";
+import {
+  DEFAULT_KNOWLEDGE_BUDGET_CHARS,
+  DEFAULT_KNOWLEDGE_MIN_SCORE,
+  DEFAULT_MAX_KNOWLEDGE_CHUNKS,
+  formatKnowledgeBlock,
+  selectKnowledgeChunks,
+  shouldRetrieveKnowledge,
+} from "./knowledge-context.js";
 
 const DEFAULT_MAX_TOOL_EXECUTIONS = 10;
 const DEFAULT_MAX_ORCHESTRATION_DEPTH = 5;
@@ -62,6 +72,8 @@ export class Orchestrator implements IOrchestrator {
   private readonly memoryExtractor: IMemoryExtractor | null;
   private readonly embeddingProvider: IEmbeddingProvider | null;
   private readonly memoryConfig: Required<MemoryContextConfig>;
+  private readonly knowledgeRetriever: IKnowledgeRetriever | null;
+  private readonly knowledgeConfig: Required<KnowledgeContextConfig>;
   private readonly toolRegistry: { get(toolId: string): ITool | undefined; getAll(): ITool[] } | null;
   private readonly toolApprovalService: IToolApprovalService | null;
   private readonly pendingActionService: import("./pending-action-service.js").PendingActionService | null;
@@ -86,6 +98,14 @@ export class Orchestrator implements IOrchestrator {
       contextBudgetChars: config.memory?.contextBudgetChars ?? DEFAULT_CONTEXT_BUDGET_CHARS,
       extractionEnabled: config.memory?.extractionEnabled ?? true,
       extractionExpiryDays: config.memory?.extractionExpiryDays ?? 90,
+    };
+    this.knowledgeRetriever = config.knowledgeRetriever ?? null;
+    this.knowledgeConfig = {
+      enabled: config.knowledge?.enabled ?? true,
+      maxChunks: config.knowledge?.maxChunks ?? DEFAULT_MAX_KNOWLEDGE_CHUNKS,
+      minScore: config.knowledge?.minScore ?? DEFAULT_KNOWLEDGE_MIN_SCORE,
+      contextBudgetChars:
+        config.knowledge?.contextBudgetChars ?? DEFAULT_KNOWLEDGE_BUDGET_CHARS,
     };
     this.toolRegistry = config.toolRegistry ?? null;
     this.toolApprovalService = config.toolApprovalService ?? null;
@@ -121,7 +141,16 @@ export class Orchestrator implements IOrchestrator {
 
       await agent.initialize(agentContext);
 
-      const userMessage = await this.injectMemoryContext(
+      const withMemory = await this.injectMemoryContext(
+        request.message,
+        context.auth.userId,
+      );
+
+      // The retrieval query is the ORIGINAL message, not the memory-augmented
+      // one: recalled memories are about the user, and folding them into the
+      // query vector would pull the search away from what was actually asked.
+      const userMessage = await this.injectKnowledgeContext(
+        withMemory,
         request.message,
         context.auth.userId,
       );
@@ -396,6 +425,72 @@ export class Orchestrator implements IOrchestrator {
 
     lines.push("</user_memories>");
     return lines.join("\n");
+  }
+
+
+  // -----------------------------------------------------------------------
+  // Sprint 3.7 — Knowledge (RAG) retrieval + context injection
+  // -----------------------------------------------------------------------
+
+  /**
+   * Prepends a knowledge block when the user's own documents have something
+   * relevant to say about the request.
+   *
+   * Fail-open throughout, exactly like memory injection: a retriever that is
+   * absent, a query that is not worth retrieving, an empty result, a provider
+   * outage or a database error all return the message untouched. Knowledge is
+   * an enhancement, and no failure in it may take down a conversation that
+   * would otherwise have worked.
+   *
+   * @param message  the message to prepend onto, memory block included
+   * @param query    the original user text, used as the retrieval query
+   */
+  private async injectKnowledgeContext(
+    message: string,
+    query: string,
+    userId: string,
+  ): Promise<string> {
+    if (!this.knowledgeRetriever || !this.knowledgeConfig.enabled) return message;
+
+    // Cheap gate first: acknowledgements and greetings carry nothing to search
+    // for, and skipping them avoids an embedding call per confirmation turn.
+    if (!shouldRetrieveKnowledge(query)) return message;
+
+    try {
+      const result = await this.knowledgeRetriever.retrieve(userId, query, {
+        topK: this.knowledgeConfig.maxChunks,
+        similarityThreshold: this.knowledgeConfig.minScore,
+      });
+
+      const selected = selectKnowledgeChunks(
+        result?.results ?? [],
+        this.knowledgeConfig.minScore,
+        this.knowledgeConfig.maxChunks,
+      );
+
+      // Nothing relevant: leave the prompt alone rather than inject an empty
+      // block. An empty block invites the model to explain an absence it was
+      // never asked about.
+      if (selected.length === 0) return message;
+
+      const block = formatKnowledgeBlock(
+        selected,
+        this.knowledgeConfig.contextBudgetChars,
+      );
+      if (!block) return message;
+
+      return block + "\n\n" + message;
+    } catch (error) {
+      // Logged rather than silently swallowed: a persistently failing retriever
+      // should be visible in the logs even though it never breaks a request.
+      console.log(JSON.stringify({
+        level: "warn",
+        event: "knowledge_retrieval_failed",
+        userId,
+        error: error instanceof Error ? error.message : String(error),
+      }));
+      return message;
+    }
   }
 
   // -----------------------------------------------------------------------

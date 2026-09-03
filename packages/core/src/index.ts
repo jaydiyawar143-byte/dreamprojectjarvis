@@ -40,6 +40,9 @@ export * from "./opportunity-queue-service.js";
 export * from "./utils/params-hash.js";
 export * from "./types/knowledge.js";
 export * from "./types/document-extraction.js";
+export * from "./types/document-chunking.js";
+export * from "./types/document-embedding.js";
+export * from "./types/knowledge-retrieval.js";
 export * from "./utils/redact-secrets.js";
 
 // Re-export deprecated memory-provider types under unique names for backward compat
