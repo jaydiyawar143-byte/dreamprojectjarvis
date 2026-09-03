@@ -1,0 +1,10 @@
+{
+  "name": "run-jarvis-driver",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Agent driver for the JARVIS run skill. Self-contained: not a pnpm workspace member.",
+  "dependencies": {
+    "playwright-core": "^1.49.0"
+  }
+}

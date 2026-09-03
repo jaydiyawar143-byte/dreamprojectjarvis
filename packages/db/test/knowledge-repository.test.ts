@@ -28,6 +28,13 @@ describe("PrismaKnowledgeRepository", () => {
   let chunkStore: ChunkRow[];
   let nextDocId: number;
   let nextChunkId: number;
+  // Sprint 3.4: the vector column is Unsupported() in the schema, so embeddings
+  // are written with raw SQL. Captured here keyed by `documentId:chunkIndex`.
+  let embeddingStore: Map<string, string>;
+  let rawCalls: Array<{ sql: string; params: unknown[] }>;
+  // Sprint 3.5: similarity search goes through raw SQL for the same reason.
+  let queryCalls: Array<{ sql: string; params: unknown[] }>;
+  let searchRows: any[];
   let mockPrisma: any;
   let repo: PrismaKnowledgeRepository;
 
@@ -36,11 +43,32 @@ describe("PrismaKnowledgeRepository", () => {
     chunkStore = [];
     nextDocId = 0;
     nextChunkId = 0;
+    embeddingStore = new Map();
+    rawCalls = [];
+    queryCalls = [];
+    searchRows = [];
 
     mockPrisma = {
       $transaction: async (cb: (tx: any) => Promise<any>) => {
         // Simple transaction execution
         return cb(mockPrisma);
+      },
+      // Emulates the single UPDATE the repository issues per chunk, returning
+      // the affected row count the way Prisma does.
+      $executeRawUnsafe: async (sql: string, ...params: unknown[]) => {
+        rawCalls.push({ sql, params });
+        const [embedding, documentId, chunkIndex] = params as [string, string, number];
+        const match = chunkStore.find(
+          (c) => c.documentId === documentId && c.chunkIndex === chunkIndex
+        );
+        if (!match) return 0;
+        embeddingStore.set(`${documentId}:${chunkIndex}`, embedding);
+        return 1;
+      },
+      // Captures the search SQL and returns whatever the test staged.
+      $queryRawUnsafe: async (sql: string, ...params: unknown[]) => {
+        queryCalls.push({ sql, params });
+        return searchRows;
       },
       knowledgeDocument: {
         create: async ({ data }: { data: any }) => {
@@ -370,5 +398,324 @@ describe("PrismaKnowledgeRepository", () => {
     await expect(repo.getDocumentById("doc-1", "user-1")).rejects.toThrow(
       "Internal database timeout"
     );
+  });
+
+  // -------------------------------------------------------------------------
+  // Sprint 3.4 — embedding persistence
+  // -------------------------------------------------------------------------
+
+  describe("updateChunkEmbeddings", () => {
+    const vec = (seed: number, dims = 1536) =>
+      Array.from({ length: dims }, (_, i) => (seed + i) / 1000);
+
+    async function seedDocumentWithChunks(count: number) {
+      const doc = await repo.createDocument("user-1", { title: "Doc", content: "Body" });
+      await repo.createChunks(
+        doc.id,
+        Array.from({ length: count }, (_, i) => ({ content: `chunk ${i}`, chunkIndex: i }))
+      );
+      return doc;
+    }
+
+    it("21. writes an embedding for each chunk and reports the count", async () => {
+      const doc = await seedDocumentWithChunks(3);
+
+      const updated = await repo.updateChunkEmbeddings(doc.id, [
+        { chunkIndex: 0, embedding: vec(1) },
+        { chunkIndex: 1, embedding: vec(2) },
+        { chunkIndex: 2, embedding: vec(3) },
+      ]);
+
+      expect(updated).toBe(3);
+      expect(embeddingStore.size).toBe(3);
+      expect(embeddingStore.has(`${doc.id}:0`)).toBe(true);
+    });
+
+    it("22. formats the vector as a pgvector literal", async () => {
+      const doc = await seedDocumentWithChunks(1);
+      await repo.updateChunkEmbeddings(doc.id, [{ chunkIndex: 0, embedding: vec(0) }]);
+
+      const stored = embeddingStore.get(`${doc.id}:0`)!;
+      expect(stored.startsWith("[")).toBe(true);
+      expect(stored.endsWith("]")).toBe(true);
+      expect(stored.split(",")).toHaveLength(1536);
+    });
+
+    it("23. casts to ::vector and scopes by document and chunk index", async () => {
+      const doc = await seedDocumentWithChunks(1);
+      await repo.updateChunkEmbeddings(doc.id, [{ chunkIndex: 0, embedding: vec(0) }]);
+
+      expect(rawCalls).toHaveLength(1);
+      expect(rawCalls[0].sql).toContain("$1::vector");
+      expect(rawCalls[0].sql).toContain('"documentId" = $2');
+      expect(rawCalls[0].sql).toContain('"chunkIndex" = $3');
+      expect(rawCalls[0].params[1]).toBe(doc.id);
+      expect(rawCalls[0].params[2]).toBe(0);
+    });
+
+    it("24. rejects a dimension mismatch before writing anything", async () => {
+      const doc = await seedDocumentWithChunks(2);
+
+      await expect(
+        repo.updateChunkEmbeddings(doc.id, [
+          { chunkIndex: 0, embedding: vec(1) },
+          { chunkIndex: 1, embedding: vec(2, 768) },
+        ])
+      ).rejects.toThrow(/768 dimensions, expected 1536/);
+
+      // The valid first vector must not have been written — a rejected batch
+      // leaves the document entirely un-embedded rather than half-done.
+      expect(embeddingStore.size).toBe(0);
+      expect(rawCalls).toHaveLength(0);
+    });
+
+    it("25. is a no-op for an empty list", async () => {
+      const doc = await seedDocumentWithChunks(1);
+      const updated = await repo.updateChunkEmbeddings(doc.id, []);
+
+      expect(updated).toBe(0);
+      expect(rawCalls).toHaveLength(0);
+    });
+
+    it("26. reports zero for a chunk index that does not exist", async () => {
+      const doc = await seedDocumentWithChunks(1);
+      const updated = await repo.updateChunkEmbeddings(doc.id, [
+        { chunkIndex: 99, embedding: vec(1) },
+      ]);
+
+      expect(updated).toBe(0);
+    });
+
+    it("27. does not touch chunks belonging to another document", async () => {
+      const docA = await seedDocumentWithChunks(1);
+      const docB = await seedDocumentWithChunks(1);
+
+      await repo.updateChunkEmbeddings(docA.id, [{ chunkIndex: 0, embedding: vec(1) }]);
+
+      expect(embeddingStore.has(`${docA.id}:0`)).toBe(true);
+      expect(embeddingStore.has(`${docB.id}:0`)).toBe(false);
+    });
+
+    it("28. bubbles up a database failure", async () => {
+      const doc = await seedDocumentWithChunks(1);
+      mockPrisma.$executeRawUnsafe = async () => {
+        throw new Error("vector extension unavailable");
+      };
+
+      await expect(
+        repo.updateChunkEmbeddings(doc.id, [{ chunkIndex: 0, embedding: vec(1) }])
+      ).rejects.toThrow("vector extension unavailable");
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Sprint 3.5 — vector similarity search
+  // -------------------------------------------------------------------------
+
+  describe("searchChunksByEmbedding", () => {
+    const vec = (seed: number, dims = 1536) =>
+      Array.from({ length: dims }, (_, i) => (seed + i) / 1000);
+
+    /** Flattens the SQL so clause assertions do not depend on indentation. */
+    const sqlOf = (call: { sql: string }) => call.sql.replace(/\s+/g, " ").trim();
+
+    it("29. joins documents and scopes the search to the owner", async () => {
+      await repo.searchChunksByEmbedding("user-1", vec(1), { limit: 5 });
+
+      expect(queryCalls).toHaveLength(1);
+      const sql = sqlOf(queryCalls[0]);
+      expect(sql).toContain('FROM "KnowledgeChunk" c');
+      expect(sql).toContain('JOIN "KnowledgeDocument" d ON d."id" = c."documentId"');
+      expect(sql).toContain('WHERE d."userId" = $2');
+      expect(queryCalls[0].params[1]).toBe("user-1");
+    });
+
+    it("30. excludes chunks that have no embedding yet", async () => {
+      await repo.searchChunksByEmbedding("user-1", vec(1), { limit: 5 });
+
+      expect(sqlOf(queryCalls[0])).toContain('c."embedding" IS NOT NULL');
+    });
+
+    it("31. orders by distance with deterministic tiebreakers", async () => {
+      await repo.searchChunksByEmbedding("user-1", vec(1), { limit: 5 });
+
+      expect(sqlOf(queryCalls[0])).toContain(
+        'ORDER BY (c."embedding" <=> $1::vector) ASC, c."documentId" ASC, c."chunkIndex" ASC'
+      );
+    });
+
+    it("32. sends the query vector as a pgvector literal cast to ::vector", async () => {
+      await repo.searchChunksByEmbedding("user-1", vec(0), { limit: 5 });
+
+      const literal = queryCalls[0].params[0] as string;
+      expect(literal.startsWith("[")).toBe(true);
+      expect(literal.endsWith("]")).toBe(true);
+      expect(literal.split(",")).toHaveLength(1536);
+      expect(sqlOf(queryCalls[0])).toContain("$1::vector");
+    });
+
+    it("33. rejects a query vector with the wrong dimensions", async () => {
+      await expect(
+        repo.searchChunksByEmbedding("user-1", vec(1, 768), { limit: 5 })
+      ).rejects.toThrow(/768 dimensions, expected 1536/);
+
+      expect(queryCalls).toHaveLength(0);
+    });
+
+    it("34. rejects a limit that is not a positive integer", async () => {
+      for (const limit of [0, -2, 1.5]) {
+        await expect(
+          repo.searchChunksByEmbedding("user-1", vec(1), { limit })
+        ).rejects.toThrow(/positive integer/);
+      }
+      expect(queryCalls).toHaveLength(0);
+    });
+
+    it("35. requires a userId", async () => {
+      await expect(
+        repo.searchChunksByEmbedding("", vec(1), { limit: 5 })
+      ).rejects.toThrow(/userId is required/);
+    });
+
+    it("36. binds the limit as a parameter rather than inlining it", async () => {
+      await repo.searchChunksByEmbedding("user-1", vec(1), { limit: 9 });
+
+      const sql = sqlOf(queryCalls[0]);
+      expect(sql).toMatch(/LIMIT \$\d+$/);
+      expect(queryCalls[0].params).toContain(9);
+    });
+
+    it("37. adds a threshold clause only when a threshold is given", async () => {
+      await repo.searchChunksByEmbedding("user-1", vec(1), { limit: 5 });
+      expect(sqlOf(queryCalls[0])).not.toContain(">=");
+
+      await repo.searchChunksByEmbedding("user-1", vec(1), {
+        limit: 5,
+        similarityThreshold: 0.7,
+      });
+      expect(sqlOf(queryCalls[1])).toContain(
+        'AND (1 - (c."embedding" <=> $1::vector)) >= $3'
+      );
+      expect(queryCalls[1].params[2]).toBe(0.7);
+    });
+
+    it("38. builds IN clauses with sequential placeholders for each filter", async () => {
+      await repo.searchChunksByEmbedding("user-1", vec(1), {
+        limit: 5,
+        documentIds: ["doc-1", "doc-2"],
+        documentTypes: ["POLICY"],
+        sources: ["upload"],
+        statuses: ["PROCESSED"],
+      });
+
+      const sql = sqlOf(queryCalls[0]);
+      expect(sql).toContain('AND c."documentId" IN ($3, $4)');
+      expect(sql).toContain('AND d."documentType" IN ($5)');
+      expect(sql).toContain('AND d."source" IN ($6)');
+      expect(sql).toContain('AND d."status" IN ($7)');
+      expect(sql).toMatch(/LIMIT \$8$/);
+      expect(queryCalls[0].params).toEqual([
+        expect.any(String),
+        "user-1",
+        "doc-1",
+        "doc-2",
+        "POLICY",
+        "upload",
+        "PROCESSED",
+        5,
+      ]);
+    });
+
+    it("39. keeps placeholders aligned when a threshold precedes the filters", async () => {
+      await repo.searchChunksByEmbedding("user-1", vec(1), {
+        limit: 5,
+        similarityThreshold: 0.25,
+        documentIds: ["doc-1"],
+      });
+
+      const sql = sqlOf(queryCalls[0]);
+      expect(sql).toContain(">= $3");
+      expect(sql).toContain('AND c."documentId" IN ($4)');
+      expect(queryCalls[0].params[2]).toBe(0.25);
+      expect(queryCalls[0].params[3]).toBe("doc-1");
+    });
+
+    it("40. returns nothing without querying for an empty allow-list", async () => {
+      const results = await repo.searchChunksByEmbedding("user-1", vec(1), {
+        limit: 5,
+        documentIds: [],
+      });
+
+      expect(results).toEqual([]);
+      // An empty IN list is a syntax error, and an allow-list of nothing can
+      // only match nothing — so the query is skipped entirely.
+      expect(queryCalls).toHaveLength(0);
+    });
+
+    it("41. maps rows to matches and converts distance into similarity", async () => {
+      searchRows = [
+        {
+          id: "chunk-1",
+          documentId: "doc-1",
+          content: "Refunds are issued within 14 days.",
+          chunkIndex: 3,
+          metadata: { pageNumbers: [2] },
+          documentTitle: "Refund Policy.pdf",
+          documentType: "POLICY",
+          source: "upload",
+          status: "PROCESSED",
+          distance: 0.25,
+        },
+      ];
+
+      const results = await repo.searchChunksByEmbedding("user-1", vec(1), { limit: 5 });
+
+      expect(results).toHaveLength(1);
+      expect(results[0]).toEqual({
+        id: "chunk-1",
+        documentId: "doc-1",
+        content: "Refunds are issued within 14 days.",
+        chunkIndex: 3,
+        metadata: { pageNumbers: [2] },
+        documentTitle: "Refund Policy.pdf",
+        documentType: "POLICY",
+        source: "upload",
+        status: "PROCESSED",
+        distance: 0.25,
+        score: 0.75,
+      });
+    });
+
+    it("42. normalises a missing metadata blob to null", async () => {
+      searchRows = [
+        {
+          id: "chunk-2",
+          documentId: "doc-1",
+          content: "text",
+          chunkIndex: 0,
+          metadata: null,
+          documentTitle: "Doc",
+          documentType: null,
+          source: null,
+          status: "UPLOADED",
+          distance: 1,
+        },
+      ];
+
+      const results = await repo.searchChunksByEmbedding("user-1", vec(1), { limit: 5 });
+
+      expect(results[0].metadata).toBeNull();
+      expect(results[0].score).toBe(0);
+    });
+
+    it("43. bubbles up a database failure", async () => {
+      mockPrisma.$queryRawUnsafe = async () => {
+        throw new Error("vector extension unavailable");
+      };
+
+      await expect(
+        repo.searchChunksByEmbedding("user-1", vec(1), { limit: 5 })
+      ).rejects.toThrow("vector extension unavailable");
+    });
   });
 });

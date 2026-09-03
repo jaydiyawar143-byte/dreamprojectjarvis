@@ -6,6 +6,9 @@ export { MemoryExtractionService } from "./memory-extraction-service.js";
 export type { MemoryExtractionServiceConfig } from "./memory-extraction-service.js";
 
 export * from "./extraction/index.js";
+export * from "./chunking/index.js";
+export * from "./embedding/index.js";
+export * from "./retrieval/index.js";
 
 export { PrismaMemoryRepository } from "@jarvis/db";
 
@@ -39,4 +42,29 @@ export type {
   ExtractedDocumentMetadata,
   SupportedDocumentFormat,
   DocumentFormatDescriptor,
+  IDocumentChunker,
+  ChunkingOptions,
+  ResolvedChunkingOptions,
+  ChunkSourceContext,
+  ChunkBoundaryKind,
+  ChunkSectionRef,
+  DocumentChunk,
+  DocumentChunkMetadata,
+  DocumentChunkingResult,
+  IDocumentEmbedder,
+  DocumentEmbeddingOptions,
+  ResolvedEmbeddingOptions,
+  DocumentEmbeddingResult,
+  DocumentEmbeddingUsage,
+  ChunkEmbedding,
+  SkippedChunk,
+  EmbeddingSkipReason,
+  IKnowledgeRetriever,
+  KnowledgeRetrievalOptions,
+  ResolvedRetrievalOptions,
+  KnowledgeRetrievalFilters,
+  KnowledgeRetrievalResult,
+  RetrievedChunk,
+  KnowledgeChunkSearchOptions,
+  KnowledgeChunkMatch,
 } from "@jarvis/core";

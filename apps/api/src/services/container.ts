@@ -1,4 +1,4 @@
-import type { IOrchestrator, IToolExecutor, ITool, AIToolDefinition, ShutdownLifecycle, IMemoryStore, IEmbeddingProvider } from "@jarvis/core";
+import type { IOrchestrator, IToolExecutor, ITool, AIToolDefinition, ShutdownLifecycle, IMemoryStore, IEmbeddingProvider, IKnowledgeRetriever } from "@jarvis/core";
 import type { TokenService } from "@jarvis/security";
 import type { IMemoryExtractor } from "@jarvis/core";
 import { Orchestrator, AgentRegistry, ConversationalAssistant, MetaAdsAgent, PendingActionService } from "@jarvis/agents";
@@ -43,7 +43,7 @@ import {
   PrismaMemoryRepository,
   PrismaKnowledgeRepository,
 } from "@jarvis/db";
-import { MemoryExtractionService } from "@jarvis/memory";
+import { MemoryExtractionService, KnowledgeRetrievalService } from "@jarvis/memory";
 
 export interface Container {
   tokenService: TokenService;
@@ -87,6 +87,11 @@ export interface Container {
   /** Sprint 1.1A — memory extractor. Null when OPENAI_API_KEY is absent. */
   memoryExtractor: IMemoryExtractor | null;
   knowledgeRepo?: PrismaKnowledgeRepository;
+  /**
+   * Sprint 3.7 — knowledge retriever wired into the orchestrator for RAG.
+   * Null when OPENAI_API_KEY is absent, since a query cannot be embedded.
+   */
+  knowledgeRetriever: IKnowledgeRetriever | null;
 }
 
 /**
@@ -397,6 +402,25 @@ export function getContainer(options?: {
     memoryExtractor = null;
   }
 
+  // ---------------------------------------------------------------------------
+  // Sprint 3.7 — Knowledge retrieval wiring for RAG.
+  // Reuses the SAME embedding provider the memory stack uses, so no second
+  // client is created. Null without a provider: a query cannot be embedded, and
+  // the orchestrator then behaves exactly as it did before this sprint.
+  // ---------------------------------------------------------------------------
+  let knowledgeRetriever: IKnowledgeRetriever | null = null;
+  if (embeddingProvider !== null) {
+    knowledgeRetriever = new KnowledgeRetrievalService({
+      provider: embeddingProvider,
+      repository: knowledgeRepo,
+    });
+  }
+  console.log(JSON.stringify({
+    level: "info",
+    event: "knowledge_wiring",
+    status: knowledgeRetriever ? "rag_enabled" : "rag_disabled_no_embedding_provider",
+  }));
+
   const orchestrator = new Orchestrator(agentRegistry, toolExecutor, auditLogger, {
     toolRegistry: resolvingRegistry,
     toolApprovalService,
@@ -409,6 +433,8 @@ export function getContainer(options?: {
           ...(memoryExtractor !== null ? { memoryExtractor } : {}),
         }
       : {}),
+    // Sprint 3.7: RAG context injection. Absent when no provider is configured.
+    ...(knowledgeRetriever !== null ? { knowledgeRetriever } : {}),
   });
 
   const recommendationRepo = new PrismaRecommendationRepository(prisma);
@@ -431,6 +457,7 @@ export function getContainer(options?: {
     embeddingProvider,
     memoryExtractor,
     knowledgeRepo,
+    knowledgeRetriever,
   };
 
   return _container;

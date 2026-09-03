@@ -15,6 +15,7 @@ import { createPendingActionsRouter } from "./routes/pending-actions.js";
 import { createRecommendationsRouter } from "./routes/recommendations.js";
 import { createOutcomesRouter } from "./routes/outcomes.js";
 import { createOpportunitiesRouter } from "./routes/opportunities.js";
+import { createKnowledgeRouter } from "./routes/knowledge.js";
 import { getContainer } from "./services/container.js";
 import {
   ShutdownLifecycle,
@@ -77,6 +78,7 @@ app.use("/api/v1/pending-actions", createPendingActionsRouter(container));
 app.use("/api/v1/recommendations", createRecommendationsRouter(container));
 app.use("/api/v1", createOutcomesRouter(container));
 app.use("/api/v1/opportunities", createOpportunitiesRouter(container));
+app.use("/api/v1/knowledge", createKnowledgeRouter(container));
 
 io.on("connection", (socket) => {
   console.log(`Client connected: ${socket.id}`);
