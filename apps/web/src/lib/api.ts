@@ -63,10 +63,30 @@ export function setTokens(access: string, refresh: string): void {
 }
 
 export function loadTokens(): void {
-  if (typeof window !== "undefined") {
+  if (typeof window === "undefined") return;
+  try {
     _accessToken = sessionStorage.getItem("jarvis_access");
     _refreshToken = sessionStorage.getItem("jarvis_refresh");
+  } catch {
+    // Session storage can throw outright when a browser is configured to block
+    // site data. An unreadable store is the same situation as an empty one.
+    _accessToken = null;
+    _refreshToken = null;
   }
+}
+
+// Restore the session as soon as this module is evaluated, not on an effect.
+//
+// React runs child effects BEFORE the parent's, so a protected page's data
+// fetch is issued before AuthProvider's mount effect has had a chance to call
+// loadTokens(). Hydrating here — synchronously, during module evaluation, ahead
+// of any render — is what guarantees the first authenticated request of a hard
+// page load already carries its bearer token.
+//
+// Guarded for the server, where this module is also evaluated during
+// prerendering and there is no session storage to read.
+if (typeof window !== "undefined") {
+  loadTokens();
 }
 
 export function clearTokens(): void {
@@ -470,4 +490,307 @@ export async function getOpportunity(
   id: string
 ): Promise<OpportunityDetailResponse> {
   return request(`/opportunities/${id}`);
+}
+
+// ---------------------------------------------------------------------------
+// Sprint 4.3 — Dashboard API
+//
+// Thin wrappers over /api/v1/dashboard. Every figure originates in an existing
+// service; nothing here computes a metric.
+// ---------------------------------------------------------------------------
+
+export interface DashboardSummary {
+  pendingApprovals: number;
+  conversations: number;
+  knowledgeDocuments: number;
+  knowledgeProcessed: number;
+  openOpportunities: number;
+  metaConfigured: boolean;
+}
+
+export interface DashboardStatus {
+  service: string;
+  uptimeSeconds: number;
+  capabilities: {
+    knowledgeBase: boolean;
+    retrieval: boolean;
+    memory: boolean;
+    embeddings: boolean;
+    metaAds: boolean;
+  };
+}
+
+/**
+ * A metric is `null` when Meta reported nothing for it. Null is not zero: a
+ * zero is a measurement, a null is a gap, and the charts render them
+ * differently.
+ */
+export interface MetricTotals {
+  spend: number | null;
+  impressions: number | null;
+  clicks: number | null;
+  reach: number | null;
+  conversions: number | null;
+  revenue: number | null;
+  ctr: number | null;
+  cpc: number | null;
+  cpm: number | null;
+  cpa: number | null;
+  roas: number | null;
+}
+
+export interface MetricPoint extends MetricTotals {
+  date: string;
+}
+
+export interface CampaignMetrics extends MetricTotals {
+  campaignId: string | null;
+  campaignName: string | null;
+  date: string | null;
+}
+
+export interface DateRangeParams {
+  startDate?: string;
+  endDate?: string;
+}
+
+function rangeQuery(range?: DateRangeParams): string {
+  if (!range?.startDate || !range?.endDate) return "";
+  const qs = new URLSearchParams({ startDate: range.startDate, endDate: range.endDate });
+  return `?${qs.toString()}`;
+}
+
+export async function getDashboardSummary(): Promise<ApiResponse<DashboardSummary>> {
+  return request("/dashboard/summary");
+}
+
+export async function getDashboardStatus(): Promise<ApiResponse<DashboardStatus>> {
+  return request("/dashboard/status");
+}
+
+export async function getMetaOverview(
+  range?: DateRangeParams
+): Promise<ApiResponse<{ accountId: string; dateRange: { start: string; end: string }; totals: MetricTotals; rowCount: number }>> {
+  return request(`/dashboard/meta/overview${rangeQuery(range)}`);
+}
+
+export async function getMetaTimeseries(
+  range?: DateRangeParams
+): Promise<ApiResponse<{ accountId: string; dateRange: { start: string; end: string }; series: MetricPoint[]; pointCount: number }>> {
+  return request(`/dashboard/meta/timeseries${rangeQuery(range)}`);
+}
+
+export async function getMetaCampaigns(
+  range?: DateRangeParams,
+  limit?: number
+): Promise<ApiResponse<{ accountId: string; dateRange: { start: string; end: string }; campaigns: CampaignMetrics[]; campaignCount: number }>> {
+  const qs = new URLSearchParams();
+  if (range?.startDate && range?.endDate) {
+    qs.set("startDate", range.startDate);
+    qs.set("endDate", range.endDate);
+  }
+  if (limit) qs.set("limit", String(limit));
+  const suffix = qs.toString() ? `?${qs.toString()}` : "";
+  return request(`/dashboard/meta/campaigns${suffix}`);
+}
+
+// ---------------------------------------------------------------------------
+// Sprint 4.5 — Knowledge Base
+//
+// Thin wrappers over the Sprint 3.6 endpoints. Extraction, chunking, embedding
+// and retrieval all happen server-side; nothing here reimplements any of it.
+// ---------------------------------------------------------------------------
+
+/** Mirrors SUPPORTED_DOCUMENT_EXTENSIONS so the picker and the pre-flight agree. */
+export const KNOWLEDGE_EXTENSIONS = [".pdf", ".docx", ".txt", ".md"] as const;
+
+/** The API's decoded-byte ceiling (MAX_UPLOAD_BYTES). Checked before encoding. */
+export const KNOWLEDGE_MAX_BYTES = 6 * 1024 * 1024;
+
+export interface KnowledgeDocument {
+  id: string;
+  title: string;
+  documentType: string;
+  mimeType?: string | null;
+  source?: string | null;
+  status: string;
+  createdAt: string;
+  updatedAt: string;
+  fileName?: string | null;
+  charCount?: number;
+  wordCount?: number;
+  byteSize?: number;
+  pageCount?: number;
+  /** Present only on the single-document read. */
+  content?: string;
+}
+
+export interface KnowledgeSection {
+  title?: string;
+  level?: number;
+  order?: number;
+}
+
+export interface KnowledgeChunk {
+  id: string;
+  chunkIndex: number;
+  content: string;
+  pageNumbers: number[];
+  sections?: KnowledgeSection[];
+  primarySection?: KnowledgeSection | null;
+  charCount?: number;
+  wordCount?: number;
+}
+
+export interface KnowledgeSearchHit {
+  chunkId: string;
+  documentId: string;
+  documentTitle: string;
+  documentType: string;
+  source?: string | null;
+  chunkIndex: number;
+  content: string;
+  score: number;
+  pageNumbers: number[];
+  primarySection?: KnowledgeSection | null;
+}
+
+export interface KnowledgeIngestResult {
+  document: KnowledgeDocument;
+  chunkCount: number;
+  embeddedCount: number;
+  skippedCount: number;
+  embedded: boolean;
+  searchable: boolean;
+}
+
+/** Extension check, mirroring the server's. Saves a doomed round trip. */
+export function isSupportedKnowledgeFile(fileName: string): boolean {
+  const lower = fileName.toLowerCase();
+  return KNOWLEDGE_EXTENSIONS.some((ext) => lower.endsWith(ext));
+}
+
+/** Reads a File into base64 without pulling the whole thing through a string. */
+export function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("Could not read the file"));
+    reader.onload = () => {
+      const result = String(reader.result ?? "");
+      // A data: URL prefix precedes the payload; the API wants only the payload.
+      const comma = result.indexOf(",");
+      resolve(comma >= 0 ? result.slice(comma + 1) : result);
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+export async function listKnowledgeDocuments(): Promise<
+  ApiResponse<{ documents: KnowledgeDocument[]; total: number }>
+> {
+  return request("/knowledge/documents");
+}
+
+export async function getKnowledgeDocument(
+  id: string
+): Promise<ApiResponse<{ document: KnowledgeDocument }>> {
+  return request(`/knowledge/documents/${id}`);
+}
+
+export async function getKnowledgeChunks(
+  id: string
+): Promise<ApiResponse<{ documentId: string; chunks: KnowledgeChunk[]; total: number }>> {
+  return request(`/knowledge/documents/${id}/chunks`);
+}
+
+export async function deleteKnowledgeDocument(
+  id: string
+): Promise<ApiResponse<{ id: string; deleted: boolean }>> {
+  return request(`/knowledge/documents/${id}`, { method: "DELETE" });
+}
+
+export async function uploadKnowledgeDocument(input: {
+  fileName: string;
+  content: string;
+  mimeType?: string;
+  source?: string;
+  title?: string;
+}): Promise<ApiResponse<KnowledgeIngestResult>> {
+  return request("/knowledge/documents", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function searchKnowledge(
+  query: string,
+  options?: { topK?: number; similarityThreshold?: number }
+): Promise<
+  ApiResponse<{
+    query: string;
+    results: KnowledgeSearchHit[];
+    resultCount: number;
+    topK: number;
+    similarityThreshold: number;
+    emptyQuery: boolean;
+  }>
+> {
+  return request("/knowledge/search", {
+    method: "POST",
+    body: JSON.stringify({ query, ...(options ?? {}) }),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Sprint 4.6 — Meta Ads panel
+//
+// Account context comes from the dashboard router; anomalies, diagnosis,
+// evidence and recommendations all come from the Phase 11.5–11.9 endpoints
+// that already existed. The panel is READ-ONLY: nothing here can execute a
+// recommendation, and the execute endpoint is deliberately not wrapped.
+// ---------------------------------------------------------------------------
+
+export interface MetaAccountContext {
+  accountId: string;
+  name: string | null;
+  currency: string | null;
+  timezone: string | null;
+  status: string | null;
+}
+
+export async function getMetaAccount(): Promise<ApiResponse<{ account: MetaAccountContext }>> {
+  return request("/dashboard/meta/account");
+}
+
+export interface RecommendationSummary {
+  id: string;
+  accountId?: string;
+  status: string;
+  actionType?: string;
+  entityType?: string;
+  entityId?: string;
+  entityName?: string | null;
+  rationale?: string | null;
+  createdAt?: string;
+  expiresAt?: string | null;
+  [key: string]: unknown;
+}
+
+export interface RecommendationListResponse {
+  success: boolean;
+  items?: RecommendationSummary[];
+  total?: number;
+  error?: ApiError;
+  timestamp: string;
+}
+
+export async function listRecommendations(options?: {
+  status?: string;
+  limit?: number;
+}): Promise<RecommendationListResponse> {
+  const qs = new URLSearchParams();
+  if (options?.status) qs.set("status", options.status);
+  if (options?.limit) qs.set("limit", String(options.limit));
+  const suffix = qs.toString() ? `?${qs.toString()}` : "";
+  return request(`/recommendations${suffix}`);
 }

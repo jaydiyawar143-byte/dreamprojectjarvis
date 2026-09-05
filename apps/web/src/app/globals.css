@@ -18,9 +18,15 @@ body {
 }
 
 /* ---------------------------------------------------------------------------
-   Auth / HUD system layer.
-   Everything here is decorative and scoped to the auth experience, so it can
-   never leak into the chat, approvals or opportunities screens.
+   HUD system layer.
+
+   Originally written for the auth screens. As of Sprint 4.2 the authenticated
+   dashboard adopts the same `sys` visual system, so the shared utilities here
+   — chiefly .sys-focus and .sys-hairline — are used by both. The heavier
+   decorative pieces (.sys-glass, .sys-rim, .sys-grid, .sys-grain) remain
+   auth-only; the dashboard is a working surface and does not wear them. Nothing
+   in this layer is applied by the legacy chat, approvals or opportunities
+   screens, which still carry their own styling.
    --------------------------------------------------------------------------- */
 
 /* Technical grid. One repeating-linear-gradient pair beats hundreds of DOM
