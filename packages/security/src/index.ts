@@ -7,3 +7,12 @@ export type { ToolApprovalConfig } from "./tool-approval.js";
 export { PasswordHasher } from "./password.js";
 export { TokenService } from "./tokens.js";
 export { AuthService as AuthManager } from "./auth-service.js";
+export {
+  EncryptionService,
+  EncryptionError,
+  parseKey,
+  generateKey,
+  safeEqual,
+  type EncryptionKey,
+  type EncryptionErrorCode,
+} from "./crypto.js";

@@ -34,3 +34,9 @@ export {
   FinalizedOutcomeImmutableError,
 } from "./repositories/outcome-repository.js";
 export { PrismaKnowledgeRepository } from "./repositories/knowledge-repository.js";
+export {
+  PrismaGoogleConnectionRepository,
+  PrismaOAuthStateRepository,
+} from "./repositories/google-connection-repository.js";
+export { PrismaWhatsAppRepository } from "./repositories/whatsapp-repository.js";
+export { PrismaN8nRepository } from "./repositories/n8n-repository.js";

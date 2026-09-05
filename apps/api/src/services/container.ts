@@ -20,8 +20,23 @@ import {
   MetaUpdateCampaignBudgetTool,
   MetaUpdateAdSetBudgetTool,
   MetaCreateCampaignTool,
+  GoogleGetAccountsTool,
+  GoogleGetCampaignsTool,
+  GoogleGetInsightsTool,
+  WhatsAppSendMessageTool,
+  RepositoryRecipientAuthorizer,
+  N8nTriggerWorkflowTool,
 } from "@jarvis/tools";
 import { createMetaGraphProvider } from "@jarvis/meta-graph";
+import { createGoogleAdsProvider, createGoogleConfig, isGoogleConfigured } from "@jarvis/google-ads";
+import { createWhatsAppProvider, createWhatsAppConfig, isWhatsAppConfigured } from "@jarvis/whatsapp";
+import {
+  createN8nProvider,
+  createN8nConfig,
+  isN8nConfigured,
+  hashPayload,
+  buildIdempotencyKey,
+} from "@jarvis/n8n";
 import {
   PermissionService,
   ApprovalService,
@@ -30,6 +45,7 @@ import {
   AuditLogger,
   PasswordHasher,
   AuthManager,
+  EncryptionService,
 } from "@jarvis/security";
 import {
   prisma,
@@ -42,6 +58,9 @@ import {
   PrismaRecommendationRepository,
   PrismaMemoryRepository,
   PrismaKnowledgeRepository,
+  PrismaGoogleConnectionRepository,
+  PrismaWhatsAppRepository,
+  PrismaN8nRepository,
 } from "@jarvis/db";
 import { MemoryExtractionService, KnowledgeRetrievalService } from "@jarvis/memory";
 
@@ -183,6 +202,91 @@ function createMetaToolRegistry(
 
     // Phase 9.3: Campaign creation
     registry.register(new MetaCreateCampaignTool(realProvider, realProvider, undefined, executionJournal, approvalConsumption));
+  }
+
+  // -------------------------------------------------------------------------
+  // Sprint 5.2 — Google Ads (READ-ONLY)
+  // -------------------------------------------------------------------------
+  // Registered only when the server is fully configured AND an encryption key
+  // exists: without the key no connection could have been stored, so the tools
+  // would fail on every call. Credentials are per-user and resolved inside the
+  // provider, so nothing here handles a token.
+  // -------------------------------------------------------------------------
+  if (isGoogleConfigured() && process.env.JARVIS_ENCRYPTION_KEY) {
+    try {
+      const googleProvider = createGoogleAdsProvider({
+        config: createGoogleConfig(),
+        connections: new PrismaGoogleConnectionRepository(prisma, EncryptionService.fromEnv()),
+      });
+      // Provider doubles as its own authorizer, matching the Meta wiring.
+      registry.register(new GoogleGetAccountsTool(googleProvider, googleProvider));
+      registry.register(new GoogleGetCampaignsTool(googleProvider, googleProvider));
+      registry.register(new GoogleGetInsightsTool(googleProvider, googleProvider));
+    } catch (err) {
+      // Misconfiguration must not take the whole API down; Google tools simply
+      // stay unregistered and /google/status reports configured: false.
+      console.log(JSON.stringify({
+        level: "warn",
+        event: "google_ads_registration_skipped",
+        reason: err instanceof Error ? err.message : "unknown",
+      }));
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Sprint 5.3 — WhatsApp outbound send (APPROVAL-GATED)
+  // -------------------------------------------------------------------------
+  // Registered only when every WhatsApp secret is present. The tool is
+  // EXTERNAL_SIDE_EFFECT with requiresApproval, so ToolApprovalService refuses
+  // to execute it without a human decision — the same gate the Meta write
+  // tools pass through.
+  // -------------------------------------------------------------------------
+  if (isWhatsAppConfigured()) {
+    try {
+      const waConfig = createWhatsAppConfig();
+      const waRepo = new PrismaWhatsAppRepository(prisma);
+      const waProvider = createWhatsAppProvider({ config: waConfig });
+      registry.register(
+        new WhatsAppSendMessageTool(
+          waProvider,
+          new RepositoryRecipientAuthorizer(waRepo, waConfig.phoneNumberId),
+          waConfig.phoneNumberId,
+          waRepo
+        )
+      );
+    } catch (err) {
+      // Misconfiguration must not take the API down; the tool stays
+      // unregistered and the webhook routes report themselves unconfigured.
+      console.log(JSON.stringify({
+        level: "warn",
+        event: "whatsapp_registration_skipped",
+        reason: err instanceof Error ? err.message : "unknown",
+      }));
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Sprint 5.4 — n8n workflow trigger (APPROVAL-GATED)
+  // -------------------------------------------------------------------------
+  // Registered only when base URL, API key and callback secret are all set.
+  // The tool is EXTERNAL_SIDE_EFFECT with requiresApproval: an n8n workflow can
+  // do anything its author wired up, so ToolApprovalService demands a human
+  // decision exactly as it does for the Meta write tools and whatsapp.send.
+  // -------------------------------------------------------------------------
+  if (isN8nConfigured()) {
+    try {
+      const n8nRepo = new PrismaN8nRepository(prisma);
+      const n8nProvider = createN8nProvider({ config: createN8nConfig() });
+      registry.register(
+        new N8nTriggerWorkflowTool(n8nProvider, n8nRepo, { hashPayload, buildIdempotencyKey })
+      );
+    } catch (err) {
+      console.log(JSON.stringify({
+        level: "warn",
+        event: "n8n_registration_skipped",
+        reason: err instanceof Error ? err.message : "unknown",
+      }));
+    }
   }
 
   return registry;
