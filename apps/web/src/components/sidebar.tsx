@@ -4,7 +4,7 @@ import { useEffect } from "react";
 import Link from "next/link";
 import { useChatStore } from "@/lib/chat-store";
 import { useAuth } from "@/lib/auth";
-import { MessageSquare, Plus, LogOut, User, Inbox, CheckSquare } from "lucide-react";
+import { MessageSquare, Plus, LogOut, User, Inbox, CheckSquare, LayoutDashboard } from "lucide-react";
 
 export function Sidebar() {
   const { user, logout } = useAuth();
@@ -32,6 +32,14 @@ export function Sidebar() {
 
       {/* Navigation links */}
       <div className="px-2 py-2 border-b border-gray-800 space-y-1">
+        <Link
+          href="/dashboard"
+          data-testid="nav-dashboard"
+          className="flex items-center gap-2 w-full px-3 py-2 rounded-lg text-sm text-gray-400 hover:bg-gray-800/50 hover:text-gray-200 transition-colors"
+        >
+          <LayoutDashboard size={14} className="shrink-0" />
+          <span>Dashboard</span>
+        </Link>
         <Link
           href="/opportunities"
           data-testid="nav-opportunities"
