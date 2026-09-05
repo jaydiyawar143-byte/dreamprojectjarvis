@@ -79,6 +79,12 @@ model User {
   executions    ToolExecution[]
   marketingAccounts MarketingAccount[]
   knowledgeDocuments KnowledgeDocument[]
+  googleConnections GoogleConnection[]
+  oauthStates       OAuthState[]
+  whatsappAccounts  WhatsAppAccount[]
+  whatsappMessages  WhatsAppMessage[]
+  n8nWorkflows      N8nWorkflow[]
+  n8nExecutions     N8nExecution[]
 }
 
 model RefreshToken {
@@ -254,6 +260,165 @@ model UserSetting {
   user User @relation(fields: [userId], references: [id])
 
   @@unique([userId, key])
+}
+
+// Sprint 5.2 — Google OAuth connection, one per (user, Google account).
+//
+// Token columns hold AES-256-GCM envelopes produced by EncryptionService, NOT
+// plaintext. encKeyVersion mirrors the envelope prefix so a key rotation can
+// find rows still on a retired key without decrypting every one of them.
+//
+// The deliberately-unused `Integration` model above is NOT used for this: it is
+// global rather than per-user, has no User relation, and its `config Json?`
+// invites dumping raw token blobs.
+model GoogleConnection {
+  id                   String    @id @default(cuid())
+  userId               String    @map("user_id")
+  googleAccountEmail   String    @map("google_account_email")
+  // Scopes actually GRANTED by the consent screen, which can be narrower than
+  // those requested. Authorization decisions must read this, never the request.
+  scopes               String[]
+  accessTokenEnc       String    @map("access_token_enc")
+  refreshTokenEnc      String    @map("refresh_token_enc")
+  encKeyVersion        Int       @default(1) @map("enc_key_version")
+  accessTokenExpiresAt DateTime  @map("access_token_expires_at")
+  revokedAt            DateTime? @map("revoked_at")
+  createdAt            DateTime  @default(now()) @map("created_at")
+  updatedAt            DateTime  @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, googleAccountEmail])
+  @@index([userId])
+  @@map("GoogleConnection")
+}
+
+// Sprint 5.3 — claims a WhatsApp business phone number for a JARVIS user.
+//
+// The webhook is an UNAUTHENTICATED endpoint: Meta calls it, not a logged-in
+// user. This table is what turns an inbound payload into an owned row — a
+// phone_number_id with no claim here is rejected rather than attributed to a
+// guessed user. It is therefore the tenant-isolation boundary for inbound.
+model WhatsAppAccount {
+  id            String   @id @default(cuid())
+  userId        String   @map("user_id")
+  phoneNumberId String   @unique @map("phone_number_id")
+  displayName   String?  @map("display_name")
+  isActive      Boolean  @default(true) @map("is_active")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("WhatsAppAccount")
+}
+
+// Sprint 5.3 — durable message log for both directions.
+//
+// provider_message_id is UNIQUE, and that constraint IS the replay defence:
+// Meta redelivers a webhook until it gets a 200, so the same wamid arrives
+// repeatedly. Letting the database reject the second insert makes duplicate
+// suppression atomic and crash-safe, rather than depending on in-process state.
+model WhatsAppMessage {
+  id                String   @id @default(cuid())
+  userId            String   @map("user_id")
+  providerMessageId String   @unique @map("provider_message_id")
+  waId              String   @map("wa_id")
+  phoneNumberId     String   @map("phone_number_id")
+  direction         String
+  type              String
+  body              String?
+  status            String?
+  providerTimestamp DateTime @map("provider_timestamp")
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([userId, waId])
+  @@map("WhatsAppMessage")
+}
+
+// Sprint 5.4 — workflows a user is permitted to trigger.
+//
+// This is an ALLOW-LIST, and it is the tenant-isolation boundary for outbound.
+// A caller passes a JARVIS workflow id, never an n8n URL or path, so no request
+// can aim the trigger at an arbitrary endpoint (an SSRF-shaped risk when a
+// self-hosted n8n sits inside the same network). The webhook path is resolved
+// server-side from this table.
+model N8nWorkflow {
+  id          String   @id @default(cuid())
+  userId      String   @map("user_id")
+  name        String
+  // n8n webhook path segment only — never a full URL.
+  webhookPath String   @map("webhook_path")
+  isActive    Boolean  @default(true) @map("is_active")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  user       User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  executions N8nExecution[]
+
+  @@unique([userId, webhookPath])
+  @@index([userId])
+  @@map("N8nWorkflow")
+}
+
+// Sprint 5.4 — durable audit trail and idempotency record for workflow runs.
+//
+// Two independent unique constraints, each guarding a different direction:
+//
+//   idempotency_key  — OUTBOUND. A retried trigger converges on the existing
+//                      row instead of starting a second workflow run.
+//   callback_event_id — INBOUND. A redelivered result is applied at most once.
+//
+// status TRIGGERED is deliberately not "failed": the workflow may have had real
+// side effects even when no callback arrives, so it is never auto-retried. Same
+// reasoning as UNKNOWN in the Phase 10 ToolExecution journal.
+model N8nExecution {
+  id                String    @id @default(cuid())
+  userId            String    @map("user_id")
+  workflowId        String    @map("workflow_id")
+  idempotencyKey    String    @unique @map("idempotency_key")
+  remoteExecutionId String?   @map("remote_execution_id")
+  status            String    @default("TRIGGERED")
+  // SHA-256 of the request payload: proves what was sent without storing it.
+  payloadHash       String    @map("payload_hash")
+  callbackEventId   String?   @unique @map("callback_event_id")
+  resultSummary     String?   @map("result_summary")
+  errorCode         String?   @map("error_code")
+  traceId           String    @map("trace_id")
+  triggeredAt       DateTime  @default(now()) @map("triggered_at")
+  completedAt       DateTime? @map("completed_at")
+
+  user     User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workflow N8nWorkflow @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+
+  @@index([userId, triggeredAt])
+  @@index([workflowId])
+  @@map("N8nExecution")
+}
+
+// Sprint 5.2 — short-lived OAuth authorization-code state.
+//
+// Carries the CSRF `state` and the PKCE code_verifier. Rows are single-use:
+// the callback deletes the row as it reads it, so a replayed authorization code
+// finds nothing and is rejected. The verifier is a one-time secret with a
+// ~10 minute lifetime, so it is stored as-is rather than encrypted.
+model OAuthState {
+  state        String   @id
+  userId       String   @map("user_id")
+  provider     String   @default("google")
+  codeVerifier String   @map("code_verifier")
+  redirectUri  String   @map("redirect_uri")
+  expiresAt    DateTime @map("expires_at")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+  @@map("OAuthState")
 }
 
 // Phase 10.1 — Durable execution journal.

@@ -17,7 +17,14 @@ import { createOutcomesRouter } from "./routes/outcomes.js";
 import { createOpportunitiesRouter } from "./routes/opportunities.js";
 import { createKnowledgeRouter } from "./routes/knowledge.js";
 import { createDashboardRouter } from "./routes/dashboard.js";
+import { createGoogleAuthRouter } from "./routes/google-auth.js";
+import { createWhatsAppRouter } from "./routes/whatsapp.js";
+import { createN8nRouter } from "./routes/n8n.js";
 import { getContainer } from "./services/container.js";
+import { EncryptionService } from "@jarvis/security";
+import { prisma, PrismaGoogleConnectionRepository, PrismaOAuthStateRepository, PrismaWhatsAppRepository, PrismaN8nRepository } from "@jarvis/db";
+import { createWhatsAppConfig, isWhatsAppConfigured } from "@jarvis/whatsapp";
+import { createN8nConfig, isN8nConfigured } from "@jarvis/n8n";
 import {
   ShutdownLifecycle,
   type LifecycleState,
@@ -68,6 +75,54 @@ app.use(helmet());
 app.use(cors({ origin: env.CORS_ORIGIN, credentials: true }));
 app.use(compression());
 app.use(morgan("combined"));
+// ---------------------------------------------------------------------------
+// Sprint 5.3 — WhatsApp webhook, mounted BEFORE the JSON body parser.
+//
+// This ordering is load-bearing, not stylistic. X-Hub-Signature-256 is an HMAC
+// over the EXACT bytes Meta sent; express.json() consumes the request stream and
+// leaves only a parsed object, and re-serialising that object changes key order
+// and escaping, so the digest would never match. Mounting here lets the router
+// apply its own express.raw() parser to the untouched body.
+//
+// Every other route keeps the app-wide JSON parser registered just below.
+// ---------------------------------------------------------------------------
+if (isWhatsAppConfigured()) {
+  app.use(
+    "/api/v1/whatsapp",
+    createWhatsAppRouter(container, {
+      repo: new PrismaWhatsAppRepository(prisma),
+      config: createWhatsAppConfig(),
+    })
+  );
+} else {
+  console.log(JSON.stringify({
+    level: "info",
+    event: "whatsapp_routes_disabled",
+    reason: "WhatsApp secrets are not fully configured",
+  }));
+}
+
+// Sprint 5.4 — n8n router, mounted here for the same reason as WhatsApp above:
+// its /callback route authenticates an HMAC over the RAW request body, so it
+// must install its own express.raw() before the app-wide JSON parser consumes
+// the stream. Its authenticated GET routes are unaffected by the placement.
+if (isN8nConfigured()) {
+  app.use(
+    "/api/v1/n8n",
+    createN8nRouter(container, {
+      repo: new PrismaN8nRepository(prisma),
+      config: createN8nConfig(),
+      auditLogger: container.auditLogger,
+    })
+  );
+} else {
+  console.log(JSON.stringify({
+    level: "info",
+    event: "n8n_routes_disabled",
+    reason: "n8n base URL, API key or callback secret is not configured",
+  }));
+}
+
 app.use(express.json({ limit: "10mb" }));
 
 app.use("/api/v1/health", createHealthRouter(lifecycle));
@@ -81,6 +136,28 @@ app.use("/api/v1", createOutcomesRouter(container));
 app.use("/api/v1/opportunities", createOpportunitiesRouter(container));
 app.use("/api/v1/knowledge", createKnowledgeRouter(container));
 app.use("/api/v1/dashboard", createDashboardRouter(container));
+// Sprint 5.2 — Google OAuth connection management (read-only Ads integration).
+//
+// Mounted only when an encryption key is present. Without one no Google token
+// could be stored, and EncryptionService.fromEnv() throws by design rather than
+// silently degrading to plaintext — so the route is omitted instead of taking
+// the whole API down at startup. Deployments without the key keep every other
+// route and simply have no /api/v1/google surface.
+if (process.env.JARVIS_ENCRYPTION_KEY) {
+  app.use(
+    "/api/v1/google",
+    createGoogleAuthRouter(container, {
+      connections: new PrismaGoogleConnectionRepository(prisma, EncryptionService.fromEnv()),
+      oauthStates: new PrismaOAuthStateRepository(prisma),
+    })
+  );
+} else {
+  console.log(JSON.stringify({
+    level: "info",
+    event: "google_routes_disabled",
+    reason: "JARVIS_ENCRYPTION_KEY is not set",
+  }));
+}
 
 io.on("connection", (socket) => {
   console.log(`Client connected: ${socket.id}`);

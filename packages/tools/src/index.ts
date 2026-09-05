@@ -81,3 +81,42 @@ export {
   type AllowlistResolution,
   type StatePortContext,
 } from "./recommendation-bridge.js";
+
+// Sprint 5.2 — Google Ads (read-only)
+export type { GoogleAdsProvider, GoogleAccountAuthorizer } from "./tools/google-ads-provider.js";
+export {
+  MockGoogleAdsProvider,
+  DEFAULT_MOCK_CUSTOMERS,
+  DEFAULT_MOCK_CAMPAIGNS,
+  DEFAULT_MOCK_METRICS,
+  type MockGoogleProviderConfig,
+} from "./tools/google-ads-mock.js";
+export {
+  GoogleGetAccountsTool,
+  GoogleGetCampaignsTool,
+  GoogleGetInsightsTool,
+  validateCustomerId,
+  validateDateRange as validateGoogleDateRange,
+} from "./tools/google-ads-tools.js";
+
+// Sprint 5.3 — WhatsApp (outbound send, approval-gated)
+export {
+  WhatsAppSendMessageTool,
+  RepositoryRecipientAuthorizer,
+  validateWaId,
+  validateMessageBody,
+  type WhatsAppSendProvider,
+  type WhatsAppRecipientAuthorizer,
+  type WhatsAppSendOptions,
+} from "./tools/whatsapp-tools.js";
+export { MockWhatsAppProvider, type MockWhatsAppProviderConfig } from "./tools/whatsapp-mock.js";
+
+// Sprint 5.4 — n8n workflow trigger (approval-gated)
+export {
+  N8nTriggerWorkflowTool,
+  validateTriggerPayload,
+  type N8nTriggerProvider,
+  type N8nTriggerOptions,
+  type N8nKeyDeriver,
+} from "./tools/n8n-tools.js";
+export { MockN8nProvider, mockKeyDeriver, type MockN8nProviderConfig } from "./tools/n8n-mock.js";
