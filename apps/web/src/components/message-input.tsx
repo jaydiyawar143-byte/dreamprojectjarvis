@@ -3,6 +3,8 @@
 import { useState, useRef, useEffect } from "react";
 import { useChatStore } from "@/lib/chat-store";
 import { Send } from "lucide-react";
+import { MicButton, useVoiceLocksComposer } from "./voice/mic-button";
+import { VoiceStatus } from "./voice/voice-status";
 
 interface Props {
   disabled: boolean;
@@ -13,6 +15,10 @@ export function MessageInput({ disabled }: Props) {
   const [value, setValue] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const sendMessage = useChatStore((s) => s.sendMessage);
+  // A voice turn owns the composer while it is capturing or waiting on the
+  // pipeline, so a typed message cannot race the spoken one into the same
+  // conversation.
+  const voiceBusy = useVoiceLocksComposer();
   const lastFailedMessage = useChatStore((s) => s.lastFailedMessage);
   const sending = useChatStore((s) => s.sending);
 
@@ -53,6 +59,7 @@ export function MessageInput({ disabled }: Props) {
 
   return (
     <div className="border-t border-gray-800 p-4">
+      <VoiceStatus />
       <div className="max-w-3xl mx-auto">
         <div className="flex items-end gap-3 bg-gray-900 rounded-xl border border-gray-700 p-3">
           <textarea
@@ -60,14 +67,17 @@ export function MessageInput({ disabled }: Props) {
             value={value}
             onChange={handleInput}
             onKeyDown={handleKeyDown}
-            placeholder="Message JARVIS..."
-            disabled={disabled}
+            placeholder={voiceBusy ? "Listening…" : "Message JARVIS..."}
+            disabled={disabled || voiceBusy}
             rows={1}
             className="flex-1 bg-transparent text-white placeholder-gray-500 resize-none focus:outline-none text-sm leading-relaxed max-h-[200px]"
           />
+          <MicButton disabled={disabled} />
           <button
             onClick={handleSend}
-            disabled={disabled || !value.trim()}
+            aria-label="Send message"
+            title="Send message"
+            disabled={disabled || voiceBusy || !value.trim()}
             className="p-2 bg-indigo-600 hover:bg-indigo-700 disabled:bg-gray-700 disabled:text-gray-500 text-white rounded-lg transition-colors shrink-0"
           >
             <Send size={16} />

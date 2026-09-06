@@ -63,7 +63,10 @@ describe("MessageInput", () => {
 
   it("10. Send button present", () => {
     render(<MessageInput disabled={false} conversationId={null} />);
-    const btn = screen.getByRole("button");
+    // Targeted by name rather than by "the only button": Sprint 8 added a
+    // microphone control beside it, so an unqualified role query is now
+    // ambiguous. The assertion is unchanged in intent and stricter in effect.
+    const btn = screen.getByRole("button", { name: "Send message" });
     expect(btn).toBeInTheDocument();
   });
 });

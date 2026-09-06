@@ -794,3 +794,57 @@ export async function listRecommendations(options?: {
   const suffix = qs.toString() ? `?${qs.toString()}` : "";
   return request(`/recommendations${suffix}`);
 }
+
+// ---------------------------------------------------------------------------
+// Sprint 8 — Voice.
+//
+// Two stateless transformations. Neither carries conversation state: the
+// transcript returned here is sent through `sendChatMessage` like any typed
+// message, so voice inherits routing, memory, approvals and audit rather than
+// re-implementing them.
+// ---------------------------------------------------------------------------
+
+export interface VoiceStatus {
+  enabled: boolean;
+  sttModel: string;
+  ttsModel: string;
+  voice: string;
+  maxAudioBytes: number;
+  maxTtsChars: number;
+  canConfirmApprovals: boolean;
+}
+
+export async function getVoiceStatus(): Promise<ApiResponse<VoiceStatus>> {
+  return request("/voice/status");
+}
+
+export async function transcribeAudio(input: {
+  audio: string;
+  mimeType: string;
+  durationMs?: number;
+  conversationId?: string;
+}): Promise<ApiResponse<{ text: string; empty: boolean; model: string; latencyMs?: number }>> {
+  return request("/voice/transcribe", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function synthesizeSpeech(input: {
+  text: string;
+  conversationId?: string;
+}): Promise<
+  ApiResponse<{
+    audio: string;
+    mimeType: string;
+    model: string;
+    voice: string;
+    format: string;
+    characterCount: number;
+  }>
+> {
+  return request("/voice/speak", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}

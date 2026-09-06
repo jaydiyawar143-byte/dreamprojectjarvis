@@ -26,12 +26,15 @@ import type {
   MemoryRecord,
   MemoryContextConfig,
   ITool,
-  ConversationMessage,
   IKnowledgeRetriever,
   KnowledgeContextConfig,
+  IPermissionChecker,
 } from "@jarvis/core";
 import { JarvisError } from "@jarvis/core";
+import type { AgentPolicy, AgentResolution } from "@jarvis/core";
 import type { AgentRegistry } from "./registry.js";
+import { rankAgentCandidates, isAmbiguous } from "./agent-router.js";
+import { isToolAllowed, resolveAllowedToolId, scopedToolRegistry } from "./agent-policy.js";
 import { ToolDescriptionBuilder, ToolPlanValidator, ToolPlanParser } from "./tool-planner.js";
 import {
   DEFAULT_KNOWLEDGE_BUDGET_CHARS,
@@ -76,6 +79,7 @@ export class Orchestrator implements IOrchestrator {
   private readonly knowledgeConfig: Required<KnowledgeContextConfig>;
   private readonly toolRegistry: { get(toolId: string): ITool | undefined; getAll(): ITool[] } | null;
   private readonly toolApprovalService: IToolApprovalService | null;
+  private readonly permissionChecker: IPermissionChecker | null;
   private readonly pendingActionService: import("./pending-action-service.js").PendingActionService | null;
   private readonly toolDescriptionBuilder: ToolDescriptionBuilder;
   private readonly toolPlanValidator: ToolPlanValidator;
@@ -109,6 +113,7 @@ export class Orchestrator implements IOrchestrator {
     };
     this.toolRegistry = config.toolRegistry ?? null;
     this.toolApprovalService = config.toolApprovalService ?? null;
+    this.permissionChecker = config.permissionChecker ?? null;
     this.pendingActionService = (config as unknown as { pendingActionService?: import("./pending-action-service.js").PendingActionService }).pendingActionService ?? null;
     this.toolDescriptionBuilder = new ToolDescriptionBuilder();
     this.toolPlanValidator = new ToolPlanValidator();
@@ -123,23 +128,38 @@ export class Orchestrator implements IOrchestrator {
     const startedAt = new Date();
 
     try {
-      const agent = this.selectAgent(request);
+      const { agent, policy, resolution } = this.selectAgent(request, context);
       context.agentId = agent.id;
-      await this.initializeAgent(agent, context);
+      await this.initializeAgent(agent, context, policy);
 
       const agentContext = {
         userId: context.auth.userId,
         conversationId: context.conversationId,
         traceId: context.traceId,
         memoryManager: this.memoryStore ?? createNoopMemoryStore(),
-        toolRegistry: this.toolRegistry ?? {
-          get: () => undefined,
-          getAll: () => [],
-        },
+        // Sprint 6.9 — least privilege. The agent sees only the tools its
+        // policy grants, so an agent that looks a tool up directly (the Meta
+        // and Google agents both preload account context this way) cannot
+        // reach a provider it does not own.
+        toolRegistry: this.scopeRegistryForAgent(policy),
         auditLogger: this.auditLogger,
       };
 
       await agent.initialize(agentContext);
+
+      if (process.env.NODE_ENV === "development") {
+        console.log(JSON.stringify({
+          level: "debug",
+          event: "agent_resolution",
+          conversationId: context.conversationId,
+          agentId: agent.id,
+          domain: resolution.domain,
+          status: resolution.status,
+          confidence: resolution.confidence,
+          reason: resolution.reason,
+          ...(resolution.candidates ? { candidates: resolution.candidates } : {}),
+        }));
+      }
 
       const withMemory = await this.injectMemoryContext(
         request.message,
@@ -248,7 +268,8 @@ export class Orchestrator implements IOrchestrator {
 
         const { results: toolResults, pendingAction } = await this.executeTools(
           output.actions,
-          context
+          context,
+          policy
         );
         allToolResults.push(...toolResults);
         if (pendingAction) {
@@ -527,49 +548,172 @@ export class Orchestrator implements IOrchestrator {
   // Existing methods (unchanged)
   // -----------------------------------------------------------------------
 
-  private selectAgent(request: JarvisRequest): IAgent {
-    const agentId = request.agentId;
-    if (agentId) {
-      const agent = this.agentRegistry.get(agentId);
+  // -----------------------------------------------------------------------
+  // Sprint 6.8 — server-controlled agent resolution
+  // -----------------------------------------------------------------------
+
+  /**
+   * Chooses the agent for this request. The decision is the server's.
+   *
+   * A client MAY name an agent, but the name is treated as a request and not
+   * as an instruction: the agent must exist, be healthy, be marked
+   * `clientSelectable`, and the caller's role must clear the agent's permission
+   * floor. That matters more after Sprint 6 than it did before, because the
+   * agent choice now selects a TOOL ALLOWLIST — without these checks, naming an
+   * agent would be a way to pick your own privileges.
+   *
+   * Otherwise the deterministic router ranks candidates and the first one that
+   * is registered, healthy and permitted wins. Ranked candidates rather than a
+   * single answer is what lets a deployment with WhatsApp or n8n unconfigured
+   * fall through to the general assistant instead of failing.
+   */
+  private selectAgent(
+    request: JarvisRequest,
+    context: SessionContext
+  ): { agent: IAgent; policy: AgentPolicy | undefined; resolution: AgentResolution } {
+    const requestedId = request.agentId;
+
+    if (requestedId) {
+      const agent = this.agentRegistry.get(requestedId);
       if (!agent) {
-        throw new JarvisError("AGENT_NOT_FOUND", `Agent not found: ${agentId}`);
+        throw new JarvisError("AGENT_NOT_FOUND", `Agent not found: ${requestedId}`);
       }
       if (agent.getStatus() === "disabled") {
-        throw new JarvisError("AGENT_ERROR", `Agent is disabled: ${agentId}`);
+        throw new JarvisError("AGENT_ERROR", `Agent is disabled: ${requestedId}`);
       }
       if (agent.getStatus() === "error") {
-        throw new JarvisError("AGENT_ERROR", `Agent is in error state: ${agentId}`);
+        throw new JarvisError("AGENT_ERROR", `Agent is in error state: ${requestedId}`);
       }
-      return agent;
+
+      const policy = this.agentRegistry.getPolicy(requestedId);
+
+      if (policy && !policy.clientSelectable) {
+        throw new JarvisError(
+          "AUTHORIZATION_FAILED",
+          `Agent "${requestedId}" cannot be selected directly`
+        );
+      }
+
+      if (policy && !this.isRolePermitted(policy, context)) {
+        throw new JarvisError(
+          "AUTHORIZATION_FAILED",
+          `Your role is not permitted to use agent "${requestedId}"`
+        );
+      }
+
+      return {
+        agent,
+        policy,
+        resolution: {
+          status: "resolved",
+          agentId: agent.id,
+          domain: policy?.domain,
+          confidence: 1,
+          reason: "explicitly requested by client and permitted by policy",
+        },
+      };
     }
 
-    // Try Meta intent routing if query relates to Meta Ads
-    if (request.message && isMetaAdsQuery(request.message, request.conversationHistory)) {
-      const metaAgent = this.agentRegistry.get("meta-ads-agent");
-      if (metaAgent && metaAgent.getStatus() !== "disabled" && metaAgent.getStatus() !== "error") {
-        return metaAgent;
-      }
+    const candidates = rankAgentCandidates(
+      request.message ?? "",
+      request.conversationHistory
+    );
+    const ambiguous = isAmbiguous(candidates);
+
+    for (const candidate of candidates) {
+      const agent = this.agentRegistry.get(candidate.agentId);
+      if (!agent) continue;
+
+      const status = agent.getStatus();
+      if (status === "disabled" || status === "error") continue;
+
+      const policy = this.agentRegistry.getPolicy(candidate.agentId);
+      // A role that cannot use this agent is not an error — the next candidate,
+      // and ultimately the general assistant, is the right destination.
+      if (policy && !this.isRolePermitted(policy, context)) continue;
+
+      return {
+        agent,
+        policy,
+        resolution: {
+          status: ambiguous ? "ambiguous" : "resolved",
+          agentId: agent.id,
+          domain: candidate.domain,
+          confidence: candidate.confidence,
+          reason: candidate.reason,
+          ...(ambiguous
+            ? {
+                candidates: candidates
+                  .filter((c) => c.domain !== "general")
+                  .map((c) => c.agentId),
+              }
+            : {}),
+        },
+      };
     }
 
-    const agents = this.agentRegistry.getAll();
-    const available = agents.find((a) => a.getStatus() === "ready" || a.getStatus() === "idle");
+    // Nothing the router named is registered. This is the Sprint 1-5 path and
+    // the path any registry built without the standard agent ids takes.
+    const available = this.agentRegistry
+      .getAll()
+      .find((a) => a.getStatus() === "ready" || a.getStatus() === "idle");
     if (!available) {
       throw new JarvisError("AGENT_ERROR", "No available agents");
     }
-    return available;
+
+    return {
+      agent: available,
+      policy: this.agentRegistry.getPolicy(available.id),
+      resolution: {
+        status: "resolved",
+        agentId: available.id,
+        confidence: 0.1,
+        reason: "no routed agent was registered; first available agent used",
+      },
+    };
   }
 
-  private async initializeAgent(agent: IAgent, context: SessionContext): Promise<void> {
+  /**
+   * Whether the caller's role clears the agent's permission floor.
+   *
+   * Reuses the tool permission model rather than inventing a second one: an
+   * agent requiring `execute` is asking for exactly the permission its tools
+   * would demand, so an agent can never be a way around what a role may reach.
+   * With no permission checker wired the check is skipped — the tool layer
+   * still performs its own, so this is a narrowing gate, never the only one.
+   */
+  private isRolePermitted(policy: AgentPolicy, context: SessionContext): boolean {
+    if (!this.permissionChecker) return true;
+    return policy.requiredPermissions.every((perm) =>
+      this.permissionChecker!.hasPermission(context.auth.role, "tools", perm)
+    );
+  }
+
+  /** The tool view an agent is given, narrowed to its policy. */
+  private scopeRegistryForAgent(policy: AgentPolicy | undefined): {
+    get(toolId: string): ITool | undefined;
+    getAll(): ITool[];
+  } {
+    const base = this.toolRegistry ?? {
+      get: () => undefined,
+      getAll: () => [],
+    };
+    if (!policy) return base;
+    return scopedToolRegistry(base, policy.allowedTools);
+  }
+
+  private async initializeAgent(
+    agent: IAgent,
+    context: SessionContext,
+    policy: AgentPolicy | undefined
+  ): Promise<void> {
     if (agent.getStatus() === "idle") {
       await agent.initialize({
         userId: context.auth.userId,
         conversationId: context.conversationId,
         traceId: context.traceId,
         memoryManager: this.memoryStore ?? createNoopMemoryStore(),
-        toolRegistry: this.toolRegistry ?? {
-          get: () => undefined,
-          getAll: () => [],
-        },
+        toolRegistry: this.scopeRegistryForAgent(policy),
         auditLogger: this.auditLogger,
       });
     }
@@ -577,7 +721,8 @@ export class Orchestrator implements IOrchestrator {
 
   private async executeTools(
     actions: Array<{ toolId: string; toolCallId?: string; params: Record<string, unknown> }>,
-    context: SessionContext
+    context: SessionContext,
+    policy: AgentPolicy | undefined
   ): Promise<{ results: ToolExecutionResult[]; pendingAction?: Record<string, unknown> }> {
     const results: ToolExecutionResult[] = [];
     const executionId = crypto.randomUUID();
@@ -587,9 +732,105 @@ export class Orchestrator implements IOrchestrator {
       const action = actions[i]!;
       const stepStartedAt = new Date();
 
+      // ---------------------------------------------------------------------
+      // Sprint 6.10 — allowlist gate.
+      //
+      // FIRST, before the pending-action branch, before the approval check and
+      // before the executor. A tool outside the agent's policy is not "an
+      // action awaiting approval" — it is an action this agent may never take,
+      // and creating an approval for it would put a request in front of a human
+      // that should never have been asked. Denials are audited so an agent
+      // repeatedly reaching outside its policy is visible.
+      //
+      // The policy is read from the REGISTRY, never from `agent.tools`: the
+      // instance is ordinary code and could report anything.
+      // ---------------------------------------------------------------------
+      if (policy && !isToolAllowed(action.toolId, policy.allowedTools)) {
+        const reason = `Agent "${policy.agentId}" is not authorized to use tool "${action.toolId}"`;
+
+        results.push({
+          executionId,
+          toolId: action.toolId,
+          toolCallId: action.toolCallId,
+          status: "permission_denied",
+          error: reason,
+          startedAt: stepStartedAt,
+          completedAt: new Date(),
+          durationMs: Date.now() - stepStartedAt.getTime(),
+        });
+
+        await this.auditLogger.log({
+          userId: context.auth.userId,
+          agentId: policy.agentId,
+          toolId: action.toolId,
+          action: "agent.tool_denied",
+          result: "rejected",
+          traceId: context.traceId,
+          ipAddress: context.ipAddress,
+          metadata: {
+            reason,
+            domain: policy.domain,
+            executionId,
+            stepIndex: i,
+          },
+        });
+
+        continue;
+      }
+
+      // Both spellings of a tool name reach the same registry id, so the rest
+      // of the loop works on the canonical one.
+      if (policy) {
+        const canonical = resolveAllowedToolId(action.toolId, policy.allowedTools);
+        if (canonical) action.toolId = canonical;
+      }
+
       // Check if this is a write tool that needs pending-action flow
       const tool = this.toolRegistry?.get(action.toolId);
       const needsConfirmation = tool?.requiresApproval === true;
+
+      // ---------------------------------------------------------------------
+      // Sprint 6.10 — fail closed when nothing is left to gate a write.
+      //
+      // Normally either the pending-action flow or ToolApprovalService stands
+      // between a side-effecting tool and the provider. If a container is wired
+      // with neither, that gap would silently turn every agent into an
+      // autonomous writer. A policy that says writes need approval is taken at
+      // its word instead: with no gate available, the write does not happen.
+      // ---------------------------------------------------------------------
+      if (
+        policy?.writesRequireApproval &&
+        tool &&
+        tool.risk !== "READ_ONLY" &&
+        !this.toolApprovalService &&
+        !(needsConfirmation && this.pendingActionService && context.conversationId)
+      ) {
+        const reason = `Tool "${action.toolId}" requires approval but no approval service is configured`;
+
+        results.push({
+          executionId,
+          toolId: action.toolId,
+          toolCallId: action.toolCallId,
+          status: "permission_denied",
+          error: reason,
+          startedAt: stepStartedAt,
+          completedAt: new Date(),
+          durationMs: Date.now() - stepStartedAt.getTime(),
+        });
+
+        await this.auditLogger.log({
+          userId: context.auth.userId,
+          agentId: policy.agentId,
+          toolId: action.toolId,
+          action: "agent.approval_gate_missing",
+          result: "rejected",
+          traceId: context.traceId,
+          ipAddress: context.ipAddress,
+          metadata: { reason, risk: tool.risk, executionId, stepIndex: i },
+        });
+
+        continue;
+      }
 
       if (needsConfirmation && this.pendingActionService && context.conversationId) {
         // Create a pending action instead of executing directly
@@ -847,96 +1088,4 @@ export class Orchestrator implements IOrchestrator {
       },
     });
   }
-}
-
-function isMetaAdsQuery(message: string, history?: ConversationMessage[]): boolean {
-  const normalized = message.toLowerCase();
-
-  // 1. Explicit non-Meta platforms or generic tech tools (Highest priority overrides context / keywords)
-  const nonMetaPlatformTriggers = [
-    /\bgoogle\b/i,
-    /\blinkedin\b/i,
-    /\badwords\b/i,
-    /\bgmail\b/i,
-    /\bemail\b/i,
-    /\bpython\b/i,
-    /\bjavascript\b/i,
-    /\btypescript\b/i,
-    /\bcalendar\b/i,
-    /\bpdf\b/i,
-    /\bwebsite\b/i,
-    /\bexcel\b/i,
-  ];
-
-  const hasExplicitNonMetaPlatform = nonMetaPlatformTriggers.some((pattern) => pattern.test(normalized));
-  if (hasExplicitNonMetaPlatform) {
-    return false;
-  }
-
-  // 2. Explicit Meta Ads triggers
-  const explicitMetaTriggers = [
-    /\bmeta\b/i,
-    /\bfacebook\b/i,
-    /\binsta\b/i,
-    /\binstagram\b/i,
-  ];
-
-  const hasExplicitMeta = explicitMetaTriggers.some((pattern) => pattern.test(normalized));
-  if (hasExplicitMeta) {
-    return true;
-  }
-
-  // 3. Strong Meta Ads domain terminologies
-  const strongDomainTriggers = [
-    /\bcpa\b/i,
-    /\broas\b/i,
-    /\bctr\b/i,
-    /\bcpc\b/i,
-    /\bcpm\b/i,
-    /\badset\b/i,
-    /\badsets\b/i,
-    /\bad\s+set\b/i,
-    /\bad\s+sets\b/i,
-    /\bcreatives?\b/i,
-    /\bbadh\s+raha\b/i,
-    /\bworst\s+perform\b/i,
-  ];
-
-  const hasStrongDomainIntent = strongDomainTriggers.some((pattern) => pattern.test(normalized));
-  if (hasStrongDomainIntent) {
-    return true;
-  }
-
-  // 4. Generic Meta keywords (requires history context to disambiguate)
-  const genericMetaKeywords = [
-    /\bcampaign\b/i,
-    /\bcampaigns\b/i,
-    /\bad\b/i,
-    /\bads\b/i,
-    /\bbudget\b/i,
-    /\bbudgets\b/i,
-    /\bperformance\b/i,
-    /\boptimize\b/i,
-    /\bpause\b/i,
-    /\bresume\b/i,
-    /\banalytics\b/i,
-    /\baccount\b/i,
-  ];
-
-  const hasGenericMetaKeyword = genericMetaKeywords.some((pattern) => pattern.test(normalized));
-  if (hasGenericMetaKeyword) {
-    if (history && history.length > 0) {
-      const recentMessages = history.slice(-3); // Look at the last 3 turns
-      for (const msg of recentMessages) {
-        const content = msg.content.toLowerCase();
-        const isMeta = explicitMetaTriggers.some(p => p.test(content)) ||
-                       strongDomainTriggers.some(p => p.test(content));
-        if (isMeta) {
-          return true;
-        }
-      }
-    }
-  }
-
-  return false;
 }

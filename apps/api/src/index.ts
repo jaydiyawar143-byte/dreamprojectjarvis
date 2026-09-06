@@ -20,11 +20,19 @@ import { createDashboardRouter } from "./routes/dashboard.js";
 import { createGoogleAuthRouter } from "./routes/google-auth.js";
 import { createWhatsAppRouter } from "./routes/whatsapp.js";
 import { createN8nRouter } from "./routes/n8n.js";
+import { createVoiceRouter } from "./routes/voice.js";
+import {
+  SOCKET_CONNECT_TIMEOUT_MS,
+  SOCKET_MAX_BUFFER_BYTES,
+  secureSocketServer,
+} from "./socket/socket-auth.js";
 import { getContainer } from "./services/container.js";
 import { EncryptionService } from "@jarvis/security";
 import { prisma, PrismaGoogleConnectionRepository, PrismaOAuthStateRepository, PrismaWhatsAppRepository, PrismaN8nRepository } from "@jarvis/db";
 import { createWhatsAppConfig, isWhatsAppConfigured } from "@jarvis/whatsapp";
 import { createN8nConfig, isN8nConfigured } from "@jarvis/n8n";
+import { createVoiceConfig, describeVoiceConfigStatus, isVoiceConfigured } from "@jarvis/config";
+import { OpenAIVoiceProvider } from "@jarvis/ai-openai";
 import {
   ShutdownLifecycle,
   type LifecycleState,
@@ -69,6 +77,11 @@ const io = new SocketIOServer(httpServer, {
     origin: env.CORS_ORIGIN,
     methods: ["GET", "POST"],
   },
+  // Sprint 9 hotfix — bound what an UNAUTHENTICATED peer can hold or send.
+  // Both limits apply before the handshake completes, which is the only window
+  // in which an anonymous client exists at all.
+  connectTimeout: SOCKET_CONNECT_TIMEOUT_MS,
+  maxHttpBufferSize: SOCKET_MAX_BUFFER_BYTES,
 });
 
 app.use(helmet());
@@ -143,6 +156,57 @@ app.use("/api/v1/dashboard", createDashboardRouter(container));
 // silently degrading to plaintext — so the route is omitted instead of taking
 // the whole API down at startup. Deployments without the key keep every other
 // route and simply have no /api/v1/google surface.
+// ---------------------------------------------------------------------------
+// Sprint 8 — Voice interaction layer.
+//
+// Mounted only when an operator has switched it on AND a speech credential
+// exists. Voice is never inferred from the presence of an OpenAI key: every
+// existing deployment has one, and inferring would expose two new endpoints on
+// upgrade with nobody having asked for them.
+//
+// These routes are a transport. They transcribe and they synthesize; the
+// transcript then travels through the ordinary /api/v1/chat pipeline, which is
+// what keeps agent routing, tool allowlists, approvals, tenant isolation and
+// audit in one place rather than two.
+// ---------------------------------------------------------------------------
+if (isVoiceConfigured()) {
+  try {
+    const voiceConfig = createVoiceConfig();
+    app.use(
+      "/api/v1/voice",
+      createVoiceRouter(container, {
+        provider: new OpenAIVoiceProvider({
+          sttModel: voiceConfig.sttModel,
+          ttsModel: voiceConfig.ttsModel,
+          defaultVoice: voiceConfig.ttsVoice,
+        }),
+        config: voiceConfig,
+      })
+    );
+    console.log(JSON.stringify({
+      level: "info",
+      event: "voice_routes_enabled",
+      sttModel: voiceConfig.sttModel,
+      ttsModel: voiceConfig.ttsModel,
+      voice: voiceConfig.ttsVoice,
+    }));
+  } catch (err) {
+    // A misconfigured optional feature must not take the API down; the routes
+    // stay unmounted and every other surface is unaffected.
+    console.log(JSON.stringify({
+      level: "warn",
+      event: "voice_routes_disabled",
+      reason: err instanceof Error ? err.message : "invalid voice configuration",
+    }));
+  }
+} else {
+  console.log(JSON.stringify({
+    level: "info",
+    event: "voice_routes_disabled",
+    reason: describeVoiceConfigStatus().reason,
+  }));
+}
+
 if (process.env.JARVIS_ENCRYPTION_KEY) {
   app.use(
     "/api/v1/google",
@@ -159,15 +223,20 @@ if (process.env.JARVIS_ENCRYPTION_KEY) {
   }));
 }
 
-io.on("connection", (socket) => {
-  console.log(`Client connected: ${socket.id}`);
-
-  socket.on("disconnect", () => {
-    console.log(`Client disconnected: ${socket.id}`);
-    // Phase 10.4 decision preserved: CLIENT DISCONNECT ≠ EXECUTION
-    // CANCELLATION. Executions are journal-backed; no abort happens here.
-  });
-});
+// ---------------------------------------------------------------------------
+// Sprint 9 hotfix — Socket.IO is authenticated.
+//
+// Previously every connection was accepted with no identity attached. Reusing
+// the SAME TokenService the HTTP middleware uses means one identity model
+// across both transports: a socket that cannot prove who it is never reaches a
+// handler, and every event is checked against an explicit policy so the
+// authorized surface cannot grow by accident.
+//
+// Tool execution and approval decisions are deliberately NOT reachable here.
+// They stay on the HTTP routes, where ToolExecutor, the permission service and
+// the approval boundary already live.
+// ---------------------------------------------------------------------------
+secureSocketServer(io, container.tokenService);
 
 app.set("io", io);
 
