@@ -9,6 +9,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./voice": {
+      "types": "./dist/types/voice.d.ts",
+      "import": "./dist/types/voice.js"
     }
   },
   "scripts": {

@@ -1,6 +1,9 @@
 export { OpenAIAdapter } from "./openai-adapter.js";
 export { OpenAIEmbeddingProvider } from "./openai-embedding-provider.js";
 export type { OpenAIEmbeddingConfig } from "./openai-embedding-provider.js";
+// Sprint 8.1/8.2 — speech-to-text and text-to-speech over the same key.
+export { OpenAIVoiceProvider } from "./openai-voice-provider.js";
+export type { OpenAIVoiceConfig } from "./openai-voice-provider.js";
 export type { OpenAIAdapterConfig, OpenAICompletionResponse } from "./types.js";
 export {
   convertMessages,

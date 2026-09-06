@@ -5,6 +5,7 @@ import type { IMemoryExtractor } from "./memory.js";
 import type { IEmbeddingProvider } from "./embedding-provider.js";
 import type { ITool } from "./tool.js";
 import type { IKnowledgeRetriever } from "./knowledge-retrieval.js";
+import type { IPermissionChecker } from "./common.js";
 
 // ---------------------------------------------------------------------------
 // Memory Context Config — controls memory recall + extraction behavior
@@ -98,6 +99,13 @@ export interface OrchestratorConfig {
   knowledge?: KnowledgeContextConfig;
   /** Pending action service for write-tool confirmation flow. */
   pendingActionService?: unknown;
+  /**
+   * Sprint 6 — role checker used to enforce an agent's permission floor during
+   * resolution. Reuses the same checker the tool layer uses, so an agent can
+   * never grant access a role does not already have. When absent, agent-level
+   * permission narrowing is skipped and the tool layer remains the only gate.
+   */
+  permissionChecker?: IPermissionChecker;
 }
 
 // ---------------------------------------------------------------------------

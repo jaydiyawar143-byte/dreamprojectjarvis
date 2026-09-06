@@ -1,7 +1,21 @@
 import type { IOrchestrator, IToolExecutor, ITool, AIToolDefinition, ShutdownLifecycle, IMemoryStore, IEmbeddingProvider, IKnowledgeRetriever } from "@jarvis/core";
 import type { TokenService } from "@jarvis/security";
 import type { IMemoryExtractor } from "@jarvis/core";
-import { Orchestrator, AgentRegistry, ConversationalAssistant, MetaAdsAgent, PendingActionService } from "@jarvis/agents";
+import {
+  Orchestrator,
+  AgentRegistry,
+  ConversationalAssistant,
+  MetaAdsAgent,
+  KnowledgeAgent,
+  AnalyticsAgent,
+  AutomationAgent,
+  CommunicationAgent,
+  GoogleAdsAgent,
+  PendingActionService,
+  AGENT_IDS,
+  AGENT_POLICIES,
+  isToolAllowed,
+} from "@jarvis/agents";
 import { OpenAIAdapter, OpenAIEmbeddingProvider } from "@jarvis/ai-openai";
 import {
   ToolExecutor,
@@ -335,6 +349,15 @@ export function getContainer(options?: {
 
   const { definitions: agentTools, sanitizedToOriginal } = convertToolsToAIToolDefinitions(toolRegistry.getAll());
 
+  // Sprint 6 — narrow the definitions offered to each agent to its policy.
+  // `agentTools` holds SANITIZED names (dots are illegal in an OpenAI function
+  // name), so membership is tested with the helper that understands both
+  // spellings rather than by string equality against the registry ids.
+  const registeredToolIds = new Set(toolRegistry.getAll().map((t) => t.id));
+  const hasTool = (id: string) => registeredToolIds.has(id);
+  const toolDefsFor = (allowed: readonly string[]): AIToolDefinition[] =>
+    agentTools.filter((def) => isToolAllowed(def.name, allowed));
+
   const systemPrompt = [
     "You are JARVIS, a helpful AI assistant with direct access to the user's Meta Ads account.",
     "",
@@ -385,7 +408,7 @@ export function getContainer(options?: {
   const agent = new ConversationalAssistant({
     provider: adapter,
     systemPrompt,
-    tools: agentTools,
+    tools: toolDefsFor(AGENT_POLICIES[AGENT_IDS.general]!.allowedTools),
   });
 
   const metaAdsSystemPrompt = [
@@ -422,12 +445,82 @@ export function getContainer(options?: {
   const metaAgent = new MetaAdsAgent({
     provider: adapter,
     systemPrompt: metaAdsSystemPrompt,
-    tools: agentTools,
+    tools: toolDefsFor(AGENT_POLICIES[AGENT_IDS.metaAds]!.allowedTools),
   });
 
-  const agentRegistry = new AgentRegistry();
+  // ---------------------------------------------------------------------------
+  // Sprint 6 — specialized agent registration.
+  //
+  // `requirePolicy` makes the allowlist a property of the deployment: an agent
+  // with no entry in the compiled-in policy table cannot be registered at all,
+  // so there is no path to a production agent running unrestricted.
+  //
+  // Each agent is offered ONLY the tool definitions its policy allows. That is
+  // prompt hygiene rather than the security boundary — the Orchestrator checks
+  // the same policy again before executing anything — but it stops a model
+  // being tempted by a tool it would only be denied.
+  //
+  // Integration-backed agents register only when their tool actually exists.
+  // With WhatsApp or n8n unconfigured the agent is absent, the router's next
+  // candidate is taken, and the request lands on the general assistant instead
+  // of on an agent that could not have helped.
+  // ---------------------------------------------------------------------------
+  const agentRegistry = new AgentRegistry({ requirePolicy: true });
   agentRegistry.register(agent);
   agentRegistry.register(metaAgent);
+
+  agentRegistry.register(
+    new KnowledgeAgent({
+      provider: adapter,
+      tools: toolDefsFor(AGENT_POLICIES[AGENT_IDS.knowledge]!.allowedTools),
+    })
+  );
+
+  agentRegistry.register(
+    new AnalyticsAgent({
+      provider: adapter,
+      tools: toolDefsFor(AGENT_POLICIES[AGENT_IDS.analytics]!.allowedTools),
+    })
+  );
+
+  if (hasTool("google.accounts")) {
+    agentRegistry.register(
+      new GoogleAdsAgent({
+        provider: adapter,
+        tools: toolDefsFor(AGENT_POLICIES[AGENT_IDS.googleAds]!.allowedTools),
+      })
+    );
+  }
+
+  if (hasTool("n8n.trigger")) {
+    agentRegistry.register(
+      new AutomationAgent({
+        provider: adapter,
+        tools: toolDefsFor(AGENT_POLICIES[AGENT_IDS.automation]!.allowedTools),
+        workflows: new PrismaN8nRepository(prisma),
+      })
+    );
+  }
+
+  if (hasTool("whatsapp.send")) {
+    agentRegistry.register(
+      new CommunicationAgent({
+        provider: adapter,
+        tools: toolDefsFor(AGENT_POLICIES[AGENT_IDS.communication]!.allowedTools),
+        conversations: new PrismaWhatsAppRepository(prisma),
+      })
+    );
+  }
+
+  console.log(JSON.stringify({
+    level: "info",
+    event: "agent_registration",
+    agents: agentRegistry.getAll().map((a) => ({
+      id: a.id,
+      domain: agentRegistry.getPolicy(a.id)?.domain,
+      tools: agentRegistry.getPolicy(a.id)?.allowedTools.length ?? 0,
+    })),
+  }));
 
   const toolApprovalService = new ToolApprovalService(approvalRepo, auditRepo, permissionService);
 
@@ -528,6 +621,9 @@ export function getContainer(options?: {
   const orchestrator = new Orchestrator(agentRegistry, toolExecutor, auditLogger, {
     toolRegistry: resolvingRegistry,
     toolApprovalService,
+    // Sprint 6 — the agent permission floor is checked with the SAME service
+    // the tool layer uses, so selecting an agent can never widen a role.
+    permissionChecker: permissionService,
     pendingActionService: pendingActionService as unknown,
     // Sprint 1.1A: wire persistent memory into orchestrator
     ...(memoryStore !== null && embeddingProvider !== null

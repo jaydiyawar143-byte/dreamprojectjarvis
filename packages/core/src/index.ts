@@ -46,6 +46,8 @@ export * from "./types/document-extraction.js";
 export * from "./types/document-chunking.js";
 export * from "./types/document-embedding.js";
 export * from "./types/knowledge-retrieval.js";
+// Sprint 8.0 — voice interaction-layer contracts.
+export * from "./types/voice.js";
 export * from "./utils/redact-secrets.js";
 
 // Re-export deprecated memory-provider types under unique names for backward compat
