@@ -17,6 +17,8 @@ import { createOutcomesRouter } from "./routes/outcomes.js";
 import { createOpportunitiesRouter } from "./routes/opportunities.js";
 import { createKnowledgeRouter } from "./routes/knowledge.js";
 import { createDashboardRouter } from "./routes/dashboard.js";
+import { createAgentsRouter } from "./routes/agents.js";
+import { createActivityRouter } from "./routes/activity.js";
 import { createGoogleAuthRouter } from "./routes/google-auth.js";
 import { createWhatsAppRouter } from "./routes/whatsapp.js";
 import { createN8nRouter } from "./routes/n8n.js";
@@ -89,6 +91,21 @@ const io = new SocketIOServer(httpServer, {
   connectTimeout: SOCKET_CONNECT_TIMEOUT_MS,
   maxHttpBufferSize: SOCKET_MAX_BUFFER_BYTES,
 });
+
+// ---------------------------------------------------------------------------
+// Sprint 9.7/9.12 — proxy trust.
+//
+// Off by default, because trusting X-Forwarded-For when nothing sets it lets
+// any client claim any address — which would turn the per-IP rate limiter into
+// a no-op. An operator behind a load balancer sets TRUST_PROXY to the number of
+// proxies in front of this process (usually 1), and only then does `req.ip`
+// mean the client rather than the proxy.
+// ---------------------------------------------------------------------------
+const trustProxy = process.env.TRUST_PROXY;
+if (trustProxy && trustProxy !== "false") {
+  const hops = Number(trustProxy);
+  app.set("trust proxy", Number.isInteger(hops) && hops > 0 ? hops : trustProxy);
+}
 
 app.use(helmet());
 app.use(cors({ origin: env.CORS_ORIGIN, credentials: true }));
@@ -167,6 +184,10 @@ app.use("/api/v1", createOutcomesRouter(container));
 app.use("/api/v1/opportunities", createOpportunitiesRouter(container));
 app.use("/api/v1/knowledge", createKnowledgeRouter(container));
 app.use("/api/v1/dashboard", createDashboardRouter(container));
+// UI V2 — read-only windows on data the server already owns. Both are
+// auth-gated; activity is scoped to the caller's own rows.
+app.use("/api/v1/agents", createAgentsRouter(container));
+app.use("/api/v1/activity", createActivityRouter(container));
 // Sprint 5.2 — Google OAuth connection management (read-only Ads integration).
 //
 // Mounted only when an encryption key is present. Without one no Google token

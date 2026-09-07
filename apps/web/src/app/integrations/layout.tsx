@@ -1,9 +1,9 @@
-// UI V2 — protected, and now wears the shell like every other authenticated route.
+// UI V2 — Google, WhatsApp and n8n connection state.
 import type { ReactNode } from "react";
 import { RequireAuth } from "@/components/require-auth";
 import { DashboardShell } from "@/components/dashboard/dashboard-shell";
 
-export default function ApprovalsLayout({ children }: { children: ReactNode }) {
+export default function IntegrationsLayout({ children }: { children: ReactNode }) {
   return (
     <RequireAuth>
       <DashboardShell>{children}</DashboardShell>

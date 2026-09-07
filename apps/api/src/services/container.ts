@@ -105,6 +105,15 @@ export interface Container {
   /** Registry used by the approval flow to re-validate stored parameters. */
   toolRegistry: ToolRegistry;
   /**
+   * UI V2 — the agent registry, exposed so `GET /api/v1/agents` can report which
+   * agents ACTUALLY registered rather than which ones have a policy.
+   *
+   * The distinction matters: four of the eight agents register conditionally on
+   * their integration being configured, so a UI reading only `AGENT_POLICIES`
+   * would claim capabilities this deployment does not have.
+   */
+  agentRegistry: AgentRegistry;
+  /**
    * PHASE 11.6B — executor exposed for recommendation execution route so
    * the RecommendationExecutionService can route all writes through the
    * SAME Phase 10 authority (approval + journal + concurrency).
@@ -724,6 +733,7 @@ export function getContainer(options?: {
     executionJournal,
     approvalRepo,
     toolRegistry,
+    agentRegistry,
     executor: toolExecutor,
     recommendationRepo,
     lifecycle: options?.lifecycle,

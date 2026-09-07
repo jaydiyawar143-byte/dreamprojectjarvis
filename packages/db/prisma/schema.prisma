@@ -1,5 +1,10 @@
 generator client {
   provider = "prisma-client-js"
+  // "native" keeps the host build working (Windows, macOS, glibc Linux).
+  // The musl target is what the Alpine containers need: a client generated
+  // only for the host has no query engine the container can load, and the
+  // failure surfaces at runtime as a missing-binary error rather than at build.
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
 }
 
 datasource db {
@@ -239,6 +244,11 @@ model AuditLog {
 
   @@index([userId])
   @@index([createdAt])
+  // Sprint 9.5 — the rate limiter counts a user's rows inside a time window on
+  // every approval and voice call. Its source comment already claimed this
+  // index existed; it did not, so each check fell back to the single-column
+  // userId index and filtered the window in Postgres.
+  @@index([userId, createdAt])
 }
 
 model Integration {

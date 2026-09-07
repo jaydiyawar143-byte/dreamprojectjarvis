@@ -9,12 +9,18 @@
 // ---------------------------------------------------------------------------
 
 import {
+  Activity,
   BookOpen,
+  Bot,
   CheckSquare,
   Inbox,
   LayoutDashboard,
   Megaphone,
   MessageSquare,
+  Plug,
+  Settings,
+  ShieldCheck,
+  Workflow,
   type LucideIcon,
 } from "lucide-react";
 
@@ -52,6 +58,24 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { href: "/knowledge", label: "Knowledge Base", icon: BookOpen, available: true },
       { href: "/meta-ads", label: "Meta Ads", icon: Megaphone, available: true },
+    ],
+  },
+  // UI V2 — the capability surfaces. Each of these is backed by an endpoint
+  // that genuinely exists; nothing here is aspirational.
+  {
+    title: "Capabilities",
+    items: [
+      { href: "/agents", label: "Agents", icon: Bot, available: true },
+      { href: "/automations", label: "Automations", icon: Workflow, available: true },
+      { href: "/integrations", label: "Integrations", icon: Plug, available: true },
+    ],
+  },
+  {
+    title: "System",
+    items: [
+      { href: "/activity", label: "Activity", icon: Activity, available: true },
+      { href: "/system", label: "Health", icon: ShieldCheck, available: true },
+      { href: "/settings", label: "Settings", icon: Settings, available: true },
     ],
   },
 ];

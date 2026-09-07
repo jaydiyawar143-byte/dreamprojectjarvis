@@ -27,6 +27,12 @@ export interface RateLimitDecision {
 export const RATE_LIMIT_NAMESPACES = {
   approval: "approval",
   voice: "voice",
+  // Sprint 9.7 — the two authenticated endpoints that do real work per call,
+  // and the browser tools. `voice` and `approval` keep their exact prefixes so
+  // the Sprint 8 and Phase 10.7 windows are unchanged.
+  chat: "chat",
+  knowledge: "knowledge",
+  browser: "browser",
 } as const;
 
 export type RateLimitNamespace =
@@ -102,4 +108,26 @@ export const APPROVAL_RATE_LIMITS = {
 export const VOICE_RATE_LIMITS = {
   transcribe: { limit: 30, windowMs: 60_000 },
   speak: { limit: 60, windowMs: 60_000 },
+} as const;
+
+/**
+ * Sprint 9.7 — the expensive authenticated paths.
+ *
+ * Every one of these spends real money or real time per call: a chat turn runs
+ * the model and a tool loop, a document ingest runs extraction, chunking and N
+ * embedding calls, and a browser action starts a browser. Sized so ordinary
+ * interactive use never touches them — a person does not send sixty chat
+ * messages a minute — while a loop does.
+ */
+export const CHAT_RATE_LIMITS = {
+  message: { limit: 60, windowMs: 60_000 },
+} as const;
+
+export const KNOWLEDGE_RATE_LIMITS = {
+  ingest: { limit: 20, windowMs: 60_000 },
+} as const;
+
+export const BROWSER_RATE_LIMITS = {
+  navigate: { limit: 30, windowMs: 60_000 },
+  action: { limit: 20, windowMs: 60_000 },
 } as const;

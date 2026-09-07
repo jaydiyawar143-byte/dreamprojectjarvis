@@ -108,6 +108,11 @@ export interface AuditQueryFilters {
   toolId?: string;
   startDate?: Date;
   endDate?: Date;
+  /**
+   * Sprint 9.5 — page size. Repositories clamp this to their own ceiling, so a
+   * caller can ask for less but never for an unbounded scan.
+   */
+  limit?: number;
 }
 
 export interface IApprovalRepository {

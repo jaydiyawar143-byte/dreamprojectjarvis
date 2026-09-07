@@ -10,7 +10,8 @@
     "typecheck": "turbo typecheck",
     "db:generate": "turbo db:generate",
     "db:migrate": "turbo db:migrate",
-    "db:seed": "turbo db:seed"
+    "db:seed": "turbo db:seed",
+    "test": "turbo run test --concurrency=1"
   },
   "devDependencies": {
     "turbo": "^2.10.11",
