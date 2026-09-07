@@ -301,10 +301,41 @@ describe("navigation model", () => {
   });
 
   it("groups destinations by what they are for", () => {
-    expect(NAV_GROUPS.map((g) => g.title)).toEqual(["Overview", "Operate", "Intelligence"]);
-    // Intelligence is where the Knowledge Base and Meta Ads panels live.
+    // UI V2 added Capabilities and System. The guarantee is unchanged: groups
+    // are named by what the destinations are FOR, and each holds only items
+    // that belong to it.
+    expect(NAV_GROUPS.map((g) => g.title)).toEqual([
+      "Overview",
+      "Operate",
+      "Intelligence",
+      "Capabilities",
+      "System",
+    ]);
+
     const intelligence = NAV_GROUPS.find((g) => g.title === "Intelligence")!;
     expect(intelligence.items.map((i) => i.label)).toEqual(["Knowledge Base", "Meta Ads"]);
+
+    const capabilities = NAV_GROUPS.find((g) => g.title === "Capabilities")!;
+    expect(capabilities.items.map((i) => i.label)).toEqual([
+      "Agents",
+      "Automations",
+      "Integrations",
+    ]);
+
+    const system = NAV_GROUPS.find((g) => g.title === "System")!;
+    expect(system.items.map((i) => i.label)).toEqual(["Activity", "Health", "Settings"]);
+  });
+
+  it("every UI V2 destination has a page behind it", () => {
+    // A nav entry pointing at a route with no page is a dead link the sidebar
+    // still advertises. This is the check that would have caught the five
+    // layout-without-page folders created mid-implementation.
+    const uiV2 = ["/agents", "/automations", "/integrations", "/activity", "/system", "/settings"];
+    for (const href of uiV2) {
+      const item = NAV_ITEMS.find((i) => i.href === href);
+      expect(item, `nav entry for ${href}`).toBeDefined();
+      expect(item!.available, href).toBe(true);
+    }
   });
 
   it("every destination in the model is reachable", () => {

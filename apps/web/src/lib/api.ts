@@ -848,3 +848,208 @@ export async function synthesizeSpeech(input: {
     body: JSON.stringify(input),
   });
 }
+
+// ---------------------------------------------------------------------------
+// UI V2 — Agents and Activity
+//
+// Both are read-only windows on data the server already owned but never
+// exposed. `registered` is the field that matters on an agent: four of the
+// eight register only when their integration is configured, so a UI that
+// showed policy alone would claim capabilities this deployment does not have.
+// ---------------------------------------------------------------------------
+
+export type AgentAvailability = "AVAILABLE" | "UNAVAILABLE";
+
+export interface AgentSummary {
+  agentId: string;
+  domain: string;
+  description: string;
+  allowedTools: string[];
+  toolCount: number;
+  writesRequireApproval: boolean;
+  clientSelectable: boolean;
+  registered: boolean;
+  availability: AgentAvailability;
+}
+
+export async function listAgents(): Promise<
+  ApiResponse<{ agents: AgentSummary[]; total: number; registeredCount: number }>
+> {
+  return request("/agents");
+}
+
+export type ActivityResult = "success" | "failure" | "rejected" | "pending";
+
+export interface ActivityEntry {
+  id: string;
+  timestamp: string;
+  action: string;
+  result: ActivityResult;
+  agentId?: string;
+  toolId?: string;
+  traceId?: string;
+  executionId?: string;
+  durationMs?: number;
+}
+
+export interface ActivityFilters {
+  limit?: number;
+  agentId?: string;
+  toolId?: string;
+  action?: string;
+  result?: ActivityResult;
+  startDate?: string;
+  endDate?: string;
+}
+
+export async function listActivity(
+  filters: ActivityFilters = {}
+): Promise<ApiResponse<{ entries: ActivityEntry[]; count: number; limit: number }>> {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(filters)) {
+    if (value !== undefined && value !== null && String(value).length > 0) {
+      params.set(key, String(value));
+    }
+  }
+  const query = params.toString();
+  return request(`/activity${query ? `?${query}` : ""}`);
+}
+
+// ---------------------------------------------------------------------------
+// UI V2 — System health
+//
+// These three routes return BARE JSON with no {success, data} envelope, so they
+// deliberately bypass `request()`. A client that unwrapped `data` would read
+// undefined and report a healthy service as unknown.
+// ---------------------------------------------------------------------------
+
+export interface HealthReport {
+  status: string;
+  state?: string;
+  service?: string;
+  uptime?: number;
+  checks?: Record<string, string>;
+  timestamp?: string;
+}
+
+async function bareGet(path: string): Promise<{ ok: boolean; body: HealthReport | null }> {
+  try {
+    const res = await fetch(`${API_BASE}${path}`);
+    return { ok: res.ok, body: (await res.json()) as HealthReport };
+  } catch {
+    return { ok: false, body: null };
+  }
+}
+
+export async function getHealth(): Promise<{ ok: boolean; body: HealthReport | null }> {
+  return bareGet("/health");
+}
+
+export async function getReadiness(): Promise<{ ok: boolean; body: HealthReport | null }> {
+  return bareGet("/health/ready");
+}
+
+export interface CapabilityStatus {
+  service: string;
+  uptimeSeconds: number;
+  capabilities: {
+    knowledgeBase: boolean;
+    retrieval: boolean;
+    memory: boolean;
+    embeddings: boolean;
+    metaAds: boolean;
+  };
+}
+
+export async function getCapabilityStatus(): Promise<ApiResponse<CapabilityStatus>> {
+  return request("/dashboard/status");
+}
+
+// ---------------------------------------------------------------------------
+// UI V2 — Integrations
+//
+// Google has a status route. WhatsApp and n8n do NOT: their whole router is
+// unmounted when the integration is unconfigured, so every call 404s. That is
+// why each helper below reports a `configured` flag derived from the response
+// rather than throwing — "not deployed" is a state the UI must render calmly,
+// not an error.
+// ---------------------------------------------------------------------------
+
+export interface GoogleStatus {
+  configured: boolean;
+  connected: boolean;
+  account: { email: string; scopes: string[]; connectedAt?: string; expiresAt?: string } | null;
+}
+
+export async function getGoogleStatus(): Promise<ApiResponse<GoogleStatus>> {
+  return request("/google/status");
+}
+
+export async function connectGoogle(): Promise<ApiResponse<{ authUrl: string }>> {
+  return request("/google/connect", { method: "POST" });
+}
+
+export async function disconnectGoogle(): Promise<
+  ApiResponse<{ disconnected: boolean; revokedAtGoogle?: boolean; reason?: string }>
+> {
+  return request("/google/disconnect", { method: "POST" });
+}
+
+export interface WhatsAppMessage {
+  id: string;
+  providerMessageId: string;
+  waId: string;
+  direction: string;
+  type: string;
+  body: string | null;
+  status: string;
+  timestamp: string;
+}
+
+export async function listWhatsAppMessages(
+  limit = 50
+): Promise<ApiResponse<{ messages: WhatsAppMessage[]; count: number }>> {
+  return request(`/whatsapp/messages?limit=${encodeURIComponent(String(limit))}`);
+}
+
+export interface N8nWorkflow {
+  id: string;
+  name: string;
+  isActive: boolean;
+  createdAt: string;
+}
+
+export interface N8nExecution {
+  id: string;
+  workflowId: string;
+  status: string;
+  remoteExecutionId: string | null;
+  resultSummary: string | null;
+  errorCode: string | null;
+  traceId: string | null;
+  triggeredAt: string;
+  completedAt: string | null;
+}
+
+export async function listN8nWorkflows(): Promise<
+  ApiResponse<{ workflows: N8nWorkflow[]; count: number }>
+> {
+  return request("/n8n/workflows");
+}
+
+export async function listN8nExecutions(
+  limit = 50
+): Promise<ApiResponse<{ executions: N8nExecution[]; count: number }>> {
+  return request(`/n8n/executions?limit=${encodeURIComponent(String(limit))}`);
+}
+
+/**
+ * True when a failed response means "this integration is not deployed" rather
+ * than "something went wrong".
+ *
+ * The unconfigured routers are not mounted at all, so the request falls through
+ * to the terminal 404 handler.
+ */
+export function isNotDeployed(error?: ApiError): boolean {
+  return error?.code === "NOT_FOUND";
+}

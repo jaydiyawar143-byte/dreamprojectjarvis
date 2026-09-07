@@ -1,9 +1,12 @@
-// Sprint 4.1 — /opportunities and /opportunities/[id] are protected routes.
-// One layout covers both: a nested route inherits its parent segment's layout,
-// so the detail page is gated by the same contract as the list.
+// UI V2 — protected, and now wears the shell like every other authenticated route.
 import type { ReactNode } from "react";
 import { RequireAuth } from "@/components/require-auth";
+import { DashboardShell } from "@/components/dashboard/dashboard-shell";
 
 export default function OpportunitiesLayout({ children }: { children: ReactNode }) {
-  return <RequireAuth>{children}</RequireAuth>;
+  return (
+    <RequireAuth>
+      <DashboardShell>{children}</DashboardShell>
+    </RequireAuth>
+  );
 }

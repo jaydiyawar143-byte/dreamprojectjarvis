@@ -6,6 +6,14 @@ import type {
 import { Prisma } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
 
+/**
+ * Sprint 9.5 — hard ceiling on one audit query.
+ *
+ * Set far above the loosest rate limit (120/min) so a bounded page can never
+ * cause a limiter to allow a request it should have refused.
+ */
+export const AUDIT_QUERY_MAX_ROWS = 1000;
+
 const RESULT_MAP: Record<AuditEntry["result"], "SUCCESS" | "FAILURE" | "REJECTED" | "PENDING"> = {
   success: "SUCCESS",
   failure: "FAILURE",
@@ -84,9 +92,18 @@ export class PrismaAuditRepository implements IAuditRepository {
       };
     }
 
+    // Sprint 9.5 — bounded. This query backs the rate limiter, which counts a
+    // user's rows inside a window; unbounded, a user with heavy audit volume
+    // materialised their whole history into memory on every request they made,
+    // so the limiter degraded exactly for the accounts it most needed to bound.
+    //
+    // The cap sits far above every real limit (the loosest is 120/min), so a
+    // truncated page can only ever UNDER-count, which fails toward refusing a
+    // request rather than allowing one past the limit.
     const rows = await this.prisma.auditLog.findMany({
       where,
       orderBy: { createdAt: "desc" },
+      take: Math.min(filters.limit ?? AUDIT_QUERY_MAX_ROWS, AUDIT_QUERY_MAX_ROWS),
     });
 
     return rows.map(toAuditEntry);

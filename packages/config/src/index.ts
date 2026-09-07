@@ -175,13 +175,23 @@ export function checkProductionConfig(
   }
 
   const corsOrigin = env.CORS_ORIGIN;
+  // Running the production build on your own machine — in containers, say — is
+  // the one case where a localhost origin is CORRECT rather than a mistake, so
+  // it is opted into explicitly. Deliberately narrow: it waives this check and
+  // nothing else. A weak JWT secret and a missing encryption key stay refused.
+  const localOriginAllowed = env.JARVIS_ALLOW_LOCAL_ORIGIN === "true";
+
   if (!corsOrigin || corsOrigin.trim().length === 0) {
     problems.push({
       field: "CORS_ORIGIN",
       problem: "must be set explicitly in production; it must not fall back to localhost",
     });
-  } else if (/localhost|127\.0\.0\.1/i.test(corsOrigin)) {
-    problems.push({ field: "CORS_ORIGIN", problem: "points at localhost in production" });
+  } else if (/localhost|127\.0\.0\.1/i.test(corsOrigin) && !localOriginAllowed) {
+    problems.push({
+      field: "CORS_ORIGIN",
+      problem:
+        "points at localhost in production; set JARVIS_ALLOW_LOCAL_ORIGIN=true only when running the production build on this machine",
+    });
   } else if (corsOrigin.trim() === "*") {
     problems.push({
       field: "CORS_ORIGIN",

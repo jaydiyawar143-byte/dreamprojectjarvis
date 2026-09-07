@@ -9,7 +9,8 @@
     "start": "node dist/index.js",
     "lint": "eslint src/",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "typecheck:tests": "tsc --noEmit -p tsconfig.test.json"
   },
   "dependencies": {
     "@jarvis/agents": "workspace:*",
