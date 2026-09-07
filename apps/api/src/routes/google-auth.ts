@@ -24,6 +24,7 @@
 import { Router } from "express";
 import type { Response } from "express";
 import { createAuthMiddleware, type AuthenticatedRequest } from "../middleware/auth.js";
+import { asyncHandler } from "../middleware/error-handler.js";
 import type { Container } from "../services/container.js";
 import type { IGoogleConnectionRepository, IOAuthStateRepository } from "@jarvis/core";
 import {
@@ -83,7 +84,7 @@ export function createGoogleAuthRouter(container: Container, deps: GoogleAuthDep
   // -------------------------------------------------------------------------
   // GET /status
   // -------------------------------------------------------------------------
-  router.get("/status", requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  router.get("/status", requireAuth, asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
     if (!req.auth) return fail(res, 401, "AUTHENTICATION_REQUIRED", "Authentication required");
 
     const configured = resolveConfig() !== null;
@@ -102,12 +103,12 @@ export function createGoogleAuthRouter(container: Container, deps: GoogleAuthDep
           }
         : null,
     });
-  });
+  }));
 
   // -------------------------------------------------------------------------
   // POST /connect
   // -------------------------------------------------------------------------
-  router.post("/connect", requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  router.post("/connect", requireAuth, asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
     if (!req.auth) return fail(res, 401, "AUTHENTICATION_REQUIRED", "Authentication required");
 
     const config = resolveConfig();
@@ -134,12 +135,12 @@ export function createGoogleAuthRouter(container: Container, deps: GoogleAuthDep
     // The URL contains client_id and the PKCE CHALLENGE (a hash), never the
     // verifier or the client secret, so it is safe to hand to the browser.
     ok(res, { authUrl: buildAuthUrl({ config, state, codeChallenge }) });
-  });
+  }));
 
   // -------------------------------------------------------------------------
   // GET /callback
   // -------------------------------------------------------------------------
-  router.get("/callback", async (req: AuthenticatedRequest, res: Response) => {
+  router.get("/callback", asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
     const config = resolveConfig();
     if (!config) {
       return fail(
@@ -210,12 +211,12 @@ export function createGoogleAuthRouter(container: Container, deps: GoogleAuthDep
       }
       return fail(res, 502, "INTERNAL_ERROR", "Failed to complete Google authorization");
     }
-  });
+  }));
 
   // -------------------------------------------------------------------------
   // POST /disconnect
   // -------------------------------------------------------------------------
-  router.post("/disconnect", requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  router.post("/disconnect", requireAuth, asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
     if (!req.auth) return fail(res, 401, "AUTHENTICATION_REQUIRED", "Authentication required");
 
     const credentials = await deps.connections.getCredentials(req.auth.userId);
@@ -238,7 +239,7 @@ export function createGoogleAuthRouter(container: Container, deps: GoogleAuthDep
     await deps.connections.revoke(req.auth.userId);
 
     ok(res, { disconnected: true, revokedAtGoogle });
-  });
+  }));
 
   return router;
 }

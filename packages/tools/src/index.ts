@@ -120,3 +120,18 @@ export {
   type N8nKeyDeriver,
 } from "./tools/n8n-tools.js";
 export { MockN8nProvider, mockKeyDeriver, type MockN8nProviderConfig } from "./tools/n8n-mock.js";
+
+// Sprint 7.3 — controlled browser automation (reads open, actions approval-gated)
+export {
+  BrowserNavigateTool,
+  BrowserInspectTool,
+  BrowserExtractTool,
+  BrowserScreenshotTool,
+  BrowserClickTool,
+  BrowserTypeTool,
+  BrowserSelectTool,
+  BrowserDownloadTool,
+  BrowserSubmitTool,
+  BrowserUploadTool,
+  createBrowserTools,
+} from "./tools/browser-tools.js";

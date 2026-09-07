@@ -169,6 +169,18 @@ export function productionLikeTools(): ITool[] {
     write("whatsapp.send"),
     write("n8n.trigger"),
     read("data.csv.analyze"),
+    // Sprint 7 — browser. The four reads are open; the six actions are all
+    // approval-gated, which is what `write()` models here.
+    read("browser.navigate"),
+    read("browser.inspect"),
+    read("browser.extract"),
+    read("browser.screenshot"),
+    write("browser.click"),
+    write("browser.type"),
+    write("browser.select"),
+    write("browser.download"),
+    write("browser.submit"),
+    write("browser.upload"),
   ];
 }
 

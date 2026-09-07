@@ -112,6 +112,97 @@ export function getEnv(): BaseEnv {
   return _baseEnv;
 }
 
+// ---------------------------------------------------------------------------
+// Sprint 9.12 — production strictness
+//
+// Everything above validates SHAPE. These check whether a value is safe to run
+// a production deployment on, which is a different question: the placeholder in
+// .env.example is 48 characters long and sails through `min(32)`.
+//
+// They apply ONLY when NODE_ENV === "production", so development and test keep
+// working with defaults. Failures name the FIELD and never the value.
+// ---------------------------------------------------------------------------
+
+/**
+ * Secrets that are published in this repo or are obvious placeholders.
+ *
+ * A deployment running on one of these has an authentication system anyone can
+ * forge tokens for, so this is refused outright rather than warned about.
+ */
+const PUBLISHED_SECRETS: readonly string[] = [
+  "your-super-secret-jwt-key-min-32-characters-long",
+  "change-me",
+  "changeme",
+  "secret",
+  "development",
+  "test",
+];
+
+/** Rough entropy check: a long run of one repeated character is not a secret. */
+function looksLikePlaceholder(secret: string): boolean {
+  const normalized = secret.trim().toLowerCase();
+  if (PUBLISHED_SECRETS.includes(normalized)) return true;
+  if (PUBLISHED_SECRETS.some((known) => normalized.includes(known))) return true;
+  // Fewer than 8 distinct characters over 32+ bytes means something like
+  // "aaaa..." or "abababab...".
+  return new Set(normalized).size < 8;
+}
+
+export interface ProductionConfigProblem {
+  field: string;
+  problem: string;
+}
+
+/**
+ * Production-only checks, exported so they can be tested without a real env.
+ *
+ * Returns the problems rather than throwing, so the caller decides whether a
+ * given process should refuse to start.
+ */
+export function checkProductionConfig(
+  env: NodeJS.ProcessEnv = process.env
+): ProductionConfigProblem[] {
+  if (env.NODE_ENV !== "production") return [];
+
+  const problems: ProductionConfigProblem[] = [];
+
+  const jwtSecret = env.JWT_SECRET ?? "";
+  if (looksLikePlaceholder(jwtSecret)) {
+    problems.push({
+      field: "JWT_SECRET",
+      problem: "is a published placeholder or has too little entropy for production",
+    });
+  }
+
+  const corsOrigin = env.CORS_ORIGIN;
+  if (!corsOrigin || corsOrigin.trim().length === 0) {
+    problems.push({
+      field: "CORS_ORIGIN",
+      problem: "must be set explicitly in production; it must not fall back to localhost",
+    });
+  } else if (/localhost|127\.0\.0\.1/i.test(corsOrigin)) {
+    problems.push({ field: "CORS_ORIGIN", problem: "points at localhost in production" });
+  } else if (corsOrigin.trim() === "*") {
+    problems.push({
+      field: "CORS_ORIGIN",
+      problem: "must name an origin; '*' with credentials is not a usable policy",
+    });
+  }
+
+  // Google connections store OAuth refresh tokens. Without the encryption key
+  // the routes silently unmount, which in production is a feature that has
+  // quietly disappeared rather than a deployment that failed loudly.
+  const googleConfigured = Boolean(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET);
+  if (googleConfigured && !env.JARVIS_ENCRYPTION_KEY) {
+    problems.push({
+      field: "JARVIS_ENCRYPTION_KEY",
+      problem: "is required when Google OAuth is configured, so tokens are never stored in plaintext",
+    });
+  }
+
+  return problems;
+}
+
 export function getServerEnv(): ServerEnv {
   if (_serverEnv) return _serverEnv;
 
@@ -121,6 +212,18 @@ export function getServerEnv(): ServerEnv {
     console.error("Invalid server environment variables:");
     console.error(result.error.flatten().fieldErrors);
     throw new Error("Invalid server environment variables");
+  }
+
+  // Sprint 9.12 — refuse to boot a production process on unsafe configuration.
+  // Doing this here means it happens before `listen()`, at module load, the
+  // same way a missing DATABASE_URL already does.
+  const problems = checkProductionConfig(process.env);
+  if (problems.length > 0) {
+    console.error("Unsafe production configuration:");
+    for (const { field, problem } of problems) {
+      console.error(`  ${field}: ${problem}`);
+    }
+    throw new Error("Unsafe production configuration");
   }
 
   _serverEnv = result.data;

@@ -83,6 +83,33 @@ const KNOWLEDGE_SIGNALS: RegExp[] = [
 ];
 
 /** Analytics: measurement language that is not tied to one ad platform. */
+/**
+ * Sprint 7 — an actual link. Unambiguous, so it is ranked above everything.
+ *
+ * Deliberately only http(s): a `file:` or `javascript:` string in a message is
+ * not a browsing request, and routing it here would send it to an agent whose
+ * tools would refuse it anyway.
+ */
+const BROWSER_URL_SIGNALS: RegExp[] = [/\bhttps?:\/\/[^\s<>"']+/i];
+
+/**
+ * Softer browsing phrasings.
+ *
+ * Narrow on purpose. "check the site" is a browsing request; "check the
+ * campaign" is not, and a greedy pattern here would quietly steal traffic from
+ * the Meta and analytics agents that this repo's routing tests pin.
+ */
+const BROWSER_SIGNALS: RegExp[] = [
+  /\bweb\s?site\b/i,
+  /\bweb\s?page\b/i,
+  /\b(open|visit|browse|check|read|look at)\s+(this|that|the)\s+(link|url|site|page|website)\b/i,
+  /\bscrape\b/i,
+  /\bcrawl\s+(this|that|the)\b/i,
+  /\b(fill|complete)\s+(in\s+|out\s+)?(this|that|the)\s+form\b/i,
+  /\bsubmit\s+(this|that|the)\s+form\b/i,
+  /\bscreenshot\s+(this|that|the)\b/i,
+];
+
 const ANALYTICS_SIGNALS: RegExp[] = [
   /\bkpi(s)?\b/i,
   /\banomal(y|ies)\b/i,
@@ -233,6 +260,18 @@ export function rankAgentCandidates(
   const candidates: RouteCandidate[] = [];
   const text = typeof message === "string" ? message : "";
 
+  // Sprint 7 — an explicit http(s) URL in the message is the least ambiguous
+  // signal the router has, so it outranks every keyword heuristic. Somebody
+  // who pastes a link wants that link opened, whatever else the sentence says.
+  if (matches(BROWSER_URL_SIGNALS, text)) {
+    candidates.push({
+      agentId: AGENT_IDS.browser,
+      domain: "browser",
+      confidence: 0.95,
+      reason: "message contains an explicit web URL",
+    });
+  }
+
   if (matches(AUTOMATION_SIGNALS, text)) {
     candidates.push({
       agentId: AGENT_IDS.automation,
@@ -266,6 +305,19 @@ export function rankAgentCandidates(
       domain: "knowledge",
       confidence: 0.8,
       reason: "message appeals to the user's own documents",
+    });
+  }
+
+  // Placed after knowledge and before Meta. A bare mention of "the website"
+  // is weaker evidence than a document appeal, and `isMetaAdsQuery` already
+  // treats \bwebsite\b as a veto on the Meta heuristic, so the two agree
+  // rather than competing.
+  if (matches(BROWSER_SIGNALS, text)) {
+    candidates.push({
+      agentId: AGENT_IDS.browser,
+      domain: "browser",
+      confidence: 0.75,
+      reason: "message asks for a web page to be opened, read or filled in",
     });
   }
 

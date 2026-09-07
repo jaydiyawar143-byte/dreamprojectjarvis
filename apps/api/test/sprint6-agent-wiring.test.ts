@@ -24,6 +24,7 @@ import {
   CommunicationAgent,
   ConversationalAssistant,
   GoogleAdsAgent,
+  BrowserAgent,
   KnowledgeAgent,
   MetaAdsAgent,
   isToolAllowed,
@@ -78,6 +79,17 @@ const ALL_REGISTERED_TOOLS = [
   "google.insights",
   "whatsapp.send",
   "n8n.trigger",
+  // Sprint 7 — registered by the container when BROWSER_ENABLED is set.
+  "browser.navigate",
+  "browser.inspect",
+  "browser.extract",
+  "browser.screenshot",
+  "browser.click",
+  "browser.type",
+  "browser.select",
+  "browser.download",
+  "browser.submit",
+  "browser.upload",
 ];
 
 function fakeTool(overrides: Partial<ITool> & { id: string }): ITool {
@@ -210,10 +222,13 @@ describe("Sprint 6 — conditional agent registration", () => {
     if (has("whatsapp.send")) {
       registry.register(new CommunicationAgent({ provider: stubProvider }));
     }
+    if (has("browser.navigate")) {
+      registry.register(new BrowserAgent({ provider: stubProvider }));
+    }
     return registry;
   }
 
-  it("registers all seven agents when everything is configured", () => {
+  it("registers every declared agent when everything is configured", () => {
     const registry = registryFor(ALL_REGISTERED_TOOLS);
 
     expect(registry.getAll().map((a) => a.id).sort()).toEqual(
@@ -232,6 +247,7 @@ describe("Sprint 6 — conditional agent registration", () => {
     expect(ids).not.toContain(AGENT_IDS.automation);
     expect(ids).not.toContain(AGENT_IDS.communication);
     expect(ids).not.toContain(AGENT_IDS.googleAds);
+    expect(ids).not.toContain(AGENT_IDS.browser);
   });
 
   it("binds a policy to every registered agent", () => {
@@ -254,16 +270,13 @@ describe("Sprint 6 — conditional agent registration", () => {
     expect(() => registry.register(rogue)).toThrow(/no policy/i);
   });
 
-  it("does not register any of the Sprint 6 non-goal agents", () => {
+  it("does not register any of the remaining non-goal agents", () => {
+    // "browser-agent" was on this list until Sprint 7 built it. The other
+    // three are still deliberately absent and this test still guards them.
     const registry = registryFor(ALL_REGISTERED_TOOLS);
     const ids = registry.getAll().map((a) => a.id);
 
-    for (const forbidden of [
-      "browser-agent",
-      "voice-agent",
-      "developer-agent",
-      "autopilot-agent",
-    ]) {
+    for (const forbidden of ["voice-agent", "developer-agent", "autopilot-agent"]) {
       expect(ids).not.toContain(forbidden);
     }
   });

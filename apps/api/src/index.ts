@@ -26,7 +26,13 @@ import {
   SOCKET_MAX_BUFFER_BYTES,
   secureSocketServer,
 } from "./socket/socket-auth.js";
-import { getContainer } from "./services/container.js";
+import { getContainer, getBrowserRuntime } from "./services/container.js";
+import { requestId } from "./middleware/request-id.js";
+import {
+  errorHandler,
+  notFoundHandler,
+  installProcessErrorHandlers,
+} from "./middleware/error-handler.js";
 import { EncryptionService } from "@jarvis/security";
 import { prisma, PrismaGoogleConnectionRepository, PrismaOAuthStateRepository, PrismaWhatsAppRepository, PrismaN8nRepository } from "@jarvis/db";
 import { createWhatsAppConfig, isWhatsAppConfigured } from "@jarvis/whatsapp";
@@ -87,6 +93,9 @@ const io = new SocketIOServer(httpServer, {
 app.use(helmet());
 app.use(cors({ origin: env.CORS_ORIGIN, credentials: true }));
 app.use(compression());
+// Sprint 9.2 — first, so every later middleware and every log line can name
+// the request, including the ones that fail before reaching a route.
+app.use(requestId());
 app.use(morgan("combined"));
 // ---------------------------------------------------------------------------
 // Sprint 5.3 — WhatsApp webhook, mounted BEFORE the JSON body parser.
@@ -138,7 +147,16 @@ if (isN8nConfigured()) {
 
 app.use(express.json({ limit: "10mb" }));
 
-app.use("/api/v1/health", createHealthRouter(lifecycle));
+app.use(
+  "/api/v1/health",
+  createHealthRouter(lifecycle, {
+    // Sprint 9.10 — the cheapest query that proves the connection works.
+    pingDatabase: async () => {
+      const { prisma } = await import("@jarvis/db");
+      return prisma.$queryRaw`SELECT 1`;
+    },
+  })
+);
 app.use("/api/v1/auth", createAuthRouter(container.authService, container.tokenService));
 app.use("/api/v1/chat", createChatRouter(container));
 app.use("/api/v1/conversations", createConversationsRouter(container));
@@ -241,6 +259,19 @@ secureSocketServer(io, container.tokenService);
 app.set("io", io);
 
 // ---------------------------------------------------------------------------
+// Sprint 9.2 — terminal error handling. MUST stay last: Express picks the 404
+// handler for anything no route claimed, and the error handler only for the
+// four-argument signature, so both have to sit after every `app.use` above.
+//
+// With these mounted, Express's own default handler is never reached — which
+// matters because it serialises `err.stack` into the response body whenever
+// NODE_ENV is not "production", and NODE_ENV defaults to "development" here.
+// ---------------------------------------------------------------------------
+app.use(notFoundHandler());
+app.use(errorHandler());
+installProcessErrorHandlers();
+
+// ---------------------------------------------------------------------------
 // Graceful shutdown wiring. graceMs comes from the validated config layer
 // (JARVIS_SHUTDOWN_GRACE_MS, safe default when absent). beginShutdown() is
 // single-flight: a second SIGTERM/SIGINT or duplicate call cannot re-run
@@ -250,6 +281,10 @@ const jarvisShutdown = createShutdownController({
   lifecycle,
   server: httpServer,
   closeIo: () => io.close(),
+  // Sprint 7 — close the shared Chrome, if browsing is switched on at all.
+  releaseExternalResources: async () => {
+    await getBrowserRuntime()?.shutdown();
+  },
   disconnectDatabase: async () => {
     const { prisma } = await import("@jarvis/db");
     await prisma.$disconnect();

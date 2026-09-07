@@ -132,6 +132,8 @@ export const AgentDomainSchema = z.enum([
   "analytics",
   "automation",
   "communication",
+  // Sprint 7 — controlled web browsing.
+  "browser",
 ]);
 
 export type AgentDomain = z.infer<typeof AgentDomainSchema>;

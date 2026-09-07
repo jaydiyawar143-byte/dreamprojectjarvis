@@ -27,6 +27,7 @@
 import { Router, raw } from "express";
 import type { Response } from "express";
 import { createAuthMiddleware, type AuthenticatedRequest } from "../middleware/auth.js";
+import { asyncHandler } from "../middleware/error-handler.js";
 import type { Container } from "../services/container.js";
 import type { IWhatsAppRepository } from "@jarvis/core";
 import {
@@ -91,7 +92,7 @@ export function createWhatsAppRouter(container: Container, deps: WhatsAppRouterD
   // -------------------------------------------------------------------------
   // POST /webhook — inbound messages and delivery statuses
   // -------------------------------------------------------------------------
-  router.post("/webhook", rawJson, async (req: AuthenticatedRequest, res: Response) => {
+  router.post("/webhook", rawJson, asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
     const rawBody: Buffer | undefined = Buffer.isBuffer(req.body) ? req.body : undefined;
 
     const signature = verifyWebhookSignature(
@@ -163,12 +164,12 @@ export function createWhatsAppRouter(container: Container, deps: WhatsAppRouterD
 
     // Counts only — never message content.
     ok(res, { processed, duplicates, skipped, statuses: event.statuses.length });
-  });
+  }));
 
   // -------------------------------------------------------------------------
   // GET /messages — authenticated, tenant-scoped history
   // -------------------------------------------------------------------------
-  router.get("/messages", requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  router.get("/messages", requireAuth, asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
     if (!req.auth) return fail(res, 401, "AUTHENTICATION_REQUIRED", "Authentication required");
 
     const waIdParam = typeof req.query.waId === "string" ? req.query.waId : undefined;
@@ -191,7 +192,7 @@ export function createWhatsAppRouter(container: Container, deps: WhatsAppRouterD
       })),
       count: messages.length,
     });
-  });
+  }));
 
   return router;
 }
