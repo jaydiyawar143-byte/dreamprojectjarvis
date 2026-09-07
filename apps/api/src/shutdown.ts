@@ -41,6 +41,13 @@ export interface ShutdownControllerOptions {
    * must not affect execution outcomes — they are journal-backed.
    */
   closeIo?: () => void;
+  /**
+   * Sprint 7 — external processes this API owns, released before the database.
+   *
+   * Currently the shared Chrome behind the browser tools. Optional, so a
+   * deployment without browsing wires nothing and behaves exactly as before.
+   */
+  releaseExternalResources?: () => Promise<void>;
   /** Disconnected last, after all persistence work has settled. */
   disconnectDatabase?: () => Promise<void>;
   /** Bounded grace period (validated JARVIS_SHUTDOWN_GRACE_MS). */
@@ -107,6 +114,7 @@ export function createShutdownController(
     lifecycle,
     server,
     closeIo,
+    releaseExternalResources,
     disconnectDatabase,
     graceMs,
     log = (message, meta) =>
@@ -177,7 +185,7 @@ export function createShutdownController(
 
       // -----------------------------------------------------------------
       // RELEASE_RESOURCES — transports first (socket close CANNOT cancel
-      // executions), then the database connection.
+      // executions), then child processes, then the database connection.
       // -----------------------------------------------------------------
       lifecycle.markReleasingResources();
       let dbDisconnected = true;
@@ -189,6 +197,11 @@ export function createShutdownController(
             .closeAllConnections === "function"
         ) {
           (server as { closeAllConnections(): void }).closeAllConnections();
+        }
+        // Sprint 7 — external processes we own (the browser) go before the
+        // database, so anything still finishing can record its journal row.
+        if (releaseExternalResources) {
+          await releaseExternalResources();
         }
         if (disconnectDatabase) {
           await disconnectDatabase();

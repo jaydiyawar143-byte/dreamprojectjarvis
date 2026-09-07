@@ -11,6 +11,7 @@ import {
   AutomationAgent,
   CommunicationAgent,
   GoogleAdsAgent,
+  BrowserAgent,
   PendingActionService,
   AGENT_IDS,
   AGENT_POLICIES,
@@ -40,7 +41,14 @@ import {
   WhatsAppSendMessageTool,
   RepositoryRecipientAuthorizer,
   N8nTriggerWorkflowTool,
+  createBrowserTools,
 } from "@jarvis/tools";
+import {
+  BrowserRuntime,
+  createBrowserConfig,
+  isBrowserConfigured,
+  describeBrowserConfigStatus,
+} from "@jarvis/browser";
 import { createMetaGraphProvider } from "@jarvis/meta-graph";
 import { createGoogleAdsProvider, createGoogleConfig, isGoogleConfigured } from "@jarvis/google-ads";
 import { createWhatsAppProvider, createWhatsAppConfig, isWhatsAppConfigured } from "@jarvis/whatsapp";
@@ -167,6 +175,16 @@ function convertToolsToAIToolDefinitions(
 }
 
 let _container: Container | null = null;
+
+/**
+ * Sprint 7 — the shared browser, held so shutdown can close it.
+ *
+ * Module-scoped for the same reason `_container` is: the registry factory
+ * creates it, but the process lifecycle is what has to end it, and threading a
+ * return value out of the factory would change a signature the Sprint 6 drift
+ * test pins.
+ */
+let _browserRuntime: BrowserRuntime | null = null;
 
 function createMetaToolRegistry(
   approvalConsumption: PrismaApprovalRepository
@@ -301,6 +319,53 @@ function createMetaToolRegistry(
         reason: err instanceof Error ? err.message : "unknown",
       }));
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Sprint 7.3 — browser tools (READS OPEN, ACTIONS APPROVAL-GATED)
+  // -------------------------------------------------------------------------
+  // Mounted only when an operator has switched browsing on AND a Chrome exists
+  // to drive. Browsing is never inferred from "a browser is installed", for the
+  // same reason Sprint 8 refused to infer voice from an OpenAI key being
+  // present: every machine has one, and inferring would hand a live automation
+  // surface to deployments that never asked for it.
+  //
+  // Where the browser may navigate is decided below the tools, in
+  // @jarvis/browser, so no prompt and no request body can widen it.
+  // -------------------------------------------------------------------------
+  if (isBrowserConfigured()) {
+    try {
+      const browserConfig = createBrowserConfig();
+      const runtime = new BrowserRuntime({ config: browserConfig });
+      _browserRuntime = runtime;
+
+      const browserJournal = new PrismaToolExecutionRepository(prisma);
+      for (const tool of createBrowserTools(runtime, browserJournal, approvalConsumption)) {
+        registry.register(tool);
+      }
+
+      console.log(JSON.stringify({
+        level: "info",
+        event: "browser_tools_enabled",
+        chromePath: browserConfig.chromePath,
+        maxConcurrentSessions: browserConfig.maxConcurrentSessions,
+        domainAllowlist: browserConfig.domainAllowlist.length,
+      }));
+    } catch (err) {
+      // A misconfigured optional feature must not take the API down; the tools
+      // stay unregistered and every other surface is unaffected.
+      console.log(JSON.stringify({
+        level: "warn",
+        event: "browser_registration_skipped",
+        reason: err instanceof Error ? err.message : "unknown",
+      }));
+    }
+  } else {
+    console.log(JSON.stringify({
+      level: "info",
+      event: "browser_tools_disabled",
+      reason: describeBrowserConfigStatus().reason,
+    }));
   }
 
   return registry;
@@ -512,6 +577,17 @@ export function getContainer(options?: {
     );
   }
 
+  // Sprint 7 — gated on the tools actually being registered, so a deployment
+  // with browsing switched off never offers an agent that cannot act.
+  if (hasTool("browser.navigate")) {
+    agentRegistry.register(
+      new BrowserAgent({
+        provider: adapter,
+        tools: toolDefsFor(AGENT_POLICIES[AGENT_IDS.browser]!.allowedTools),
+      })
+    );
+  }
+
   console.log(JSON.stringify({
     level: "info",
     event: "agent_registration",
@@ -663,6 +739,17 @@ export function getContainer(options?: {
   return _container;
 }
 
+/**
+ * Sprint 7 — the shared browser, or null when browsing is off.
+ *
+ * Exposed so the shutdown controller can close Chrome during RELEASE_RESOURCES
+ * rather than orphaning it when the API exits.
+ */
+export function getBrowserRuntime(): BrowserRuntime | null {
+  return _browserRuntime;
+}
+
 export function resetContainer(): void {
   _container = null;
+  _browserRuntime = null;
 }

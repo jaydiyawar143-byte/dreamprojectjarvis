@@ -48,7 +48,10 @@ export * from "./types/document-embedding.js";
 export * from "./types/knowledge-retrieval.js";
 // Sprint 8.0 — voice interaction-layer contracts.
 export * from "./types/voice.js";
+// Sprint 7.0 — browser agent contracts.
+export * from "./types/browser.js";
 export * from "./utils/redact-secrets.js";
+export * from "./utils/untrusted-content.js";
 
 // Re-export deprecated memory-provider types under unique names for backward compat
 export type {

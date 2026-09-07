@@ -250,8 +250,10 @@ describe("Sprint 6.8 — orchestration", () => {
     });
 
     it("rejects an unknown agent id", async () => {
+      // Was "browser-agent" until Sprint 7 registered it; "developer-agent"
+      // remains a non-goal and is the right stand-in for "not a real agent".
       const res = await orchestrator().process(
-        { message: "hi", agentId: "browser-agent" },
+        { message: "hi", agentId: "developer-agent" },
         sessionFor("user-1")
       );
 

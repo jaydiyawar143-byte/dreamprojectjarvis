@@ -19,6 +19,7 @@ import { AnalyticsAgent } from "../src/agents/analytics-agent.js";
 import { AutomationAgent } from "../src/agents/automation-agent.js";
 import { CommunicationAgent } from "../src/agents/communication-agent.js";
 import { GoogleAdsAgent } from "../src/agents/google-ads-agent.js";
+import { BrowserAgent } from "../src/agents/browser-agent.js";
 import { ConversationalAssistant } from "../src/agents/conversational-assistant.js";
 import { MetaAdsAgent } from "../src/agents/meta-ads-agent.js";
 import {
@@ -50,8 +51,12 @@ describe("Sprint 6.1 — agent architecture", () => {
       registry.register(new AutomationAgent({ provider }));
       registry.register(new CommunicationAgent({ provider }));
       registry.register(new GoogleAdsAgent({ provider }));
+      // Sprint 7 added the eighth. The loop below is the real assertion: every
+      // id declared in AGENT_IDS must resolve to a registered agent AND a
+      // policy, so a new agent cannot be declared without being wired.
+      registry.register(new BrowserAgent({ provider }));
 
-      expect(registry.getAll()).toHaveLength(7);
+      expect(registry.getAll()).toHaveLength(8);
       for (const id of Object.values(AGENT_IDS)) {
         expect(registry.get(id), `agent ${id}`).toBeDefined();
         expect(registry.getPolicy(id), `policy ${id}`).toBeDefined();
@@ -118,7 +123,10 @@ describe("Sprint 6.1 — agent architecture", () => {
     });
 
     it("returns undefined for an unknown agent id", () => {
-      expect(getAgentPolicy("browser-agent")).toBeUndefined();
+      // "browser-agent" was one of these until Sprint 7 registered it. The
+      // remaining three are still non-goals and still must not resolve.
+      expect(getAgentPolicy("developer-agent")).toBeUndefined();
+      expect(getAgentPolicy("autopilot-agent")).toBeUndefined();
       expect(getAgentPolicy("voice-agent")).toBeUndefined();
       expect(getAgentPolicy("")).toBeUndefined();
     });
@@ -230,6 +238,7 @@ describe("Sprint 6.1 — agent architecture", () => {
         [new AutomationAgent({ provider }), AGENT_IDS.automation],
         [new CommunicationAgent({ provider }), AGENT_IDS.communication],
         [new GoogleAdsAgent({ provider }), AGENT_IDS.googleAds],
+        [new BrowserAgent({ provider }), AGENT_IDS.browser],
       ] as const;
 
       for (const [agent, id] of cases) {
@@ -299,10 +308,10 @@ describe("Sprint 6.1 — agent architecture", () => {
 
     it("cannot have an agent swapped into the table", () => {
       expect(() => {
-        (AGENT_POLICIES as Record<string, unknown>)["browser-agent"] = {};
+        (AGENT_POLICIES as Record<string, unknown>)["developer-agent"] = {};
       }).toThrow();
 
-      expect(getAgentPolicy("browser-agent")).toBeUndefined();
+      expect(getAgentPolicy("developer-agent")).toBeUndefined();
     });
   });
 });

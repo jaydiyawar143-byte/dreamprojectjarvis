@@ -31,6 +31,7 @@
 import { Router, raw } from "express";
 import type { Response } from "express";
 import { createAuthMiddleware, type AuthenticatedRequest } from "../middleware/auth.js";
+import { asyncHandler } from "../middleware/error-handler.js";
 import type { Container } from "../services/container.js";
 import type { IN8nRepository, AuditLogger } from "@jarvis/core";
 import {
@@ -101,7 +102,7 @@ export function createN8nRouter(container: Container, deps: N8nRouterDeps): Rout
   // -------------------------------------------------------------------------
   // POST /callback
   // -------------------------------------------------------------------------
-  router.post("/callback", rawJson, async (req: AuthenticatedRequest, res: Response) => {
+  router.post("/callback", rawJson, asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
     const rawBody: Buffer | undefined = Buffer.isBuffer(req.body) ? req.body : undefined;
 
     const signature = verifyCallbackSignature(
@@ -179,12 +180,12 @@ export function createN8nRouter(container: Container, deps: N8nRouterDeps): Rout
       status: event.status,
     });
     ok(res, { applied: true, status: event.status });
-  });
+  }));
 
   // -------------------------------------------------------------------------
   // GET /workflows
   // -------------------------------------------------------------------------
-  router.get("/workflows", requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  router.get("/workflows", requireAuth, asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
     if (!req.auth) return fail(res, 401, "AUTHENTICATION_REQUIRED", "Authentication required");
 
     const workflows = await deps.repo.listWorkflowsForUser(req.auth.userId);
@@ -199,12 +200,12 @@ export function createN8nRouter(container: Container, deps: N8nRouterDeps): Rout
       })),
       count: workflows.length,
     });
-  });
+  }));
 
   // -------------------------------------------------------------------------
   // GET /executions
   // -------------------------------------------------------------------------
-  router.get("/executions", requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  router.get("/executions", requireAuth, asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
     if (!req.auth) return fail(res, 401, "AUTHENTICATION_REQUIRED", "Authentication required");
 
     const workflowId = typeof req.query.workflowId === "string" ? req.query.workflowId : undefined;
@@ -217,12 +218,12 @@ export function createN8nRouter(container: Container, deps: N8nRouterDeps): Rout
       limit,
     });
     ok(res, { executions: executions.map(serializeExecution), count: executions.length });
-  });
+  }));
 
   // -------------------------------------------------------------------------
   // GET /executions/:id
   // -------------------------------------------------------------------------
-  router.get("/executions/:id", requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  router.get("/executions/:id", requireAuth, asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
     if (!req.auth) return fail(res, 401, "AUTHENTICATION_REQUIRED", "Authentication required");
 
     const execution = await deps.repo.findExecutionForUser(req.auth.userId, req.params.id);
@@ -231,7 +232,7 @@ export function createN8nRouter(container: Container, deps: N8nRouterDeps): Rout
     if (!execution) return fail(res, 404, "NOT_FOUND", "Execution not found");
 
     ok(res, serializeExecution(execution));
-  });
+  }));
 
   return router;
 }

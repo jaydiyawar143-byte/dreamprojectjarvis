@@ -15,6 +15,7 @@
 // ---------------------------------------------------------------------------
 
 import type { AgentPolicy, ITool, ToolRegistry } from "@jarvis/core";
+import { BROWSER_READ_TOOL_IDS, BROWSER_ACTION_TOOL_IDS } from "@jarvis/core";
 
 // ---------------------------------------------------------------------------
 // Agent ids — the closed set. An id absent from here cannot be resolved.
@@ -28,6 +29,7 @@ export const AGENT_IDS = {
   analytics: "analytics-agent",
   automation: "automation-agent",
   communication: "communication-agent",
+  browser: "browser-agent",
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -188,6 +190,29 @@ const COMMUNICATION_POLICY = policy({
   description: "Handles inbound WhatsApp context and proposes approval-gated outbound replies",
 });
 
+/**
+ * Sprint 7 — controlled browsing.
+ *
+ * The reads are open and the six actions are approval-gated, which is what the
+ * `writesRequireApproval` flag below enforces a second time: even if a browser
+ * tool were ever registered with `requiresApproval: false`, the Orchestrator
+ * would refuse it for carrying a non-READ_ONLY risk.
+ *
+ * The permission floor is `["read", "write"]` like the other two agents that
+ * can act on the outside world. It is not stricter than the tools it holds —
+ * a stricter floor would not add safety, since the per-tool check runs anyway,
+ * and would only push entitled users onto the general assistant.
+ */
+const BROWSER_POLICY = policy({
+  agentId: AGENT_IDS.browser,
+  domain: "browser",
+  allowedTools: [...BROWSER_READ_TOOL_IDS, ...BROWSER_ACTION_TOOL_IDS],
+  requiredPermissions: ["read", "write"],
+  writesRequireApproval: true,
+  clientSelectable: true,
+  description: "Reads public web pages and proposes approval-gated interactions with them",
+});
+
 /** The complete, immutable policy set. */
 export const AGENT_POLICIES: Readonly<Record<string, AgentPolicy>> = Object.freeze({
   [AGENT_IDS.general]: GENERAL_POLICY,
@@ -197,6 +222,7 @@ export const AGENT_POLICIES: Readonly<Record<string, AgentPolicy>> = Object.free
   [AGENT_IDS.analytics]: ANALYTICS_POLICY,
   [AGENT_IDS.automation]: AUTOMATION_POLICY,
   [AGENT_IDS.communication]: COMMUNICATION_POLICY,
+  [AGENT_IDS.browser]: BROWSER_POLICY,
 });
 
 export function getAgentPolicy(agentId: string): AgentPolicy | undefined {

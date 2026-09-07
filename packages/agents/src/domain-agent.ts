@@ -20,6 +20,8 @@
 // against the registry-held policy after these hooks have run.
 // ---------------------------------------------------------------------------
 
+import { sanitizeToolResult } from "@jarvis/tools";
+
 import { BaseAgent } from "./base-agent.js";
 import type {
   AgentContext,
@@ -344,15 +346,31 @@ export abstract class DomainAgent extends BaseAgent {
 
     if (tr.result) {
       if (tr.result.success) {
+        // Sprint 9.9 — bound and de-secret the payload before it is written
+        // into a prompt. `sanitizeToolResult` has existed since Phase 9 with a
+        // full test suite and NO production call site; this is the one place
+        // every tool result passes through on its way to a model, so it is
+        // where the cap and the secret patterns actually have to apply.
+        //
+        // Tool results are the largest untrusted thing in a conversation: a
+        // scraped page, a Meta insights payload, a document extract. Truncation
+        // is visible to the model (the sanitizer appends its own marker) rather
+        // than silent.
+        const safe = sanitizeToolResult(tr.result);
         const dataStr =
-          tr.result.data !== undefined
-            ? JSON.stringify(tr.result.data, null, 2)
+          safe.result.data !== undefined
+            ? JSON.stringify(safe.result.data, null, 2)
             : undefined;
         lines.push(
           dataStr && dataStr !== "undefined"
             ? `DATA: ${dataStr}`
             : "DATA: (empty — no data returned)"
         );
+        if (safe.truncated) {
+          lines.push(
+            "NOTE: This result was truncated because it exceeded the size limit. Do not assume the omitted part agrees with what you can see."
+          );
+        }
       } else {
         lines.push(`DATA_RETRIEVAL_FAILED: ${tr.result.error ?? "unknown error"}`);
         lines.push(
