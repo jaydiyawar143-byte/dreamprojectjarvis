@@ -13,6 +13,7 @@ import {
   BookOpen,
   Bot,
   CheckSquare,
+  Globe,
   Inbox,
   LayoutDashboard,
   Megaphone,
@@ -40,40 +41,43 @@ export interface NavGroup {
 
 export const NAV_GROUPS: NavGroup[] = [
   {
-    title: "Overview",
+    title: "Command",
     items: [
       { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard, available: true },
-    ],
-  },
-  {
-    title: "Operate",
-    items: [
       { href: "/chat", label: "Assistant", icon: MessageSquare, available: true },
-      { href: "/opportunities", label: "Opportunities", icon: Inbox, available: true },
-      { href: "/approvals", label: "Approvals", icon: CheckSquare, available: true },
     ],
   },
   {
     title: "Intelligence",
     items: [
+      { href: "/opportunities", label: "Opportunities", icon: Inbox, available: true },
       { href: "/knowledge", label: "Knowledge Base", icon: BookOpen, available: true },
       { href: "/meta-ads", label: "Meta Ads", icon: Megaphone, available: true },
     ],
   },
-  // UI V2 — the capability surfaces. Each of these is backed by an endpoint
-  // that genuinely exists; nothing here is aspirational.
   {
     title: "Capabilities",
     items: [
       { href: "/agents", label: "Agents", icon: Bot, available: true },
       { href: "/automations", label: "Automations", icon: Workflow, available: true },
       { href: "/integrations", label: "Integrations", icon: Plug, available: true },
+      // Browser now has a real page. It reports the browser agent's LIVE
+      // registration state, so on a deployment with the runtime switched off it
+      // says so rather than implying a capability that is not there. That keeps
+      // the rule intact: this nav links only to pages that exist.
+      { href: "/browser", label: "Browser", icon: Globe, available: true },
+    ],
+  },
+  {
+    title: "Control",
+    items: [
+      { href: "/approvals", label: "Approvals", icon: CheckSquare, available: true },
+      { href: "/activity", label: "Activity", icon: Activity, available: true },
     ],
   },
   {
     title: "System",
     items: [
-      { href: "/activity", label: "Activity", icon: Activity, available: true },
       { href: "/system", label: "Health", icon: ShieldCheck, available: true },
       { href: "/settings", label: "Settings", icon: Settings, available: true },
     ],

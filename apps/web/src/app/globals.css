@@ -218,3 +218,102 @@ body {
     opacity: 0.28 !important;
   }
 }
+
+/* ---------------------------------------------------------------------------
+   UI V2 — scrollbar suppression.
+
+   The sidebar scrolls (its nav can exceed the viewport on a short window) but
+   must not paint a browser scrollbar over the rail: the gutter is reserved even
+   when idle, which on Windows shows as a permanent grey bar down the middle of
+   an otherwise minimal surface.
+
+   Scrolling itself is untouched — wheel, trackpad, touch and keyboard all still
+   work. Only the ornament is hidden, which is why this is applied to a
+   deliberately-chosen container rather than globally: a hidden scrollbar on a
+   long document would remove the only cue that there is more to read.
+   --------------------------------------------------------------------------- */
+.no-scrollbar {
+  scrollbar-width: none; /* Firefox */
+  -ms-overflow-style: none; /* legacy Edge */
+}
+.no-scrollbar::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+
+/* ---------------------------------------------------------------------------
+   UI V2 — horizontal overflow guard.
+
+   Nothing in this app is meant to scroll sideways. A single overflowing child
+   (a wide table, an absolutely-positioned glow) otherwise adds a horizontal
+   scrollbar to the whole document, which on a dark full-bleed layout reads as a
+   rendering fault. Vertical scrolling is left alone.
+   --------------------------------------------------------------------------- */
+html,
+body {
+  overflow-x: hidden;
+  max-width: 100%;
+}
+
+/* ---------------------------------------------------------------------------
+   UI V2 — glass surfaces.
+
+   `.sys-glass` above is the heavy console treatment. These are the lighter
+   panel variants used across the command centre: enough translucency to show
+   the field behind them, without a second expensive blur on every card.
+
+   Restraint is the point. One accent hue, low-opacity borders, and a single
+   soft inner highlight — the depth comes from layering, not from glow.
+   --------------------------------------------------------------------------- */
+.glass-panel {
+  position: relative;
+  background: linear-gradient(
+    155deg,
+    rgba(18, 28, 42, 0.55) 0%,
+    rgba(9, 15, 24, 0.42) 60%,
+    rgba(12, 20, 32, 0.5) 100%
+  );
+  backdrop-filter: blur(18px) saturate(125%);
+  -webkit-backdrop-filter: blur(18px) saturate(125%);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 24px 60px -32px rgba(0, 0, 0, 0.9);
+}
+
+/* A hairline highlight along the top edge — the cue that reads as "glass"
+   rather than "dark box". Kept to one edge; ringing every side looks like a
+   selection state. */
+.glass-edge::after {
+  content: "";
+  position: absolute;
+  inset-inline: 12%;
+  top: 0;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(140, 220, 255, 0.35),
+    transparent
+  );
+  pointer-events: none;
+}
+
+/* Atmospheric floor behind the Orb. Sits under everything, casts no shadow and
+   catches no pointer events. */
+.orb-atmosphere {
+  position: absolute;
+  inset: -18%;
+  pointer-events: none;
+  background:
+    radial-gradient(circle at 50% 46%, rgba(62, 224, 242, 0.16), transparent 58%),
+    radial-gradient(circle at 62% 62%, rgba(141, 139, 255, 0.11), transparent 62%);
+  filter: blur(28px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .orb-atmosphere {
+    filter: blur(20px);
+  }
+}

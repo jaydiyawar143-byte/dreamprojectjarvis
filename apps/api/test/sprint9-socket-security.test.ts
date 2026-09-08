@@ -519,7 +519,31 @@ describe("Sprint 9 — event authorization", () => {
       .filter(([, c]) => c === "READ_ONLY" || c === "AUTHENTICATED_OPERATION")
       .map(([event]) => event);
 
-    expect(allowed).toEqual(["ping"]);
+    // An EXACT list on purpose: this is the tripwire that makes adding a socket
+    // event a deliberate decision rather than something that ships quietly.
+    //
+    // V3 added the two system-metrics events. They are READ_ONLY in the strict
+    // sense — they start and stop a server-side interval that reads OS counters
+    // and emits them to the caller's OWN room. They take no parameters, execute
+    // no tool, mutate nothing, and cannot observe another user. The capability
+    // they grant ("watch this machine's load") is one the same operator already
+    // has over HTTP at GET /api/v1/command-center/system.
+    expect(allowed).toEqual(["ping", "system:subscribe", "system:unsubscribe"]);
+  });
+
+  it("keeps the system stream free of any parameter a caller could inject", async () => {
+    // The metrics events are safe partly BECAUSE they carry no input. If a
+    // future change gives them an argument, that argument reaches OS-level
+    // collection code and this test should be the thing that stops it.
+    const source = await import("fs").then((fs) =>
+      fs.readFileSync(new URL("../src/socket/system-stream.ts", import.meta.url), "utf8")
+    );
+
+    // Handlers take no payload: `socket.on("system:subscribe", () => ...)`.
+    expect(source).toMatch(/on\("system:subscribe",\s*\(\)\s*=>/);
+    expect(source).toMatch(/on\("system:unsubscribe",\s*\(\)\s*=>/);
+    // And nothing in the stream shells out.
+    expect(source).not.toMatch(/child_process|execSync|spawn\(/);
   });
 });
 

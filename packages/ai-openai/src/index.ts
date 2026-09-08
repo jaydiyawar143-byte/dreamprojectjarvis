@@ -17,3 +17,13 @@ export {
   toJarvisError,
   executeWithRetry,
 } from "./error-handler.js";
+
+// V3 — image understanding. Produces text for the existing knowledge pipeline.
+export {
+  OpenAIVisionProvider,
+  isSupportedImage,
+  SUPPORTED_IMAGE_MIME_TYPES,
+  MAX_IMAGE_BYTES,
+  type OpenAIVisionConfig,
+  type ImageDescription,
+} from "./openai-vision-provider.js";
