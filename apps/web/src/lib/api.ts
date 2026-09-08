@@ -50,56 +50,93 @@ export interface ConversationWithMessages extends Conversation {
   messages: ConversationMessage[];
 }
 
+// ---------------------------------------------------------------------------
+// UI V2 — session transport.
+//
+// The refresh token is NEVER visible to this file. It lives in an HttpOnly
+// cookie set by the API, so script on this page — ours or an attacker's —
+// cannot read it. What is held here is the short-lived (15 min) access token,
+// in a module variable ONLY: not localStorage, not sessionStorage, not a
+// readable cookie. Nothing that survives a reload on its own.
+//
+// Persistence therefore comes from the cookie, not from web storage. On a cold
+// load the app has no access token and asks /auth/refresh for one; the browser
+// attaches the cookie, and a valid session is restored without the user ever
+// re-entering a password. That is what makes login survive a closed tab, and
+// it is also why "log in again on every visit" was happening before: tokens
+// were in sessionStorage, which is cleared the moment the tab closes.
+// ---------------------------------------------------------------------------
+
 let _accessToken: string | null = null;
-let _refreshToken: string | null = null;
 
-export function setTokens(access: string, refresh: string): void {
-  _accessToken = access;
-  _refreshToken = refresh;
-  if (typeof window !== "undefined") {
-    sessionStorage.setItem("jarvis_access", access);
-    sessionStorage.setItem("jarvis_refresh", refresh);
-  }
-}
+/** Non-secret UI preference. Safe in localStorage; it is not a credential. */
+const REMEMBER_KEY = "jarvis_remember";
 
-export function loadTokens(): void {
-  if (typeof window === "undefined") return;
-  try {
-    _accessToken = sessionStorage.getItem("jarvis_access");
-    _refreshToken = sessionStorage.getItem("jarvis_refresh");
-  } catch {
-    // Session storage can throw outright when a browser is configured to block
-    // site data. An unreadable store is the same situation as an empty one.
-    _accessToken = null;
-    _refreshToken = null;
-  }
-}
+/** Keys written by the pre-V2 build. Removed on sight, never read. */
+const LEGACY_TOKEN_KEYS = ["jarvis_access", "jarvis_refresh"];
 
-// Restore the session as soon as this module is evaluated, not on an effect.
-//
-// React runs child effects BEFORE the parent's, so a protected page's data
-// fetch is issued before AuthProvider's mount effect has had a chance to call
-// loadTokens(). Hydrating here — synchronously, during module evaluation, ahead
-// of any render — is what guarantees the first authenticated request of a hard
-// page load already carries its bearer token.
-//
-// Guarded for the server, where this module is also evaluated during
-// prerendering and there is no session storage to read.
-if (typeof window !== "undefined") {
-  loadTokens();
-}
-
-export function clearTokens(): void {
-  _accessToken = null;
-  _refreshToken = null;
-  if (typeof window !== "undefined") {
-    sessionStorage.removeItem("jarvis_access");
-    sessionStorage.removeItem("jarvis_refresh");
-  }
+export function setAccessToken(token: string | null): void {
+  _accessToken = token;
 }
 
 export function getAccessToken(): string | null {
   return _accessToken;
+}
+
+export function setRemember(remember: boolean): void {
+  if (typeof window === "undefined") return;
+  try {
+    localStorage.setItem(REMEMBER_KEY, remember ? "1" : "0");
+  } catch {
+    // Blocked site data. The session still works; it just will not outlive
+    // the browser, which is the safe direction to fail in.
+  }
+}
+
+export function getRemember(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    return localStorage.getItem(REMEMBER_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Deletes anything a previous version of this app left in web storage.
+ *
+ * An upgrading browser can still be holding a real refresh token in
+ * sessionStorage from the old build. Clearing it is part of the fix, not
+ * housekeeping — leaving it behind would preserve exactly the exposure the
+ * cookie was introduced to remove.
+ */
+export function purgeLegacyTokenStorage(): void {
+  if (typeof window === "undefined") return;
+  for (const key of LEGACY_TOKEN_KEYS) {
+    try {
+      sessionStorage.removeItem(key);
+      localStorage.removeItem(key);
+    } catch {
+      // Unreadable storage cannot be holding anything we could have written.
+    }
+  }
+}
+
+if (typeof window !== "undefined") {
+  purgeLegacyTokenStorage();
+}
+
+/** Drops the in-memory session. Does NOT revoke server-side; logout() does. */
+export function clearTokens(): void {
+  _accessToken = null;
+  if (typeof window !== "undefined") {
+    try {
+      localStorage.removeItem(REMEMBER_KEY);
+    } catch {
+      // Nothing readable to clear.
+    }
+  }
+  purgeLegacyTokenStorage();
 }
 
 async function request<T>(
@@ -108,6 +145,9 @@ async function request<T>(
 ): Promise<ApiResponse<T>> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
+    // Tells the API to speak cookies to this client: the refresh token is set
+    // as HttpOnly and withheld from the response body.
+    "X-Auth-Mode": "cookie",
     ...((options.headers as Record<string, string>) || {}),
   };
 
@@ -119,20 +159,30 @@ async function request<T>(
     const res = await fetch(`${API_BASE}${path}`, {
       ...options,
       headers,
+      // Required for the refresh cookie to be sent at all: fetch omits
+      // credentials on cross-origin requests by default, and the web app and
+      // the API are different origins (different ports).
+      credentials: "include",
     });
 
     const body = await res.json();
 
-    if (res.status === 401 && _refreshToken) {
+    // A 401 here means the ACCESS token expired, which is routine every 15
+    // minutes. The refresh cookie may still be perfectly valid, so this is
+    // attempted without any local evidence of a refresh token — there is none
+    // to have. `/auth/refresh` is excluded to avoid recursing on itself.
+    if (res.status === 401 && !path.startsWith("/auth/refresh")) {
       const refreshed = await refreshTokens();
       if (refreshed) {
         headers["Authorization"] = `Bearer ${_accessToken}`;
         const retryRes = await fetch(`${API_BASE}${path}`, {
           ...options,
           headers,
+          credentials: "include",
         });
         return await retryRes.json();
       }
+      // The session is genuinely gone, not merely stale.
       clearTokens();
     }
 
@@ -146,43 +196,85 @@ async function request<T>(
   }
 }
 
+/**
+ * Trades the refresh cookie for a fresh access token.
+ *
+ * Sends no token: the browser attaches the HttpOnly cookie, which this code
+ * cannot read. `rememberMe` is restated because the server cannot see whether
+ * the browser is holding a session or a persistent cookie, and defaulting to
+ * "session" must not silently extend a deliberately-temporary login.
+ *
+ * In-flight requests are shared. A cold page load fires several protected
+ * fetches at once, all of which 401 together; without this they would each
+ * rotate the refresh token, and the rotations would invalidate one another.
+ */
+let _refreshInFlight: Promise<boolean> | null = null;
+
 async function refreshTokens(): Promise<boolean> {
-  if (!_refreshToken) return false;
-  try {
-    const res = await fetch(`${API_BASE}/auth/refresh`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ refreshToken: _refreshToken }),
-    });
-    const body: ApiResponse<TokenPair> = await res.json();
-    if (body.success && body.data) {
-      setTokens(body.data.accessToken, body.data.refreshToken);
-      return true;
+  if (_refreshInFlight) return _refreshInFlight;
+
+  _refreshInFlight = (async () => {
+    try {
+      const res = await fetch(`${API_BASE}/auth/refresh`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Auth-Mode": "cookie" },
+        credentials: "include",
+        body: JSON.stringify({ rememberMe: getRemember() }),
+      });
+      const body: ApiResponse<Omit<TokenPair, "refreshToken">> = await res.json();
+      if (body.success && body.data?.accessToken) {
+        setAccessToken(body.data.accessToken);
+        return true;
+      }
+    } catch {
+      // Network failure is indistinguishable here from an expired session;
+      // both mean "no usable access token", and the caller handles that.
     }
-  } catch {
-    // ignore
+    return false;
+  })();
+
+  try {
+    return await _refreshInFlight;
+  } finally {
+    _refreshInFlight = null;
   }
-  return false;
 }
+
+/**
+ * Restores a session on app start, if the browser still holds a valid cookie.
+ *
+ * This is the whole persistence mechanism: no stored credential is read, the
+ * cookie is simply presented and either honoured or not.
+ */
+export async function bootstrapSession(): Promise<boolean> {
+  return refreshTokens();
+}
+
+// The response no longer carries `refreshToken` for this client — the API
+// withholds it and sets the cookie instead — so the token shape is narrowed
+// rather than lying about what arrives.
+export type BrowserTokenPair = Omit<TokenPair, "refreshToken">;
 
 export async function register(
   email: string,
   name: string,
-  password: string
-): Promise<ApiResponse<{ user: SafeUser; tokens: TokenPair }>> {
+  password: string,
+  rememberMe = true
+): Promise<ApiResponse<{ user: SafeUser; tokens: BrowserTokenPair }>> {
   return request("/auth/register", {
     method: "POST",
-    body: JSON.stringify({ email, name, password }),
+    body: JSON.stringify({ email, name, password, rememberMe }),
   });
 }
 
 export async function login(
   email: string,
-  password: string
-): Promise<ApiResponse<{ user: SafeUser; tokens: TokenPair }>> {
+  password: string,
+  rememberMe = true
+): Promise<ApiResponse<{ user: SafeUser; tokens: BrowserTokenPair }>> {
   return request("/auth/login", {
     method: "POST",
-    body: JSON.stringify({ email, password }),
+    body: JSON.stringify({ email, password, rememberMe }),
   });
 }
 
@@ -221,8 +313,29 @@ export async function getConversation(
   return request(`/conversations/${id}`);
 }
 
+/**
+ * Ends the session on the SERVER, then locally.
+ *
+ * The previous implementation only dropped the in-memory copy, which left the
+ * refresh token valid in the database for its full 7 days — "logging out" did
+ * not actually end the session. This revokes it and clears the cookie.
+ *
+ * Local state is cleared even when the call fails: a user who asked to be
+ * logged out must never be left looking logged in.
+ */
 export async function logout(): Promise<void> {
-  clearTokens();
+  try {
+    await fetch(`${API_BASE}/auth/logout`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Auth-Mode": "cookie" },
+      credentials: "include",
+      body: "{}",
+    });
+  } catch {
+    // Offline logout is still a logout on this device.
+  } finally {
+    clearTokens();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -247,6 +360,11 @@ export type ApprovalStatusValue =
 export interface ApprovalRecord extends ApprovalSummaryInfo {
   approvalId: string;
   toolId: string;
+  /**
+   * The tool's declared risk, read from the same registry that gates execution.
+   * Optional: an unknown tool reports nothing rather than a guessed default.
+   */
+  risk?: "READ_ONLY" | "LOW_IMPACT" | "EXTERNAL_SIDE_EFFECT" | "HIGH_IMPACT" | "FINANCIAL";
   paramsHash?: string;
   status: ApprovalStatusValue;
   createdAt: string;
@@ -1052,4 +1170,389 @@ export async function listN8nExecutions(
  */
 export function isNotDeployed(error?: ApiError): boolean {
   return error?.code === "NOT_FOUND";
+}
+
+// ---------------------------------------------------------------------------
+// UI V2 — Google sign-in.
+//
+// Availability is a SERVER fact, not a build-time flag: the routes are mounted
+// only when the OAuth client credentials exist, so a 404 here is the honest
+// answer that the channel is unprovisioned. Asking avoids the failure mode
+// where a web env var says "enabled" and the exchange then dies at the token
+// endpoint — the button is shown only when it can actually complete.
+// ---------------------------------------------------------------------------
+
+export async function getGoogleSignInEnabled(): Promise<boolean> {
+  try {
+    const res = await fetch(`${API_BASE}/auth/google/status`, {
+      credentials: "include",
+    });
+    if (!res.ok) return false;
+    const body: ApiResponse<{ enabled: boolean }> = await res.json();
+    return body.success === true && body.data?.enabled === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The URL that begins the flow.
+ *
+ * A full-page navigation, never fetch/XHR: the browser has to follow redirects
+ * to accounts.google.com and back, and a cross-origin fetch cannot do that.
+ */
+export function googleSignInStartUrl(next = "/dashboard"): string {
+  return `${API_BASE}/auth/google/start?next=${encodeURIComponent(next)}`;
+}
+
+// ---------------------------------------------------------------------------
+// UI V2 — Agent Credential Center.
+//
+// The server never returns a stored secret, so there is no type here that can
+// hold one. `values` carries a mask for secret fields and the real value only
+// for non-secret ones (an ad account id), which is what lets the UI show WHICH
+// account is configured without ever re-rendering a token.
+// ---------------------------------------------------------------------------
+
+export type CredentialStatus =
+  | "CONNECTED"
+  | "CONFIGURED"
+  | "NOT_CONNECTED"
+  | "CONFIGURATION_REQUIRED"
+  | "INVALID";
+
+export interface CredentialField {
+  name: string;
+  label: string;
+  kind: "secret" | "text";
+  required: boolean;
+  placeholder?: string;
+  help?: string;
+}
+
+export interface CredentialProvider {
+  id: string;
+  label: string;
+  /** How it is configured, which decides what the UI may offer. */
+  kind: "form" | "oauth" | "server-managed";
+  description: string;
+  testable: boolean;
+  fields: CredentialField[];
+  status: CredentialStatus;
+  detail: string;
+  /** What the RUNNING system is using, which may differ from what is stored. */
+  effectiveSource: string;
+  values?: Record<string, string>;
+  connectUrl?: string;
+}
+
+export interface CredentialTestResult {
+  status: CredentialStatus;
+  detail: string;
+  checkedAt: string;
+}
+
+export async function listCredentials(): Promise<
+  ApiResponse<{ providers: CredentialProvider[] }>
+> {
+  return request("/credentials");
+}
+
+export async function saveCredentials(
+  provider: string,
+  values: Record<string, string>
+): Promise<ApiResponse<CredentialProvider>> {
+  return request(`/credentials/${provider}`, {
+    method: "PUT",
+    body: JSON.stringify(values),
+  });
+}
+
+export async function testCredentials(
+  provider: string
+): Promise<ApiResponse<CredentialTestResult>> {
+  return request(`/credentials/${provider}/test`, { method: "POST" });
+}
+
+export async function removeCredentials(
+  provider: string
+): Promise<ApiResponse<CredentialProvider>> {
+  return request(`/credentials/${provider}`, { method: "DELETE" });
+}
+
+// ---------------------------------------------------------------------------
+// V3 — Command Center.
+//
+// Every live value arrives wrapped in { value, meta }. The meta is not optional
+// decoration: it is how the UI knows whether it may present a number as current.
+// There is deliberately no helper that unwraps `value` on its own, because that
+// helper is exactly how a stale price ends up rendered as live.
+// ---------------------------------------------------------------------------
+
+export type Freshness = "LIVE" | "DELAYED" | "STALE" | "UNAVAILABLE";
+
+export interface ProviderMeta {
+  freshness: Freshness;
+  observedAt: string;
+  ageSeconds: number;
+  source: string;
+  reason?: string;
+  cached?: boolean;
+}
+
+/** A value that may not exist on this machine, with the reason it does not. */
+export interface Maybe<T> {
+  value: T | null;
+  reason?: string;
+}
+
+export interface Live<T> {
+  value: T | null;
+  meta: ProviderMeta;
+}
+
+export interface WeatherNow {
+  temperatureC: number;
+  feelsLikeC: number | null;
+  humidityPct: number | null;
+  windKph: number | null;
+  precipitationMm: number | null;
+  code: number;
+  isDay: boolean;
+  sunrise: string | null;
+  sunset: string | null;
+  location: { latitude: number; longitude: number; timezone: string; label?: string };
+  forecast: Array<{ date: string; minC: number; maxC: number; code: number }>;
+}
+
+export interface CryptoQuote {
+  id: string;
+  symbol: string;
+  name: string;
+  price: number;
+  changePct24h: number | null;
+  marketCapRank: number;
+}
+
+export interface IndexQuote {
+  symbol: string;
+  name: string;
+  value: number;
+  change: number | null;
+  changePct: number | null;
+  marketState?: "OPEN" | "CLOSED" | "PRE_OPEN" | "UNKNOWN";
+}
+
+export interface Place {
+  name: string;
+  latitude: number;
+  longitude: number;
+  type?: string;
+  attribution: string;
+}
+
+export interface RouteResult {
+  from: Place;
+  to: Place;
+  distanceKm: number;
+  durationMinutes: number;
+  geometry?: Array<[number, number]>;
+  attribution: string;
+}
+
+export interface SystemSnapshot {
+  at: string;
+  cpu: { loadPct: Maybe<number>; cores: number; model: string; temperatureC: Maybe<number> };
+  memory: { usedPct: number; usedBytes: number; totalBytes: number; availableBytes: number };
+  gpu: {
+    model: Maybe<string>;
+    utilizationPct: Maybe<number>;
+    memoryUsedMB: Maybe<number>;
+    temperatureC: Maybe<number>;
+  };
+  disk: Maybe<{ usedPct: number; usedBytes: number; totalBytes: number; mount: string }>;
+  network: Maybe<{ rxBytesPerSec: number; txBytesPerSec: number; iface: string }>;
+  uptimeSeconds: number;
+  containerized: boolean;
+}
+
+export interface TaskRecord {
+  id: string;
+  title: string;
+  description: string | null;
+  dueAt: string | null;
+  priority: "LOW" | "NORMAL" | "HIGH" | string;
+  completedAt: string | null;
+  createdAt: string;
+}
+
+export interface CommandCenterPreferences {
+  clockMode?: "DIGITAL" | "ANALOG";
+  hourFormat?: "12" | "24";
+  weatherLocation?: { latitude: number; longitude: number; label?: string } | null;
+  /** Widget order, size and visibility. Repaired on read, never trusted raw. */
+  layout?: Array<{ id: string; size: { w: number; h: number }; hidden?: boolean }>;
+  /** Kept for preferences written by the first V3 build. */
+  widgets?: string[];
+  hiddenWidgets?: string[];
+}
+
+export interface CommandCenterCapabilities {
+  weather: boolean;
+  crypto: boolean;
+  indices: boolean;
+  /** Geocoding and routing — always true (Google or OpenStreetMap). */
+  geo: boolean;
+  /** An INTERACTIVE map — needs a Google browser key, and has no fallback. */
+  maps?: boolean;
+  system: boolean;
+  tasks: boolean;
+}
+
+const CC = "/command-center";
+
+export async function getCapabilities(): Promise<ApiResponse<CommandCenterCapabilities>> {
+  return request(`${CC}/capabilities`);
+}
+
+export async function getWeather(
+  coords?: { latitude: number; longitude: number }
+): Promise<ApiResponse<Live<WeatherNow>>> {
+  const qs = coords ? `?lat=${coords.latitude}&lon=${coords.longitude}` : "";
+  return request(`${CC}/weather${qs}`);
+}
+
+export async function getCrypto(count = 3): Promise<ApiResponse<Live<CryptoQuote[]>>> {
+  return request(`${CC}/markets/crypto?count=${count}`);
+}
+
+export async function getIndices(): Promise<ApiResponse<Live<IndexQuote[]>>> {
+  return request(`${CC}/markets/indices`);
+}
+
+export async function searchPlaces(
+  query: string,
+  near?: { latitude: number; longitude: number }
+): Promise<ApiResponse<Live<Place[]>>> {
+  const qs = new URLSearchParams({ q: query });
+  if (near) {
+    qs.set("lat", String(near.latitude));
+    qs.set("lon", String(near.longitude));
+  }
+  return request(`${CC}/geo/search?${qs.toString()}`);
+}
+
+export async function getRoute(
+  from: string,
+  to: string,
+  geometry = false,
+  mode?: TravelMode
+): Promise<ApiResponse<Live<RouteResult>>> {
+  const qs = new URLSearchParams({
+    from,
+    to,
+    ...(geometry ? { geometry: "true" } : {}),
+    ...(mode ? { mode } : {}),
+  });
+  return request(`${CC}/geo/route?${qs.toString()}`);
+}
+
+export async function getSystemSnapshot(): Promise<ApiResponse<Live<SystemSnapshot>>> {
+  return request(`${CC}/system`);
+}
+
+export async function listTasks(
+  includeCompleted = false
+): Promise<ApiResponse<{ tasks: TaskRecord[] }>> {
+  return request(`${CC}/tasks?includeCompleted=${includeCompleted}`);
+}
+
+export async function createTask(input: {
+  title: string;
+  description?: string;
+  dueAt?: string | null;
+  priority?: "LOW" | "NORMAL" | "HIGH";
+}): Promise<ApiResponse<{ task: TaskRecord }>> {
+  return request(`${CC}/tasks`, { method: "POST", body: JSON.stringify(input) });
+}
+
+export async function updateTask(
+  id: string,
+  input: { completed?: boolean; title?: string; dueAt?: string | null; priority?: string }
+): Promise<ApiResponse<{ task: TaskRecord }>> {
+  return request(`${CC}/tasks/${id}`, { method: "PATCH", body: JSON.stringify(input) });
+}
+
+export async function deleteTask(id: string): Promise<ApiResponse<{ deleted: boolean }>> {
+  return request(`${CC}/tasks/${id}`, { method: "DELETE" });
+}
+
+export async function getPreferences(): Promise<
+  ApiResponse<{ preferences: CommandCenterPreferences }>
+> {
+  return request(`${CC}/preferences`);
+}
+
+export async function savePreferences(
+  prefs: CommandCenterPreferences
+): Promise<ApiResponse<{ preferences: CommandCenterPreferences }>> {
+  return request(`${CC}/preferences`, { method: "PUT", body: JSON.stringify(prefs) });
+}
+
+// ---------------------------------------------------------------------------
+// V3 — image understanding.
+//
+// Images take a different route from documents because they cannot be chunked
+// directly: the server describes the image with a vision model and ingests THAT
+// text through the ordinary knowledge pipeline. From the client's point of view
+// the outcome is the same — a searchable, citable knowledge document.
+// ---------------------------------------------------------------------------
+
+export const SUPPORTED_IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
+export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+
+export interface ImageIngestResult {
+  document: { id: string; title: string | null; fileName: string };
+  description: string;
+  chunkCount: number;
+  searchable: boolean;
+}
+
+export async function uploadKnowledgeImage(input: {
+  fileName: string;
+  content: string;
+  mimeType: string;
+  question?: string;
+}): Promise<ApiResponse<ImageIngestResult>> {
+  return request("/knowledge/images", { method: "POST", body: JSON.stringify(input) });
+}
+
+// ---------------------------------------------------------------------------
+// V3 — Google Maps.
+//
+// The browser key arrives from an authenticated endpoint rather than a build-
+// time constant, so it is not in a static bundle. `serverGeoAvailable` tells
+// the UI whether search and routing will be answered by Google or by
+// OpenStreetMap, so results can be labelled truthfully either way.
+// ---------------------------------------------------------------------------
+
+export interface MapsConfig {
+  browserKey: string | null;
+  mapsAvailable: boolean;
+  serverGeoAvailable: boolean;
+  reason: string;
+}
+
+export type TravelMode = "driving" | "walking" | "cycling" | "transit";
+
+export async function getMapsConfig(): Promise<ApiResponse<MapsConfig>> {
+  return request("/command-center/maps/config");
+}
+
+/** Coordinates → an address, for the current-location label. */
+export async function reverseGeocode(
+  latitude: number,
+  longitude: number
+): Promise<ApiResponse<Live<Place>>> {
+  return request(`/command-center/geo/reverse?lat=${latitude}&lon=${longitude}`);
 }

@@ -6,16 +6,17 @@ import { riseIn } from "./motion";
 /**
  * Secondary authentication channel.
  *
- * IMPORTANT — this deployment has no Google flow. There is no `[...nextauth]`
- * route handler in the web app and no `/auth/google` endpoint on the API
- * (apps/api/src/routes/auth.ts exposes register, login, refresh, logout, me
- * only). Rather than render a button that silently does nothing — or worse,
- * fakes a session — the control reports the channel as unprovisioned.
+ * UI V2 — the Google flow now exists: GET /api/v1/auth/google/start begins an
+ * OpenID Connect authorization-code exchange with PKCE, and the callback
+ * establishes the same HttpOnly session cookie the password flow uses.
  *
- * To enable it later: implement the provider callback, then set
- * NEXT_PUBLIC_GOOGLE_AUTH_ENABLED=true and pass `onGoogle`.
+ * Availability is decided by the SERVER, not by a build-time flag on this side.
+ * The API mounts those routes only when it holds OAuth client credentials, so
+ * the parent probes `/auth/google/status` and passes the answer down. That is
+ * what keeps the promise the previous version of this file made: the button is
+ * never shown unless pressing it can actually complete, and it never fakes a
+ * session.
  */
-const GOOGLE_ENABLED = process.env.NEXT_PUBLIC_GOOGLE_AUTH_ENABLED === "true";
 
 function GoogleMark({ muted }: { muted: boolean }) {
   if (muted) {
@@ -49,12 +50,19 @@ function GoogleMark({ muted }: { muted: boolean }) {
 
 export function SocialAuth({
   busy,
+  enabled,
   onGoogle,
 }: {
   busy: boolean;
+  /** Server-reported availability. `null` while still being probed. */
+  enabled: boolean | null;
   onGoogle?: () => void;
 }) {
-  const available = GOOGLE_ENABLED && typeof onGoogle === "function";
+  const available = enabled === true && typeof onGoogle === "function";
+
+  // While the probe is in flight the channel is neither offered nor denied:
+  // flashing "not provisioned" and then enabling the button reads as a fault.
+  if (enabled === null) return null;
 
   return (
     <motion.div variants={riseIn()} className="space-y-3">

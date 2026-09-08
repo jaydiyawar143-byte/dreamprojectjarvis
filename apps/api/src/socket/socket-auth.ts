@@ -111,6 +111,15 @@ export const SOCKET_EVENT_POLICY: Readonly<Record<string, SocketEventClass>> =
     /** Liveness check on an authenticated channel. Carries no data. */
     ping: "READ_ONLY",
 
+    // V3 — Command Center system metrics stream. READ_ONLY: these start and
+    // stop a server-side interval that reads OS counters and emits them to the
+    // caller's own room. They carry no parameters, execute nothing, and cannot
+    // observe another user - so there is no capability here beyond "watch this
+    // machine's load", which an authenticated operator already has via the
+    // equivalent HTTP route.
+    "system:subscribe": "READ_ONLY",
+    "system:unsubscribe": "READ_ONLY",
+
     // Never over this transport — see above.
     "tool:execute": "FORBIDDEN",
     "tool:invoke": "FORBIDDEN",

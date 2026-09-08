@@ -29,6 +29,11 @@ import type { Response } from "express";
 import { createAuthMiddleware, type AuthenticatedRequest } from "../middleware/auth.js";
 import type { Container } from "../services/container.js";
 import {
+  OpenAIVisionProvider,
+  isSupportedImage,
+  SUPPORTED_IMAGE_MIME_TYPES,
+} from "@jarvis/ai-openai";
+import {
   KnowledgeIngestionService,
   type DocumentChunkerLike,
   type DocumentEmbedderLike,
@@ -363,6 +368,19 @@ export function createKnowledgeRouter(
   const extractor = overrides.extractor ?? new DocumentExtractionService();
   const chunker = overrides.chunker ?? new DocumentChunkingService();
 
+  // V3 — image understanding. Optional for the same reason the embedder is:
+  // it needs an OpenAI key, and a deployment without one must still serve every
+  // other knowledge route rather than failing to start.
+  const vision: { describeImage: OpenAIVisionProvider["describeImage"] } | null = (() => {
+    if (!process.env.OPENAI_API_KEY) return null;
+    try {
+      const provider = new OpenAIVisionProvider();
+      return { describeImage: provider.describeImage.bind(provider) };
+    } catch {
+      return null;
+    }
+  })();
+
   // The embedding stack is optional for the same reason the memory stack is:
   // without OPENAI_API_KEY the container leaves `embeddingProvider` null and
   // the app still starts. Ingestion degrades to storing text and chunks;
@@ -490,6 +508,103 @@ export function createKnowledgeRouter(
         .catch(() => undefined);
 
       failFromError(res, error, "Failed to ingest document");
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // POST /images — V3 image understanding
+  //
+  // An image cannot be chunked or embedded directly, so it is converted to TEXT
+  // by a vision model and then ingested through the SAME pipeline as every other
+  // document. From that point on it is an ordinary knowledge document: it
+  // chunks, embeds, retrieves and cites like a PDF, and the assistant needs no
+  // special case to answer questions about it.
+  //
+  // The image bytes are never stored. What is persisted is the description.
+  // -------------------------------------------------------------------------
+  router.post("/images", requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+    const userId = identify(req, res);
+    if (!userId) return;
+
+    if (!vision) {
+      return fail(
+        res,
+        503,
+        "VISION_UNAVAILABLE",
+        "Image understanding is not configured on this server (no OpenAI key)."
+      );
+    }
+
+    const body = asRecord(req.body);
+    if (!body) return fail(res, 400, "INVALID_REQUEST", "A JSON request body is required");
+
+    const fileName = body.fileName;
+    if (typeof fileName !== "string" || fileName.trim().length === 0) {
+      return fail(res, 400, "INVALID_REQUEST", "fileName is required");
+    }
+
+    const mimeType = typeof body.mimeType === "string" ? body.mimeType : "";
+    if (!isSupportedImage(mimeType)) {
+      return fail(
+        res,
+        415,
+        "DOCUMENT_UNSUPPORTED_FORMAT",
+        `Unsupported image type. Supported: ${SUPPORTED_IMAGE_MIME_TYPES.join(", ")}`
+      );
+    }
+
+    if (typeof body.content !== "string" || body.content.length === 0) {
+      return fail(res, 400, "INVALID_REQUEST", "content (base64) is required");
+    }
+
+    const question = typeof body.question === "string" ? body.question.slice(0, 500) : undefined;
+
+    try {
+      const described = await vision.describeImage(body.content, mimeType, question);
+
+      // Ingested as a .txt document: the extractor already handles plain text,
+      // so no new format needs to be taught to the pipeline.
+      const result = await ingestion.ingest(userId, {
+        fileName: `${fileName.trim().replace(/\.[^.]+$/, "")}.txt`,
+        content: Buffer.from(described.text, "utf8"),
+        mimeType: "text/plain",
+        source: `image:${fileName.trim()}`,
+        title: fileName.trim(),
+      });
+
+      await container.auditLogger
+        .log({
+          userId,
+          action: "knowledge.image.ingest",
+          result: "success",
+          metadata: {
+            documentId: result.document.id,
+            visionModel: described.model,
+            chunkCount: result.chunkCount,
+          },
+        })
+        .catch(() => undefined);
+
+      res.status(201).json({
+        success: true,
+        data: {
+          document: toPublicDocument(result.document),
+          description: described.text,
+          chunkCount: result.chunkCount,
+          searchable: result.embedded && result.embeddedCount > 0,
+        },
+        timestamp: now(),
+      });
+    } catch (error) {
+      await container.auditLogger
+        .log({
+          userId,
+          action: "knowledge.image.ingest",
+          result: "failure",
+          metadata: { code: error instanceof JarvisError ? error.code : "INTERNAL_ERROR" },
+        })
+        .catch(() => undefined);
+      failFromError(res, error, "Failed to analyse the image");
     }
   });
 

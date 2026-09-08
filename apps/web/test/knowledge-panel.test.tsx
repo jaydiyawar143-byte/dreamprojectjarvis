@@ -59,20 +59,19 @@ const DOC = (over: Partial<api.KnowledgeDocument> = {}): api.KnowledgeDocument =
   ...over,
 });
 
+/** UI V2 — session restored via the refresh cookie, not stored tokens. */
 function seedSession() {
-  sessionStorage.setItem("jarvis_access", "t");
-  sessionStorage.setItem("jarvis_refresh", "r");
-  global.fetch = vi.fn(() =>
-    Promise.resolve({
+  global.fetch = vi.fn((input: RequestInfo | URL) => {
+    const url = String(input);
+    const body = url.includes("/auth/refresh")
+      ? { accessToken: "t", expiresIn: 900 }
+      : { id: "u1", email: "a@b.c", name: "Op", role: "member", createdAt: ts(), updatedAt: ts() };
+    return Promise.resolve({
       status: 200,
       ok: true,
-      json: () => Promise.resolve({
-        success: true,
-        data: { id: "u1", email: "a@b.c", name: "Op", role: "member", createdAt: ts(), updatedAt: ts() },
-        timestamp: ts(),
-      }),
-    } as Response)
-  ) as unknown as typeof fetch;
+      json: () => Promise.resolve({ success: true, data: body, timestamp: ts() }),
+    } as Response);
+  }) as unknown as typeof fetch;
 }
 
 beforeEach(() => {

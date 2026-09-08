@@ -96,6 +96,27 @@ export function createApprovalsRouter(container: Container): Router {
   // -------------------------------------------------------------------------
   // GET / — paginated list of the authenticated user's own approvals
   // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
+  // UI V2 - the tool's declared risk, surfaced to the approval UI.
+  //
+  // The registry has always carried this; it simply was not returned, so the
+  // approval screen could only say "this needs approval" without saying how much
+  // is at stake. A budget change and a campaign pause are not the same decision,
+  // and the person making it should be able to see which one it is.
+  //
+  // Read from the SAME registry the executor consults, so it cannot drift from
+  // the risk that actually gates execution. An unknown tool reports nothing
+  // rather than a guessed default - an invented "LOW_IMPACT" would be worse than
+  // a blank, because it would be believed.
+  // ---------------------------------------------------------------------------
+  function riskOf(toolId: string): string | undefined {
+    try {
+      return container.toolRegistry.get(toolId)?.risk;
+    } catch {
+      return undefined;
+    }
+  }
+
   router.get("/", requireAuth, async (req: AuthenticatedRequest, res: Response) => {
     const identity = auth(req, res);
     if (!identity) return;
@@ -120,6 +141,7 @@ export function createApprovalsRouter(container: Container): Router {
         data: items.map((a) => ({
           ...a,
           ...buildApprovalSummary(a.toolId, a.params),
+          risk: riskOf(a.toolId),
         })),
         pagination: {
           page,
@@ -181,6 +203,7 @@ export function createApprovalsRouter(container: Container): Router {
         executionId,
         executionStatus,
         ...buildApprovalSummary(approval.toolId, approval.params),
+        risk: riskOf(approval.toolId),
       },
       timestamp: new Date().toISOString(),
     });

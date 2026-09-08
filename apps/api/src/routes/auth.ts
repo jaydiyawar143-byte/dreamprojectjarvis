@@ -13,6 +13,12 @@ import {
   clientKey,
   type IpRateLimitRule,
 } from "../services/ip-rate-limiter.js";
+import {
+  clearRefreshCookie,
+  readRefreshToken,
+  setRefreshCookie,
+  wantsCookieAuth,
+} from "../lib/auth-cookies.js";
 
 export function createAuthRouter(
   authService: AuthManager,
@@ -53,6 +59,41 @@ export function createAuthRouter(
     return true;
   }
 
+  // ---------------------------------------------------------------------------
+  // UI V2 — one place that decides how the refresh token leaves the process.
+  //
+  // A browser (X-Auth-Mode: cookie) gets it as an HttpOnly cookie and NOT in
+  // the body, so page scripts can never read it. Every other client keeps the
+  // original body contract. Returning both would defeat the point.
+  // ---------------------------------------------------------------------------
+  function issueSession<T extends { tokens: { refreshToken: string } }>(
+    req: Request,
+    res: Response,
+    result: T,
+    status: number
+  ): void {
+    if (!wantsCookieAuth(req)) {
+      res.status(status).json({
+        success: true,
+        data: result,
+        timestamp: new Date().toISOString(),
+      });
+      return;
+    }
+
+    // Absent or falsey "rememberMe" means a session cookie: gone when the
+    // browser closes. Present and true pins it to the refresh token's lifetime.
+    const remember = (req.body as { rememberMe?: unknown } | undefined)?.rememberMe === true;
+    setRefreshCookie(res, result.tokens.refreshToken, { remember });
+
+    const { refreshToken: _omitted, ...safeTokens } = result.tokens;
+    res.status(status).json({
+      success: true,
+      data: { ...result, tokens: safeTokens },
+      timestamp: new Date().toISOString(),
+    });
+  }
+
   router.post("/register", async (req: Request, res: Response) => {
     if (throttled(req, res, "register", IP_RATE_LIMITS.register)) return;
 
@@ -76,11 +117,7 @@ export function createAuthRouter(
         ipAddress: req.ip,
       });
 
-      res.status(201).json({
-        success: true,
-        data: result,
-        timestamp: new Date().toISOString(),
-      });
+      issueSession(req, res, result, 201);
     } catch (error) {
       const statusCode = (error as { statusCode?: number }).statusCode ?? 500;
       const code = (error as { code?: string }).code ?? "INTERNAL_ERROR";
@@ -116,11 +153,7 @@ export function createAuthRouter(
         ipAddress: req.ip,
       });
 
-      res.status(200).json({
-        success: true,
-        data: result,
-        timestamp: new Date().toISOString(),
-      });
+      issueSession(req, res, result, 200);
     } catch (error) {
       const statusCode = (error as { statusCode?: number }).statusCode ?? 500;
       const code = (error as { code?: string }).code ?? "INTERNAL_ERROR";
@@ -137,28 +170,77 @@ export function createAuthRouter(
     if (throttled(req, res, "refresh", IP_RATE_LIMITS.refresh)) return;
 
     try {
-      const parsed = RefreshInputSchema.safeParse(req.body);
-      if (!parsed.success) {
-        res.status(400).json({
+      // Cookie first: a browser session carries no token in the body, and a
+      // stale body value must never take precedence over the live cookie.
+      const presented = readRefreshToken(req, (req.body as { refreshToken?: unknown })?.refreshToken);
+      if (!presented) {
+        // A browser asking "do I have a session?" on a cold load presents no
+        // cookie and no body. That is not a malformed request — it is an
+        // unauthenticated one, and answering 400 made every visit to the login
+        // page log a console error for a completely normal condition.
+        //
+        // Body-mode callers that genuinely sent a malformed payload still get
+        // the field-level detail they had before.
+        const malformed = req.body != null && Object.keys(req.body as object).length > 0;
+        if (malformed) {
+          const parsed = RefreshInputSchema.safeParse(req.body);
+          if (!parsed.success && (req.body as { refreshToken?: unknown }).refreshToken !== undefined) {
+            res.status(400).json({
+              success: false,
+              error: {
+                code: "INVALID_REQUEST",
+                message: "Invalid refresh input",
+                details: parsed.error.flatten().fieldErrors,
+              },
+              timestamp: new Date().toISOString(),
+            });
+            return;
+          }
+        }
+
+        res.status(401).json({
           success: false,
           error: {
-            code: "INVALID_REQUEST",
-            message: "Invalid refresh input",
-            details: parsed.error.flatten().fieldErrors,
+            code: "AUTHENTICATION_REQUIRED",
+            message: "No session to refresh",
           },
           timestamp: new Date().toISOString(),
         });
         return;
       }
 
-      const tokens = await authService.refresh(parsed.data.refreshToken, {
+      const tokens = await authService.refresh(presented, {
         userAgent: req.headers["user-agent"],
         ipAddress: req.ip,
       });
 
+      // NOTE: this route returns the token pair at the TOP level of `data`,
+      // unlike login/register which nest it under `tokens`. That shape is part
+      // of the existing contract, so it is preserved rather than normalised.
+      if (!wantsCookieAuth(req)) {
+        res.status(200).json({
+          success: true,
+          data: tokens,
+          timestamp: new Date().toISOString(),
+        });
+        return;
+      }
+
+      // Refresh ROTATES the token, so the cookie must be replaced or the next
+      // refresh would present a revoked one.
+      //
+      // The client re-states `rememberMe` on every refresh because the server
+      // cannot observe it: an HttpOnly cookie does not report back whether the
+      // browser is holding it as a session or a persistent one. Defaulting to
+      // a session cookie means a caller that says nothing can never silently
+      // UPGRADE a deliberately-temporary session into a week-long one.
+      const remember = (req.body as { rememberMe?: unknown } | undefined)?.rememberMe === true;
+      setRefreshCookie(res, tokens.refreshToken, { remember });
+
+      const { refreshToken: _omitted, ...safeTokens } = tokens;
       res.status(200).json({
         success: true,
-        data: tokens,
+        data: safeTokens,
         timestamp: new Date().toISOString(),
       });
     } catch (error) {
@@ -175,8 +257,8 @@ export function createAuthRouter(
 
   router.post("/logout", async (req: Request, res: Response) => {
     try {
-      const { refreshToken } = req.body;
-      if (!refreshToken) {
+      const presented = readRefreshToken(req, (req.body as { refreshToken?: unknown })?.refreshToken);
+      if (!presented) {
         res.status(400).json({
           success: false,
           error: {
@@ -188,7 +270,12 @@ export function createAuthRouter(
         return;
       }
 
-      await authService.logout(refreshToken);
+      await authService.logout(presented);
+
+      // Always clear, regardless of transport. Revoking the token server-side
+      // while leaving the cookie in the browser would make every later request
+      // present a credential that can only fail.
+      clearRefreshCookie(res);
 
       res.status(200).json({
         success: true,
@@ -196,6 +283,9 @@ export function createAuthRouter(
         timestamp: new Date().toISOString(),
       });
     } catch (error) {
+      // The session is being torn down; the cookie should not outlive the
+      // attempt even if revocation failed.
+      clearRefreshCookie(res);
       res.status(500).json({
         success: false,
         error: {

@@ -40,3 +40,16 @@ export {
 } from "./repositories/google-connection-repository.js";
 export { PrismaWhatsAppRepository } from "./repositories/whatsapp-repository.js";
 export { PrismaN8nRepository } from "./repositories/n8n-repository.js";
+
+// UI V2 — per-user third-party credentials (encrypted envelopes at rest).
+export { PrismaCredentialRepository, type StoredCredential } from "./repositories/credential-repository.js";
+
+// V3 — Command Center: tasks/reminders and per-user dashboard preferences.
+export {
+  PrismaTaskRepository,
+  type TaskRecord,
+  type TaskPriority,
+  type CreateTaskInput,
+  type UpdateTaskInput,
+} from "./repositories/task-repository.js";
+export { PrismaPreferenceRepository } from "./repositories/preference-repository.js";
