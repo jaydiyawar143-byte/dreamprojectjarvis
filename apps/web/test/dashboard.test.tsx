@@ -31,6 +31,25 @@ vi.mock("../src/lib/api", async () => {
     getMetaOverview: vi.fn(),
     getMetaTimeseries: vi.fn(),
     getMetaCampaigns: vi.fn(),
+    // UI V2 — the command centre reads pending approvals directly.
+    listApprovals: vi.fn(),
+    approveApproval: vi.fn(),
+    rejectApproval: vi.fn(),
+    // V3 — the dashboard now renders the live widget grid, so every provider
+    // the grid touches must be stubbed here or a widget throws and takes the
+    // whole tree (including the approval panel) down with it.
+    getCapabilities: vi.fn(),
+    getPreferences: vi.fn(),
+    savePreferences: vi.fn(),
+    listTasks: vi.fn(),
+    createTask: vi.fn(),
+    updateTask: vi.fn(),
+    deleteTask: vi.fn(),
+    getWeather: vi.fn(),
+    getCrypto: vi.fn(),
+    getIndices: vi.fn(),
+    getRoute: vi.fn(),
+    searchPlaces: vi.fn(),
   };
 });
 
@@ -107,22 +126,25 @@ function seedHappyApi() {
   });
 }
 
-/** A resolved, authenticated session for components that read useAuth(). */
+/**
+ * A resolved, authenticated session for components that read useAuth().
+ *
+ * UI V2 — the session is an HttpOnly refresh cookie, not stored tokens, so it
+ * is seeded by making the refresh exchange succeed. Nothing goes into web
+ * storage because the app no longer puts anything there.
+ */
 function seedSession() {
-  sessionStorage.setItem("jarvis_access", "token-abc");
-  sessionStorage.setItem("jarvis_refresh", "token-ref");
-  global.fetch = vi.fn(() =>
-    Promise.resolve({
+  global.fetch = vi.fn((input: RequestInfo | URL) => {
+    const url = String(input);
+    const body = url.includes("/auth/refresh")
+      ? { accessToken: "token-abc", expiresIn: 900 }
+      : { id: "u1", email: "op@jarvis.local", name: "Operator", role: "member", createdAt: ts(), updatedAt: ts() };
+    return Promise.resolve({
       status: 200,
       ok: true,
-      json: () =>
-        Promise.resolve({
-          success: true,
-          data: { id: "u1", email: "op@jarvis.local", name: "Operator", role: "member", createdAt: ts(), updatedAt: ts() },
-          timestamp: ts(),
-        }),
-    } as Response)
-  ) as unknown as typeof fetch;
+      json: () => Promise.resolve({ success: true, data: body, timestamp: ts() }),
+    } as Response);
+  }) as unknown as typeof fetch;
 }
 
 beforeEach(() => {
@@ -132,94 +154,155 @@ beforeEach(() => {
   sessionStorage.clear();
   seedHappyApi();
   seedSession();
+  mockedApi.listApprovals.mockResolvedValue({
+    success: true,
+    data: [],
+    pagination: { page: 1, limit: 3, total: 0, totalPages: 1 },
+    timestamp: ts(),
+  } as never);
+
+  // V3 widget grid defaults: everything resolves to an empty-but-valid state so
+  // these tests stay about the dashboard, not about the widgets.
+  const unavailable = {
+    freshness: "UNAVAILABLE" as const,
+    observedAt: ts(),
+    ageSeconds: 0,
+    source: "Test",
+    reason: "Not configured in this test",
+  };
+  mockedApi.getCapabilities.mockResolvedValue({
+    success: true,
+    data: { weather: true, crypto: true, indices: false, geo: true, system: true, tasks: true },
+    timestamp: ts(),
+  } as never);
+  mockedApi.getPreferences.mockResolvedValue({
+    success: true, data: { preferences: {} }, timestamp: ts(),
+  } as never);
+  mockedApi.savePreferences.mockResolvedValue({
+    success: true, data: { preferences: {} }, timestamp: ts(),
+  } as never);
+  mockedApi.listTasks.mockResolvedValue({ success: true, data: { tasks: [] }, timestamp: ts() } as never);
+  mockedApi.getWeather.mockResolvedValue({ success: true, data: { value: null, meta: unavailable }, timestamp: ts() } as never);
+  mockedApi.getCrypto.mockResolvedValue({ success: true, data: { value: [], meta: unavailable }, timestamp: ts() } as never);
+  mockedApi.getIndices.mockResolvedValue({ success: true, data: { value: null, meta: unavailable }, timestamp: ts() } as never);
 });
 
 // ---------------------------------------------------------------------------
-// Route rendering
+// Route rendering — the dashboard IS the command centre
+//
+// The queue counts, Meta KPIs and charts that used to be asserted here moved to
+// the pages that own them. Their behaviour is still covered, in meta-panel
+// tests: "renders KPI cards from real totals", "writes an em dash for a metric
+// Meta did not report", "says the deployment has no account rather than showing
+// zeros", "offers a retry when the metric endpoints all fail". Nothing was
+// dropped — the duplicates were.
 // ---------------------------------------------------------------------------
 
 describe("dashboard route", () => {
-  it("renders the queue counts and the Meta KPIs from the API", async () => {
+  it("is the command centre and nothing else", async () => {
     render(<DashboardPage />);
 
-    expect(screen.getByTestId("page-title").textContent).toBe("Dashboard");
-    expect(screen.getByTestId("page-container")).toBeInTheDocument();
+    expect(screen.getByTestId("command-center")).toBeInTheDocument();
+    expect(screen.getByTestId("command-input")).toBeInTheDocument();
+    expect(screen.getByText("How can I help?")).toBeInTheDocument();
 
-    await waitFor(() => {
-      const values = screen.getAllByTestId("stat-value").map((n) => n.textContent);
-      // Four queue counts, then four Meta KPIs.
-      expect(values.slice(0, 4)).toEqual(["4", "7", "6", "2"]);
-      expect(values.slice(4)).toEqual(["1.2k", "98.0k", "4.3k", "2.50×"]);
-    });
+    // The BI surface must NOT be here. This is the assertion that keeps the
+    // dashboard from silently growing back into a card wall.
+    expect(screen.queryAllByTestId("stat-value")).toHaveLength(0);
+    expect(screen.queryByTestId("metric-select")).toBeNull();
+    expect(screen.queryByText("Pending approvals")).toBeNull();
   });
 
-  it("shows loading placeholders before the data arrives", async () => {
-    let release: (v: unknown) => void = () => {};
-    mockedApi.getDashboardSummary.mockReturnValue(new Promise((r) => { release = r; }) as never);
-
+  it("reports readiness rather than inventing activity", async () => {
     render(<DashboardPage />);
-    expect(screen.getAllByTestId("stat-loading").length).toBeGreaterThan(0);
-
-    release({ success: true, data: { pendingApprovals: 0, conversations: 0, knowledgeDocuments: 0, knowledgeProcessed: 0, openOpportunities: 0, metaConfigured: true }, timestamp: ts() });
-    await waitFor(() => expect(screen.queryByTestId("stat-loading")).toBeNull());
+    await waitFor(() =>
+      expect(screen.getByTestId("command-readout").textContent).toContain(
+        "Ask a question"
+      )
+    );
   });
 
-  it("surfaces a retryable error when the summary fails", async () => {
-    mockedApi.getDashboardSummary.mockResolvedValue({
-      success: false,
-      error: { code: "NETWORK_ERROR", message: "Network request failed" },
-      timestamp: ts(),
-    } as never);
-
+  it("fetches its own pending approvals rather than guessing from the chat", async () => {
+    // An approval can be raised by a background worker or in another tab, so
+    // the panel is driven by the approvals endpoint, not by conversation state.
     render(<DashboardPage />);
-
-    await waitFor(() => expect(screen.getByTestId("error-state")).toBeInTheDocument());
-    expect(screen.getByTestId("error-message").textContent).toBe("Network request failed");
-
-    seedHappyApi();
-    fireEvent.click(screen.getByTestId("error-retry"));
-    await waitFor(() => expect(screen.queryByTestId("error-state")).toBeNull());
+    await waitFor(() => expect(mockedApi.listApprovals).toHaveBeenCalled());
+    expect(mockedApi.listApprovals).toHaveBeenCalledWith("pending", 1, 3);
   });
 
-  it("writes an em dash, never a zero, when Meta reports no figures", async () => {
-    mockedApi.getMetaOverview.mockResolvedValue({
+  it("shows no approval panel when nothing is waiting", async () => {
+    render(<DashboardPage />);
+    await waitFor(() => expect(mockedApi.listApprovals).toHaveBeenCalled());
+    expect(screen.queryByTestId("command-approvals")).toBeNull();
+  });
+
+  it("surfaces a waiting approval, and says voice cannot decide it", async () => {
+    mockedApi.listApprovals.mockResolvedValue({
       success: true,
-      data: { accountId: "act_1", dateRange: { start: "a", end: "b" }, totals: NULL_TOTALS, rowCount: 0 },
-      timestamp: ts(),
-    } as never);
-    mockedApi.getMetaTimeseries.mockResolvedValue({
-      success: true,
-      data: { accountId: "act_1", dateRange: { start: "a", end: "b" }, series: [], pointCount: 0 },
-      timestamp: ts(),
-    } as never);
-
-    render(<DashboardPage />);
-
-    await waitFor(() => {
-      const values = screen.getAllByTestId("stat-value").map((n) => n.textContent);
-      expect(values.slice(4)).toEqual(["—", "—", "—", "—"]);
-    });
-    expect(screen.queryByText("0")).toBeNull();
-  });
-
-  it("says the account is not connected rather than showing empty charts", async () => {
-    mockedApi.getDashboardSummary.mockResolvedValue({
-      success: true,
-      data: { pendingApprovals: 0, conversations: 0, knowledgeDocuments: 0, knowledgeProcessed: 0, openOpportunities: 0, metaConfigured: false },
-      timestamp: ts(),
-    } as never);
-    mockedApi.getMetaOverview.mockResolvedValue({
-      success: false,
-      error: { code: "ACCOUNT_NOT_CONFIGURED", message: "Ad account not configured on this server" },
+      data: [
+        {
+          approvalId: "ap-1",
+          toolId: "meta.campaign.budget",
+          status: "pending",
+          createdAt: ts(),
+          expiresAt: new Date(Date.now() + 600_000).toISOString(),
+          params: {},
+          actionSummary: "Increase campaign budget",
+          detailLines: [],
+          risk: "FINANCIAL",
+        },
+      ],
+      pagination: { page: 1, limit: 3, total: 1, totalPages: 1 },
       timestamp: ts(),
     } as never);
 
     render(<DashboardPage />);
 
     await waitFor(() =>
-      expect(screen.getByText("No ad account connected")).toBeInTheDocument()
+      expect(screen.getByTestId("command-approvals")).toBeInTheDocument()
     );
-    expect(screen.queryByTestId("metric-select")).toBeNull();
+    expect(screen.getByText("Action requires approval")).toBeInTheDocument();
+    expect(screen.getByText(/Voice can never approve an action/i)).toBeInTheDocument();
+
+    // The Orb must report the blocked state rather than "ready".
+    await waitFor(() =>
+      expect(screen.getByTestId("command-readout").textContent).toContain(
+        "waiting for your decision"
+      )
+    );
+  });
+
+  it("keeps a stale approval on screen when the refresh fails", async () => {
+    // Blanking the panel on a transient network error would hide a decision
+    // that is still genuinely waiting.
+    mockedApi.listApprovals.mockResolvedValueOnce({
+      success: true,
+      data: [
+        {
+          approvalId: "ap-2",
+          toolId: "meta.campaign.pause",
+          status: "pending",
+          createdAt: ts(),
+          expiresAt: new Date(Date.now() + 600_000).toISOString(),
+          params: {},
+          actionSummary: "Pause campaign",
+          detailLines: [],
+        },
+      ],
+      pagination: { page: 1, limit: 3, total: 1, totalPages: 1 },
+      timestamp: ts(),
+    } as never);
+    mockedApi.listApprovals.mockResolvedValue({
+      success: false,
+      error: { code: "NETWORK_ERROR", message: "Network request failed" },
+      timestamp: ts(),
+    } as never);
+
+    render(<DashboardPage />);
+    await waitFor(() =>
+      expect(screen.getByTestId("command-approvals")).toBeInTheDocument()
+    );
+    expect(screen.getByTestId("command-approvals")).toBeInTheDocument();
   });
 });
 
@@ -301,29 +384,50 @@ describe("navigation model", () => {
   });
 
   it("groups destinations by what they are for", () => {
-    // UI V2 added Capabilities and System. The guarantee is unchanged: groups
-    // are named by what the destinations are FOR, and each holds only items
-    // that belong to it.
+    // UI V2 regrouped these around what JARVIS actually does: what you drive
+    // (Command), what it knows (Intelligence), what it can do (Capabilities),
+    // what needs a human (Control), and the machine itself (System). The
+    // guarantee is unchanged — groups are named by what the destinations are
+    // FOR, and each holds only items that belong to it.
     expect(NAV_GROUPS.map((g) => g.title)).toEqual([
-      "Overview",
-      "Operate",
+      "Command",
       "Intelligence",
       "Capabilities",
+      "Control",
       "System",
     ]);
 
+    const command = NAV_GROUPS.find((g) => g.title === "Command")!;
+    expect(command.items.map((i) => i.label)).toEqual(["Dashboard", "Assistant"]);
+
     const intelligence = NAV_GROUPS.find((g) => g.title === "Intelligence")!;
-    expect(intelligence.items.map((i) => i.label)).toEqual(["Knowledge Base", "Meta Ads"]);
+    expect(intelligence.items.map((i) => i.label)).toEqual([
+      "Opportunities",
+      "Knowledge Base",
+      "Meta Ads",
+    ]);
 
     const capabilities = NAV_GROUPS.find((g) => g.title === "Capabilities")!;
     expect(capabilities.items.map((i) => i.label)).toEqual([
       "Agents",
       "Automations",
       "Integrations",
+      "Browser",
     ]);
 
+    // Approvals and Activity are the two places a human is in the loop, so
+    // they are grouped together rather than filed under "System".
+    const control = NAV_GROUPS.find((g) => g.title === "Control")!;
+    expect(control.items.map((i) => i.label)).toEqual(["Approvals", "Activity"]);
+
     const system = NAV_GROUPS.find((g) => g.title === "System")!;
-    expect(system.items.map((i) => i.label)).toEqual(["Activity", "Health", "Settings"]);
+    expect(system.items.map((i) => i.label)).toEqual(["Health", "Settings"]);
+
+    // Browser is now present because /browser now EXISTS. The rule is unchanged
+    // — the nav links only to pages that exist — so this asserts the page is
+    // really behind it rather than that the label is merely absent.
+    const browser = NAV_ITEMS.find((i) => i.href === "/browser");
+    expect(browser?.available).toBe(true);
   });
 
   it("every UI V2 destination has a page behind it", () => {

@@ -1,0 +1,242 @@
+"use client";
+
+// ---------------------------------------------------------------------------
+// V3 — tasks and reminders.
+//
+// Backed by the database, so a reminder survives a closed tab — a reminder that
+// lives only in a browser is not a reminder. It is also why JARVIS can create
+// one from a spoken request and have it still be there tomorrow.
+//
+// Grouped OVERDUE / TODAY / UPCOMING because that is the decision the reader is
+// making. Bucketing is done from the due date rather than a stored flag, so it
+// stays correct as time passes without anything having to run.
+// ---------------------------------------------------------------------------
+
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { CheckCircle2, Circle, ListTodo, Plus, X } from "lucide-react";
+import { createTask, deleteTask, listTasks, updateTask, type TaskRecord } from "@/lib/api";
+import { WidgetShell } from "./widget-shell";
+
+type Bucket = "OVERDUE" | "TODAY" | "UPCOMING" | "SOMEDAY";
+
+/** Which group a task belongs to right now. Pure, so it is testable. */
+export function bucketFor(task: TaskRecord, now = new Date()): Bucket {
+  if (!task.dueAt) return "SOMEDAY";
+  const due = new Date(task.dueAt);
+  if (Number.isNaN(due.getTime())) return "SOMEDAY";
+
+  // End of the local day, so "today" means the calendar day the reader is in
+  // rather than the next 24 hours.
+  const endOfToday = new Date(now);
+  endOfToday.setHours(23, 59, 59, 999);
+
+  if (due < now) return "OVERDUE";
+  if (due <= endOfToday) return "TODAY";
+  return "UPCOMING";
+}
+
+const BUCKET_LABEL: Record<Bucket, string> = {
+  OVERDUE: "Overdue",
+  TODAY: "Today",
+  UPCOMING: "Upcoming",
+  SOMEDAY: "No date",
+};
+
+const BUCKET_TONE: Record<Bucket, string> = {
+  OVERDUE: "text-red-300/90",
+  TODAY: "text-sys-cyan-soft",
+  UPCOMING: "text-sys-dim",
+  SOMEDAY: "text-sys-dim",
+};
+
+function dueLabel(task: TaskRecord): string {
+  if (!task.dueAt) return "";
+  const due = new Date(task.dueAt);
+  if (Number.isNaN(due.getTime())) return "";
+  const today = new Date();
+  const sameDay = due.toDateString() === today.toDateString();
+  return sameDay
+    ? due.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })
+    : due.toLocaleDateString(undefined, { day: "numeric", month: "short" });
+}
+
+export function TasksWidget() {
+  const [tasks, setTasks] = useState<TaskRecord[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [adding, setAdding] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [draftDue, setDraftDue] = useState("");
+
+  const load = useCallback(async () => {
+    setError(null);
+    const res = await listTasks(false);
+    if (res.success && res.data) setTasks(res.data.tasks);
+    else setError(res.error?.message ?? "Could not load tasks.");
+    setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const grouped = useMemo(() => {
+    const now = new Date();
+    const groups: Record<Bucket, TaskRecord[]> = { OVERDUE: [], TODAY: [], UPCOMING: [], SOMEDAY: [] };
+    for (const task of tasks) groups[bucketFor(task, now)].push(task);
+    return groups;
+  }, [tasks]);
+
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    const title = draft.trim();
+    if (!title) return;
+
+    setDraft("");
+    setDraftDue("");
+    setAdding(false);
+
+    const res = await createTask({
+      title,
+      // datetime-local has no timezone; the Date constructor reads it as local,
+      // and toISOString then sends a correct absolute instant.
+      ...(draftDue ? { dueAt: new Date(draftDue).toISOString() } : {}),
+    });
+    if (res.success && res.data) setTasks((prev) => [...prev, res.data!.task]);
+    else setError(res.error?.message ?? "Could not create the task.");
+  };
+
+  const toggle = async (task: TaskRecord) => {
+    // Optimistic: completing a task should feel instant. A failure restores it
+    // by reloading rather than by guessing what the server now holds.
+    setTasks((prev) => prev.filter((t) => t.id !== task.id));
+    const res = await updateTask(task.id, { completed: true });
+    if (!res.success) void load();
+  };
+
+  const remove = async (task: TaskRecord) => {
+    setTasks((prev) => prev.filter((t) => t.id !== task.id));
+    const res = await deleteTask(task.id);
+    if (!res.success) void load();
+  };
+
+  const order: Bucket[] = ["OVERDUE", "TODAY", "UPCOMING", "SOMEDAY"];
+  const hasAny = tasks.length > 0;
+
+  return (
+    <WidgetShell
+      testId="widget-tasks"
+      title="Tasks"
+      icon={<ListTodo size={13} />}
+      loading={loading}
+      error={error}
+      onRetry={() => void load()}
+      action={
+        <button
+          type="button"
+          data-testid="task-add-toggle"
+          onClick={() => setAdding((v) => !v)}
+          aria-label={adding ? "Cancel new task" : "Add a task"}
+          aria-expanded={adding}
+          className="sys-focus rounded border border-sys-line p-0.5 text-sys-dim transition-colors hover:text-white"
+        >
+          {adding ? <X size={11} aria-hidden="true" /> : <Plus size={11} aria-hidden="true" />}
+        </button>
+      }
+    >
+      {adding && (
+        <form onSubmit={submit} className="mb-2.5 space-y-1.5">
+          <label htmlFor="task-title" className="sr-only">
+            Task title
+          </label>
+          <input
+            id="task-title"
+            data-testid="task-title-input"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            placeholder="What needs doing?"
+            autoFocus
+            className="sys-focus w-full rounded-md border border-sys-line bg-black/30 px-2 py-1.5 text-xs text-white placeholder:text-sys-dim/60"
+          />
+          <div className="flex gap-1.5">
+            <label htmlFor="task-due" className="sr-only">
+              Due date and time
+            </label>
+            <input
+              id="task-due"
+              data-testid="task-due-input"
+              type="datetime-local"
+              value={draftDue}
+              onChange={(e) => setDraftDue(e.target.value)}
+              className="sys-focus min-w-0 flex-1 rounded-md border border-sys-line bg-black/30 px-2 py-1 text-[0.62rem] text-sys-text/85"
+            />
+            <button
+              type="submit"
+              disabled={!draft.trim()}
+              className="sys-focus rounded-md border border-sys-cyan/40 bg-sys-cyan/10 px-2.5 py-1 font-mono text-[0.5rem] uppercase tracking-hud text-sys-cyan transition-colors enabled:hover:bg-sys-cyan/20 disabled:opacity-40"
+            >
+              Add
+            </button>
+          </div>
+        </form>
+      )}
+
+      {!hasAny && !adding && (
+        <p className="text-[0.68rem] text-sys-dim">
+          Nothing due. Ask JARVIS to remind you, or add a task above.
+        </p>
+      )}
+
+      <div className="space-y-2">
+        {order.map((bucket) => {
+          const items = grouped[bucket];
+          if (items.length === 0) return null;
+          return (
+            <div key={bucket} data-testid={`task-bucket-${bucket}`}>
+              <p className={`mb-1 font-mono text-[0.45rem] uppercase tracking-hud ${BUCKET_TONE[bucket]}`}>
+                {BUCKET_LABEL[bucket]} · {items.length}
+              </p>
+              <ul className="space-y-1">
+                {items.slice(0, 5).map((task) => (
+                  <li key={task.id} className="group flex items-start gap-1.5">
+                    <button
+                      type="button"
+                      data-testid="task-complete"
+                      onClick={() => void toggle(task)}
+                      aria-label={`Mark "${task.title}" complete`}
+                      className="sys-focus mt-0.5 shrink-0 rounded text-sys-dim transition-colors hover:text-emerald-300"
+                    >
+                      {task.completedAt ? (
+                        <CheckCircle2 size={12} aria-hidden="true" />
+                      ) : (
+                        <Circle size={12} aria-hidden="true" />
+                      )}
+                    </button>
+                    <span className="min-w-0 flex-1 truncate text-[0.68rem] text-sys-text/90">
+                      {task.title}
+                    </span>
+                    {task.dueAt && (
+                      <span className="shrink-0 font-mono text-[0.5rem] text-sys-dim">
+                        {dueLabel(task)}
+                      </span>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => void remove(task)}
+                      aria-label={`Delete "${task.title}"`}
+                      // Hidden until hover OR focus: keyboard users must still
+                      // be able to reach it.
+                      className="sys-focus shrink-0 rounded text-transparent transition-colors group-hover:text-sys-dim focus:text-sys-dim hover:!text-red-300"
+                    >
+                      <X size={10} aria-hidden="true" />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          );
+        })}
+      </div>
+    </WidgetShell>
+  );
+}

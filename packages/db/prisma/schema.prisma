@@ -90,6 +90,7 @@ model User {
   whatsappMessages  WhatsAppMessage[]
   n8nWorkflows      N8nWorkflow[]
   n8nExecutions     N8nExecution[]
+  tasks             Task[]
 }
 
 model RefreshToken {
@@ -748,3 +749,40 @@ model OutcomeRevision {
   @@map("OutcomeRevision")
 }
 
+
+// ---------------------------------------------------------------------------
+// V3 — Command Center tasks and reminders.
+//
+// Persisted server-side because a reminder that lives in a browser tab is not a
+// reminder. This is also what lets JARVIS create one from a spoken request and
+// have it still be there tomorrow.
+//
+// Scoped by userId with a compound index on (userId, dueAt): every query this
+// feature makes is "my tasks, ordered by when they are due", and that index is
+// what keeps it a range scan rather than a full table scan per dashboard load.
+//
+// `completedAt` is a timestamp rather than a boolean so "when did I finish
+// this" is answerable, and so completion is idempotent.
+// ---------------------------------------------------------------------------
+model Task {
+  id          String    @id @default(cuid())
+  userId      String    @map("user_id")
+  title       String
+  description String?
+  /// Null means "someday": a task with no deadline, which is never overdue.
+  dueAt       DateTime? @map("due_at")
+  priority    String    @default("NORMAL")
+  completedAt DateTime? @map("completed_at")
+  /// Set once a reminder has been surfaced, so it is not raised twice.
+  remindedAt  DateTime? @map("reminded_at")
+  /// Which agent or flow created it, for the audit trail. Null when manual.
+  createdBy   String?   @map("created_by")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, dueAt])
+  @@index([userId, completedAt])
+  @@map("Task")
+}

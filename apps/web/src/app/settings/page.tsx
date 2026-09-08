@@ -14,6 +14,7 @@
 // where an operator goes looking for a way to turn it off. There isn't one.
 // ---------------------------------------------------------------------------
 
+import Link from "next/link";
 import { getVoiceStatus, isNotDeployed, type VoiceStatus } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useResource } from "@/lib/use-resource";
@@ -115,9 +116,37 @@ export default function SettingsPage() {
           )}
         </Panel>
 
+        {/* UI V2 — the editable credential store. /integrations stays the
+            read-only view of connection health; this is where secrets go in. */}
+        <Panel
+          title="Connections"
+          description="Credentials for the agents and integrations."
+        >
+          <p className="text-sm text-sys-text/85">
+            Meta Ads, Google, WhatsApp and n8n. Secrets are encrypted on the server and are never
+            returned to the browser once saved.
+          </p>
+          <div className="pt-3">
+            <Link
+              href="/settings/connections"
+              className="sys-focus inline-flex items-center rounded border border-sys-cyan/40 bg-sys-cyan/[0.08] px-3 py-1.5 font-mono text-[0.58rem] uppercase tracking-hud text-sys-cyan-soft transition-colors hover:border-sys-cyan/80"
+            >
+              Manage connections
+            </Link>
+          </div>
+        </Panel>
+
         <Panel title="Session" description="This browser">
-          <Row label="Token storage">Session storage, cleared when the tab closes</Row>
+          {/*
+            UI V2 changed how this works, so the description changed with it.
+            It previously read "session storage, cleared when the tab closes" —
+            which was both the reason logins did not survive a restart and an
+            XSS-readable place to keep a 7-day refresh token.
+          */}
+          <Row label="Session storage">HttpOnly cookie — not readable by page scripts</Row>
+          <Row label="Access token">Held in memory only, never written to disk</Row>
           <Row label="Access token lifetime">15 minutes, refreshed automatically</Row>
+          <Row label="Stays signed in">Until you sign out, or 7 days of inactivity</Row>
           <div className="pt-3">
             <Button variant="danger" size="sm" onClick={logout}>
               Sign out

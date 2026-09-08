@@ -108,6 +108,20 @@ export class AudioCapture {
   }
 
   /**
+   * The live microphone stream, or null when not recording.
+   *
+   * UI V2 — exposed so the Orb can attach a Web Audio AnalyserNode and react to
+   * what is ACTUALLY being said, rather than playing a canned animation.
+   *
+   * Read-only by contract: an analyser tap does not consume the stream and does
+   * not interfere with the MediaRecorder reading the same tracks. Nothing here
+   * may stop, mute or re-configure it — recording owns its lifecycle.
+   */
+  getStream(): MediaStream | null {
+    return this.stream;
+  }
+
+  /**
    * Opens the microphone and begins recording.
    *
    * @param onAutoStop invoked if MAX_RECORDING_MS is reached, so the store can
