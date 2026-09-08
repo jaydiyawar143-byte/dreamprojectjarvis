@@ -24,6 +24,8 @@ export function AuthConsole({
   onSignup,
   onSwitch,
   onDismissError,
+  googleEnabled,
+  onGoogle,
 }: {
   mode: AuthMode;
   direction: number;
@@ -35,6 +37,9 @@ export function AuthConsole({
   onSignup: (email: string, name: string, password: string) => void;
   onSwitch: (mode: AuthMode) => void;
   onDismissError: () => void;
+  /** Server-reported Google availability; null while being probed. */
+  googleEnabled: boolean | null;
+  onGoogle: () => void;
 }) {
   const isLogin = mode === "login";
 
@@ -101,7 +106,7 @@ export function AuthConsole({
         transition={{ delay: BOOT.controls + 0.18 }}
         className="mt-6"
       >
-        <SocialAuth busy={busy} />
+        <SocialAuth busy={busy} enabled={googleEnabled} onGoogle={onGoogle} />
       </motion.div>
 
       {/* ---- Mode switch ---- */}

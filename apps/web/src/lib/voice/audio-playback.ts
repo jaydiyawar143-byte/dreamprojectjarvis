@@ -71,6 +71,17 @@ export class AudioPlayback {
     }
   }
 
+  /**
+   * The underlying media element, or null before anything has been prepared.
+   *
+   * UI V2 — exposed so the Orb can analyse the REPLY audio while JARVIS speaks.
+   * The caller must not alter playback through it; see audio-analyser.ts, which
+   * taps it only once playback is already running.
+   */
+  getElement(): HTMLAudioElement | null {
+    return this.element;
+  }
+
   get isPlaying(): boolean {
     return Boolean(this.element && !this.element.paused && !this.element.ended);
   }

@@ -414,3 +414,147 @@ export function createVoiceConfig(
   }
   return result.data;
 }
+
+// ---------------------------------------------------------------------------
+// UI V2 — Google sign-in (OpenID Connect authorization code + PKCE).
+//
+// Distinct from the Sprint 5.2 Google ADS connection, which links an already
+// authenticated JARVIS user to an Ads account. This is identity: it is how a
+// browser with no session becomes a logged-in user, so it is deliberately kept
+// separate rather than folded into the same config.
+//
+// Both may reuse the same OAuth client. They are separate redirect URIs.
+// ---------------------------------------------------------------------------
+
+export interface GoogleSignInConfig {
+  clientId: string;
+  clientSecret: string;
+  /** Absolute callback URL. MUST be registered in the Google Cloud console. */
+  redirectUri: string;
+  /** Where the browser is sent once a session exists. */
+  webOrigin: string;
+}
+
+/**
+ * Whether the Google sign-in routes should be mounted.
+ *
+ * Both halves of the client credential are required. Mounting with only an ID
+ * would put a working button in front of the user that fails at the token
+ * exchange — strictly worse than showing the channel as unprovisioned, which
+ * the login screen already knows how to do.
+ */
+export function isGoogleSignInConfigured(env: NodeJS.ProcessEnv = process.env): boolean {
+  return Boolean(env.GOOGLE_CLIENT_ID) && Boolean(env.GOOGLE_CLIENT_SECRET);
+}
+
+/** Why Google sign-in is or is not active, for the startup log line. */
+export function describeGoogleSignInStatus(
+  env: NodeJS.ProcessEnv = process.env
+): { configured: boolean; reason: string } {
+  if (!env.GOOGLE_CLIENT_ID) {
+    return { configured: false, reason: "GOOGLE_CLIENT_ID is not set" };
+  }
+  if (!env.GOOGLE_CLIENT_SECRET) {
+    return { configured: false, reason: "GOOGLE_CLIENT_SECRET is not set" };
+  }
+  return { configured: true, reason: "google sign-in enabled" };
+}
+
+/**
+ * Builds the validated Google sign-in configuration.
+ *
+ * Call only when `isGoogleSignInConfigured()` is true. The thrown message names
+ * FIELDS only, never values, so a misconfiguration cannot leak the secret into
+ * a log line.
+ */
+export function createGoogleSignInConfig(
+  env: NodeJS.ProcessEnv = process.env
+): GoogleSignInConfig {
+  const clientId = env.GOOGLE_CLIENT_ID;
+  const clientSecret = env.GOOGLE_CLIENT_SECRET;
+  if (!clientId || !clientSecret) {
+    throw new Error("Google sign-in requires GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET");
+  }
+
+  // Derived from the API's own public URL so a standard local setup needs no
+  // extra variable, while a real deployment can state it explicitly.
+  const apiOrigin = env.API_PUBLIC_URL ?? `http://localhost:${env.API_PORT ?? "3001"}`;
+  const redirectUri =
+    env.GOOGLE_SIGNIN_REDIRECT_URI ?? `${apiOrigin}/api/v1/auth/google/callback`;
+
+  // The browser is returned to the web app, not the API. CORS_ORIGIN is already
+  // the single declaration of where that app lives.
+  const webOrigin = env.CORS_ORIGIN ?? "http://localhost:3000";
+
+  return { clientId, clientSecret, redirectUri, webOrigin };
+}
+
+// ---------------------------------------------------------------------------
+// V3 — Google Maps Platform.
+//
+// TWO KEYS, because they have genuinely different exposure.
+//
+//   BROWSER key  loads the Maps JavaScript API. It reaches the browser by
+//                necessity — there is no way to render a Google map without it
+//                — so it is not a secret. Its real protection is an HTTP
+//                referrer restriction in the Google console, and it should be
+//                restricted to the Maps JavaScript API alone.
+//
+//   SERVER key   signs Geocoding and Routes calls made from the API. It never
+//                leaves the server, and should be restricted by IP and to those
+//                two APIs.
+//
+// They are deliberately separate variables. Reusing one unrestricted key for
+// both is the common mistake, and it turns a referrer-restricted browser key
+// into a billable server credential anyone can lift from the page.
+//
+// The browser key is served from an AUTHENTICATED endpoint rather than inlined
+// as NEXT_PUBLIC_*, so it is not sitting in a static JS bundle that anyone can
+// fetch without logging in. That is defence in depth, not a replacement for the
+// referrer restriction.
+// ---------------------------------------------------------------------------
+
+export interface GoogleMapsConfig {
+  /** Loads the Maps JavaScript API in the browser. Referrer-restricted. */
+  browserKey: string | null;
+  /** Geocoding and Routes, server-side only. Never sent to a client. */
+  serverKey: string | null;
+}
+
+/** Whether the interactive map can be rendered at all. */
+export function isGoogleMapsBrowserConfigured(env: NodeJS.ProcessEnv = process.env): boolean {
+  return Boolean(env.GOOGLE_MAPS_BROWSER_KEY);
+}
+
+/** Whether server-side geocoding and routing can use Google. */
+export function isGoogleMapsServerConfigured(env: NodeJS.ProcessEnv = process.env): boolean {
+  return Boolean(env.GOOGLE_MAPS_SERVER_KEY);
+}
+
+export function createGoogleMapsConfig(env: NodeJS.ProcessEnv = process.env): GoogleMapsConfig {
+  return {
+    browserKey: env.GOOGLE_MAPS_BROWSER_KEY ?? null,
+    serverKey: env.GOOGLE_MAPS_SERVER_KEY ?? null,
+  };
+}
+
+/** Why the map is or is not available, for the startup log and the UI. */
+export function describeGoogleMapsStatus(
+  env: NodeJS.ProcessEnv = process.env
+): { configured: boolean; reason: string } {
+  const browser = isGoogleMapsBrowserConfigured(env);
+  const server = isGoogleMapsServerConfigured(env);
+
+  if (!browser && !server) {
+    return { configured: false, reason: "No Google Maps keys are set" };
+  }
+  if (!browser) {
+    // Routing would work but nothing could be drawn, which is the worse half to
+    // be missing — the widget is a map first.
+    return { configured: false, reason: "GOOGLE_MAPS_BROWSER_KEY is not set, so the map cannot render" };
+  }
+  if (!server) {
+    return { configured: true, reason: "Map available; GOOGLE_MAPS_SERVER_KEY is not set, so geocoding and routing fall back to OpenStreetMap" };
+  }
+  return { configured: true, reason: "google maps enabled" };
+}

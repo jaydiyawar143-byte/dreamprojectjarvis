@@ -4,6 +4,7 @@ import { MotionConfig, motion, useReducedMotion } from "framer-motion";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth";
+import { getGoogleSignInEnabled, googleSignInStartUrl } from "@/lib/api";
 import { SystemBackground } from "./system-background";
 import { HUDLayer } from "./hud-layer";
 import { JarvisBrand } from "./jarvis-brand";
@@ -41,6 +42,56 @@ export function AuthExperience({ initialMode }: { initialMode: AuthMode }) {
 
   const { phase, stages, error, run, reset } = useAuthSequence(reduced);
 
+  // ---------------------------------------------------------------------------
+  // Google channel.
+  //
+  // `null` until the server answers. Availability is the API's to decide — it
+  // mounts the routes only when it holds OAuth client credentials — so this is
+  // asked rather than assumed from a build-time variable that could disagree.
+  // ---------------------------------------------------------------------------
+  const [googleEnabled, setGoogleEnabled] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void getGoogleSignInEnabled().then((ok) => {
+      if (!cancelled) setGoogleEnabled(ok);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Errors from the OAuth callback arrive as a query parameter, because the
+  // callback is a redirect and has no other way to report. Each is mapped to
+  // something a person can act on; an unrecognised code is reported plainly
+  // rather than echoed back into the page.
+  const [channelError, setChannelError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const code = new URLSearchParams(window.location.search).get("error");
+    if (!code) return;
+
+    const messages: Record<string, string> = {
+      google_cancelled: "Google sign-in was cancelled.",
+      google_state_invalid: "That sign-in link expired. Please try again.",
+      google_email_unverified:
+        "That Google account has no verified email address, so it cannot be linked.",
+      google_session_failed: "Signed in with Google, but the session could not be established.",
+      google_failed: "Google sign-in failed. Please try again.",
+    };
+    setChannelError(messages[code] ?? "Sign-in failed. Please try again.");
+
+    // Clear it from the URL so a refresh does not resurrect a stale error.
+    window.history.replaceState(null, "", window.location.pathname);
+  }, []);
+
+  const handleGoogle = useCallback(() => {
+    // A FULL-PAGE navigation, not fetch: the browser must follow redirects to
+    // Google and back, which a cross-origin fetch cannot do. Re-entry is not
+    // guarded here because SocialAuth disables the control while `busy`.
+    window.location.href = googleSignInStartUrl("/dashboard");
+  }, []);
+
   // True once we've started our own auth, so the "already signed in" guard
   // below doesn't yank the user to /chat mid-transition.
   const selfInitiated = useRef(false);
@@ -50,7 +101,7 @@ export function AuthExperience({ initialMode }: { initialMode: AuthMode }) {
   // Someone who already has a session shouldn't sit on the login screen.
   useEffect(() => {
     if (!loading && authenticated && !selfInitiated.current) {
-      router.replace("/chat");
+      router.replace("/dashboard");
     }
   }, [loading, authenticated, router]);
 
@@ -70,7 +121,7 @@ export function AuthExperience({ initialMode }: { initialMode: AuthMode }) {
     setHandoff(true);
     // Let the HUD bloom read before handing off to the app.
     await wait(reduced ? 120 : 850);
-    router.push("/chat");
+    router.push("/dashboard");
   }, [reduced, router]);
 
   const handleLogin = useCallback(
@@ -134,11 +185,16 @@ export function AuthExperience({ initialMode }: { initialMode: AuthMode }) {
           busy={busy}
           phase={phase}
           stages={stages}
-          error={error}
+          error={error ?? channelError ?? undefined}
           onLogin={handleLogin}
           onSignup={handleSignup}
           onSwitch={switchMode}
-          onDismissError={reset}
+          onDismissError={() => {
+            setChannelError(null);
+            reset();
+          }}
+          googleEnabled={googleEnabled}
+          onGoogle={handleGoogle}
         />
 
         {/* Footer readout */}

@@ -32,8 +32,13 @@ import { AudioPlayback, PlaybackError } from "./audio-playback";
 
 // Module-level singletons: the microphone and the audio element are hardware
 // and browser resources, not per-render values.
-const capture = new AudioCapture();
-const playback = new AudioPlayback();
+//
+// UI V2 — exported so the Orb can analyse the SAME stream and element the voice
+// turn is using. Sharing the instances is the point: a second getUserMedia call
+// would open a second microphone, and a second audio element would play the
+// reply twice.
+export const capture = new AudioCapture();
+export const playback = new AudioPlayback();
 
 /** A short, plain sentence explaining a failure the user can act on. */
 export interface VoiceNotice {

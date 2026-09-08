@@ -1,9 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
-  setTokens,
+  setAccessToken,
   clearTokens,
   getAccessToken,
-  loadTokens,
+  purgeLegacyTokenStorage,
   login,
   register,
   sendChatMessage,
@@ -44,26 +44,30 @@ function mockError(code: string, message: string): ApiResponse {
 }
 
 describe("API Client", () => {
+  // UI V2 — the access token is held in memory and the refresh token lives in
+  // an HttpOnly cookie. These assert the absence of persistence, which is the
+  // security property, rather than the presence of it.
   describe("Token management", () => {
-    it("1. setTokens stores tokens", () => {
-      setTokens("access-123", "refresh-456");
+    it("1. setAccessToken holds the token in memory only", () => {
+      setAccessToken("access-123");
       expect(getAccessToken()).toBe("access-123");
-      expect(sessionStorage.getItem("jarvis_access")).toBe("access-123");
-      expect(sessionStorage.getItem("jarvis_refresh")).toBe("refresh-456");
+      expect(sessionStorage.getItem("jarvis_access")).toBeNull();
+      expect(localStorage.getItem("jarvis_access")).toBeNull();
     });
 
-    it("2. clearTokens removes tokens", () => {
-      setTokens("access-123", "refresh-456");
+    it("2. clearTokens removes the token", () => {
+      setAccessToken("access-123");
       clearTokens();
       expect(getAccessToken()).toBeNull();
-      expect(sessionStorage.getItem("jarvis_access")).toBeNull();
     });
 
-    it("3. loadTokens restores from sessionStorage", () => {
+    it("3. legacy tokens left by the previous build are purged", () => {
       sessionStorage.setItem("jarvis_access", "saved-access");
       sessionStorage.setItem("jarvis_refresh", "saved-refresh");
-      loadTokens();
-      expect(getAccessToken()).toBe("saved-access");
+      purgeLegacyTokenStorage();
+      expect(sessionStorage.getItem("jarvis_access")).toBeNull();
+      expect(sessionStorage.getItem("jarvis_refresh")).toBeNull();
+      expect(getAccessToken()).toBeNull();
     });
   });
 
@@ -116,7 +120,7 @@ describe("API Client", () => {
 
   describe("Chat", () => {
     it("7. Send chat message success", async () => {
-      setTokens("valid-token", "refresh");
+      setAccessToken("valid-token");
 
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -134,7 +138,7 @@ describe("API Client", () => {
     });
 
     it("8. Send chat includes auth header", async () => {
-      setTokens("my-token", "refresh");
+      setAccessToken("my-token");
 
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -147,7 +151,7 @@ describe("API Client", () => {
     });
 
     it("9. Network failure returns error", async () => {
-      setTokens("token", "refresh");
+      setAccessToken("token");
       mockFetch.mockRejectedValueOnce(new Error("Network error"));
 
       const res = await sendChatMessage("test");
@@ -158,7 +162,7 @@ describe("API Client", () => {
 
   describe("Conversations", () => {
     it("10. List conversations", async () => {
-      setTokens("token", "refresh");
+      setAccessToken("token");
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: async () =>
@@ -171,7 +175,7 @@ describe("API Client", () => {
     });
 
     it("11. Get conversation with messages", async () => {
-      setTokens("token", "refresh");
+      setAccessToken("token");
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: async () =>
@@ -191,7 +195,7 @@ describe("API Client", () => {
 
   describe("401 handling", () => {
     it("12. 401 clears tokens", async () => {
-      setTokens("expired-token", "bad-refresh");
+      setAccessToken("expired-token");
 
       mockFetch
         .mockResolvedValueOnce({
@@ -211,11 +215,23 @@ describe("API Client", () => {
   });
 
   describe("Logout", () => {
-    it("13. Logout clears tokens", () => {
-      setTokens("token", "refresh");
-      logout();
+    it("13. Logout revokes server-side and clears tokens", async () => {
+      setAccessToken("token");
+      // logout() is async in V2: it revokes the refresh token SERVER-side
+      // before dropping local state. The previous version only cleared the
+      // browser, leaving the session valid for its full 7 days.
+      mockFetch.mockResolvedValueOnce({
+        status: 200,
+        ok: true,
+        json: async () => mockSuccess({ message: "Logged out successfully" }),
+      });
+      await logout();
       expect(getAccessToken()).toBeNull();
       expect(sessionStorage.getItem("jarvis_access")).toBeNull();
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining("/auth/logout"),
+        expect.objectContaining({ method: "POST", credentials: "include" })
+      );
     });
   });
 

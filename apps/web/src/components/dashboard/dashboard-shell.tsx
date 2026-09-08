@@ -40,17 +40,31 @@ export function DashboardShell({ children }: { children: ReactNode }) {
 
   return (
     <div data-testid="dashboard-shell" className="flex min-h-screen bg-sys-void text-sys-text">
-      {/* Desktop rail */}
+      {/*
+        Desktop rail — UI V2.
+
+        Collapsed to an icon rail by default and expanded on hover or on focus
+        entering it. `group` + `group-hover`/`group-focus-within` does the work
+        in CSS, so it responds to the keyboard as well as the pointer; a JS
+        mouseenter handler would strand tab users on a collapsed rail.
+
+        The rail EXPANDS OVER the content rather than pushing it: the spacer
+        keeps the collapsed width, so the page does not reflow every time the
+        cursor passes by. Reflowing a dashboard on hover is disorienting and
+        would move the thing the user was reaching for.
+      */}
       <aside
         data-testid="sidebar-desktop"
-        className="hidden shrink-0 lg:block"
+        className="group hidden shrink-0 lg:block"
         aria-label="Primary"
       >
-        <div className="fixed inset-y-0 left-0 w-64">
-          <DashboardSidebar />
+        <div
+          data-testid="sidebar-rail"
+          className="fixed inset-y-0 left-0 z-40 w-16 transition-[width] duration-300 ease-out group-hover:w-64 group-focus-within:w-64 motion-reduce:transition-none"
+        >
+          <DashboardSidebar collapsible />
         </div>
-        {/* Spacer so content is not overlapped by the fixed rail. */}
-        <div className="w-64" aria-hidden="true" />
+        <div className="w-16" aria-hidden="true" />
       </aside>
 
       {/* Mobile / tablet drawer */}

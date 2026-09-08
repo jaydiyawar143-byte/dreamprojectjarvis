@@ -36,10 +36,15 @@ import {
   installProcessErrorHandlers,
 } from "./middleware/error-handler.js";
 import { EncryptionService } from "@jarvis/security";
-import { prisma, PrismaGoogleConnectionRepository, PrismaOAuthStateRepository, PrismaWhatsAppRepository, PrismaN8nRepository } from "@jarvis/db";
+import { prisma, PrismaGoogleConnectionRepository, PrismaOAuthStateRepository, PrismaWhatsAppRepository, PrismaN8nRepository, PrismaCredentialRepository, PrismaTaskRepository, PrismaPreferenceRepository } from "@jarvis/db";
 import { createWhatsAppConfig, isWhatsAppConfigured } from "@jarvis/whatsapp";
 import { createN8nConfig, isN8nConfigured } from "@jarvis/n8n";
 import { createVoiceConfig, describeVoiceConfigStatus, isVoiceConfigured } from "@jarvis/config";
+import { createGoogleSignInConfig, describeGoogleSignInStatus } from "@jarvis/config";
+import { createGoogleSignInRouter } from "./routes/google-signin.js";
+import { createCredentialsRouter } from "./routes/credentials.js";
+import { createCommandCenterRouter } from "./routes/command-center.js";
+import { installSystemStream } from "./socket/system-stream.js";
 import { OpenAIVoiceProvider } from "@jarvis/ai-openai";
 import {
   ShutdownLifecycle,
@@ -174,6 +179,33 @@ app.use(
     },
   })
 );
+// ---------------------------------------------------------------------------
+// UI V2 — Google sign-in, mounted BEFORE the general auth router so
+// /api/v1/auth/google/* resolves to it.
+//
+// Gated on the OAuth client credentials being present, following the same rule
+// the other integrations use: a button that cannot complete its exchange is
+// worse than a channel the login screen openly reports as unprovisioned.
+// ---------------------------------------------------------------------------
+{
+  const googleSignIn = describeGoogleSignInStatus();
+  if (googleSignIn.configured) {
+    app.use(
+      "/api/v1/auth/google",
+      createGoogleSignInRouter(
+        container.authService,
+        createGoogleSignInConfig(),
+        env.JWT_SECRET
+      )
+    );
+  }
+  console.log(JSON.stringify({
+    level: "info",
+    event: googleSignIn.configured ? "google_signin_enabled" : "google_signin_disabled",
+    reason: googleSignIn.reason,
+  }));
+}
+
 app.use("/api/v1/auth", createAuthRouter(container.authService, container.tokenService));
 app.use("/api/v1/chat", createChatRouter(container));
 app.use("/api/v1/conversations", createConversationsRouter(container));
@@ -187,6 +219,15 @@ app.use("/api/v1/dashboard", createDashboardRouter(container));
 // UI V2 — read-only windows on data the server already owns. Both are
 // auth-gated; activity is scoped to the caller's own rows.
 app.use("/api/v1/agents", createAgentsRouter(container));
+// V3 — Command Center: weather, markets, geo, host metrics, tasks, preferences.
+// Every response carries provider freshness metadata; nothing is fabricated.
+app.use(
+  "/api/v1/command-center",
+  createCommandCenterRouter(container, {
+    tasks: new PrismaTaskRepository(prisma),
+    preferences: new PrismaPreferenceRepository(prisma),
+  })
+);
 app.use("/api/v1/activity", createActivityRouter(container));
 // Sprint 5.2 — Google OAuth connection management (read-only Ads integration).
 //
@@ -246,6 +287,34 @@ if (isVoiceConfigured()) {
   }));
 }
 
+const googleAdsMounted = Boolean(process.env.JARVIS_ENCRYPTION_KEY);
+
+// ---------------------------------------------------------------------------
+// UI V2 — Agent Credential Center.
+//
+// Gated on the same key as the Google routes, and for the same reason: without
+// it there is no way to store a third-party secret at rest, and storing one in
+// plaintext is not an acceptable fallback. `googleAdsMounted` is passed through
+// so the Credential Center reports Google's real availability rather than
+// re-deriving it from an environment variable of its own.
+// ---------------------------------------------------------------------------
+if (process.env.JARVIS_ENCRYPTION_KEY) {
+  app.use(
+    "/api/v1/credentials",
+    createCredentialsRouter(container, {
+      repo: new PrismaCredentialRepository(prisma),
+      encryption: EncryptionService.fromEnv(),
+      googleAdsMounted,
+    })
+  );
+} else {
+  console.log(JSON.stringify({
+    level: "info",
+    event: "credentials_routes_disabled",
+    reason: "JARVIS_ENCRYPTION_KEY is not set",
+  }));
+}
+
 if (process.env.JARVIS_ENCRYPTION_KEY) {
   app.use(
     "/api/v1/google",
@@ -276,6 +345,9 @@ if (process.env.JARVIS_ENCRYPTION_KEY) {
 // the approval boundary already live.
 // ---------------------------------------------------------------------------
 secureSocketServer(io, container.tokenService);
+// V3 — realtime host metrics on the SAME authenticated socket. Installed after
+// securing it, so the auth middleware and the event allowlist both apply.
+installSystemStream(io);
 
 app.set("io", io);
 

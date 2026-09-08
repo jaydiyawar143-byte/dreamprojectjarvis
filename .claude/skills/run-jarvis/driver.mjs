@@ -196,16 +196,15 @@ async function browser({ headed = false } = {}) {
 // is null for the same reason. Storage is seeded anyway so a later in-app
 // refresh has something to read, but the reliable route is loginViaForm +
 // client-side navigation below.
-async function seedAuth(page, tok) {
-  const st = loadState();
-  await page.goto(`${WEB}/login`, { waitUntil: "domcontentloaded" });
-  await page.evaluate(
-    ([a, r]) => {
-      sessionStorage.setItem("jarvis_access", a);
-      sessionStorage.setItem("jarvis_refresh", r);
-    },
-    [tok, st.refreshToken || ""]
-  );
+// UI V2 — deliberately a no-op.
+//
+// Seeding sessionStorage no longer establishes anything: the session is an
+// HttpOnly refresh cookie the API sets at login, and the access token is held
+// in a module variable that nothing outside the app can write. Kept as a stub
+// so the call site reads honestly rather than looking like it still helps.
+// loginViaForm is now the ONLY way to obtain a browser session.
+async function seedAuth(_page, _tok) {
+  /* no-op: see comment above */
 }
 
 // Real login through the actual form. This is what puts the token in the
@@ -216,14 +215,16 @@ async function loginViaForm(page) {
   await page.fill('input[type="email"]', USER.email);
   await page.fill('input[type="password"]', USER.password);
   await page.click('button[type="submit"]');
-  await page.waitForURL("**/chat", { timeout: 30000 });
+  // UI V2 — login lands on /dashboard, not /chat.
+  await page.waitForURL("**/dashboard", { timeout: 30000 });
 }
 
 // Navigate to a protected route WITHOUT a page reload, so the in-memory token
 // survives. next/link anchors are intercepted by the app router; a plain
 // page.goto would be a hard load and re-open the 401 race described above.
 async function gotoAuthed(page, route) {
-  if (route === "/chat") return;
+  // UI V2 — /dashboard is where login lands, so it needs no navigation.
+  if (route === "/dashboard") return;
   const link = page.locator(`a[href="${route}"]`).first();
   if ((await link.count()) > 0) {
     await link.click();
@@ -522,6 +523,10 @@ cmds["web:chat"] = async (msg = "Hello JARVIS, reply with exactly: UI OK") => {
   const { b, page, errors } = await browser();
   try {
     await loginViaForm(page);
+    // UI V2 — login lands on /dashboard now, so reach the assistant through
+    // the sidebar link (a client-side navigation, which preserves the
+    // in-memory access token).
+    await gotoAuthed(page, "/chat");
 
     const box = page.locator('textarea[placeholder="Message JARVIS..."]');
     await box.waitFor({ timeout: 20000 });
