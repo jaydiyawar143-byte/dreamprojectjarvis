@@ -25,6 +25,7 @@ import {
   ConversationalAssistant,
   GoogleAdsAgent,
   BrowserAgent,
+  LocationAgent,
   KnowledgeAgent,
   MetaAdsAgent,
   isToolAllowed,
@@ -90,6 +91,16 @@ const ALL_REGISTERED_TOOLS = [
   "browser.download",
   "browser.submit",
   "browser.upload",
+  // Maps — registered unconditionally by the container, because the geo layer
+  // answers from OpenStreetMap when no Google key is set.
+  "maps.search",
+  "maps.nearby",
+  "maps.geocode",
+  "maps.reverse.geocode",
+  "maps.current.location",
+  "maps.route",
+  "maps.distance",
+  "maps.place",
 ];
 
 function fakeTool(overrides: Partial<ITool> & { id: string }): ITool {
@@ -225,6 +236,9 @@ describe("Sprint 6 — conditional agent registration", () => {
     if (has("browser.navigate")) {
       registry.register(new BrowserAgent({ provider: stubProvider }));
     }
+    if (has("maps.route")) {
+      registry.register(new LocationAgent({ provider: stubProvider }));
+    }
     return registry;
   }
 
@@ -248,6 +262,7 @@ describe("Sprint 6 — conditional agent registration", () => {
     expect(ids).not.toContain(AGENT_IDS.communication);
     expect(ids).not.toContain(AGENT_IDS.googleAds);
     expect(ids).not.toContain(AGENT_IDS.browser);
+    expect(ids).not.toContain(AGENT_IDS.location);
   });
 
   it("binds a policy to every registered agent", () => {

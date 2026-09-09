@@ -134,6 +134,9 @@ export const AgentDomainSchema = z.enum([
   "communication",
   // Sprint 7 — controlled web browsing.
   "browser",
+  // Maps, places and routing. Separate from `general` because it is the only
+  // domain whose tools read the user's physical position.
+  "location",
 ]);
 
 export type AgentDomain = z.infer<typeof AgentDomainSchema>;

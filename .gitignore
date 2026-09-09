@@ -8,6 +8,9 @@ out/
 
 # Environment files
 .env
+# Backups of .env hold the same live secrets and must never be committed.
+.env.bak*
+.env.*.bak
 .env.local
 .env.*.local
 .env.development

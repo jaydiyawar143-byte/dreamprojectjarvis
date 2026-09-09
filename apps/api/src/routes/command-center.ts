@@ -24,7 +24,11 @@
 import { Router } from "express";
 import type { Response } from "express";
 import { z } from "zod";
-import type { PrismaPreferenceRepository, PrismaTaskRepository } from "@jarvis/db";
+import type {
+  PrismaMapsUsageRepository,
+  PrismaPreferenceRepository,
+  PrismaTaskRepository,
+} from "@jarvis/db";
 import { createAuthMiddleware, type AuthenticatedRequest } from "../middleware/auth.js";
 import type { Container } from "../services/container.js";
 import { getWeather } from "../services/providers/weather-provider.js";
@@ -34,8 +38,17 @@ import {
   getTopCrypto,
   isIndicesConfigured,
 } from "../services/providers/market-provider.js";
-import { geocode, route as routeBetween, searchNearby } from "../services/providers/geo-provider.js";
-import { googleReverseGeocode } from "../services/providers/google-maps-provider.js";
+import {
+  autocomplete,
+  geocode,
+  resolvePlaceId,
+  reverseGeocode,
+  route as routeBetween,
+  routePlaces,
+  searchNearby,
+} from "../services/providers/geo-provider.js";
+import { locationStore } from "../services/location-store.js";
+import { getMapsUsageGuard } from "../services/maps-usage-guard.js";
 import {
   createGoogleMapsConfig,
   describeGoogleMapsStatus,
@@ -51,6 +64,21 @@ import type { ProviderResult } from "../services/providers/freshness.js";
 const CoordSchema = z.object({
   lat: z.coerce.number().min(-90).max(90),
   lon: z.coerce.number().min(-180).max(180),
+});
+
+/**
+ * A position published by the browser's Geolocation API.
+ *
+ * Spelled out rather than reusing CoordSchema because this one is a JSON body
+ * with the browser's own field names, and because it must reject a coordinate
+ * out of range at the edge rather than letting an impossible latitude reach a
+ * routing call.
+ */
+const PositionSchema = z.object({
+  latitude: z.number().min(-90).max(90),
+  longitude: z.number().min(-180).max(180),
+  /** Metres. Recorded when present; never used to reject a fix. */
+  accuracy: z.number().nonnegative().max(1_000_000).optional(),
 });
 
 const TaskCreateSchema = z.object({
@@ -118,7 +146,12 @@ const PreferencesSchema = z
 
 export function createCommandCenterRouter(
   container: Container,
-  deps: { tasks: PrismaTaskRepository; preferences: PrismaPreferenceRepository }
+  deps: {
+    tasks: PrismaTaskRepository;
+    preferences: PrismaPreferenceRepository;
+    /** Absent on a deployment without usage tracking; the route says so. */
+    mapsUsage?: PrismaMapsUsageRepository;
+  }
 ): Router {
   const router = Router();
   const requireAuth = createAuthMiddleware(container.tokenService);
@@ -217,26 +250,150 @@ export function createCommandCenterRouter(
 
     sendProvider(
       res,
-      near.success ? await searchNearby(q, near.data.lat, near.data.lon) : await geocode(q)
+      near.success
+        ? await searchNearby(q, near.data.lat, near.data.lon, 8, { userId: req.auth.userId })
+        : await geocode(q, 5, { userId: req.auth.userId })
     );
   });
 
+  // -------------------------------------------------------------------------
+  // Routing.
+  //
+  // Accepts either display strings or Place IDs. IDs win when both are given:
+  // "Gondia" names a city, a district and a railway station, and re-geocoding
+  // a label the user already picked from a suggestion list is how a route
+  // quietly ends up between two different places from the ones on screen.
+  // -------------------------------------------------------------------------
   router.get("/geo/route", requireAuth, async (req: AuthenticatedRequest, res: Response) => {
     if (!req.auth) return fail(res, 401, "AUTHENTICATION_REQUIRED", "Authentication required");
 
     const from = typeof req.query.from === "string" ? req.query.from : "";
     const to = typeof req.query.to === "string" ? req.query.to : "";
-    if (!from || !to) {
-      return fail(res, 400, "INVALID_REQUEST", "Both 'from' and 'to' are required");
+    const fromPlaceId = typeof req.query.fromPlaceId === "string" ? req.query.fromPlaceId : "";
+    const toPlaceId = typeof req.query.toPlaceId === "string" ? req.query.toPlaceId : "";
+
+    if ((!from && !fromPlaceId) || (!to && !toPlaceId)) {
+      return fail(res, 400, "INVALID_REQUEST", "Both an origin and a destination are required");
     }
 
+    const options = {
+      geometry: req.query.geometry === "true",
+      ...(typeof req.query.mode === "string" ? { travelMode: req.query.mode } : {}),
+    };
+
+    // No Place IDs at all: the plain name-based path, unchanged.
+    if (!fromPlaceId && !toPlaceId) {
+      return sendProvider(res, await routeBetween(from, to, options, { userId: req.auth.userId }));
+    }
+
+    // At least one endpoint is an ID. Resolve both to places first, so the
+    // route is computed between exactly what the caller named.
+    const usage = { userId: req.auth.userId };
+    const origin = fromPlaceId
+      ? await resolvePlaceId(fromPlaceId, usage)
+      : await geocode(from, 1, usage);
+    const originPlace = Array.isArray(origin.data) ? origin.data[0] : origin.data;
+    if (!originPlace) {
+      return sendProvider(res, { data: null, meta: origin.meta });
+    }
+
+    const destination = toPlaceId
+      ? await resolvePlaceId(toPlaceId, usage)
+      : await geocode(to, 1, usage);
+    const destinationPlace = Array.isArray(destination.data) ? destination.data[0] : destination.data;
+    if (!destinationPlace) {
+      return sendProvider(res, { data: null, meta: destination.meta });
+    }
+
+    sendProvider(res, await routePlaces(originPlace, destinationPlace, options, usage));
+  });
+
+  // -------------------------------------------------------------------------
+  // Type-ahead suggestions.
+  //
+  // Separate from /geo/search because the two cost different things: this one
+  // fires while the user is still typing, so the CLIENT debounces and this
+  // endpoint refuses anything under two characters. Suggestions are never
+  // cached server-side — see the provider for why.
+  // -------------------------------------------------------------------------
+  router.get("/geo/autocomplete", requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+    if (!req.auth) return fail(res, 401, "AUTHENTICATION_REQUIRED", "Authentication required");
+
+    const input = typeof req.query.q === "string" ? req.query.q : "";
+    if (input.trim().length < 2) {
+      return fail(res, 400, "INVALID_REQUEST", "Type at least two characters");
+    }
+
+    const near = CoordSchema.safeParse(req.query);
     sendProvider(
       res,
-      await routeBetween(from, to, {
-        geometry: req.query.geometry === "true",
-        ...(typeof req.query.mode === "string" ? { travelMode: req.query.mode } : {}),
-      })
+      await autocomplete(
+        input,
+        near.success ? { latitude: near.data.lat, longitude: near.data.lon } : undefined,
+        5,
+        { userId: req.auth.userId }
+      )
     );
+  });
+
+  // -------------------------------------------------------------------------
+  // Place ID -> a place with coordinates.
+  //
+  // What turns a picked suggestion into something routable. The id is validated
+  // in the provider before it is ever put in a URL path.
+  // -------------------------------------------------------------------------
+  router.get("/geo/place/:placeId", requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+    if (!req.auth) return fail(res, 401, "AUTHENTICATION_REQUIRED", "Authentication required");
+
+    const placeId = req.params.placeId ?? "";
+    if (!placeId) return fail(res, 400, "INVALID_REQUEST", "A place id is required");
+
+    sendProvider(res, await resolvePlaceId(placeId, { userId: req.auth.userId }));
+  });
+
+  // -------------------------------------------------------------------------
+  // The browser publishing its own position.
+  //
+  // This is the ONLY way a coordinate reaches the server for tool use, and it
+  // is deliberately a small door:
+  //
+  //   - It is authenticated, and stored against `req.auth.userId`. A caller
+  //     cannot name a different user, so no request can plant a position in
+  //     someone else's session or read one out of it.
+  //   - Nothing is persisted. It lands in an in-memory store with a fifteen
+  //     minute TTL (see location-store.ts).
+  //   - Nothing is logged. Not the coordinates, not the accuracy.
+  //   - DELETE forgets it immediately, so "stop sharing" is real rather than
+  //     just a UI state.
+  //
+  // The response deliberately echoes nothing back. There is no reason for the
+  // server to tell a client where it just said it was, and a response body is
+  // one more place a coordinate could end up in a proxy log.
+  // -------------------------------------------------------------------------
+  router.post("/geo/location", requireAuth, (req: AuthenticatedRequest, res: Response) => {
+    if (!req.auth) return fail(res, 401, "AUTHENTICATION_REQUIRED", "Authentication required");
+
+    const parsed = PositionSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return fail(res, 400, "INVALID_REQUEST", "Valid latitude and longitude are required");
+    }
+
+    const stored = locationStore.set(req.auth.userId, {
+      latitude: parsed.data.latitude,
+      longitude: parsed.data.longitude,
+      ...(parsed.data.accuracy !== undefined ? { accuracy: parsed.data.accuracy } : {}),
+    });
+    if (!stored) {
+      return fail(res, 400, "INVALID_REQUEST", "Valid latitude and longitude are required");
+    }
+
+    ok(res, { accepted: true });
+  });
+
+  router.delete("/geo/location", requireAuth, (req: AuthenticatedRequest, res: Response) => {
+    if (!req.auth) return fail(res, 401, "AUTHENTICATION_REQUIRED", "Authentication required");
+    locationStore.clear(req.auth.userId);
+    ok(res, { cleared: true });
   });
 
   // -------------------------------------------------------------------------
@@ -256,21 +413,12 @@ export function createCommandCenterRouter(
       return fail(res, 400, "INVALID_REQUEST", "Valid lat and lon are required");
     }
 
-    const config = createGoogleMapsConfig();
-    if (!config.serverKey) {
-      return ok(res, {
-        value: null,
-        meta: {
-          freshness: "UNAVAILABLE",
-          observedAt: new Date().toISOString(),
-          ageSeconds: 0,
-          source: "Google Maps Platform",
-          reason: "Reverse geocoding needs GOOGLE_MAPS_SERVER_KEY.",
-        },
-      });
-    }
-
-    sendProvider(res, await googleReverseGeocode(parsed.data.lat, parsed.data.lon, config.serverKey));
+    // Google when a server key exists, Nominatim otherwise. Previously this
+    // returned UNAVAILABLE without a key, which left the current-location
+    // marker unlabelled on every deployment that had only a browser key —
+    // for a lookup OpenStreetMap answers perfectly well. `meta.source` names
+    // whichever one replied.
+    sendProvider(res, await reverseGeocode(parsed.data.lat, parsed.data.lon, { userId: req.auth.userId }));
   });
 
   // -------------------------------------------------------------------------
@@ -300,6 +448,63 @@ export function createCommandCenterRouter(
       serverGeoAvailable: Boolean(config.serverKey),
       reason: status.reason,
     });
+  });
+
+  // -------------------------------------------------------------------------
+  // Google Maps usage.
+  //
+  // Counts only. No key, no coordinates, no query text — there is nothing in
+  // this response that would be sensitive if it were logged by a proxy.
+  //
+  // The per-user breakdown is ADMIN-ONLY, because "which user is generating the
+  // most map traffic" is a fact about other people. Every authenticated caller
+  // sees the global figures (they need to know why their map stopped working)
+  // and their OWN consumption; only OWNER and ADMIN see the leaderboard.
+  // -------------------------------------------------------------------------
+  router.get("/maps/usage", requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+    if (!req.auth) return fail(res, 401, "AUTHENTICATION_REQUIRED", "Authentication required");
+
+    const guard = getMapsUsageGuard();
+    if (!guard || !deps.mapsUsage) {
+      return ok(res, {
+        available: false,
+        reason: "Usage tracking is not configured on this deployment.",
+      });
+    }
+
+    try {
+      const status = await guard.status();
+      const isAdmin = req.auth.role === "owner" || req.auth.role === "admin";
+
+      const [byService, mine, lastRequestAt, byUser] = await Promise.all([
+        deps.mapsUsage.byService(status.period),
+        deps.mapsUsage.totalForUser(status.period, req.auth.userId),
+        deps.mapsUsage.lastRequestAt(status.period),
+        isAdmin ? deps.mapsUsage.byUser(status.period, 10) : Promise.resolve(null),
+      ]);
+
+      ok(res, {
+        available: true,
+        period: status.period,
+        used: status.used,
+        limit: status.limit,
+        percentUsed: status.percentUsed,
+        level: status.level,
+        blocked: status.blocked,
+        message: status.message,
+        byService,
+        yourUsage: mine,
+        lastRequestAt: lastRequestAt ? lastRequestAt.toISOString() : null,
+        ...(byUser ? { byUser } : {}),
+        // Stated in the payload, not just in a doc, so an operator reading the
+        // admin panel cannot mistake this for their actual Google bill.
+        note: "Counts server-side Places, Geocoding and Routes calls made by JARVIS. Map tile loads are billed by Google in the browser and are not visible here. This is a JARVIS safety limit, not a replacement for a Google Cloud budget and quota cap.",
+      });
+    } catch {
+      // A counter that cannot be read is reported as such, never as zero — a
+      // zero here would read as "no usage" and hide a real problem.
+      fail(res, 503, "USAGE_UNAVAILABLE", "Usage figures could not be read.");
+    }
   });
 
   // -------------------------------------------------------------------------

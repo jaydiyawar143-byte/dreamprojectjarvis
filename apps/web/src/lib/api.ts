@@ -1348,6 +1348,14 @@ export interface Place {
   latitude: number;
   longitude: number;
   type?: string;
+  /**
+   * Google's stable id for the place, when Google resolved it. Pass it back
+   * for routing rather than the display name — "Gondia" is a city, a district
+   * and a station, and the id is the only way to say which one.
+   *
+   * Absent on OpenStreetMap results.
+   */
+  placeId?: string;
   attribution: string;
 }
 
@@ -1446,13 +1454,18 @@ export async function getRoute(
   from: string,
   to: string,
   geometry = false,
-  mode?: TravelMode
+  mode?: TravelMode,
+  // Place IDs win over the strings when both are supplied, so a route runs
+  // between exactly the places the user picked from the suggestion list.
+  ids?: { fromPlaceId?: string; toPlaceId?: string }
 ): Promise<ApiResponse<Live<RouteResult>>> {
   const qs = new URLSearchParams({
     from,
     to,
     ...(geometry ? { geometry: "true" } : {}),
     ...(mode ? { mode } : {}),
+    ...(ids?.fromPlaceId ? { fromPlaceId: ids.fromPlaceId } : {}),
+    ...(ids?.toPlaceId ? { toPlaceId: ids.toPlaceId } : {}),
   });
   return request(`${CC}/geo/route?${qs.toString()}`);
 }
@@ -1555,4 +1568,203 @@ export async function reverseGeocode(
   longitude: number
 ): Promise<ApiResponse<Live<Place>>> {
   return request(`/command-center/geo/reverse?lat=${latitude}&lon=${longitude}`);
+}
+
+/**
+ * One type-ahead row.
+ *
+ * Exactly one of `placeId` and `place` is set. Google returns a Place ID that
+ * must be resolved on selection; OpenStreetMap has no autocomplete product, so
+ * its rows come from an ordinary search and already carry coordinates.
+ */
+export interface PlaceSuggestion {
+  placeId?: string;
+  description: string;
+  primary: string;
+  secondary?: string;
+  type?: string;
+  place?: Place;
+}
+
+/**
+ * Type-ahead suggestions.
+ *
+ * DEBOUNCE THIS. Autocomplete is billed per request, and an undebounced input
+ * fires one call per keystroke. The map widget debounces at 300ms and drops
+ * responses that arrive out of order; any other caller must do the same.
+ */
+export async function autocompletePlaces(
+  input: string,
+  near?: { latitude: number; longitude: number },
+  signal?: AbortSignal
+): Promise<ApiResponse<Live<PlaceSuggestion[]>>> {
+  const qs = new URLSearchParams({ q: input });
+  if (near) {
+    qs.set("lat", String(near.latitude));
+    qs.set("lon", String(near.longitude));
+  }
+  return request(`${CC}/geo/autocomplete?${qs.toString()}`, signal ? { signal } : {});
+}
+
+/** A picked suggestion's Place ID → a place with coordinates. */
+export async function resolvePlace(placeId: string): Promise<ApiResponse<Live<Place>>> {
+  return request(`${CC}/geo/place/${encodeURIComponent(placeId)}`);
+}
+
+/**
+ * Publishes the browser's position so the SERVER-side maps tools can use it.
+ *
+ * This is what makes "meri current location se Gondia ka route dikhao" work in
+ * chat: the tools run on the server and cannot see the browser.
+ *
+ * The server holds it in memory for fifteen minutes, keyed on the authenticated
+ * user, and never persists or logs it. Call `clearPublishedLocation` to revoke
+ * it early.
+ */
+export async function publishLocation(coords: {
+  latitude: number;
+  longitude: number;
+  accuracy?: number;
+}): Promise<ApiResponse<{ accepted: boolean }>> {
+  return request(`${CC}/geo/location`, {
+    method: "POST",
+    body: JSON.stringify(coords),
+  });
+}
+
+/** Forgets the published position immediately. */
+export async function clearPublishedLocation(): Promise<ApiResponse<{ cleared: boolean }>> {
+  return request(`${CC}/geo/location`, { method: "DELETE" });
+}
+
+// ---------------------------------------------------------------------------
+// Google Maps monthly usage.
+//
+// Counts only. This endpoint returns no key and no coordinates — there is
+// nothing here that would be sensitive in a proxy log. `byUser` is present only
+// for OWNER and ADMIN, and is omitted from the payload entirely otherwise
+// rather than hidden in the client.
+// ---------------------------------------------------------------------------
+
+export interface MapsUsage {
+  available: true;
+  period: string;
+  used: number;
+  limit: number;
+  percentUsed: number;
+  level: "OK" | "WARNING" | "STRONG_WARNING" | "CRITICAL" | "BLOCKED";
+  blocked: boolean;
+  message: string;
+  byService: Array<{ service: string; count: number }>;
+  yourUsage: number;
+  lastRequestAt: string | null;
+  byUser?: Array<{ userId: string; count: number }>;
+  note: string;
+}
+
+export interface MapsUsageUnavailable {
+  available: false;
+  reason: string;
+}
+
+export async function getMapsUsage(): Promise<
+  ApiResponse<MapsUsage | MapsUsageUnavailable>
+> {
+  return request(`${CC}/maps/usage`);
+}
+
+// ---------------------------------------------------------------------------
+// Integration Control Center.
+//
+// The unified read/test surface. Actions (connect, configure, disconnect) are
+// NOT duplicated here: each integration carries the existing endpoint to call,
+// so there is one write path to a credential rather than two.
+//
+// Nothing in these shapes can hold a secret. There is no token, key or webhook
+// field — the server does not send one, and the type is the second control.
+// ---------------------------------------------------------------------------
+
+export type IntegrationHealth =
+  | "CONNECTED"
+  | "DEGRADED"
+  | "UNVERIFIED"
+  | "ERROR"
+  | "NOT_CONNECTED"
+  | "CONFIG_REQUIRED"
+  | "DISABLED";
+
+export type IntegrationCategory =
+  | "google"
+  | "maps"
+  | "communication"
+  | "automation"
+  | "advertising";
+
+export interface IntegrationCapability {
+  id: string;
+  label: string;
+  available: boolean;
+  /** Marked so a connected card cannot read as "this dashboard can execute". */
+  requiresApproval?: boolean;
+}
+
+export interface IntegrationUsage {
+  used: number;
+  limit: number;
+  percentUsed: number;
+  level: string;
+  blocked: boolean;
+}
+
+export interface Integration {
+  id: string;
+  name: string;
+  subtitle: string;
+  category: IntegrationCategory;
+  health: IntegrationHealth;
+  detail: string;
+  capabilities: IntegrationCapability[];
+  /** Non-secret identifiers only — an account email, an account id, a base URL. */
+  account: { label: string; detail?: string } | null;
+  usage: IntegrationUsage | null;
+  lastCheckedAt: string | null;
+  lastError: string | null;
+  effectiveSource: string;
+  actions: {
+    testable: boolean;
+    connectUrl?: string;
+    configureUrl?: string;
+    disconnectUrl?: string;
+  };
+}
+
+export interface IntegrationCheckResult {
+  health: IntegrationHealth;
+  detail: string;
+  checkedAt: string;
+}
+
+export async function listIntegrations(): Promise<
+  ApiResponse<{ integrations: Integration[] }>
+> {
+  return request("/integrations");
+}
+
+/** Runs a REAL connection test. Every provider's test is a read. */
+export async function testIntegration(
+  id: string
+): Promise<ApiResponse<IntegrationCheckResult>> {
+  return request(`/integrations/${id}/test`, { method: "POST" });
+}
+
+/**
+ * Forgets the cached verdict for one integration.
+ *
+ * Called after connect / configure / disconnect so a card cannot keep showing
+ * a result that predates the change.
+ */
+export async function refreshIntegration(
+  id: string
+): Promise<ApiResponse<Integration>> {
+  return request(`/integrations/${id}/refresh`, { method: "POST" });
 }

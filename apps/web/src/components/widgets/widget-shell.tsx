@@ -77,6 +77,15 @@ export interface WidgetShellProps {
   action?: ReactNode;
   className?: string;
   children: ReactNode;
+  /**
+   * Stretch the content to the full height of the grid cell.
+   *
+   * Off by default, and that default is deliberate — see the wrapper below.
+   * Only a widget whose content is a CANVAS rather than a list of readings
+   * should turn this on: the map is the one that has to fill its cell, because
+   * a map sized to its own minimum is a map you cannot read.
+   */
+  fill?: boolean;
   /** Test hook, so a suite can find one widget among many. */
   testId?: string;
 }
@@ -91,6 +100,7 @@ export function WidgetShell({
   action,
   className = "",
   children,
+  fill = false,
   testId,
 }: WidgetShellProps) {
   const unavailable = meta?.freshness === "UNAVAILABLE";
@@ -161,9 +171,19 @@ export function WidgetShell({
       )}
 
       {!loading && !error && !unavailable && (
-        // `flex-1` would stretch short content down a tall grid cell; the
-        // content should sit at the top and let the cell end where it ends.
-        <div className="min-w-0">{children}</div>
+        // `flex-1` would stretch short content down a tall grid cell, so by
+        // default the content sits at the top and lets the cell end where it
+        // ends — a weather reading floating in the middle of a tall card reads
+        // as a layout bug.
+        //
+        // `fill` opts out for the widgets that ARE their cell. Without it a map
+        // gets only its own min-height and leaves the rest of the cell empty.
+        <div
+          className={`min-w-0 ${fill ? "flex min-h-0 flex-1 flex-col" : ""}`}
+          data-fill={fill ? "true" : undefined}
+        >
+          {children}
+        </div>
       )}
     </section>
   );

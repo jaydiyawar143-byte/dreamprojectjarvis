@@ -53,3 +53,10 @@ export {
   type UpdateTaskInput,
 } from "./repositories/task-repository.js";
 export { PrismaPreferenceRepository } from "./repositories/preference-repository.js";
+export {
+  PrismaMapsUsageRepository,
+  currentPeriod,
+  type MapsService,
+  type MapsServiceUsage,
+  type MapsUserUsage,
+} from "./repositories/maps-usage-repository.js";

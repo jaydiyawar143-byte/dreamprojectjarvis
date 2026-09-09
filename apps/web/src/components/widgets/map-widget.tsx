@@ -1,7 +1,7 @@
 "use client";
 
 // ---------------------------------------------------------------------------
-// V3 — the live location widget, on a real Google Map.
+// The live location widget, on a real Google Map.
 //
 // A genuine google.maps.Map: pan, zoom, markers, a drawn route polyline. Not a
 // static image, not an SVG approximation.
@@ -19,35 +19,60 @@
 // The SDK <script> is deliberately NOT removed — it is a page-level singleton
 // and another map may still be using it.
 //
-// PRIVACY. Location is requested through the browser's own permission prompt,
-// used only to centre the map and (optionally) to label the marker, and never
-// persisted. The reverse-geocode call is authenticated and the coordinates are
-// not logged.
+// LOCATION IS ONE-SHOT BY DEFAULT. The dashboard asks the browser once. A
+// continuous `watchPosition` starts ONLY when the user turns LIVE on, and stops
+// the moment they turn it off or the widget unmounts. Continuous tracking that
+// nobody switched on is surveillance, not a feature, and it costs battery for a
+// map that is usually not being looked at.
+//
+// WHY THE POSITION IS SENT TO THE SERVER. The maps TOOLS run server-side, so
+// "meri current location se Gondia ka route dikhao" in chat has no way to see
+// the browser. Publishing the fix to a short-lived, in-memory, per-user store is
+// what bridges that — see apps/api/src/services/location-store.ts. It is sent
+// only after the user has granted permission, never persisted, and revoked
+// immediately when they stop sharing.
 // ---------------------------------------------------------------------------
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Crosshair, MapPin, Navigation, Search, Settings } from "lucide-react";
+import { Crosshair, MapPin, Navigation, Radio, Search, Settings } from "lucide-react";
 import Link from "next/link";
 import {
+  clearPublishedLocation,
   getRoute,
+  publishLocation,
+  resolvePlace,
   reverseGeocode,
   searchPlaces,
   type Live,
   type Place,
+  type PlaceSuggestion,
   type RouteResult,
   type TravelMode,
 } from "@/lib/api";
 import { useGoogleMaps } from "@/lib/use-google-maps";
+import { usePlaceSuggestions, type PlaceSuggestionsState } from "@/lib/use-place-suggestions";
 import { WidgetShell } from "./widget-shell";
 
 type Mode = "route" | "search";
 
+/**
+ * The location lifecycle, stated explicitly.
+ *
+ * Every one of these renders a different line of text. There is no state in
+ * which the widget shows a position it does not have, and no state in which a
+ * failure is silent.
+ */
 type GeoState =
+  /** Not asked yet. */
   | "idle"
+  /** Asked; the browser prompt may be open. */
   | "locating"
   | "available"
+  /** The user said no. A decision, not a fault — offered again, never looped. */
   | "denied"
+  /** Asked and allowed, but no fix: no GPS, no network positioning. */
   | "unavailable"
+  /** No Geolocation API at all. */
   | "unsupported";
 
 const TRAVEL_MODES: Array<{ id: TravelMode; label: string }> = [
@@ -71,6 +96,62 @@ const MAP_STYLE: google.maps.MapTypeStyle[] = [
   { featureType: "administrative", elementType: "geometry.stroke", stylers: [{ color: "#243544" }] },
 ];
 
+/** Live updates are throttled to this, however fast the browser reports. */
+const LIVE_MIN_INTERVAL_MS = 5000;
+
+// ---------------------------------------------------------------------------
+// Suggestion list
+// ---------------------------------------------------------------------------
+
+/**
+ * The dropdown under a place input.
+ *
+ * Absolutely positioned so it overlays the map rather than pushing it down —
+ * a list that reflows the map on every keystroke makes the map unusable while
+ * searching.
+ */
+function SuggestionList({
+  state,
+  testId,
+  onPick,
+}: {
+  state: PlaceSuggestionsState;
+  testId: string;
+  onPick: (suggestion: PlaceSuggestion) => void;
+}) {
+  if (state.suggestions.length === 0) return null;
+
+  return (
+    <ul
+      data-testid={testId}
+      role="listbox"
+      className="absolute left-0 right-0 top-full z-20 mt-0.5 max-h-40 overflow-y-auto rounded-md border border-sys-edge bg-sys-void/95 shadow-console backdrop-blur"
+    >
+      {state.suggestions.map((suggestion, index) => (
+        <li key={suggestion.placeId ?? `${suggestion.description}-${index}`} role="option" aria-selected={false}>
+          <button
+            type="button"
+            // `onMouseDown` rather than `onClick`: a click fires after blur,
+            // and blur closes this list, so the click would land on nothing.
+            onMouseDown={(e) => {
+              e.preventDefault();
+              onPick(suggestion);
+            }}
+            className="sys-focus block w-full truncate px-2 py-1 text-left text-xs text-sys-text transition-colors hover:bg-sys-cyan/10 hover:text-white"
+          >
+            <span className="text-white">{suggestion.primary}</span>
+            {suggestion.secondary && (
+              <span className="text-sys-dim"> · {suggestion.secondary}</span>
+            )}
+          </button>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+// ---------------------------------------------------------------------------
+
 export function MapWidget() {
   const { status, config, retry } = useGoogleMaps();
 
@@ -80,21 +161,46 @@ export function MapWidget() {
   const resultMarkersRef = useRef<google.maps.Marker[]>([]);
   const polylineRef = useRef<google.maps.Polyline | null>(null);
   const watchIdRef = useRef<number | null>(null);
+  const lastLiveUpdateRef = useRef(0);
 
+  // Which RESULT is on screen. Set when an action runs, not when a button is
+  // pressed, so a drawn route stays labelled as a route while the search panel
+  // is open.
   const [mode, setMode] = useState<Mode>("route");
+
+  // Which FORM is open, if any.
+  //
+  // Null by default, and that is the point: this widget is two grid cells tall,
+  // and the route form plus the travel-mode row ate about two thirds of it —
+  // leaving the map itself around 110px, too small to read. The controls now
+  // appear only when ROUTE or FIND is pressed, and close again once a result
+  // comes back, so the map gets the whole cell for the thing it just drew.
+  const [panel, setPanel] = useState<Mode | null>(null);
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [query, setQuery] = useState("");
   const [travelMode, setTravelMode] = useState<TravelMode>("driving");
 
+  // Place IDs for whatever the user picked from a suggestion list. Cleared
+  // whenever the text is edited by hand, because the id would then name a
+  // different place from the one on screen.
+  const [fromPlaceId, setFromPlaceId] = useState<string | null>(null);
+  const [toPlaceId, setToPlaceId] = useState<string | null>(null);
+
   const [geoState, setGeoState] = useState<GeoState>("idle");
   const [here, setHere] = useState<{ latitude: number; longitude: number } | null>(null);
   const [hereLabel, setHereLabel] = useState<string | null>(null);
+  const [live, setLive] = useState(false);
 
   const [routeResult, setRouteResult] = useState<Live<RouteResult> | null>(null);
   const [places, setPlaces] = useState<Live<Place[]> | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const suggestionsEnabled = status === "ready";
+  const fromSuggestions = usePlaceSuggestions(from, here, suggestionsEnabled && panel === "route");
+  const toSuggestions = usePlaceSuggestions(to, here, suggestionsEnabled && panel === "route");
+  const querySuggestions = usePlaceSuggestions(query, here, suggestionsEnabled && panel === "search");
 
   // -------------------------------------------------------------------------
   // Map creation
@@ -155,9 +261,14 @@ export function MapWidget() {
   }, []);
 
   const applyPosition = useCallback(
-    (coords: { latitude: number; longitude: number }, recentre: boolean) => {
-      setHere(coords);
+    (coords: { latitude: number; longitude: number; accuracy?: number }, recentre: boolean) => {
+      setHere({ latitude: coords.latitude, longitude: coords.longitude });
       setGeoState("available");
+
+      // Hand it to the server so the chat tools can use it. Fire-and-forget:
+      // a failure here costs the "route from my location" phrasing in chat,
+      // not the map, which is already centred.
+      void publishLocation(coords);
 
       const map = mapRef.current;
       if (!map) return;
@@ -193,6 +304,7 @@ export function MapWidget() {
     []
   );
 
+  /** One fix. No watcher — see the LIVE toggle for continuous tracking. */
   const locate = useCallback(
     (recentre: boolean) => {
       if (typeof navigator === "undefined" || !navigator.geolocation) {
@@ -203,27 +315,20 @@ export function MapWidget() {
       setGeoState("locating");
       navigator.geolocation.getCurrentPosition(
         (pos) => {
-          const coords = { latitude: pos.coords.latitude, longitude: pos.coords.longitude };
-          applyPosition(coords, recentre);
+          applyPosition(
+            {
+              latitude: pos.coords.latitude,
+              longitude: pos.coords.longitude,
+              ...(Number.isFinite(pos.coords.accuracy) ? { accuracy: pos.coords.accuracy } : {}),
+            },
+            recentre
+          );
 
-          // Label the marker where the server can reverse-geocode. A failure
-          // here is cosmetic: the map is already centred correctly.
-          void reverseGeocode(coords.latitude, coords.longitude).then((res) => {
+          // Label the marker. A failure here is cosmetic: the map is already
+          // centred correctly, and no address is invented in its place.
+          void reverseGeocode(pos.coords.latitude, pos.coords.longitude).then((res) => {
             if (res.success && res.data?.value) setHereLabel(res.data.value.name);
           });
-
-          // Follow the user, but only after an initial fix and with a coarse
-          // threshold — a tight watch drains battery for no visible benefit.
-          clearWatch();
-          watchIdRef.current = navigator.geolocation.watchPosition(
-            (next) =>
-              applyPosition(
-                { latitude: next.coords.latitude, longitude: next.coords.longitude },
-                false
-              ),
-            () => undefined,
-            { enableHighAccuracy: false, maximumAge: 60_000, timeout: 30_000 }
-          );
         },
         (err) => {
           // PERMISSION_DENIED is a decision, not a fault; the others are.
@@ -232,16 +337,73 @@ export function MapWidget() {
         { timeout: 10_000, maximumAge: 5 * 60_000 }
       );
     },
-    [applyPosition, clearWatch]
+    [applyPosition]
   );
 
-  // Ask once, automatically, when the map is ready. The browser shows its own
+  // Ask ONCE, automatically, when the map is ready. The browser shows its own
   // prompt; a refusal is handled and never retried in a loop.
   useEffect(() => {
     if (status === "ready" && geoState === "idle") locate(true);
   }, [status, geoState, locate]);
 
+  // -------------------------------------------------------------------------
+  // Live tracking — only while the user has it switched on
+  // -------------------------------------------------------------------------
+  useEffect(() => {
+    if (!live) {
+      clearWatch();
+      return;
+    }
+    if (typeof navigator === "undefined" || !navigator.geolocation) {
+      setGeoState("unsupported");
+      setLive(false);
+      return;
+    }
+
+    lastLiveUpdateRef.current = 0;
+    watchIdRef.current = navigator.geolocation.watchPosition(
+      (pos) => {
+        // Throttled. A phone can emit a fix every second; redrawing the marker
+        // and re-publishing to the server that often is pure cost.
+        const now = Date.now();
+        if (now - lastLiveUpdateRef.current < LIVE_MIN_INTERVAL_MS) return;
+        lastLiveUpdateRef.current = now;
+
+        applyPosition(
+          {
+            latitude: pos.coords.latitude,
+            longitude: pos.coords.longitude,
+            ...(Number.isFinite(pos.coords.accuracy) ? { accuracy: pos.coords.accuracy } : {}),
+          },
+          false
+        );
+      },
+      (err) => {
+        setGeoState(err.code === err.PERMISSION_DENIED ? "denied" : "unavailable");
+        setLive(false);
+      },
+      // Coarse on purpose: a tight high-accuracy watch drains battery for a
+      // marker that moves a few pixels.
+      { enableHighAccuracy: false, maximumAge: 30_000, timeout: 30_000 }
+    );
+
+    return clearWatch;
+  }, [live, applyPosition, clearWatch]);
+
+  // Belt and braces: a watcher must never outlive the widget.
   useEffect(() => clearWatch, [clearWatch]);
+
+  /** Stops sharing entirely — watcher off, and the server forgets the fix. */
+  const stopSharing = useCallback(() => {
+    setLive(false);
+    clearWatch();
+    setHere(null);
+    setHereLabel(null);
+    setGeoState("idle");
+    meMarkerRef.current?.setMap(null);
+    meMarkerRef.current = null;
+    void clearPublishedLocation();
+  }, [clearWatch]);
 
   // -------------------------------------------------------------------------
   // Drawing
@@ -253,62 +415,127 @@ export function MapWidget() {
     polylineRef.current = null;
   }, []);
 
-  const drawRoute = useCallback((result: RouteResult) => {
-    const map = mapRef.current;
-    if (!map) return;
+  const drawRoute = useCallback(
+    (result: RouteResult) => {
+      const map = mapRef.current;
+      if (!map) return;
 
-    clearOverlays();
+      clearOverlays();
 
-    const origin = { lat: result.from.latitude, lng: result.from.longitude };
-    const destination = { lat: result.to.latitude, lng: result.to.longitude };
+      const origin = { lat: result.from.latitude, lng: result.from.longitude };
+      const destination = { lat: result.to.latitude, lng: result.to.longitude };
 
-    resultMarkersRef.current.push(
-      new google.maps.Marker({ map, position: origin, label: "A", title: result.from.name }),
-      new google.maps.Marker({ map, position: destination, label: "B", title: result.to.name })
-    );
-
-    // Geometry is [lng, lat] throughout the geo layer; Maps wants {lat, lng}.
-    const path = (result.geometry ?? []).map(([lng, lat]) => ({ lat, lng }));
-
-    polylineRef.current = new google.maps.Polyline({
-      map,
-      // With no polyline from the provider, a straight line between the two
-      // points would imply a road that does not exist — so only the markers
-      // are drawn in that case.
-      path: path.length > 1 ? path : [],
-      strokeColor: "#3ee0f2",
-      strokeOpacity: 0.9,
-      strokeWeight: 4,
-    });
-
-    const bounds = new google.maps.LatLngBounds();
-    (path.length > 1 ? path : [origin, destination]).forEach((p) => bounds.extend(p));
-    map.fitBounds(bounds, 32);
-  }, [clearOverlays]);
-
-  const drawPlaces = useCallback((found: Place[]) => {
-    const map = mapRef.current;
-    if (!map || found.length === 0) return;
-
-    clearOverlays();
-    const bounds = new google.maps.LatLngBounds();
-
-    found.slice(0, 8).forEach((place) => {
-      const position = { lat: place.latitude, lng: place.longitude };
       resultMarkersRef.current.push(
-        new google.maps.Marker({ map, position, title: place.name })
+        new google.maps.Marker({ map, position: origin, label: "A", title: result.from.name }),
+        new google.maps.Marker({ map, position: destination, label: "B", title: result.to.name })
       );
-      bounds.extend(position);
-    });
 
-    map.fitBounds(bounds, 48);
-    // fitBounds on a single marker zooms to the maximum, which is disorienting.
-    if (found.length === 1) {
-      google.maps.event.addListenerOnce(map, "idle", () => {
-        if ((map.getZoom() ?? 0) > 15) map.setZoom(15);
+      // Geometry is [lng, lat] throughout the geo layer; Maps wants {lat, lng}.
+      const path = (result.geometry ?? []).map(([lng, lat]) => ({ lat, lng }));
+
+      polylineRef.current = new google.maps.Polyline({
+        map,
+        // With no polyline from the provider, a straight line between the two
+        // points would imply a road that does not exist — so only the markers
+        // are drawn in that case.
+        path: path.length > 1 ? path : [],
+        strokeColor: "#3ee0f2",
+        strokeOpacity: 0.9,
+        strokeWeight: 4,
       });
-    }
-  }, [clearOverlays]);
+
+      const bounds = new google.maps.LatLngBounds();
+      (path.length > 1 ? path : [origin, destination]).forEach((p) => bounds.extend(p));
+      map.fitBounds(bounds, 32);
+    },
+    [clearOverlays]
+  );
+
+  const drawPlaces = useCallback(
+    (found: Place[]) => {
+      const map = mapRef.current;
+      if (!map || found.length === 0) return;
+
+      clearOverlays();
+      const bounds = new google.maps.LatLngBounds();
+
+      found.slice(0, 8).forEach((place) => {
+        const position = { lat: place.latitude, lng: place.longitude };
+        resultMarkersRef.current.push(
+          new google.maps.Marker({ map, position, title: place.name })
+        );
+        bounds.extend(position);
+      });
+
+      map.fitBounds(bounds, 48);
+      // fitBounds on a single marker zooms to the maximum, which is disorienting.
+      if (found.length === 1) {
+        google.maps.event.addListenerOnce(map, "idle", () => {
+          if ((map.getZoom() ?? 0) > 15) map.setZoom(15);
+        });
+      }
+    },
+    [clearOverlays]
+  );
+
+  /** Centres on one place and drops a single marker. Used on selection. */
+  const focusPlace = useCallback(
+    (place: Place) => {
+      const map = mapRef.current;
+      if (!map) return;
+      clearOverlays();
+      resultMarkersRef.current.push(
+        new google.maps.Marker({
+          map,
+          position: { lat: place.latitude, lng: place.longitude },
+          title: place.name,
+        })
+      );
+      map.setCenter({ lat: place.latitude, lng: place.longitude });
+      map.setZoom(13);
+    },
+    [clearOverlays]
+  );
+
+  // -------------------------------------------------------------------------
+  // Selection
+  // -------------------------------------------------------------------------
+
+  /**
+   * Turns a picked suggestion into a place.
+   *
+   * OpenStreetMap rows already carry coordinates; Google rows cost one Place
+   * Details call, which is exactly why it happens on selection rather than for
+   * every prediction in the list.
+   */
+  const resolveSuggestion = useCallback(
+    async (suggestion: PlaceSuggestion): Promise<Place | null> => {
+      if (suggestion.place) return suggestion.place;
+      if (!suggestion.placeId) return null;
+
+      const res = await resolvePlace(suggestion.placeId);
+      if (res.success && res.data?.value) return res.data.value;
+
+      setError(res.data?.meta.reason ?? res.error?.message ?? "That place could not be resolved.");
+      return null;
+    },
+    []
+  );
+
+  const pickInto = useCallback(
+    (
+      suggestion: PlaceSuggestion,
+      state: PlaceSuggestionsState,
+      setValue: (v: string) => void,
+      setPlaceId: (v: string | null) => void
+    ) => {
+      state.skip(suggestion.description);
+      setValue(suggestion.description);
+      setPlaceId(suggestion.placeId ?? null);
+      state.clear();
+    },
+    []
+  );
 
   // -------------------------------------------------------------------------
   // Actions
@@ -322,23 +549,35 @@ export function MapWidget() {
     setBusy(true);
     setError(null);
     setPlaces(null);
+    setMode("route");
+    // Close the form as the request goes out: the answer is a drawn route, and
+    // the route needs the height the form is occupying.
+    setPanel(null);
 
-    const res = await getRoute(origin, to.trim(), true, travelMode);
+    const res = await getRoute(origin, to.trim(), true, travelMode, {
+      // Only sent when the text still matches what was picked; editing the
+      // field by hand clears the id.
+      ...(from.trim() && fromPlaceId ? { fromPlaceId } : {}),
+      ...(toPlaceId ? { toPlaceId } : {}),
+    });
     setBusy(false);
 
     if (res.success && res.data) {
       setRouteResult(res.data);
       if (res.data.value) drawRoute(res.data.value);
+      else setError(res.data.meta.reason ?? "No route was found between those places.");
     } else {
       setError(res.error?.message ?? "Could not calculate the route.");
     }
-  }, [from, to, here, travelMode, drawRoute]);
+  }, [from, to, here, travelMode, fromPlaceId, toPlaceId, drawRoute]);
 
   const runSearch = useCallback(async () => {
     if (!query.trim()) return;
     setBusy(true);
     setError(null);
     setRouteResult(null);
+    setMode("search");
+    setPanel(null);
 
     const res = await searchPlaces(query.trim(), here ?? undefined);
     setBusy(false);
@@ -346,6 +585,7 @@ export function MapWidget() {
     if (res.success && res.data) {
       setPlaces(res.data);
       if (res.data.value) drawPlaces(res.data.value);
+      else setError(res.data.meta.reason ?? "Nothing matched that search.");
     } else {
       setError(res.error?.message ?? "Could not search for that place.");
     }
@@ -368,20 +608,40 @@ export function MapWidget() {
           tone: "text-sys-cyan-soft",
         };
       case "denied":
-        return { text: "Location permission denied.", action: "Try again", tone: "text-amber-300/90" };
+        return {
+          text: "Location permission denied.",
+          action: "Try again",
+          tone: "text-amber-300/90",
+        };
       case "unavailable":
-        return { text: "Current location unavailable.", action: "Try again", tone: "text-amber-300/90" };
+        return {
+          text: "Current location unavailable.",
+          action: "Try again",
+          tone: "text-amber-300/90",
+        };
       case "unsupported":
-        return { text: "This browser cannot report a location.", action: null, tone: "text-sys-dim" };
+        return {
+          text: "This browser cannot report a location.",
+          action: null,
+          tone: "text-sys-dim",
+        };
       default:
-        return { text: "Location access is disabled.", action: "Enable location", tone: "text-sys-dim" };
+        return {
+          text: "Allow location access to centre the map.",
+          action: "Enable location",
+          tone: "text-sys-dim",
+        };
     }
   })();
 
   return (
     <WidgetShell
       testId="widget-map"
-      title="Location"
+      // The map is the widget, so it takes the whole cell rather than its own
+      // minimum height. Without this the controls' space is simply left empty
+      // when they close.
+      fill
+      title={live ? "Live location" : "Location"}
       icon={<MapPin size={13} />}
       {...(active?.meta ? { meta: active.meta } : {})}
       error={error}
@@ -392,10 +652,13 @@ export function MapWidget() {
               key={m}
               type="button"
               data-testid={`map-mode-${m}`}
-              onClick={() => setMode(m)}
-              aria-pressed={mode === m}
+              // Pressing the open one closes it, which is how the map gets
+              // its full height back without a separate close control.
+              onClick={() => setPanel((current) => (current === m ? null : m))}
+              aria-pressed={panel === m}
+              aria-expanded={panel === m}
               className={`sys-focus rounded border px-1 py-0.5 font-mono text-xs uppercase tracking-hud transition-colors ${
-                mode === m
+                panel === m
                   ? "border-sys-cyan/40 bg-sys-cyan/10 text-sys-cyan"
                   : "border-sys-line text-sys-dim hover:text-white"
               }`}
@@ -479,6 +742,27 @@ export function MapWidget() {
               </button>
             )}
 
+            {/* LIVE is opt-in and clearly labelled while it runs. It is only
+                offered once a fix exists, so it can never be the thing that
+                triggers the permission prompt. */}
+            {geoState === "available" && (
+              <button
+                type="button"
+                data-testid="map-live-toggle"
+                onClick={() => (live ? stopSharing() : setLive(true))}
+                aria-pressed={live}
+                title={live ? "Stop live tracking and forget my location" : "Follow my location"}
+                className={`sys-focus flex shrink-0 items-center gap-1 rounded border px-1.5 py-0.5 font-mono text-xs uppercase tracking-hud transition-colors ${
+                  live
+                    ? "border-sys-cyan/60 bg-sys-cyan/15 text-sys-cyan animate-sys-pulse"
+                    : "border-sys-line text-sys-dim hover:text-white"
+                }`}
+              >
+                <Radio size={9} aria-hidden="true" />
+                Live
+              </button>
+            )}
+
             <button
               type="button"
               data-testid="map-my-location"
@@ -491,8 +775,8 @@ export function MapWidget() {
             </button>
           </div>
 
-          {/* Controls */}
-          {mode === "route" ? (
+          {/* Controls — only the open one, so the map keeps the rest of the cell. */}
+          {panel === "route" && (
             <form
               onSubmit={(e) => {
                 e.preventDefault();
@@ -500,29 +784,56 @@ export function MapWidget() {
               }}
               className="space-y-1"
             >
-              <label htmlFor="map-from" className="sr-only">
-                From
-              </label>
-              <input
-                id="map-from"
-                data-testid="map-from"
-                value={from}
-                onChange={(e) => setFrom(e.target.value)}
-                placeholder={here ? "From — blank uses my location" : "From — e.g. Balaghat"}
-                className="sys-focus w-full rounded-md border border-sys-control bg-black/40 px-2 py-1 text-sm text-white placeholder:text-sys-dim"
-              />
-              <div className="flex gap-1">
-                <label htmlFor="map-to" className="sr-only">
-                  To
+              <div className="relative">
+                <label htmlFor="map-from" className="sr-only">
+                  From
                 </label>
                 <input
-                  id="map-to"
-                  data-testid="map-to"
-                  value={to}
-                  onChange={(e) => setTo(e.target.value)}
-                  placeholder="To — e.g. Gondia"
-                  className="sys-focus min-w-0 flex-1 rounded-md border border-sys-control bg-black/40 px-2 py-1 text-sm text-white placeholder:text-sys-dim"
+                  id="map-from"
+                  data-testid="map-from"
+                  value={from}
+                  onChange={(e) => {
+                    setFrom(e.target.value);
+                    // Hand-editing invalidates the picked place: the id would
+                    // otherwise still point at whatever was selected before.
+                    setFromPlaceId(null);
+                  }}
+                  onBlur={fromSuggestions.clear}
+                  autoComplete="off"
+                  placeholder={here ? "From — blank uses my location" : "From — e.g. Balaghat"}
+                  className="sys-focus w-full rounded-md border border-sys-control bg-black/40 px-2 py-1 text-sm text-white placeholder:text-sys-dim"
                 />
+                <SuggestionList
+                  state={fromSuggestions}
+                  testId="map-from-suggestions"
+                  onPick={(s) => pickInto(s, fromSuggestions, setFrom, setFromPlaceId)}
+                />
+              </div>
+
+              <div className="flex gap-1">
+                <div className="relative min-w-0 flex-1">
+                  <label htmlFor="map-to" className="sr-only">
+                    To
+                  </label>
+                  <input
+                    id="map-to"
+                    data-testid="map-to"
+                    value={to}
+                    onChange={(e) => {
+                      setTo(e.target.value);
+                      setToPlaceId(null);
+                    }}
+                    onBlur={toSuggestions.clear}
+                    autoComplete="off"
+                    placeholder="To — e.g. Gondia"
+                    className="sys-focus w-full rounded-md border border-sys-control bg-black/40 px-2 py-1 text-sm text-white placeholder:text-sys-dim"
+                  />
+                  <SuggestionList
+                    state={toSuggestions}
+                    testId="map-to-suggestions"
+                    onPick={(s) => pickInto(s, toSuggestions, setTo, setToPlaceId)}
+                  />
+                </div>
                 <button
                   type="submit"
                   data-testid="map-route-submit"
@@ -561,7 +872,9 @@ export function MapWidget() {
                 })}
               </div>
             </form>
-          ) : (
+          )}
+
+          {panel === "search" && (
             <form
               onSubmit={(e) => {
                 e.preventDefault();
@@ -569,17 +882,43 @@ export function MapWidget() {
               }}
               className="flex gap-1"
             >
-              <label htmlFor="map-query" className="sr-only">
-                Search the map
-              </label>
-              <input
-                id="map-query"
-                data-testid="map-query"
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search places…"
-                className="sys-focus min-w-0 flex-1 rounded-md border border-sys-control bg-black/40 px-2 py-1 text-sm text-white placeholder:text-sys-dim"
-              />
+              <div className="relative min-w-0 flex-1">
+                <label htmlFor="map-query" className="sr-only">
+                  Search Google Maps
+                </label>
+                <input
+                  id="map-query"
+                  data-testid="map-query"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  onBlur={querySuggestions.clear}
+                  autoComplete="off"
+                  placeholder="Search Google Maps…"
+                  className="sys-focus w-full rounded-md border border-sys-control bg-black/40 px-2 py-1 text-sm text-white placeholder:text-sys-dim"
+                />
+                <SuggestionList
+                  state={querySuggestions}
+                  testId="map-query-suggestions"
+                  onPick={(s) => {
+                    querySuggestions.skip(s.description);
+                    setQuery(s.description);
+                    querySuggestions.clear();
+                    // Selecting a place shows it immediately rather than making
+                    // the user press search for something they already chose.
+                    void resolveSuggestion(s).then((place) => {
+                      if (place) {
+                        setPlaces(null);
+                        setRouteResult(null);
+                        setMode("search");
+                        // Picking a place IS the answer here — show it on a
+                        // full-height map rather than under the form.
+                        setPanel(null);
+                        focusPlace(place);
+                      }
+                    });
+                  }}
+                />
+              </div>
               <button
                 type="submit"
                 data-testid="map-search-submit"
