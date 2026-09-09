@@ -56,7 +56,7 @@ export function CustomizeBar({
           type="button"
           data-testid="customize-toggle"
           onClick={onToggle}
-          className="sys-focus flex items-center gap-1.5 rounded-full border border-white/[0.07] bg-white/[0.03] px-2.5 py-1 font-mono text-[0.5rem] uppercase tracking-hud text-sys-dim transition-colors hover:border-sys-cyan/30 hover:text-white"
+          className="sys-focus flex items-center gap-1.5 rounded-full border border-white/[0.07] bg-white/[0.03] px-2.5 py-1 font-mono text-xs uppercase tracking-hud text-sys-dim transition-colors hover:border-sys-cyan/30 hover:text-white"
         >
           <Sliders size={10} aria-hidden="true" />
           Customise
@@ -70,7 +70,7 @@ export function CustomizeBar({
   return (
     <div className="relative z-20 mb-4 w-full max-w-6xl">
       <div className="glass-panel glass-edge flex flex-wrap items-center gap-2 rounded-xl px-3 py-2">
-        <p className="mr-auto flex items-center gap-1.5 font-mono text-[0.5rem] uppercase tracking-hud text-sys-cyan-soft">
+        <p className="mr-auto flex items-center gap-1.5 font-mono text-xs uppercase tracking-hud text-sys-cyan-soft">
           <Sliders size={10} aria-hidden="true" />
           Customising
           {dirty && (
@@ -85,7 +85,7 @@ export function CustomizeBar({
           data-testid="manage-widgets"
           onClick={() => setManaging((v) => !v)}
           aria-expanded={managing}
-          className="sys-focus flex items-center gap-1.5 rounded-md border border-sys-line px-2 py-1 font-mono text-[0.5rem] uppercase tracking-hud text-sys-dim transition-colors hover:text-white"
+          className="sys-focus flex items-center gap-1.5 rounded-md border border-sys-line px-2 py-1 font-mono text-xs uppercase tracking-hud text-sys-dim transition-colors hover:text-white"
         >
           <LayoutGrid size={10} aria-hidden="true" />
           Manage widgets
@@ -96,7 +96,7 @@ export function CustomizeBar({
           type="button"
           data-testid="reset-layout"
           onClick={onReset}
-          className="sys-focus flex items-center gap-1.5 rounded-md border border-sys-line px-2 py-1 font-mono text-[0.5rem] uppercase tracking-hud text-sys-dim transition-colors hover:text-white"
+          className="sys-focus flex items-center gap-1.5 rounded-md border border-sys-line px-2 py-1 font-mono text-xs uppercase tracking-hud text-sys-dim transition-colors hover:text-white"
         >
           <RotateCcw size={10} aria-hidden="true" />
           Reset
@@ -107,7 +107,7 @@ export function CustomizeBar({
           data-testid="save-layout"
           onClick={onSave}
           disabled={saving || !dirty}
-          className="sys-focus flex items-center gap-1.5 rounded-md border border-sys-cyan/40 bg-sys-cyan/10 px-2 py-1 font-mono text-[0.5rem] uppercase tracking-hud text-sys-cyan transition-colors enabled:hover:bg-sys-cyan/20 disabled:opacity-40"
+          className="sys-focus flex items-center gap-1.5 rounded-md border border-sys-cyan/40 bg-sys-cyan/10 px-2 py-1 font-mono text-xs uppercase tracking-hud text-sys-cyan transition-colors enabled:hover:bg-sys-cyan/20 disabled:opacity-40"
         >
           <Save size={10} aria-hidden="true" />
           {saving ? "Saving…" : "Save layout"}
@@ -138,7 +138,7 @@ export function CustomizeBar({
               return (
                 <li key={placement.id}>
                   <label
-                    className={`flex items-center gap-2 rounded-md px-2 py-1.5 text-[0.68rem] ${
+                    className={`flex items-center gap-2 rounded-md px-2 py-1.5 text-xs ${
                       limits.hideable
                         ? "cursor-pointer text-sys-text/85 hover:bg-white/[0.03]"
                         : "cursor-not-allowed text-sys-dim"
@@ -158,7 +158,7 @@ export function CustomizeBar({
                     {!limits.hideable && (
                       <span
                         title="Always shown"
-                        className="shrink-0 font-mono text-[0.42rem] uppercase tracking-hud text-sys-dim/70"
+                        className="shrink-0 font-mono text-xs uppercase tracking-hud text-sys-dim"
                       >
                         Always
                       </span>
@@ -172,7 +172,7 @@ export function CustomizeBar({
             })}
           </ul>
 
-          <p className="mt-1.5 px-2 text-[0.5rem] leading-relaxed text-sys-dim/70">
+          <p className="mt-1.5 px-2 text-xs leading-relaxed text-sys-dim">
             Drag the grip on a widget to reorder it, or use the arrow buttons. The Orb, command bar
             and approval controls are always available.
           </p>

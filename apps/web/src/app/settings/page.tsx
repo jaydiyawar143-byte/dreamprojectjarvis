@@ -27,7 +27,7 @@ import { Badge, Button, StatusDot } from "@/components/ui/primitives";
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="flex flex-wrap items-center justify-between gap-3 border-b border-sys-line/50 py-3 last:border-0">
-      <span className="font-mono text-[0.62rem] uppercase tracking-hud text-sys-dim">{label}</span>
+      <span className="font-mono text-xs uppercase tracking-hud text-sys-dim">{label}</span>
       <span className="text-sm text-sys-text">{children}</span>
     </div>
   );
@@ -129,7 +129,7 @@ export default function SettingsPage() {
           <div className="pt-3">
             <Link
               href="/settings/connections"
-              className="sys-focus inline-flex items-center rounded border border-sys-cyan/40 bg-sys-cyan/[0.08] px-3 py-1.5 font-mono text-[0.58rem] uppercase tracking-hud text-sys-cyan-soft transition-colors hover:border-sys-cyan/80"
+              className="sys-focus inline-flex items-center rounded border border-sys-cyan/40 bg-sys-cyan/[0.08] px-3 py-1.5 font-mono text-xs uppercase tracking-hud text-sys-cyan-soft transition-colors hover:border-sys-cyan/80"
             >
               Manage connections
             </Link>

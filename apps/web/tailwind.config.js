@@ -26,7 +26,21 @@ module.exports = {
           panel: "#070d16",
           line: "#14212f",
           edge: "#1d3245",
-          dim: "#5b7183",
+          // Boundary of an INTERACTIVE control. WCAG 1.4.11 wants 3:1 for
+          // anything that identifies a control; `line` and `edge` are 1.25:1
+          // and 1.54:1 on `void`, which is fine for a decorative panel seam and
+          // not fine for the edge of a button or a field. 3.47:1.
+          control: "#456888",
+          // Phase A: lifted from #5b7183 (4.00:1 on `void` — below AA for
+          // normal text, and worse on every lighter surface). #8fa3b5 measures
+          // 7.80:1 on `void`, 7.49:1 on `panel` and 5.06:1 on `edge`, so the
+          // quiet register is readable on all three without the type having to
+          // grow to "large text" to qualify.
+          //
+          // The mood is bought back with opacity instead — but only down to
+          // /75, which still measures 4.72:1. Below that it fails again, so
+          // /70 and lower must not carry informational text.
+          dim: "#8fa3b5",
           text: "#c3d3e0",
           cyan: "#3ee0f2",
           "cyan-soft": "#7ceaf7",
@@ -40,7 +54,35 @@ module.exports = {
         mono: ["var(--font-mono)", "ui-monospace", "SFMono-Regular", "monospace"],
       },
       letterSpacing: {
-        hud: "0.22em",
+        /**
+         * HUD label tracking. Retuned in Phase A, from 0.22em.
+         *
+         * `em` tracking scales with the type, so lifting every HUD label from
+         * 8px to 12px did not just make the glyphs bigger — it made the gaps
+         * between them 50% wider in absolute terms, which is what pushed the
+         * freshness badge and the CPU readout past their panel edges.
+         *
+         * 0.22em at the old 8px is 1.76px of air. 0.15em at 12px is 1.8px —
+         * so this is the tracking the design was actually drawn with, held
+         * constant through the size change rather than scaled up with it.
+         */
+        hud: "0.15em",
+      },
+      fontSize: {
+        /**
+         * Decorative frame chrome. 8px.
+         *
+         * The ONLY size below the 12px readability floor, and it is spendable
+         * only on text that is `aria-hidden`, appears nowhere else, and
+         * reports no state: corner registration marks, coordinates, frame
+         * labels, build strings.
+         *
+         * It exists as a named token rather than an arbitrary `text-[0.5rem]`
+         * precisely so it is greppable — a reviewer can list every use in one
+         * search and ask whether each is genuinely ornament. Informational
+         * text starts at `text-xs`.
+         */
+        chrome: ["0.5rem", { lineHeight: "0.75rem" }],
       },
       boxShadow: {
         console:

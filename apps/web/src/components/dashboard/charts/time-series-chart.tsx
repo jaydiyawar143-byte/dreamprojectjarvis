@@ -256,7 +256,7 @@ export function TimeSeriesChart({
       <div className="mt-1 min-h-[1.5rem]" aria-live="polite" data-testid="ts-tooltip">
         {active ? (
           // The readout wears the HUD label treatment; it is a measurement.
-          <span className="font-mono text-[0.6rem] uppercase tracking-hud text-sys-text/85">
+          <span className="font-mono text-xs uppercase tracking-hud text-sys-text/85">
             {formatDay(active.point.date)}
             <span className="mx-2 text-sys-dim">·</span>
             {spec.label} {unit}

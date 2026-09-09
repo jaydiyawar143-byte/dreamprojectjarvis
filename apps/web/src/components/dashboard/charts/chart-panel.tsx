@@ -73,7 +73,7 @@ export function ChartPanel({
             data-testid="metric-select"
             value={metric}
             onChange={(e) => onMetricChange(e.target.value as MetricKey)}
-            className="sys-focus rounded border border-sys-line bg-sys-panel px-2 py-1 font-mono text-[0.58rem] uppercase tracking-hud text-sys-text"
+            className="sys-focus rounded border border-sys-control bg-sys-panel px-2 py-1 font-mono text-sm uppercase tracking-hud text-sys-text"
           >
             {metrics.map((m) => (
               <option key={m.key} value={m.key}>
@@ -113,10 +113,10 @@ export function ChartPanel({
             <caption className="sr-only">{`${title} — ${spec.label}`}</caption>
             <thead className="sticky top-0 bg-sys-panel">
               <tr className="border-b border-sys-line">
-                <th scope="col" className="py-1.5 pr-3 font-mono text-[0.55rem] uppercase tracking-hud text-sys-dim">
+                <th scope="col" className="py-1.5 pr-3 font-mono text-xs uppercase tracking-hud text-sys-dim">
                   {title.includes("Campaign") ? "Campaign" : "Date"}
                 </th>
-                <th scope="col" className="py-1.5 text-right font-mono text-[0.55rem] uppercase tracking-hud text-sys-dim">
+                <th scope="col" className="py-1.5 text-right font-mono text-xs uppercase tracking-hud text-sys-dim">
                   {spec.label}
                 </th>
               </tr>

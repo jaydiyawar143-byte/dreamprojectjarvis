@@ -92,7 +92,7 @@ export function ClockWidget({
             data-testid="clock-mode-toggle"
             onClick={() => onToggleMode(mode === "DIGITAL" ? "ANALOG" : "DIGITAL")}
             aria-label={`Switch to ${mode === "DIGITAL" ? "analog" : "digital"} clock`}
-            className="sys-focus rounded border border-sys-line px-1.5 py-0.5 font-mono text-[0.45rem] uppercase tracking-hud text-sys-dim transition-colors hover:text-white"
+            className="sys-focus rounded border border-sys-line px-1.5 py-0.5 font-mono text-xs uppercase tracking-hud text-sys-dim transition-colors hover:text-white"
           >
             {mode === "DIGITAL" ? "Analog" : "Digital"}
           </button>
@@ -106,7 +106,7 @@ export function ClockWidget({
       ) : mode === "ANALOG" ? (
         <div>
           <AnalogFace date={now} />
-          <p data-testid="clock-date" className="mt-1.5 text-center text-[0.68rem] text-sys-dim">
+          <p data-testid="clock-date" className="mt-1.5 text-center text-xs text-sys-dim">
             {now.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" })}
           </p>
         </div>
@@ -124,7 +124,7 @@ export function ClockWidget({
               hour12: hourFormat === "12",
             })}
           </p>
-          <p data-testid="clock-date" className="mt-1.5 text-[0.68rem] text-sys-dim">
+          <p data-testid="clock-date" className="mt-1.5 text-xs text-sys-dim">
             {now.toLocaleDateString(undefined, {
               weekday: "long",
               day: "numeric",
@@ -136,7 +136,7 @@ export function ClockWidget({
       )}
 
       {timeZone && (
-        <p className="mt-1 font-mono text-[0.45rem] uppercase tracking-hud text-sys-dim/60">
+        <p className="mt-1 font-mono text-xs uppercase tracking-hud text-sys-dim">
           {timeZone}
         </p>
       )}

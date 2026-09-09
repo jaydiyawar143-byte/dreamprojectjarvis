@@ -36,7 +36,7 @@ export function ConsoleButton({
       whileHover={disabled ? undefined : { y: -1 }}
       whileTap={disabled ? undefined : { y: 0, scale: 0.995 }}
       transition={springTechnical}
-      className={`sys-focus group relative w-full overflow-hidden rounded-md py-3.5 font-mono text-[0.65rem] uppercase tracking-hud transition-all duration-300 disabled:cursor-not-allowed disabled:opacity-50 ${
+      className={`sys-focus group relative w-full overflow-hidden rounded-md py-3.5 font-mono text-xs uppercase tracking-hud transition-all duration-300 disabled:cursor-not-allowed disabled:opacity-50 ${
         isPrimary
           ? "border border-sys-cyan/45 bg-sys-cyan/10 text-sys-cyan-soft shadow-[0_0_22px_-10px_rgba(62,224,242,0.7)] hover:border-sys-cyan/85 hover:bg-sys-cyan/[0.16] hover:shadow-[0_0_34px_-8px_rgba(62,224,242,0.85)]"
           : "border border-sys-edge bg-white/[0.02] text-sys-text hover:border-sys-cyan/40 hover:bg-white/[0.04] hover:text-white"

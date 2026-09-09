@@ -179,7 +179,7 @@ export function AttachmentList({
           key={file.id}
           data-testid="attachment-chip"
           data-status={file.status}
-          className={`flex max-w-[16rem] items-center gap-1.5 rounded-full border px-2 py-1 text-[0.6rem] ${
+          className={`flex max-w-[16rem] items-center gap-1.5 rounded-full border px-2 py-1 text-xs ${
             file.status === "error"
               ? "border-red-400/35 bg-red-400/10 text-red-300/90"
               : file.status === "uploading"
@@ -200,13 +200,13 @@ export function AttachmentList({
           {file.status === "ready" && file.searchable === false && (
             <span
               title="Stored, but not searchable: this deployment has no embedding key."
-              className="shrink-0 font-mono text-[0.45rem] uppercase tracking-hud text-amber-300/80"
+              className="shrink-0 font-mono text-xs uppercase tracking-hud text-amber-300/80"
             >
               stored
             </span>
           )}
           {file.status === "error" && file.message && (
-            <span className="shrink-0 font-mono text-[0.45rem] uppercase tracking-hud">
+            <span className="shrink-0 font-mono text-xs uppercase tracking-hud">
               {file.message}
             </span>
           )}

@@ -61,7 +61,7 @@ export function Panel({
             {title && (
               <h2
                 data-testid="panel-title"
-                className="truncate font-mono text-[0.62rem] uppercase tracking-hud text-sys-text/80"
+                className="truncate font-mono text-xs uppercase tracking-hud text-sys-text/80"
               >
                 {title}
               </h2>
@@ -108,7 +108,7 @@ export function StatPanel({
   return (
     <Panel tone={tone} className={className} bodyClassName="px-4 py-4">
       <div data-testid="stat-panel" className="space-y-1.5">
-        <p className="font-mono text-[0.58rem] uppercase tracking-hud text-sys-dim">{label}</p>
+        <p className="font-mono text-xs uppercase tracking-hud text-sys-dim">{label}</p>
         {loading ? (
           <div data-testid="stat-loading" className="h-8 w-16 animate-pulse rounded bg-sys-edge/50" />
         ) : (

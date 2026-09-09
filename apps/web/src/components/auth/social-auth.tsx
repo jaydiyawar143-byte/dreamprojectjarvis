@@ -69,7 +69,7 @@ export function SocialAuth({
       {/* Divider */}
       <div className="flex items-center gap-3" aria-hidden="true">
         <span className="h-px flex-1 bg-gradient-to-r from-transparent to-sys-edge" />
-        <span className="font-mono text-[0.5rem] uppercase tracking-hud text-sys-dim/70">
+        <span className="font-mono text-xs uppercase tracking-hud text-sys-dim">
           Alt Channel
         </span>
         <span className="h-px flex-1 bg-gradient-to-l from-transparent to-sys-edge" />
@@ -81,7 +81,7 @@ export function SocialAuth({
         disabled={!available || busy}
         aria-disabled={!available}
         aria-describedby={available ? undefined : "google-channel-note"}
-        className="sys-focus group relative flex w-full items-center justify-center gap-2.5 rounded-md border border-sys-edge bg-white/[0.02] py-3 font-mono text-[0.62rem] uppercase tracking-hud text-sys-text transition-all duration-200 enabled:hover:border-sys-cyan/40 enabled:hover:bg-white/[0.05] enabled:hover:text-white disabled:cursor-not-allowed disabled:opacity-45"
+        className="sys-focus group relative flex w-full items-center justify-center gap-2.5 rounded-md border border-sys-edge bg-white/[0.02] py-3 font-mono text-xs uppercase tracking-hud text-sys-text transition-all duration-200 enabled:hover:border-sys-cyan/40 enabled:hover:bg-white/[0.05] enabled:hover:text-white disabled:cursor-not-allowed disabled:opacity-45"
       >
         <GoogleMark muted={!available} />
         Continue with Google
@@ -90,7 +90,7 @@ export function SocialAuth({
       {!available && (
         <p
           id="google-channel-note"
-          className="text-center font-mono text-[0.5rem] uppercase tracking-hud text-sys-dim/70"
+          className="text-balance text-center font-mono text-xs uppercase tracking-hud text-sys-dim"
         >
           Channel not provisioned — use Operator ID
         </p>

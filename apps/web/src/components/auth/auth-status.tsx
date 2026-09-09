@@ -37,20 +37,20 @@ function StageRow({
         ? "text-sys-danger"
         : state === "active"
           ? "text-sys-cyan"
-          : "text-sys-dim/50";
+          : "text-sys-dim";
 
   return (
     <motion.div
       initial={{ opacity: 0, x: -6 }}
       animate={{ opacity: 1, x: 0 }}
       transition={{ duration: 0.3, delay: index * 0.05 }}
-      className="flex items-baseline gap-2 font-mono text-[0.6rem] uppercase tracking-[0.14em]"
+      className="flex items-baseline gap-2 font-mono text-xs uppercase tracking-[0.14em]"
     >
-      <span className={state === "pending" ? "text-sys-dim/60" : "text-sys-text"}>{label}</span>
+      <span className={state === "pending" ? "text-sys-dim" : "text-sys-text"}>{label}</span>
       {/* Dot leader fills the gap and keeps the status column aligned */}
       <span
         aria-hidden="true"
-        className="min-w-0 flex-1 translate-y-[-2px] overflow-hidden text-sys-dim/25"
+        className="min-w-0 flex-1 translate-y-[-2px] overflow-hidden text-sys-dim"
       >
         ........................................
       </span>
@@ -113,7 +113,7 @@ export function AuthStatus({
         <>
           <div className="mb-5 flex items-center gap-2">
             <span className="h-1.5 w-1.5 animate-sys-pulse rounded-full bg-sys-cyan" aria-hidden="true" />
-            <p className="font-mono text-[0.68rem] uppercase tracking-hud text-sys-cyan">
+            <p className="font-mono text-xs uppercase tracking-hud text-sys-cyan">
               Authenticating…
             </p>
           </div>
@@ -143,7 +143,7 @@ export function AuthStatus({
           <p className="font-mono text-[0.8rem] uppercase tracking-hud text-sys-ok">
             Access Granted
           </p>
-          <p className="mt-2.5 font-mono text-[0.58rem] uppercase tracking-hud text-sys-dim">
+          <p className="mt-2.5 font-mono text-xs uppercase tracking-hud text-sys-dim">
             Welcome, Operator
           </p>
         </motion.div>
@@ -168,7 +168,7 @@ export function AuthStatus({
             {error || "Identity verification failed."}
           </p>
 
-          <p className="mt-2.5 font-mono text-[0.55rem] uppercase tracking-hud text-sys-dim">
+          <p className="mt-2.5 font-mono text-xs uppercase tracking-hud text-sys-dim">
             Check Operator ID and Access Key
           </p>
 
@@ -176,7 +176,7 @@ export function AuthStatus({
             <button
               type="button"
               onClick={onDismiss}
-              className="sys-focus mt-6 rounded border border-sys-edge px-5 py-2 font-mono text-[0.58rem] uppercase tracking-hud text-sys-text transition-colors hover:border-sys-cyan/50 hover:text-white"
+              className="sys-focus mt-6 rounded border border-sys-edge px-5 py-2 font-mono text-xs uppercase tracking-hud text-sys-text transition-colors hover:border-sys-cyan/50 hover:text-white"
             >
               Retry
             </button>

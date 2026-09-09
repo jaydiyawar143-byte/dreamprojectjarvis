@@ -65,7 +65,7 @@ export const ConsoleField = forwardRef<HTMLInputElement, Props>(function Console
       {/* ---- Label row ---- */}
       <label
         htmlFor={id}
-        className="mb-2 flex items-center gap-1.5 font-mono text-[0.55rem] uppercase tracking-hud"
+        className="mb-2 flex items-center gap-1.5 font-mono text-xs uppercase tracking-hud"
       >
         <span className="sr-only">{label}</span>
         <span
@@ -85,7 +85,7 @@ export const ConsoleField = forwardRef<HTMLInputElement, Props>(function Console
             ? "border-sys-danger/70 shadow-[0_0_18px_-6px_rgba(255,93,108,0.5)]"
             : focused
               ? "border-sys-cyan/70 shadow-field-focus"
-              : "border-sys-edge hover:border-sys-edge/80"
+              : "border-sys-control hover:border-sys-control/80"
         } ${disabled ? "opacity-60" : ""}`}
       >
         {/* Left activity bar */}
@@ -161,7 +161,7 @@ export const ConsoleField = forwardRef<HTMLInputElement, Props>(function Console
       </div>
 
       {hint && !error && (
-        <p id={hintId} className="mt-1.5 font-mono text-[0.55rem] tracking-wide text-sys-dim/70">
+        <p id={hintId} className="mt-1.5 font-mono text-xs tracking-wide text-sys-dim">
           {hint}
         </p>
       )}
@@ -171,7 +171,7 @@ export const ConsoleField = forwardRef<HTMLInputElement, Props>(function Console
           id={errorId}
           initial={{ opacity: 0, y: -3 }}
           animate={{ opacity: 1, y: 0 }}
-          className="mt-1.5 font-mono text-[0.58rem] uppercase tracking-wide text-sys-danger"
+          className="mt-1.5 font-mono text-xs uppercase tracking-wide text-sys-danger"
         >
           {error}
         </motion.p>

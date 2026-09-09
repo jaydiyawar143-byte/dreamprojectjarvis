@@ -120,7 +120,7 @@ export default function BrowserPage() {
                 {agent.allowedTools.map((tool) => (
                   <li
                     key={tool}
-                    className="rounded border border-sys-line bg-white/[0.02] px-2 py-1 font-mono text-[0.6rem] text-sys-text/80"
+                    className="rounded border border-sys-line bg-white/[0.02] px-2 py-1 font-mono text-xs text-sys-text/80"
                   >
                     {tool}
                   </li>
