@@ -126,6 +126,56 @@ const ANALYTICS_SIGNALS: RegExp[] = [
   /\bsummar(y|ise|ize)\b.*\b(metric|number|result)/i,
 ];
 
+/**
+ * Location: maps, routing, distance and "near me".
+ *
+ * Every pattern here needs a MAP word, a ROUTING word or an explicit
+ * proximity phrase. "show Gondia" alone is deliberately not enough — it is
+ * indistinguishable from asking about a campaign named Gondia, and routing on
+ * a bare place name would make the router guess at every proper noun.
+ *
+ * The Hindi and Hinglish forms are first-class, not an afterthought: this
+ * product is used in both, and "Balaghat se Gondia ka route dikhao" is the
+ * literal example the feature was specified against.
+ *
+ * `route` is safe next to the automation agent because n8n is named explicitly
+ * there and ranks higher, so "route the workflow" still goes to automation.
+ */
+const LOCATION_SIGNALS: RegExp[] = [
+  // Named product.
+  /\bgoogle\s*maps?\b/i,
+  /\bon\s+(the\s+)?map\b/i,
+  /\bmap\s+(par|pe|pr)\b/i,
+
+  // Routing and directions.
+  /\broutes?\b/i,
+  /\bdirections?\s+(to|from|for)\b/i,
+  /\b(driving|walking|cycling|biking|transit|public\s+transport)\s+(route|directions?)\b/i,
+  /\brasta\b/i,
+
+  // Distance and travel time.
+  /\bdistance\b/i,
+  /\bhow\s+far\b/i,
+  // `kitna` / `kitni` / `kitne` — Hindi adjectives agree with the noun's
+  // gender, and `door`/`doori` are feminine, so "kitni door hai" is the form
+  // people actually type. Matching only `kitna` sent the commonest phrasing of
+  // the commonest question straight past this agent; caught by a live run.
+  /\bkitn[aie]\s+(door|doori|dur|duur|distance)\b/i,
+  /\btravel\s+time\b/i,
+  /\bhow\s+long\b[^.!?]*\b(drive|driving|walk|walking|to\s+get\s+to|to\s+reach)\b/i,
+
+  // Proximity.
+  /\bnear\s*by\b/i,
+  /\bnear\s+me\b/i,
+  /\bnearest\b/i,
+  /\bmere\s+(paas|pass)\b/i,
+  /\baas\s*paas\b/i,
+
+  // The user's own position.
+  /\b(my|current)\s+location\b/i,
+  /\b(meri|mera)\s+(current\s+)?location\b/i,
+];
+
 function matches(signals: RegExp[], text: string): boolean {
   return signals.some((re) => re.test(text));
 }
@@ -287,6 +337,21 @@ export function rankAgentCandidates(
       domain: "communication",
       confidence: 0.9,
       reason: "message names WhatsApp",
+    });
+  }
+
+  // Ranked here — above Google Ads, below the explicitly-named systems.
+  //
+  // Its signals are specific (a map word, a routing word, or "near me"), so a
+  // match is strong evidence. It sits above Google Ads because "search Google
+  // Maps for cafes" names Google without naming Google ADS, and below n8n and
+  // WhatsApp because those name a system outright.
+  if (matches(LOCATION_SIGNALS, text)) {
+    candidates.push({
+      agentId: AGENT_IDS.location,
+      domain: "location",
+      confidence: 0.88,
+      reason: "message asks about a map, a route, a distance or somewhere nearby",
     });
   }
 

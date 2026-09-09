@@ -36,13 +36,14 @@ import {
   installProcessErrorHandlers,
 } from "./middleware/error-handler.js";
 import { EncryptionService } from "@jarvis/security";
-import { prisma, PrismaGoogleConnectionRepository, PrismaOAuthStateRepository, PrismaWhatsAppRepository, PrismaN8nRepository, PrismaCredentialRepository, PrismaTaskRepository, PrismaPreferenceRepository } from "@jarvis/db";
+import { prisma, PrismaGoogleConnectionRepository, PrismaOAuthStateRepository, PrismaWhatsAppRepository, PrismaN8nRepository, PrismaCredentialRepository, PrismaTaskRepository, PrismaPreferenceRepository, PrismaMapsUsageRepository } from "@jarvis/db";
 import { createWhatsAppConfig, isWhatsAppConfigured } from "@jarvis/whatsapp";
 import { createN8nConfig, isN8nConfigured } from "@jarvis/n8n";
 import { createVoiceConfig, describeVoiceConfigStatus, isVoiceConfigured } from "@jarvis/config";
 import { createGoogleSignInConfig, describeGoogleSignInStatus } from "@jarvis/config";
 import { createGoogleSignInRouter } from "./routes/google-signin.js";
 import { createCredentialsRouter } from "./routes/credentials.js";
+import { createIntegrationsRouter } from "./routes/integrations.js";
 import { createCommandCenterRouter } from "./routes/command-center.js";
 import { installSystemStream } from "./socket/system-stream.js";
 import { OpenAIVoiceProvider } from "@jarvis/ai-openai";
@@ -226,6 +227,7 @@ app.use(
   createCommandCenterRouter(container, {
     tasks: new PrismaTaskRepository(prisma),
     preferences: new PrismaPreferenceRepository(prisma),
+    mapsUsage: new PrismaMapsUsageRepository(prisma),
   })
 );
 app.use("/api/v1/activity", createActivityRouter(container));
@@ -314,6 +316,48 @@ if (process.env.JARVIS_ENCRYPTION_KEY) {
     reason: "JARVIS_ENCRYPTION_KEY is not set",
   }));
 }
+
+// ---------------------------------------------------------------------------
+// Integration Control Center — unified status and connection testing.
+//
+// A FACADE over the routers above, not a replacement for them. It reads the
+// same encrypted store, the same OAuth connection repository and the same
+// environment configs, and it hands the browser the EXISTING endpoints to call
+// for connect / configure / disconnect. There is deliberately no second write
+// path to a credential here.
+//
+// Mounted unconditionally: with no encryption key there are no stored
+// credentials to read, and the honest answer is a page saying so rather than a
+// missing route the UI cannot explain.
+// ---------------------------------------------------------------------------
+app.use(
+  "/api/v1/integrations",
+  createIntegrationsRouter(container, {
+    googleOAuthMounted: googleAdsMounted,
+    googleConnections: process.env.JARVIS_ENCRYPTION_KEY
+      ? new PrismaGoogleConnectionRepository(prisma, EncryptionService.fromEnv())
+      : null,
+    // Decryption stays behind this closure. The registry never receives the key,
+    // and a credential only ever exists as plaintext inside the one call that
+    // needs it to reach a provider.
+    readMetaCredentials: async (userId: string) => {
+      if (!process.env.JARVIS_ENCRYPTION_KEY) return null;
+      const envelope = await new PrismaCredentialRepository(prisma).get(userId, "meta");
+      if (!envelope) return null;
+      try {
+        return JSON.parse(EncryptionService.fromEnv().decrypt(envelope)) as {
+          accessToken?: string;
+          adAccountId?: string;
+        };
+      } catch {
+        // A row that will not decrypt is not "no credentials" — it is a broken
+        // one. Reported as absent here; the credentials route surfaces the
+        // INVALID state with the explanation.
+        return null;
+      }
+    },
+  })
+);
 
 if (process.env.JARVIS_ENCRYPTION_KEY) {
   app.use(

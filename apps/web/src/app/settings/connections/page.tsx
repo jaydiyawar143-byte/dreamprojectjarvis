@@ -24,6 +24,7 @@
 // ---------------------------------------------------------------------------
 
 import { useCallback, useEffect, useState } from "react";
+import { MapsUsagePanel } from "@/components/settings/maps-usage-panel";
 import Link from "next/link";
 import { ArrowLeft, Eye, EyeOff, Loader2, Trash2 } from "lucide-react";
 import {
@@ -370,6 +371,15 @@ export default function ConnectionsPage() {
                   <p className="text-xs text-sys-dim">
                     Google is connected by consent, so there is no secret to enter here.
                   </p>
+                </div>
+              )}
+
+              {/* Google Maps carries a monthly cost ceiling JARVIS enforces
+                  itself, so its card shows consumption as well as status.
+                  No other server-managed provider is metered. */}
+              {provider.id === "google-maps" && (
+                <div className="mb-4 border-t border-sys-line pt-3">
+                  <MapsUsagePanel />
                 </div>
               )}
 

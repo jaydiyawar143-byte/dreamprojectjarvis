@@ -181,6 +181,15 @@ export function productionLikeTools(): ITool[] {
     write("browser.download"),
     write("browser.submit"),
     write("browser.upload"),
+    // Maps. All READ_ONLY — a map query changes nothing anywhere.
+    read("maps.search"),
+    read("maps.nearby"),
+    read("maps.geocode"),
+    read("maps.reverse.geocode"),
+    read("maps.current.location"),
+    read("maps.route"),
+    read("maps.distance"),
+    read("maps.place"),
   ];
 }
 

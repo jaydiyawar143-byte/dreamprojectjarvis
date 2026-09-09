@@ -786,3 +786,44 @@ model Task {
   @@index([userId, completedAt])
   @@map("Task")
 }
+
+// ---------------------------------------------------------------------------
+// Google Maps monthly usage guard.
+//
+// A JARVIS-side cost ceiling. It is NOT a replacement for Google's own billing
+// controls — a Cloud budget alert and a quota cap still belong in the console.
+// What this adds is a limit JARVIS itself enforces before a request leaves the
+// process, so a runaway loop is stopped by our code rather than by a bill.
+//
+// ONE ROW PER (period, user, service).
+//
+//   - `period` is the calendar month in UTC, "2026-09". The monthly reset is
+//     therefore IMPLICIT: a new month simply writes to new rows. There is no
+//     scheduled reset job, so there is no reset job that can fail to run and
+//     silently carry a full counter into a new month.
+//
+//   - `userId` gives per-user attribution, which is what "per-tenant usage"
+//     means in this codebase — there is no separate tenant model, the user IS
+//     the isolation boundary everywhere else.
+//
+//   - `service` splits Places / Geocoding / Routes / Autocomplete, because they
+//     are priced differently and an operator needs to see which one is running.
+//
+// Rows are never deleted on rollover; the history is the usage report.
+// ---------------------------------------------------------------------------
+model MapsUsage {
+  id        String   @id @default(cuid())
+  /// Calendar month in UTC, formatted "YYYY-MM".
+  period    String
+  userId    String   @map("user_id")
+  /// "places" | "autocomplete" | "place_details" | "geocoding" | "routes"
+  service   String
+  count     Int      @default(0)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([period, userId, service], map: "maps_usage_period_user_service_unique")
+  @@index([period], map: "maps_usage_period_idx")
+  @@index([period, userId], map: "maps_usage_period_user_idx")
+  @@map("MapsUsage")
+}

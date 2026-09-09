@@ -44,6 +44,7 @@ import type { PrismaCredentialRepository } from "@jarvis/db";
 import { createMetaGraphProvider } from "@jarvis/meta-graph";
 import { isWhatsAppConfigured } from "@jarvis/whatsapp";
 import { isN8nConfigured } from "@jarvis/n8n";
+import { describeGoogleMapsStatus, isGoogleMapsServerConfigured } from "@jarvis/config";
 import { createAuthMiddleware, type AuthenticatedRequest } from "../middleware/auth.js";
 import type { Container } from "../services/container.js";
 
@@ -115,6 +116,15 @@ const PROVIDERS: ProviderSpec[] = [
     kind: "oauth",
     description:
       "Connected by consent rather than by pasting a secret. Tokens are stored encrypted server-side.",
+    testable: false,
+    fields: [],
+  },
+  {
+    id: "google-maps",
+    label: "Google Maps",
+    kind: "server-managed",
+    description:
+      "Maps Platform keys for the interactive map, place search, geocoding and routing. Separate from the Google Ads OAuth connection above — different product, different credential, different Cloud APIs.",
     testable: false,
     fields: [],
   },
@@ -233,6 +243,37 @@ export function createCredentialsRouter(
     }
 
     if (spec.kind === "server-managed") {
+      // Google Maps has THREE states, not two, because its two keys do
+      // different jobs and either can be present alone:
+      //
+      //   - browser key  -> the interactive map renders
+      //   - server key   -> place search, geocoding and routing come from
+      //                     Google rather than from OpenStreetMap
+      //
+      // Reporting a browser-key-only deployment as simply "connected" would
+      // hide that every distance on screen is coming from OSRM. Reporting it
+      // as "not configured" would be wrong too — the map works.
+      //
+      // NEITHER KEY IS EVER RETURNED. Only whether one exists.
+      if (spec.id === "google-maps") {
+        const maps = describeGoogleMapsStatus();
+        const serverKeyPresent = isGoogleMapsServerConfigured();
+        return {
+          ...base,
+          status: maps.configured
+            ? serverKeyPresent
+              ? ("CONNECTED" as const)
+              : ("CONFIGURED" as const)
+            : ("CONFIGURATION_REQUIRED" as const),
+          detail: maps.configured
+            ? serverKeyPresent
+              ? "Map, places, geocoding and routing all served by Google Maps Platform."
+              : "Map available. GOOGLE_MAPS_SERVER_KEY is not set, so place search and routing fall back to OpenStreetMap and results are labelled as such."
+            : "GOOGLE_MAPS_BROWSER_KEY is not set, so the interactive map cannot render. Place and distance questions still work through OpenStreetMap.",
+          effectiveSource: "server environment",
+        };
+      }
+
       const configured =
         spec.id === "whatsapp" ? isWhatsAppConfigured() : isN8nConfigured();
       return {
