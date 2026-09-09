@@ -1,264 +1,347 @@
 "use client";
 
 // ---------------------------------------------------------------------------
-// UI V2 — Integrations.
+// Integration Control Center.
 //
-// Three connections with three different amounts of introspection available,
-// and the page says so rather than smoothing over the difference:
+// Replaces the passive status page. An operator can now see every integration's
+// real health, verify it against the provider, open its detail, and reach the
+// action that changes it.
 //
-//   GOOGLE    has a real status route, so `configured` and `connected` are
-//             reported separately — a deployment can have credentials wired
-//             but no account linked, and those need different actions.
-//   WHATSAPP  has NO status route. The only signal is whether the message list
-//             answers or 404s.
-//   N8N       likewise. Availability is inferred, and labelled as inferred.
+// THREE THINGS IT DELIBERATELY DOES NOT DO.
 //
-// Nothing here sends anything. Outbound WhatsApp is the approval-gated
-// `whatsapp.send` tool and triggering a workflow is `n8n.trigger`; both are
-// reachable only through the assistant, behind a human decision. A send button
-// on this page would have to route around that.
+// 1. IT DOES NOT SAVE SECRETS. The credential form stays at Settings →
+//    Connections, which is the one path that validates, encrypts, stores and
+//    audits. A second form here would be a second way to get that wrong. The
+//    drawer links there instead.
 //
-// No token, scope secret or webhook path is ever rendered — the API does not
-// return them, and this page does not ask.
+// 2. IT DOES NOT EXECUTE. There is no button that sends a WhatsApp message,
+//    triggers a workflow or changes a Meta budget. Those are tools, and tools
+//    run USER → Orchestrator → agent → ToolExecutor → permission → approval →
+//    audit. A dashboard shortcut around that is the one thing this page must
+//    never become.
+//
+// 3. IT DOES NOT GUESS. An integration whose credentials exist but has not been
+//    verified reads "Not checked", never "Connected". The Test button is the
+//    only thing that can produce a green dot, and the timestamp of that test is
+//    shown beside it.
+//
+// Status is refreshed after every action rather than polled: nothing here
+// changes on its own, so a timer would only cost requests.
 // ---------------------------------------------------------------------------
 
-import { useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Search } from "lucide-react";
 
 import {
   connectGoogle,
   disconnectGoogle,
-  getGoogleStatus,
-  isNotDeployed,
-  listN8nWorkflows,
-  listWhatsAppMessages,
+  listIntegrations,
+  refreshIntegration,
+  removeCredentials,
+  testIntegration,
+  type Integration,
+  type IntegrationCategory,
 } from "@/lib/api";
-import { useResource } from "@/lib/use-resource";
 import { PageContainer, PageHeader } from "@/components/dashboard/page-container";
-import { Panel } from "@/components/dashboard/panel";
 import { EmptyState, ErrorState, LoadingState } from "@/components/dashboard/states";
-import { Badge, Button, StatusDot, type Tone } from "@/components/ui/primitives";
+import { IntegrationCard } from "@/components/integrations/integration-card";
+import { IntegrationDrawer } from "@/components/integrations/integration-drawer";
 
-function IntegrationPanel({
-  name,
-  description,
-  tone,
-  statusLabel,
-  statusTone,
-  children,
-  actions,
-}: {
-  name: string;
-  description: string;
-  tone?: "default" | "warning";
-  statusLabel: string;
-  statusTone: Tone;
-  children?: React.ReactNode;
-  actions?: React.ReactNode;
-}) {
-  return (
-    <Panel
-      tone={tone}
-      data-testid="integration-panel"
-      data-integration={name}
-      title={name}
-      description={description}
-      action={<StatusDot tone={statusTone} label={statusLabel} />}
-      footer={actions}
-    >
-      {children}
-    </Panel>
-  );
+type Filter = "all" | "connected" | "not-connected" | "attention";
+
+const FILTERS: Array<{ id: Filter; label: string }> = [
+  { id: "all", label: "All" },
+  { id: "connected", label: "Connected" },
+  { id: "not-connected", label: "Not connected" },
+  { id: "attention", label: "Needs attention" },
+];
+
+const CATEGORY_LABEL: Record<IntegrationCategory, string> = {
+  google: "Google",
+  maps: "Maps",
+  communication: "Communication",
+  automation: "Automation",
+  advertising: "Advertising",
+};
+
+/** Which bucket a health value falls into for the filter row. */
+function matchesFilter(integration: Integration, filter: Filter): boolean {
+  switch (filter) {
+    case "connected":
+      return integration.health === "CONNECTED";
+    case "not-connected":
+      return integration.health === "NOT_CONNECTED" || integration.health === "DISABLED";
+    case "attention":
+      // Anything an operator would want to act on: a failed check, a partial
+      // configuration, or a degraded provider. "Not checked" is not attention —
+      // it is simply unverified.
+      return (
+        integration.health === "ERROR" ||
+        integration.health === "DEGRADED" ||
+        integration.health === "CONFIG_REQUIRED"
+      );
+    default:
+      return true;
+  }
 }
 
 export default function IntegrationsPage() {
-  const [busy, setBusy] = useState(false);
-  const [actionError, setActionError] = useState<string | null>(null);
+  const [integrations, setIntegrations] = useState<Integration[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
 
-  const google = useResource(getGoogleStatus, [], {
-    fallbackError: "Could not read the Google connection.",
-  });
-  const whatsapp = useResource(() => listWhatsAppMessages(5), [], {
-    fallbackError: "Could not read WhatsApp activity.",
-  });
-  const n8n = useResource(listN8nWorkflows, [], {
-    fallbackError: "Could not read n8n workflows.",
-  });
+  const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState<Filter>("all");
+  const [openId, setOpenId] = useState<string | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
-  const googleNotDeployed = google.loaded && isNotDeployed({ code: google.errorCode ?? "", message: "" });
-  const whatsappNotDeployed =
-    whatsapp.loaded && isNotDeployed({ code: whatsapp.errorCode ?? "", message: "" });
-  const n8nNotDeployed = n8n.loaded && isNotDeployed({ code: n8n.errorCode ?? "", message: "" });
+  const load = useCallback(async () => {
+    setLoading(true);
+    const res = await listIntegrations();
+    setLoading(false);
 
-  const startGoogleConnect = async () => {
-    setBusy(true);
-    setActionError(null);
-    const res = await connectGoogle();
-    setBusy(false);
-    if (res.success && res.data?.authUrl) {
-      // Consent happens on Google's own domain; the callback lands back on the
-      // API, which is the only party that ever sees the authorization code.
-      window.location.href = res.data.authUrl;
+    if (res.success && res.data) {
+      setIntegrations(res.data.integrations);
+      setError(null);
       return;
     }
-    setActionError(res.error?.message ?? "Could not start the Google connection.");
-  };
+    setIntegrations(null);
+    setError(res.error?.message ?? "Integration status could not be read.");
+  }, []);
 
-  const endGoogleConnect = async () => {
-    setBusy(true);
-    setActionError(null);
-    const res = await disconnectGoogle();
-    setBusy(false);
-    if (!res.success) {
-      setActionError(res.error?.message ?? "Could not disconnect Google.");
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  /** Replaces one card in place, so a test does not reload the whole list. */
+  const patch = useCallback((id: string, next: Partial<Integration>) => {
+    setIntegrations((current) =>
+      current ? current.map((i) => (i.id === id ? { ...i, ...next } : i)) : current
+    );
+  }, []);
+
+  const runTest = useCallback(
+    async (id: string) => {
+      setBusyId(id);
+      setNotice(null);
+      const res = await testIntegration(id);
+      setBusyId(null);
+
+      if (res.success && res.data) {
+        patch(id, {
+          health: res.data.health,
+          detail: res.data.detail,
+          lastCheckedAt: res.data.checkedAt,
+          lastError:
+            res.data.health === "ERROR" || res.data.health === "DEGRADED" ? res.data.detail : null,
+        });
+        return;
+      }
+      setNotice(res.error?.message ?? "The connection test could not be completed.");
+    },
+    [patch]
+  );
+
+  const runConnect = useCallback(async (integration: Integration) => {
+    setBusyId(integration.id);
+    setNotice(null);
+
+    // Google is the only OAuth integration. Everything else is configured on the
+    // server or through the credential form, and says so.
+    if (integration.id === "google") {
+      const res = await connectGoogle();
+      setBusyId(null);
+      if (res.success && res.data?.authUrl) {
+        // The authorisation URL is built and signed by the server; the browser
+        // only follows it.
+        window.location.href = res.data.authUrl;
+        return;
+      }
+      setNotice(res.error?.message ?? "Could not start the Google authorization flow.");
       return;
     }
-    void google.reload();
-  };
 
-  const loading = google.loading && !google.loaded;
+    setBusyId(null);
+    setNotice(
+      integration.actions.configureUrl
+        ? "Enter credentials at Settings → Connections, then test the connection here."
+        : "This integration is configured from the server environment. Set its variables and restart."
+    );
+  }, []);
+
+  const runDisconnect = useCallback(
+    async (integration: Integration) => {
+      setBusyId(integration.id);
+      setNotice(null);
+
+      // Both paths go through the EXISTING endpoints, which revoke where the
+      // provider supports it, delete the encrypted credential and write an
+      // audit event. Nothing is deleted here directly.
+      const res =
+        integration.id === "google" ? await disconnectGoogle() : await removeCredentials("meta");
+
+      if (!res.success) {
+        setBusyId(null);
+        setNotice(res.error?.message ?? "Could not disconnect.");
+        return;
+      }
+
+      // Drop the cached verdict so the card cannot keep showing a result from
+      // before the credential was removed.
+      const refreshed = await refreshIntegration(integration.id);
+      setBusyId(null);
+      if (refreshed.success && refreshed.data) {
+        patch(integration.id, refreshed.data);
+        setOpenId(null);
+      } else {
+        void load();
+      }
+    },
+    [patch, load]
+  );
+
+  const visible = useMemo(() => {
+    if (!integrations) return [];
+    const needle = query.trim().toLowerCase();
+    return integrations.filter((i) => {
+      if (!matchesFilter(i, filter)) return false;
+      if (!needle) return true;
+      return (
+        i.name.toLowerCase().includes(needle) ||
+        i.subtitle.toLowerCase().includes(needle) ||
+        CATEGORY_LABEL[i.category].toLowerCase().includes(needle) ||
+        i.capabilities.some((c) => c.label.toLowerCase().includes(needle))
+      );
+    });
+  }, [integrations, query, filter]);
+
+  const grouped = useMemo(() => {
+    const map = new Map<IntegrationCategory, Integration[]>();
+    for (const integration of visible) {
+      const list = map.get(integration.category) ?? [];
+      list.push(integration);
+      map.set(integration.category, list);
+    }
+    return [...map.entries()];
+  }, [visible]);
+
+  const open = integrations?.find((i) => i.id === openId) ?? null;
+
+  const counts = useMemo(() => {
+    const all = integrations ?? [];
+    return {
+      total: all.length,
+      connected: all.filter((i) => i.health === "CONNECTED").length,
+      attention: all.filter((i) => matchesFilter(i, "attention")).length,
+    };
+  }, [integrations]);
 
   return (
     <PageContainer>
       <PageHeader
-        title="Integrations"
-        description="External systems this deployment can reach. Every outbound action stays behind the approval boundary — nothing on this page sends anything."
+        title="Integration Control Center"
+        description="Connect, verify and monitor everything JARVIS talks to. Credentials are stored encrypted on the server and never returned to the browser."
       />
 
-      {loading && <LoadingState label="Checking connections…" />}
+      {loading && <LoadingState label="Reading integration status" />}
 
-      {actionError && (
-        <div className="mb-4">
-          <ErrorState message={actionError} onRetry={() => setActionError(null)} retryLabel="Dismiss" />
+      {!loading && error && (
+        <ErrorState title="Integrations unavailable" message={error} onRetry={() => void load()} />
+      )}
+
+      {!loading && !error && integrations && (
+        <div className="space-y-5">
+          {/* Controls */}
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="relative min-w-[12rem] flex-1">
+              <label htmlFor="integration-search" className="sr-only">
+                Search integrations
+              </label>
+              <Search
+                size={12}
+                aria-hidden
+                className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-sys-dim"
+              />
+              <input
+                id="integration-search"
+                data-testid="integration-search"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Search integrations…"
+                className="sys-focus w-full rounded-md border border-sys-control bg-black/40 py-1.5 pl-7 pr-2 text-sm text-white placeholder:text-sys-dim"
+              />
+            </div>
+
+            <div className="flex flex-wrap gap-1" role="group" aria-label="Filter integrations">
+              {FILTERS.map((f) => (
+                <button
+                  key={f.id}
+                  type="button"
+                  data-testid={`integration-filter-${f.id}`}
+                  onClick={() => setFilter(f.id)}
+                  aria-pressed={filter === f.id}
+                  className={`sys-focus rounded border px-2 py-1 font-mono text-xs uppercase tracking-hud transition-colors ${
+                    filter === f.id
+                      ? "border-sys-cyan/40 bg-sys-cyan/10 text-sys-cyan"
+                      : "border-sys-line text-sys-dim hover:text-white"
+                  }`}
+                >
+                  {f.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <p data-testid="integration-summary" className="text-xs text-sys-dim">
+            {counts.connected} of {counts.total} verified connected
+            {counts.attention > 0 && ` · ${counts.attention} need attention`}
+          </p>
+
+          {notice && (
+            <p data-testid="integration-notice" className="text-xs leading-relaxed text-amber-300/90">
+              {notice}
+            </p>
+          )}
+
+          {visible.length === 0 && (
+            <EmptyState
+              title="No integrations match"
+              message="Try a different search or filter."
+            />
+          )}
+
+          {grouped.map(([category, items]) => (
+            <section key={category} className="space-y-3">
+              <h2 className="font-mono text-xs uppercase tracking-hud text-sys-dim">
+                {CATEGORY_LABEL[category]}
+              </h2>
+              <div className="grid gap-3 lg:grid-cols-2">
+                {items.map((integration) => (
+                  <IntegrationCard
+                    key={integration.id}
+                    integration={integration}
+                    busy={busyId === integration.id}
+                    onTest={() => void runTest(integration.id)}
+                    onManage={() => setOpenId(integration.id)}
+                    onConnect={() => void runConnect(integration)}
+                    onDisconnect={() => void runDisconnect(integration)}
+                  />
+                ))}
+              </div>
+            </section>
+          ))}
         </div>
       )}
 
-      <div className="grid gap-4">
-        {/* ---------------------------------------------------------------- */}
-        <IntegrationPanel
-          name="Google"
-          description="Google Ads, read-only. OAuth tokens are encrypted at rest and never reach this page."
-          statusLabel={
-            googleNotDeployed
-              ? "Not deployed"
-              : !google.data?.configured
-                ? "Not configured"
-                : google.data.connected
-                  ? "Connected"
-                  : "Not connected"
-          }
-          statusTone={
-            googleNotDeployed || !google.data?.configured
-              ? "neutral"
-              : google.data.connected
-                ? "ok"
-                : "warn"
-          }
-          tone={google.data?.connected ? "default" : "warning"}
-          actions={
-            google.data?.configured ? (
-              google.data.connected ? (
-                <Button variant="danger" size="sm" disabled={busy} onClick={() => void endGoogleConnect()}>
-                  Disconnect
-                </Button>
-              ) : (
-                <Button variant="primary" size="sm" disabled={busy} onClick={() => void startGoogleConnect()}>
-                  Connect Google
-                </Button>
-              )
-            ) : undefined
-          }
-        >
-          {googleNotDeployed ? (
-            <p className="text-sm text-sys-dim">
-              The Google router is not mounted. Set JARVIS_ENCRYPTION_KEY on the server to enable it.
-            </p>
-          ) : google.error ? (
-            <ErrorState message={google.error} onRetry={() => void google.reload()} />
-          ) : !google.data?.configured ? (
-            <p className="text-sm text-sys-dim">
-              Google credentials are not configured on the server, so a connection cannot be started.
-            </p>
-          ) : google.data.connected && google.data.account ? (
-            <div className="space-y-2">
-              <p className="text-sm text-white">{google.data.account.email}</p>
-              <div className="flex flex-wrap gap-1.5">
-                {google.data.account.scopes.map((scope) => (
-                  <Badge key={scope} tone="neutral" title={scope}>
-                    {scope.split("/").pop()}
-                  </Badge>
-                ))}
-              </div>
-            </div>
-          ) : (
-            <p className="text-sm text-sys-dim">
-              Credentials are configured. No Google account is linked yet.
-            </p>
-          )}
-        </IntegrationPanel>
-
-        {/* ---------------------------------------------------------------- */}
-        <IntegrationPanel
-          name="WhatsApp"
-          description="Inbound messages are recorded. Sending is an approval-gated action taken through the assistant."
-          statusLabel={whatsappNotDeployed ? "Not deployed" : whatsapp.error ? "Unknown" : "Available"}
-          statusTone={whatsappNotDeployed ? "neutral" : whatsapp.error ? "warn" : "ok"}
-          tone={whatsappNotDeployed ? "warning" : "default"}
-        >
-          {whatsappNotDeployed ? (
-            <p className="text-sm text-sys-dim">
-              The WhatsApp router is not mounted. This integration has no status endpoint, so
-              availability is inferred from the message list not responding.
-            </p>
-          ) : whatsapp.error ? (
-            <ErrorState message={whatsapp.error} onRetry={() => void whatsapp.reload()} />
-          ) : (whatsapp.data?.messages.length ?? 0) === 0 ? (
-            <EmptyState title="No messages yet" message="Inbound messages will appear here." />
-          ) : (
-            <ul>
-              {whatsapp.data!.messages.map((message) => (
-                <li
-                  key={message.id}
-                  data-testid="whatsapp-message"
-                  className="flex items-center justify-between border-b border-sys-line/50 py-2 last:border-0"
-                >
-                  <div className="min-w-0">
-                    <p className="truncate text-sm text-sys-text">{message.body ?? `(${message.type})`}</p>
-                    <p className="mt-0.5 font-mono text-xs text-sys-dim">
-                      {message.direction} · {new Date(message.timestamp).toLocaleString()}
-                    </p>
-                  </div>
-                  <Badge tone="neutral">{message.status}</Badge>
-                </li>
-              ))}
-            </ul>
-          )}
-        </IntegrationPanel>
-
-        {/* ---------------------------------------------------------------- */}
-        <IntegrationPanel
-          name="n8n"
-          description="Workflow automation. Triggering a workflow is approval-gated and happens through the assistant."
-          statusLabel={n8nNotDeployed ? "Not deployed" : n8n.error ? "Unknown" : "Available"}
-          statusTone={n8nNotDeployed ? "neutral" : n8n.error ? "warn" : "ok"}
-          tone={n8nNotDeployed ? "warning" : "default"}
-        >
-          {n8nNotDeployed ? (
-            <p className="text-sm text-sys-dim">
-              The n8n router is not mounted. Set N8N_BASE_URL, N8N_API_KEY and N8N_CALLBACK_SECRET on
-              the server to enable it.
-            </p>
-          ) : n8n.error ? (
-            <ErrorState message={n8n.error} onRetry={() => void n8n.reload()} />
-          ) : (
-            <p className="text-sm text-sys-text">
-              {n8n.data?.count ?? 0} active {n8n.data?.count === 1 ? "workflow" : "workflows"}.{" "}
-              <a href="/automations" className="sys-focus text-sys-cyan underline">
-                View automations
-              </a>
-            </p>
-          )}
-        </IntegrationPanel>
-      </div>
+      {open && (
+        <IntegrationDrawer
+          integration={open}
+          busy={busyId === open.id}
+          onClose={() => setOpenId(null)}
+          onTest={() => void runTest(open.id)}
+        />
+      )}
     </PageContainer>
   );
 }

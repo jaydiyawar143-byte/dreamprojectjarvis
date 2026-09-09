@@ -135,3 +135,26 @@ export {
   BrowserUploadTool,
   createBrowserTools,
 } from "./tools/browser-tools.js";
+
+// Google Maps — all READ_ONLY. See tools/maps-tools.ts for why location is
+// never a model-supplied parameter.
+export {
+  MapsSearchPlaceTool,
+  MapsNearbySearchTool,
+  MapsGeocodeTool,
+  MapsReverseGeocodeTool,
+  MapsCurrentLocationTool,
+  MapsRouteTool,
+  MapsDistanceTool,
+  MapsGetPlaceTool,
+  MAPS_TOOL_IDS,
+  createMapsTools,
+} from "./tools/maps-tools.js";
+export type {
+  MapsPort,
+  CurrentLocationPort,
+  MapsPlace,
+  MapsRoute,
+  MapsOutcome,
+  Coordinates,
+} from "./tools/maps-tools.js";

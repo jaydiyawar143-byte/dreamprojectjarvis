@@ -12,11 +12,14 @@ import {
   CommunicationAgent,
   GoogleAdsAgent,
   BrowserAgent,
+  LocationAgent,
   PendingActionService,
   AGENT_IDS,
   AGENT_POLICIES,
   isToolAllowed,
 } from "@jarvis/agents";
+import { createCurrentLocationPort, createMapsPort } from "./maps-adapter.js";
+import { MapsUsageGuard, resolveMonthlyLimit, setMapsUsageGuard } from "./maps-usage-guard.js";
 import { OpenAIAdapter, OpenAIEmbeddingProvider } from "@jarvis/ai-openai";
 import {
   ToolExecutor,
@@ -42,6 +45,7 @@ import {
   RepositoryRecipientAuthorizer,
   N8nTriggerWorkflowTool,
   createBrowserTools,
+  createMapsTools,
 } from "@jarvis/tools";
 import {
   BrowserRuntime,
@@ -83,6 +87,7 @@ import {
   PrismaGoogleConnectionRepository,
   PrismaWhatsAppRepository,
   PrismaN8nRepository,
+  PrismaMapsUsageRepository,
 } from "@jarvis/db";
 import { MemoryExtractionService, KnowledgeRetrievalService } from "@jarvis/memory";
 
@@ -377,6 +382,32 @@ function createMetaToolRegistry(
     }));
   }
 
+  // -------------------------------------------------------------------------
+  // Google Maps — place search, geocoding and routing (ALL READ-ONLY)
+  // -------------------------------------------------------------------------
+  // Registered UNCONDITIONALLY, unlike the integrations above, and that is the
+  // deliberate difference: the geo layer answers from OpenStreetMap when no
+  // Google server key is set, so these tools work on every deployment. Gating
+  // them on a key would leave a user who asks "how far is Gondia" with an
+  // assistant that has no tool for it — and a model with no tool for a factual
+  // question is a model that guesses.
+  //
+  // Which provider actually answered is reported on every result, so an
+  // OpenStreetMap distance is never described as a Google one.
+  //
+  // Nothing here can write, and nothing here takes a location from a model
+  // parameter — see tools/maps-tools.ts.
+  // -------------------------------------------------------------------------
+  // The monthly cost ceiling is installed BEFORE the tools, so there is no
+  // window in which a maps tool exists but is unmetered.
+  setMapsUsageGuard(
+    new MapsUsageGuard(new PrismaMapsUsageRepository(prisma), resolveMonthlyLimit())
+  );
+
+  for (const tool of createMapsTools(createMapsPort(), createCurrentLocationPort())) {
+    registry.register(tool);
+  }
+
   return registry;
 }
 
@@ -593,6 +624,20 @@ export function getContainer(options?: {
       new BrowserAgent({
         provider: adapter,
         tools: toolDefsFor(AGENT_POLICIES[AGENT_IDS.browser]!.allowedTools),
+      })
+    );
+  }
+
+  // Maps. Gated the same way as the others for consistency, but the guard is
+  // effectively always true: the maps tools register unconditionally because
+  // the geo layer answers from OpenStreetMap without a Google key. The check
+  // stays so that removing the tools removes the agent, rather than leaving an
+  // agent whose whole allowlist is missing.
+  if (hasTool("maps.route")) {
+    agentRegistry.register(
+      new LocationAgent({
+        provider: adapter,
+        tools: toolDefsFor(AGENT_POLICIES[AGENT_IDS.location]!.allowedTools),
       })
     );
   }

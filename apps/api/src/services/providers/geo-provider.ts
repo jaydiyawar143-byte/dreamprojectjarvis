@@ -20,9 +20,13 @@
 // ---------------------------------------------------------------------------
 
 import { TtlCache, fetchJson, meta, unavailable, type ProviderResult } from "./freshness.js";
+import type { UsageContext } from "./google-maps-provider.js";
 import {
   googleGeocode,
+  googlePlaceAutocomplete,
+  googlePlaceDetails,
   googlePlaceSearch,
+  googleReverseGeocode,
   googleRoute,
   normalizeTravelMode,
 } from "./google-maps-provider.js";
@@ -60,6 +64,18 @@ export interface Place {
   latitude: number;
   longitude: number;
   type?: string;
+  /**
+   * Google's stable identifier for the place, when Google resolved it.
+   *
+   * Carried so routing can name an endpoint EXPLICITLY rather than re-geocoding
+   * a display string. "Gondia" matches a district, a city and a railway station;
+   * re-resolving the label a user already picked is how a route quietly ends up
+   * between two different places from the ones on screen.
+   *
+   * Absent on OpenStreetMap results — Nominatim ids are not Place IDs and must
+   * never be passed to Google as one.
+   */
+  placeId?: string;
   attribution: string;
 }
 
@@ -71,6 +87,28 @@ export interface RouteResult {
   /** Coarse polyline for drawing. Omitted when the caller does not need it. */
   geometry?: Array<[number, number]>;
   attribution: string;
+}
+
+/**
+ * One type-ahead row.
+ *
+ * A suggestion is NOT a place: Google returns a label and a Place ID with no
+ * coordinates, and selecting one is a second call. OpenStreetMap has no
+ * autocomplete product, so its rows come from a normal search and already carry
+ * the resolved place — hence both fields being optional, and exactly one of
+ * them always being present.
+ */
+export interface PlaceSuggestion {
+  /** Google Place ID. Absent on OpenStreetMap suggestions. */
+  placeId?: string;
+  /** Full label, e.g. "Gondia, Maharashtra, India". */
+  description: string;
+  /** The prominent half, e.g. "Gondia". */
+  primary: string;
+  secondary?: string;
+  type?: string;
+  /** Already-resolved coordinates, when the provider returned them. */
+  place?: Place;
 }
 
 const geoCache = new TtlCache<Place[]>(GEO_TTL_MS, 256);
@@ -121,9 +159,13 @@ function shapePlaces(raw: NominatimPlace[]): Place[] {
 }
 
 /** Resolves a place name to coordinates. */
-export async function geocode(query: string, limit = 5): Promise<ProviderResult<Place[]>> {
+export async function geocode(
+  query: string,
+  limit = 5,
+  usage?: UsageContext
+): Promise<ProviderResult<Place[]>> {
   const google = googleServerKey();
-  if (google) return googleGeocode(query, google, limit);
+  if (google) return googleGeocode(query, google, limit, usage);
 
   const trimmed = query.trim();
   if (trimmed.length < 2) {
@@ -171,10 +213,11 @@ export async function searchNearby(
   query: string,
   latitude: number,
   longitude: number,
-  limit = 8
+  limit = 8,
+  usage?: UsageContext
 ): Promise<ProviderResult<Place[]>> {
   const google = googleServerKey();
-  if (google) return googlePlaceSearch(query, google, { latitude, longitude }, limit);
+  if (google) return googlePlaceSearch(query, google, { latitude, longitude }, limit, usage);
 
   const trimmed = query.trim();
   if (trimmed.length < 2) {
@@ -225,13 +268,14 @@ export async function searchNearby(
 export async function route(
   fromQuery: string,
   toQuery: string,
-  options: { geometry?: boolean; travelMode?: string } = {}
+  options: { geometry?: boolean; travelMode?: string } = {},
+  usage?: UsageContext
 ): Promise<ProviderResult<RouteResult>> {
-  const fromResult = await geocode(fromQuery, 1);
+  const fromResult = await geocode(fromQuery, 1, usage);
   if (!fromResult.data?.[0]) {
     return unavailable(ROUTE_SOURCE, fromResult.meta.reason ?? `Could not find "${fromQuery}".`);
   }
-  const toResult = await geocode(toQuery, 1);
+  const toResult = await geocode(toQuery, 1, usage);
   if (!toResult.data?.[0]) {
     return unavailable(ROUTE_SOURCE, toResult.meta.reason ?? `Could not find "${toQuery}".`);
   }
@@ -244,10 +288,26 @@ export async function route(
   // Google is configured. The mode is never silently substituted.
   const google = googleServerKey();
   if (google) {
-    return googleRoute(from, to, google, normalizeTravelMode(options.travelMode));
+    return googleRoute(from, to, google, normalizeTravelMode(options.travelMode), usage);
   }
 
-  const key = `route:${from.latitude.toFixed(3)},${from.longitude.toFixed(3)}:${to.latitude.toFixed(3)},${to.longitude.toFixed(3)}:${options.geometry ? "g" : "n"}`;
+  return osrmRoute(from, to, options.geometry === true);
+}
+
+/**
+ * The OpenStreetMap routing path, split out so `routeBetween` can reach it
+ * without going back through geocoding.
+ *
+ * OSRM's public demo server is DRIVING ONLY. A requested walking or transit
+ * mode is not silently substituted here — the caller is told which modes are
+ * available (see `/maps/config`), and the UI disables the rest.
+ */
+async function osrmRoute(
+  from: Place,
+  to: Place,
+  geometry: boolean
+): Promise<ProviderResult<RouteResult>> {
+  const key = `route:${from.latitude.toFixed(3)},${from.longitude.toFixed(3)}:${to.latitude.toFixed(3)},${to.longitude.toFixed(3)}:${geometry ? "g" : "n"}`;
 
   const hit = routeCache.get(key);
   if (hit && !hit.expired) {
@@ -255,7 +315,7 @@ export async function route(
   }
 
   try {
-    const overview = options.geometry ? "overview=simplified&geometries=geojson" : "overview=false";
+    const overview = geometry ? "overview=simplified&geometries=geojson" : "overview=false";
     const payload = await fetchJson<{
       code: string;
       routes?: Array<{ distance: number; duration: number; geometry?: { coordinates: Array<[number, number]> } }>;
@@ -284,6 +344,172 @@ export async function route(
   } catch {
     return unavailable(ROUTE_SOURCE, "The routing service could not be reached.");
   }
+}
+
+/**
+ * Type-ahead suggestions for a partial query.
+ *
+ * Google answers with predictions (label + Place ID, no coordinates).
+ * OpenStreetMap has no autocomplete product, so its rows come from an ordinary
+ * bounded search and arrive already resolved. Callers must therefore handle
+ * both shapes — see `resolveSuggestion`.
+ *
+ * NOT cached on purpose: the input changes on every keystroke, so a cache would
+ * hold a per-user trail of partial searches and hit almost never. Call volume
+ * is controlled by the client-side debounce instead.
+ */
+export async function autocomplete(
+  input: string,
+  near?: { latitude: number; longitude: number },
+  limit = 5,
+  usage?: UsageContext
+): Promise<ProviderResult<PlaceSuggestion[]>> {
+  const google = googleServerKey();
+  if (google) return googlePlaceAutocomplete(input, google, near, limit, usage);
+
+  const trimmed = input.trim();
+  if (trimmed.length < 2) return unavailable(GEO_SOURCE, "Type at least two characters.");
+
+  const found = near
+    ? await searchNearby(trimmed, near.latitude, near.longitude, limit)
+    : await geocode(trimmed, limit);
+
+  if (!found.data?.length) {
+    return unavailable(GEO_SOURCE, found.meta.reason ?? `No place matched "${trimmed}".`);
+  }
+
+  const suggestions: PlaceSuggestion[] = found.data.slice(0, limit).map((place) => {
+    // Nominatim's display_name is "Primary, region, state, country". Splitting
+    // on the first comma reproduces Google's primary/secondary split closely
+    // enough for the same UI to render both providers.
+    const [primary, ...rest] = place.name.split(",");
+    const secondary = rest.join(",").trim();
+    return {
+      description: place.name,
+      primary: (primary ?? place.name).trim(),
+      ...(secondary ? { secondary } : {}),
+      ...(place.type ? { type: place.type } : {}),
+      place,
+    };
+  });
+
+  return { data: suggestions, meta: found.meta };
+}
+
+/**
+ * A suggestion → a place with coordinates.
+ *
+ * The OpenStreetMap path already has them. The Google path costs a Place
+ * Details call, which is exactly why it is deferred until the user picks a row
+ * rather than made for every prediction.
+ */
+export async function resolveSuggestion(
+  suggestion: { placeId?: string; place?: Place },
+  usage?: UsageContext
+): Promise<ProviderResult<Place>> {
+  if (suggestion.place) {
+    return { data: suggestion.place, meta: meta(new Date(), GEO_SOURCE, REFERENCE_THRESHOLDS) };
+  }
+
+  const google = googleServerKey();
+  if (suggestion.placeId && google) return googlePlaceDetails(suggestion.placeId, google, usage);
+
+  return unavailable(
+    GEO_SOURCE,
+    suggestion.placeId
+      ? "Resolving a Google place needs GOOGLE_MAPS_SERVER_KEY."
+      : "That suggestion carried no location."
+  );
+}
+
+/** Place ID → place. Google only; OpenStreetMap has no Place IDs. */
+export async function resolvePlaceId(
+  placeId: string,
+  usage?: UsageContext
+): Promise<ProviderResult<Place>> {
+  const google = googleServerKey();
+  if (!google) {
+    return unavailable(GEO_SOURCE, "Resolving a Google place needs GOOGLE_MAPS_SERVER_KEY.");
+  }
+  return googlePlaceDetails(placeId, google, usage);
+}
+
+/**
+ * Coordinates → a human-readable address.
+ *
+ * Falls back to Nominatim so the current-location marker gets a real label on a
+ * deployment without a Google server key. Both providers are named in
+ * `meta.source`; neither result is ever presented as the other.
+ *
+ * The cache key is ROUNDED to three decimals (~110m). That is deliberate: a
+ * precise key would keep an exact per-user location trail in process memory,
+ * and would almost never hit.
+ */
+export async function reverseGeocode(
+  latitude: number,
+  longitude: number,
+  usage?: UsageContext
+): Promise<ProviderResult<Place>> {
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+    return unavailable(GEO_SOURCE, "A valid location is required.");
+  }
+
+  const google = googleServerKey();
+  if (google) return googleReverseGeocode(latitude, longitude, google, usage);
+
+  const key = `rev:${latitude.toFixed(3)},${longitude.toFixed(3)}`;
+  const hit = geoCache.get(key);
+  if (hit?.value[0] && !hit.expired) {
+    return { data: hit.value[0], meta: meta(hit.observedAt, GEO_SOURCE, REFERENCE_THRESHOLDS, { cached: true }) };
+  }
+
+  try {
+    const raw = await throttledNominatim(() =>
+      fetchJson<NominatimPlace & { error?: string }>(
+        `${NOMINATIM}/reverse?lat=${latitude}&lon=${longitude}&format=json&zoom=12`,
+        { timeoutMs: 9000 }
+      )
+    );
+
+    if (!raw || raw.error || !raw.display_name) {
+      return unavailable(GEO_SOURCE, "No address was found for that location.");
+    }
+
+    const place: Place = {
+      name: raw.display_name,
+      latitude: Number(raw.lat),
+      longitude: Number(raw.lon),
+      type: "current",
+      attribution: OSM_ATTRIBUTION,
+    };
+    if (!Number.isFinite(place.latitude) || !Number.isFinite(place.longitude)) {
+      return unavailable(GEO_SOURCE, "No usable address was found for that location.");
+    }
+
+    const observedAt = new Date();
+    geoCache.set(key, [place], observedAt);
+    return { data: place, meta: meta(observedAt, GEO_SOURCE, REFERENCE_THRESHOLDS) };
+  } catch {
+    return unavailable(GEO_SOURCE, "The address lookup service could not be reached.");
+  }
+}
+
+/**
+ * Route between two ALREADY-RESOLVED places.
+ *
+ * Separate from `route()` so a caller that has Place IDs in hand — a user who
+ * picked both endpoints from autocomplete — does not send the display strings
+ * back through geocoding and risk landing on a different "Gondia".
+ */
+export async function routePlaces(
+  from: Place,
+  to: Place,
+  options: { geometry?: boolean; travelMode?: string } = {},
+  usage?: UsageContext
+): Promise<ProviderResult<RouteResult>> {
+  const google = googleServerKey();
+  if (google) return googleRoute(from, to, google, normalizeTravelMode(options.travelMode), usage);
+  return osrmRoute(from, to, options.geometry === true);
 }
 
 export function __resetGeoCaches(): void {

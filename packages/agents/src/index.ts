@@ -18,6 +18,7 @@ export {
 } from "./agents/communication-agent.js";
 export { GoogleAdsAgent } from "./agents/google-ads-agent.js";
 export { BrowserAgent } from "./agents/browser-agent.js";
+export { LocationAgent } from "./agents/location-agent.js";
 export { Orchestrator } from "./orchestrator.js";
 export { MockAIProvider } from "./mock-ai-provider.js";
 export { ToolPlanValidator, ToolPlanParser, ToolDescriptionBuilder } from "./tool-planner.js";

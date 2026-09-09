@@ -30,6 +30,7 @@ export const AGENT_IDS = {
   automation: "automation-agent",
   communication: "communication-agent",
   browser: "browser-agent",
+  location: "location-agent",
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -72,6 +73,25 @@ export const GOOGLE_READ_TOOLS = [
 /** Local analysis helpers: no network, no side effect. */
 export const ANALYSIS_TOOLS = ["data.csv.analyze"] as const;
 
+/**
+ * Maps reads. Every one is READ_ONLY — a map query changes nothing anywhere.
+ *
+ * Granted to the general assistant as well as the location agent, because
+ * "how far is Gondia" arrives mid-conversation about something else at least
+ * as often as it arrives on its own, and the fallback agent going tool-less
+ * for it would just produce a guessed distance.
+ */
+export const MAPS_TOOLS = [
+  "maps.search",
+  "maps.nearby",
+  "maps.geocode",
+  "maps.reverse.geocode",
+  "maps.current.location",
+  "maps.route",
+  "maps.distance",
+  "maps.place",
+] as const;
+
 // ---------------------------------------------------------------------------
 // Policies
 // ---------------------------------------------------------------------------
@@ -102,6 +122,7 @@ const GENERAL_POLICY = policy({
     ...META_WRITE_TOOLS,
     ...GOOGLE_READ_TOOLS,
     ...ANALYSIS_TOOLS,
+    ...MAPS_TOOLS,
   ],
   requiredPermissions: ["read"],
   writesRequireApproval: true,
@@ -213,6 +234,32 @@ const BROWSER_POLICY = policy({
   description: "Reads public web pages and proposes approval-gated interactions with them",
 });
 
+/**
+ * Maps, places and routing.
+ *
+ * Read-only throughout, so `writesRequireApproval` has nothing to gate here —
+ * it stays true because a policy that declares otherwise would silently widen
+ * if a write tool were ever added to this domain.
+ *
+ * The permission floor is `["read"]`, matching the tools. Location is sensitive
+ * but it is not a WRITE: reading where the user already told the browser they
+ * are does not change anything, and requiring `write` would lock read-only
+ * roles out of asking for a distance.
+ *
+ * Tenant isolation is NOT enforced here. It is enforced one level down, in the
+ * tools: coordinates are resolved from `context.userId`, never from a model
+ * parameter, so no allowlist decision can expose one user's position to another.
+ */
+const LOCATION_POLICY = policy({
+  agentId: AGENT_IDS.location,
+  domain: "location",
+  allowedTools: [...MAPS_TOOLS],
+  requiredPermissions: ["read"],
+  writesRequireApproval: true,
+  clientSelectable: true,
+  description: "Maps, place search, routing, distance and travel time over Google Maps Platform",
+});
+
 /** The complete, immutable policy set. */
 export const AGENT_POLICIES: Readonly<Record<string, AgentPolicy>> = Object.freeze({
   [AGENT_IDS.general]: GENERAL_POLICY,
@@ -223,6 +270,7 @@ export const AGENT_POLICIES: Readonly<Record<string, AgentPolicy>> = Object.free
   [AGENT_IDS.automation]: AUTOMATION_POLICY,
   [AGENT_IDS.communication]: COMMUNICATION_POLICY,
   [AGENT_IDS.browser]: BROWSER_POLICY,
+  [AGENT_IDS.location]: LOCATION_POLICY,
 });
 
 export function getAgentPolicy(agentId: string): AgentPolicy | undefined {
