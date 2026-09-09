@@ -111,7 +111,7 @@ function Tile({
         <span className="shrink-0 text-sys-dim" aria-hidden="true">
           {icon}
         </span>
-        <span className="min-w-0 flex-1 truncate font-mono text-[0.45rem] uppercase tracking-hud text-sys-dim">
+        <span className="min-w-0 flex-1 truncate font-mono text-xs uppercase tracking-hud text-sys-dim">
           {label}
         </span>
       </div>
@@ -120,13 +120,13 @@ function Tile({
         <>
           <p className={`font-mono text-sm leading-none [font-variant-numeric:tabular-nums] ${tone}`}>
             {Math.round(metric.value!)}
-            <span className="ml-0.5 text-[0.6rem] text-sys-dim">{unit}</span>
+            <span className="ml-0.5 text-xs text-sys-dim">{unit}</span>
           </p>
           {series && <Sparkline series={series} {...(max !== undefined ? { max } : {})} className={`mt-1 ${tone}`} />}
         </>
       ) : (
         // The reason, not a dash. "No sensor" and "0°C" are different claims.
-        <p className="text-[0.55rem] leading-snug text-sys-dim/80">
+        <p className="text-xs leading-snug text-sys-dim/80">
           {metric.reason ?? "Unavailable"}
         </p>
       )}
@@ -196,7 +196,7 @@ export function SystemWidget() {
           data-testid="system-range-toggle"
           onClick={() => setRange((r) => (r === 60 ? 300 : 60))}
           aria-label={`Show ${range === 60 ? "five minutes" : "sixty seconds"} of history`}
-          className="sys-focus rounded border border-sys-line px-1.5 py-0.5 font-mono text-[0.45rem] uppercase tracking-hud text-sys-dim transition-colors hover:text-white"
+          className="sys-focus rounded border border-sys-line px-1.5 py-0.5 font-mono text-xs uppercase tracking-hud text-sys-dim transition-colors hover:text-white"
         >
           {range === 60 ? "60s" : "5m"}
         </button>
@@ -249,17 +249,17 @@ export function SystemWidget() {
             >
               <div className="mb-1 flex items-center gap-1.5">
                 <HardDrive size={10} className="shrink-0 text-sys-dim" aria-hidden="true" />
-                <span className="font-mono text-[0.45rem] uppercase tracking-hud text-sys-dim">Disk</span>
+                <span className="font-mono text-xs uppercase tracking-hud text-sys-dim">Disk</span>
               </div>
               {snapshot.disk.value ? (
                 <p className="font-mono text-sm leading-none text-sky-300/90 [font-variant-numeric:tabular-nums]">
                   {snapshot.disk.value.usedPct}
-                  <span className="ml-0.5 text-[0.6rem] text-sys-dim">
+                  <span className="ml-0.5 text-xs text-sys-dim">
                     % · {snapshot.disk.value.mount}
                   </span>
                 </p>
               ) : (
-                <p className="text-[0.55rem] text-sys-dim/80">{snapshot.disk.reason ?? "Unavailable"}</p>
+                <p className="text-xs text-sys-dim/80">{snapshot.disk.reason ?? "Unavailable"}</p>
               )}
             </div>
 
@@ -269,35 +269,35 @@ export function SystemWidget() {
             >
               <div className="mb-1 flex items-center gap-1.5">
                 <Network size={10} className="shrink-0 text-sys-dim" aria-hidden="true" />
-                <span className="min-w-0 flex-1 truncate font-mono text-[0.45rem] uppercase tracking-hud text-sys-dim">
+                <span className="min-w-0 flex-1 truncate font-mono text-xs uppercase tracking-hud text-sys-dim">
                   Network{net?.value ? ` · ${net.value.iface}` : ""}
                 </span>
               </div>
               {net?.value ? (
                 <>
-                  <p className="font-mono text-[0.68rem] leading-tight text-sys-text/90 [font-variant-numeric:tabular-nums]">
+                  <p className="font-mono text-xs leading-tight text-sys-text/90 [font-variant-numeric:tabular-nums]">
                     ↓ {formatRate(net.value.rxBytesPerSec)}
                   </p>
-                  <p className="font-mono text-[0.68rem] leading-tight text-sys-dim [font-variant-numeric:tabular-nums]">
+                  <p className="font-mono text-xs leading-tight text-sys-dim [font-variant-numeric:tabular-nums]">
                     ↑ {formatRate(net.value.txBytesPerSec)}
                   </p>
                   <Sparkline series={windowed.netRx} className="mt-0.5 text-sky-300/70" />
                 </>
               ) : (
-                <p className="text-[0.55rem] text-sys-dim/80">{net?.reason ?? "Unavailable"}</p>
+                <p className="text-xs text-sys-dim/80">{net?.reason ?? "Unavailable"}</p>
               )}
             </div>
           </div>
 
-          <p className="flex items-center justify-between font-mono text-[0.45rem] uppercase tracking-hud text-sys-dim/60">
-            <span className="truncate">{snapshot.cpu.model}</span>
+          <p className="flex items-center justify-between font-mono text-xs uppercase tracking-hud text-sys-dim">
+            <span className="min-w-0 truncate">{snapshot.cpu.model}</span>
             <span className="shrink-0">up {formatUptime(snapshot.uptimeSeconds)}</span>
           </p>
 
           {/* Docker reports the container, not the machine. Saying so prevents
               a reader mistaking container memory for their laptop's. */}
           {snapshot.containerized && (
-            <p className="text-[0.5rem] leading-snug text-sys-dim/70">
+            <p className="text-xs leading-snug text-sys-dim">
               Reporting the API container, not the host machine.
             </p>
           )}

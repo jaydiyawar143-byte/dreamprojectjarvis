@@ -292,7 +292,7 @@ export function CommandCenter() {
       */}
       <div
         data-testid="command-grid"
-        className="relative grid w-full max-w-6xl grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4 lg:[grid-auto-flow:dense] lg:[grid-auto-rows:9.5rem]"
+        className="relative grid w-full max-w-6xl grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4 lg:[grid-auto-flow:dense] lg:[grid-auto-rows:10.5rem]"
       >
         {/* ---- Orb cell ---- */}
         <WidgetFrame
@@ -319,7 +319,7 @@ export function CommandCenter() {
             </h1>
 
             <div className="mt-2 min-h-[2.5rem] w-full max-w-xl text-center">
-              <p className="font-mono text-[0.5rem] uppercase tracking-hud text-sys-dim/70">
+              <p className="font-mono text-xs uppercase tracking-hud text-sys-dim">
                 {readout.label}
               </p>
               <p
@@ -357,7 +357,7 @@ export function CommandCenter() {
                   placeholder="Ask JARVIS…"
                   autoComplete="off"
                   disabled={sending}
-                  className="min-w-0 flex-1 bg-transparent text-[0.82rem] text-white placeholder:text-sys-dim/70 focus:outline-none disabled:opacity-60"
+                  className="min-w-0 flex-1 bg-transparent text-sm text-white placeholder:text-sys-dim focus:outline-none disabled:opacity-60"
                 />
 
                 <MicButton />
@@ -373,7 +373,7 @@ export function CommandCenter() {
                 </button>
               </div>
 
-              <p className="mt-1.5 text-center font-mono text-[0.45rem] uppercase tracking-hud text-sys-dim/50">
+              <p className="mt-1.5 text-center font-mono text-xs uppercase tracking-hud text-sys-dim">
                 Enter to send · tap the mic to speak
                 {latestReply ? (
                   <>
@@ -429,7 +429,7 @@ export function CommandCenter() {
         >
           <div className="flex items-center justify-center gap-2 text-amber-300/90">
             <ShieldAlert size={14} aria-hidden="true" />
-            <p className="font-mono text-[0.55rem] uppercase tracking-hud">
+            <p className="font-mono text-xs uppercase tracking-hud">
               Action requires approval
             </p>
           </div>
@@ -442,7 +442,7 @@ export function CommandCenter() {
             />
           ))}
 
-          <p className="text-center font-mono text-[0.5rem] uppercase tracking-hud text-sys-dim/60">
+          <p className="text-center font-mono text-xs uppercase tracking-hud text-sys-dim">
             Voice can never approve an action ·{" "}
             <button
               type="button"

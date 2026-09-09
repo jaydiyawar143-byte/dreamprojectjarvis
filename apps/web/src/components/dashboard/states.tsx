@@ -64,7 +64,7 @@ export function LoadingState({
       <span className="sr-only">{label}</span>
       <p
         aria-hidden="true"
-        className="font-mono text-[0.6rem] uppercase tracking-hud text-sys-dim"
+        className="font-mono text-xs uppercase tracking-hud text-sys-dim"
       >
         {label}
       </p>
@@ -110,7 +110,7 @@ export function ErrorState({
       <div className="flex items-start gap-3">
         <AlertTriangle size={16} className="mt-0.5 shrink-0 text-sys-danger" aria-hidden="true" />
         <div className="space-y-1">
-          <p className="font-mono text-[0.62rem] uppercase tracking-hud text-sys-danger">{title}</p>
+          <p className="font-mono text-xs uppercase tracking-hud text-sys-danger">{title}</p>
           <p data-testid="error-message" className="text-sm text-sys-text/85">
             {message}
           </p>
@@ -122,7 +122,7 @@ export function ErrorState({
           type="button"
           data-testid="error-retry"
           onClick={onRetry}
-          className="sys-focus ml-7 inline-flex items-center gap-1.5 rounded border border-sys-edge bg-white/[0.02] px-2.5 py-1.5 font-mono text-[0.58rem] uppercase tracking-hud text-sys-text transition-colors hover:border-sys-cyan/45 hover:text-white"
+          className="sys-focus ml-7 inline-flex items-center gap-1.5 rounded border border-sys-edge bg-white/[0.02] px-2.5 py-1.5 font-mono text-xs uppercase tracking-hud text-sys-text transition-colors hover:border-sys-cyan/45 hover:text-white"
         >
           <RefreshCw size={11} aria-hidden="true" />
           {retryLabel}
@@ -166,7 +166,7 @@ export function EmptyState({
       <span className="text-sys-dim" aria-hidden="true">
         {icon ?? <Inbox size={18} />}
       </span>
-      <p className="font-mono text-[0.62rem] uppercase tracking-hud text-sys-text/80">{title}</p>
+      <p className="font-mono text-xs uppercase tracking-hud text-sys-text/80">{title}</p>
       {message && <p className="max-w-sm text-sm text-sys-dim">{message}</p>}
       {action && <div className="pt-1">{action}</div>}
     </div>

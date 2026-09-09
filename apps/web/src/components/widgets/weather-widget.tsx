@@ -124,7 +124,7 @@ export function WeatherWidget({
             onClick={detect}
             disabled={asking}
             title="Use my location"
-            className="sys-focus flex shrink-0 items-center gap-0.5 rounded border border-sys-line px-1 py-0.5 font-mono text-[0.45rem] uppercase tracking-hud text-sys-dim transition-colors hover:text-white disabled:opacity-50"
+            className="sys-focus flex shrink-0 items-center gap-0.5 rounded border border-sys-line px-1 py-0.5 font-mono text-xs uppercase tracking-hud text-sys-dim transition-colors hover:text-white disabled:opacity-50"
           >
             <MapPin size={9} aria-hidden="true" />
             <span className="sr-only">{asking ? "Locating" : "Use my location"}</span>
@@ -145,14 +145,14 @@ export function WeatherWidget({
             <span className="text-xs text-sys-text/80">{describeWeatherCode(w.code)}</span>
           </div>
 
-          <p className="mt-1 truncate text-[0.68rem] text-sys-dim">
+          <p className="mt-1 truncate text-xs text-sys-dim">
             {w.location.label ??
               `${w.location.latitude.toFixed(2)}, ${w.location.longitude.toFixed(2)}`}
             {w.feelsLikeC !== null && ` · feels ${Math.round(w.feelsLikeC)}°`}
           </p>
 
           {/* Only render a figure the provider actually returned. */}
-          <dl className="mt-2.5 grid grid-cols-2 gap-x-3 gap-y-1 text-[0.62rem]">
+          <dl className="mt-2.5 grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
             {w.humidityPct !== null && (
               <>
                 <dt className="text-sys-dim">Humidity</dt>
@@ -181,10 +181,10 @@ export function WeatherWidget({
             <ul className="mt-2.5 flex gap-2 border-t border-white/[0.06] pt-2">
               {w.forecast.slice(1, 4).map((day) => (
                 <li key={day.date} className="min-w-0 flex-1 text-center">
-                  <p className="truncate font-mono text-[0.45rem] uppercase tracking-hud text-sys-dim">
+                  <p className="truncate font-mono text-xs uppercase tracking-hud text-sys-dim">
                     {new Date(day.date).toLocaleDateString(undefined, { weekday: "short" })}
                   </p>
-                  <p className="text-[0.62rem] text-sys-text/85">
+                  <p className="text-xs text-sys-text/85">
                     {Math.round(day.maxC)}°/{Math.round(day.minC)}°
                   </p>
                 </li>

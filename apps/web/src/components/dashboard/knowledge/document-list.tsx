@@ -140,7 +140,7 @@ export function DocumentList({
                         <span
                           data-testid={`status-${doc.id}`}
                           className={cn(
-                            "rounded border px-1.5 py-px font-mono text-[0.5rem] uppercase tracking-hud",
+                            "rounded border px-1.5 py-px font-mono text-xs uppercase tracking-hud",
                             status.className
                           )}
                         >
@@ -157,7 +157,7 @@ export function DocumentList({
                           data-testid={`confirm-delete-${doc.id}`}
                           disabled={deleting === doc.id}
                           onClick={() => void remove(doc.id)}
-                          className="sys-focus rounded border border-sys-danger/50 bg-sys-danger/10 px-2 py-1 font-mono text-[0.55rem] uppercase tracking-hud text-sys-danger disabled:opacity-50"
+                          className="sys-focus rounded border border-sys-danger/50 bg-sys-danger/10 px-2 py-1 font-mono text-xs uppercase tracking-hud text-sys-danger disabled:opacity-50"
                         >
                           {deleting === doc.id ? "Removing…" : "Remove"}
                         </button>
@@ -165,7 +165,7 @@ export function DocumentList({
                           type="button"
                           data-testid={`cancel-delete-${doc.id}`}
                           onClick={() => setConfirming(null)}
-                          className="sys-focus rounded border border-sys-line px-2 py-1 font-mono text-[0.55rem] uppercase tracking-hud text-sys-dim"
+                          className="sys-focus rounded border border-sys-line px-2 py-1 font-mono text-xs uppercase tracking-hud text-sys-dim"
                         >
                           Keep
                         </button>
@@ -197,7 +197,7 @@ export function DocumentList({
                               data-testid="chunk-row"
                               className="rounded border border-sys-line/70 bg-white/[0.015] p-2.5"
                             >
-                              <p className="mb-1 font-mono text-[0.5rem] uppercase tracking-hud text-sys-dim">
+                              <p className="mb-1 font-mono text-xs uppercase tracking-hud text-sys-dim">
                                 Passage {c.chunkIndex + 1}
                                 {c.pageNumbers.length > 0 &&
                                   ` · page${c.pageNumbers.length > 1 ? "s" : ""} ${c.pageNumbers.join(", ")}`}

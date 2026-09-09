@@ -161,7 +161,7 @@ export function WidgetFrame({
           </button>
           <span
             data-testid={`size-${placement.id}`}
-            className="font-mono text-[0.45rem] uppercase tracking-hud text-sys-dim"
+            className="font-mono text-xs uppercase tracking-hud text-sys-dim"
           >
             {placement.size.w}×{placement.size.h}
           </span>
@@ -186,7 +186,7 @@ export function WidgetFrame({
             onClick={() => onResize({ h: -1 })}
             disabled={!canShrink(placement, "h")}
             aria-label={`Make ${label} shorter (currently ${placement.size.h} of ${limits.max.h} rows)`}
-            className="sys-focus rounded px-1 py-1 font-mono text-[0.5rem] text-sys-dim transition-colors enabled:hover:text-white disabled:opacity-30"
+            className="sys-focus rounded px-1 py-1 font-mono text-xs text-sys-dim transition-colors enabled:hover:text-white disabled:opacity-30"
           >
             ↑↓−
           </button>
@@ -196,7 +196,7 @@ export function WidgetFrame({
             onClick={() => onResize({ h: 1 })}
             disabled={!canGrow(placement, "h")}
             aria-label={`Make ${label} taller (currently ${placement.size.h} of ${limits.max.h} rows)`}
-            className="sys-focus rounded px-1 py-1 font-mono text-[0.5rem] text-sys-dim transition-colors enabled:hover:text-white disabled:opacity-30"
+            className="sys-focus rounded px-1 py-1 font-mono text-xs text-sys-dim transition-colors enabled:hover:text-white disabled:opacity-30"
           >
             ↑↓+
           </button>

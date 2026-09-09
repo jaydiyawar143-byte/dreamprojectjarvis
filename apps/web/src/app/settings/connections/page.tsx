@@ -68,7 +68,7 @@ function StatusBadge({ status }: { status: CredentialStatus }) {
   return (
     <span
       data-testid={`credential-status-${status}`}
-      className={`shrink-0 rounded border px-2 py-1 font-mono text-[0.5rem] uppercase tracking-hud ${className}`}
+      className={`shrink-0 rounded border px-2 py-1 font-mono text-xs uppercase tracking-hud ${className}`}
     >
       {STATUS_LABEL[status]}
     </span>
@@ -186,10 +186,10 @@ function CredentialForm({
           <div key={field.name}>
             <label
               htmlFor={`${provider.id}-${field.name}`}
-              className="mb-1.5 block font-mono text-[0.55rem] uppercase tracking-hud text-sys-dim"
+              className="mb-1.5 block font-mono text-xs uppercase tracking-hud text-sys-dim"
             >
               {field.label}
-              {!field.required && <span className="ml-1 text-sys-dim/60">(optional)</span>}
+              {!field.required && <span className="ml-1 text-sys-dim">(optional)</span>}
             </label>
 
             <div className="relative">
@@ -204,7 +204,7 @@ function CredentialForm({
                 spellCheck={false}
                 placeholder={placeholder}
                 onChange={(e) => setDraft((d) => ({ ...d, [field.name]: e.target.value }))}
-                className="sys-focus w-full rounded-md border border-sys-line bg-black/30 px-3 py-2 pr-10 text-sm text-white placeholder:text-sys-dim/50 disabled:opacity-60"
+                className="sys-focus w-full rounded-md border border-sys-control bg-black/30 px-3 py-2 pr-10 text-sm text-white placeholder:text-sys-dim disabled:opacity-60"
               />
 
               {isSecret && (
@@ -320,7 +320,7 @@ export default function ConnectionsPage() {
 
       <Link
         href="/settings"
-        className="sys-focus mb-5 inline-flex items-center gap-1.5 font-mono text-[0.55rem] uppercase tracking-hud text-sys-dim transition-colors hover:text-white"
+        className="sys-focus mb-5 inline-flex items-center gap-1.5 font-mono text-xs uppercase tracking-hud text-sys-dim transition-colors hover:text-white"
       >
         <ArrowLeft size={12} aria-hidden="true" />
         Back to settings
@@ -344,7 +344,7 @@ export default function ConnectionsPage() {
               <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
                 <div className="min-w-0">
                   <p className="text-sm text-sys-text/85">{provider.detail}</p>
-                  <p className="mt-1 font-mono text-[0.5rem] uppercase tracking-hud text-sys-dim/70">
+                  <p className="mt-1 font-mono text-xs uppercase tracking-hud text-sys-dim">
                     In use: {provider.effectiveSource}
                   </p>
                 </div>
@@ -360,7 +360,7 @@ export default function ConnectionsPage() {
                   {provider.connectUrl && provider.status !== "CONFIGURATION_REQUIRED" ? (
                     <Link
                       href="/integrations"
-                      className="sys-focus inline-flex items-center rounded border border-sys-cyan/40 bg-sys-cyan/[0.08] px-3 py-1.5 font-mono text-[0.58rem] uppercase tracking-hud text-sys-cyan-soft transition-colors hover:border-sys-cyan/80"
+                      className="sys-focus inline-flex items-center rounded border border-sys-cyan/40 bg-sys-cyan/[0.08] px-3 py-1.5 font-mono text-xs uppercase tracking-hud text-sys-cyan-soft transition-colors hover:border-sys-cyan/80"
                     >
                       Manage connection
                     </Link>

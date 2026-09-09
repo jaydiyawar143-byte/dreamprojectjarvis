@@ -223,7 +223,7 @@ export default function IntegrationsPage() {
                 >
                   <div className="min-w-0">
                     <p className="truncate text-sm text-sys-text">{message.body ?? `(${message.type})`}</p>
-                    <p className="mt-0.5 font-mono text-[0.6rem] text-sys-dim">
+                    <p className="mt-0.5 font-mono text-xs text-sys-dim">
                       {message.direction} · {new Date(message.timestamp).toLocaleString()}
                     </p>
                   </div>

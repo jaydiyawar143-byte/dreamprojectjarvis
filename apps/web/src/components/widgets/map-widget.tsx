@@ -394,7 +394,7 @@ export function MapWidget() {
               data-testid={`map-mode-${m}`}
               onClick={() => setMode(m)}
               aria-pressed={mode === m}
-              className={`sys-focus rounded border px-1 py-0.5 font-mono text-[0.42rem] uppercase tracking-hud transition-colors ${
+              className={`sys-focus rounded border px-1 py-0.5 font-mono text-xs uppercase tracking-hud transition-colors ${
                 mode === m
                   ? "border-sys-cyan/40 bg-sys-cyan/10 text-sys-cyan"
                   : "border-sys-line text-sys-dim hover:text-white"
@@ -409,10 +409,10 @@ export function MapWidget() {
       {/* ---- No key: the widget STAYS, with setup guidance ---------------- */}
       {status === "unconfigured" && (
         <div data-testid="map-config-required" className="space-y-2">
-          <p className="font-mono text-[0.5rem] uppercase tracking-hud text-amber-300/90">
+          <p className="font-mono text-xs uppercase tracking-hud text-amber-300/90">
             Google Maps · configuration required
           </p>
-          <p className="text-[0.62rem] leading-relaxed text-sys-dim">
+          <p className="text-xs leading-relaxed text-sys-dim">
             An interactive map needs a Google Maps browser key. Add{" "}
             <code className="text-sys-text/80">GOOGLE_MAPS_BROWSER_KEY</code> (restricted to the
             Maps JavaScript API and to this origin) and{" "}
@@ -421,12 +421,12 @@ export function MapWidget() {
           </p>
           <Link
             href="/settings/connections"
-            className="sys-focus inline-flex items-center gap-1.5 rounded border border-sys-cyan/40 bg-sys-cyan/[0.08] px-2 py-1 font-mono text-[0.5rem] uppercase tracking-hud text-sys-cyan-soft transition-colors hover:border-sys-cyan/80"
+            className="sys-focus inline-flex items-center gap-1.5 rounded border border-sys-cyan/40 bg-sys-cyan/[0.08] px-2 py-1 font-mono text-xs uppercase tracking-hud text-sys-cyan-soft transition-colors hover:border-sys-cyan/80"
           >
             <Settings size={9} aria-hidden="true" />
             Settings → Connections
           </Link>
-          <p className="pt-1 text-[0.55rem] leading-relaxed text-sys-dim/80">
+          <p className="pt-1 text-xs leading-relaxed text-sys-dim/80">
             JARVIS can still answer distance and place questions meanwhile — those run through
             OpenStreetMap, and results say so.
           </p>
@@ -435,14 +435,14 @@ export function MapWidget() {
 
       {status === "error" && (
         <div data-testid="map-load-error" className="space-y-2">
-          <p className="text-[0.62rem] leading-relaxed text-red-300/90">
+          <p className="text-xs leading-relaxed text-red-300/90">
             Google Maps could not be loaded. The key may be invalid or restricted to a different
             origin.
           </p>
           <button
             type="button"
             onClick={retry}
-            className="sys-focus rounded border border-sys-line px-2 py-1 font-mono text-[0.5rem] uppercase tracking-hud text-sys-dim transition-colors hover:text-white"
+            className="sys-focus rounded border border-sys-line px-2 py-1 font-mono text-xs uppercase tracking-hud text-sys-dim transition-colors hover:text-white"
           >
             Retry
           </button>
@@ -450,7 +450,7 @@ export function MapWidget() {
       )}
 
       {(status === "checking" || status === "loading") && (
-        <p data-testid="map-loading" className="text-[0.62rem] text-sys-dim">
+        <p data-testid="map-loading" className="text-xs text-sys-dim">
           Loading map…
         </p>
       )}
@@ -462,7 +462,7 @@ export function MapWidget() {
             <p
               data-testid="map-location-banner"
               data-geo-state={geoState}
-              className={`min-w-0 flex-1 truncate text-[0.6rem] ${locationBanner.tone}`}
+              className={`min-w-0 flex-1 truncate text-xs ${locationBanner.tone}`}
             >
               {geoState === "available" && "📍 "}
               {locationBanner.text}
@@ -473,7 +473,7 @@ export function MapWidget() {
                 type="button"
                 data-testid="map-enable-location"
                 onClick={() => locate(true)}
-                className="sys-focus shrink-0 rounded border border-sys-line px-1.5 py-0.5 font-mono text-[0.42rem] uppercase tracking-hud text-sys-dim transition-colors hover:text-white"
+                className="sys-focus shrink-0 rounded border border-sys-line px-1.5 py-0.5 font-mono text-xs uppercase tracking-hud text-sys-dim transition-colors hover:text-white"
               >
                 {locationBanner.action}
               </button>
@@ -509,7 +509,7 @@ export function MapWidget() {
                 value={from}
                 onChange={(e) => setFrom(e.target.value)}
                 placeholder={here ? "From — blank uses my location" : "From — e.g. Balaghat"}
-                className="sys-focus w-full rounded-md border border-sys-line bg-black/40 px-2 py-1 text-[0.65rem] text-white placeholder:text-sys-dim/60"
+                className="sys-focus w-full rounded-md border border-sys-control bg-black/40 px-2 py-1 text-sm text-white placeholder:text-sys-dim"
               />
               <div className="flex gap-1">
                 <label htmlFor="map-to" className="sr-only">
@@ -521,13 +521,13 @@ export function MapWidget() {
                   value={to}
                   onChange={(e) => setTo(e.target.value)}
                   placeholder="To — e.g. Gondia"
-                  className="sys-focus min-w-0 flex-1 rounded-md border border-sys-line bg-black/40 px-2 py-1 text-[0.65rem] text-white placeholder:text-sys-dim/60"
+                  className="sys-focus min-w-0 flex-1 rounded-md border border-sys-control bg-black/40 px-2 py-1 text-sm text-white placeholder:text-sys-dim"
                 />
                 <button
                   type="submit"
                   data-testid="map-route-submit"
                   disabled={(!from.trim() && !here) || !to.trim() || busy}
-                  className="sys-focus flex items-center gap-1 rounded-md border border-sys-cyan/40 bg-sys-cyan/10 px-2 font-mono text-[0.45rem] uppercase tracking-hud text-sys-cyan transition-colors enabled:hover:bg-sys-cyan/20 disabled:opacity-40"
+                  className="sys-focus flex items-center gap-1 rounded-md border border-sys-cyan/40 bg-sys-cyan/10 px-2 font-mono text-xs uppercase tracking-hud text-sys-cyan transition-colors enabled:hover:bg-sys-cyan/20 disabled:opacity-40"
                 >
                   <Navigation size={8} aria-hidden="true" />
                   Go
@@ -549,7 +549,7 @@ export function MapWidget() {
                       disabled={!supported}
                       aria-pressed={travelMode === m.id}
                       title={supported ? undefined : "Needs a Google Maps server key"}
-                      className={`sys-focus flex-1 rounded border px-1 py-0.5 font-mono text-[0.4rem] uppercase tracking-hud transition-colors disabled:opacity-30 ${
+                      className={`sys-focus flex-1 rounded border px-1 py-0.5 font-mono text-xs uppercase tracking-hud transition-colors disabled:opacity-30 ${
                         travelMode === m.id
                           ? "border-sys-cyan/40 bg-sys-cyan/10 text-sys-cyan"
                           : "border-sys-line text-sys-dim enabled:hover:text-white"
@@ -578,7 +578,7 @@ export function MapWidget() {
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder="Search places…"
-                className="sys-focus min-w-0 flex-1 rounded-md border border-sys-line bg-black/40 px-2 py-1 text-[0.65rem] text-white placeholder:text-sys-dim/60"
+                className="sys-focus min-w-0 flex-1 rounded-md border border-sys-control bg-black/40 px-2 py-1 text-sm text-white placeholder:text-sys-dim"
               />
               <button
                 type="submit"
@@ -606,22 +606,22 @@ export function MapWidget() {
             <div data-testid="route-result" className="flex items-baseline gap-2">
               <span className="font-mono text-sm leading-none text-white [font-variant-numeric:tabular-nums]">
                 {r.distanceKm}
-                <span className="ml-0.5 text-[0.55rem] text-sys-dim">km</span>
+                <span className="ml-0.5 text-xs text-sys-dim">km</span>
               </span>
-              <span className="text-[0.6rem] text-sys-text/80">
+              <span className="text-xs text-sys-text/80">
                 {Math.floor(r.durationMinutes / 60) > 0
                   ? `${Math.floor(r.durationMinutes / 60)}h `
                   : ""}
                 {r.durationMinutes % 60}m
               </span>
-              <span className="min-w-0 flex-1 truncate text-[0.55rem] text-sys-dim">
+              <span className="min-w-0 flex-1 truncate text-xs text-sys-dim">
                 {r.from.name.split(",")[0]} → {r.to.name.split(",")[0]}
               </span>
             </div>
           )}
 
           {mode === "search" && places?.value && places.value.length > 0 && (
-            <p data-testid="place-results" className="truncate text-[0.55rem] text-sys-dim">
+            <p data-testid="place-results" className="truncate text-xs text-sys-dim">
               {places.value.length} result{places.value.length === 1 ? "" : "s"} ·{" "}
               {places.value[0]!.name}
             </p>
@@ -629,7 +629,7 @@ export function MapWidget() {
 
           {/* Attribution for whichever provider actually answered. */}
           {active?.value != null && (
-            <p data-testid="map-attribution" className="text-[0.42rem] text-sys-dim/60">
+            <p data-testid="map-attribution" className="text-xs text-sys-dim">
               {active.meta.source}
             </p>
           )}

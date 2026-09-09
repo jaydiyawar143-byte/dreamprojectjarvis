@@ -38,7 +38,7 @@ export function JarvisBrand() {
 
       <motion.p
         variants={riseIn()}
-        className="mt-3 font-mono text-[0.58rem] uppercase tracking-hud text-sys-dim sm:text-[0.65rem]"
+        className="mt-3 font-mono text-xs uppercase tracking-hud text-sys-dim sm:text-sm"
       >
         Artificial Intelligence System
       </motion.p>

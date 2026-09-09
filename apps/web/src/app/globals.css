@@ -317,3 +317,29 @@ body {
     filter: blur(20px);
   }
 }
+
+/* ---------------------------------------------------------------------------
+   Phase A — the iOS zoom floor.
+
+   Safari on iOS zooms the whole viewport when a focused form control renders
+   below 16px, which on this layout throws the user into a half-scrolled,
+   horizontally-offset page they then have to pinch back out of. The fix is a
+   16px floor on the control — but applying that everywhere would inflate every
+   compact widget input on desktop, where the zoom does not happen and 14px
+   reads fine.
+
+   `pointer: coarse` is the accurate test: it is true for touch, false for a
+   mouse, and it does not care about viewport width — so a phone held in
+   landscape (wider than the `sm` breakpoint) is still covered, which a
+   width-based media query would miss.
+
+   The markup carries a 14px floor of its own, so this only ever raises a
+   control, never shrinks one.
+   --------------------------------------------------------------------------- */
+@media (pointer: coarse) {
+  input,
+  textarea,
+  select {
+    font-size: max(16px, 1em);
+  }
+}

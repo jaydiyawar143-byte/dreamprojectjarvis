@@ -111,7 +111,7 @@ export default function AutomationsPage() {
                   >
                     <div>
                       <p className="text-sm text-white">{workflow.name}</p>
-                      <p className="mt-0.5 font-mono text-[0.6rem] text-sys-dim">{workflow.id}</p>
+                      <p className="mt-0.5 font-mono text-xs text-sys-dim">{workflow.id}</p>
                     </div>
                     <StatusDot
                       tone={workflow.isActive ? "ok" : "neutral"}

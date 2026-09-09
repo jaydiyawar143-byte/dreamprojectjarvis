@@ -161,7 +161,7 @@ export default function ActivityPage() {
                 header: "Trace",
                 render: (row) => (
                   <span
-                    className="font-mono text-[0.62rem] text-sys-dim"
+                    className="font-mono text-xs text-sys-dim"
                     title={row.traceId ?? undefined}
                   >
                     {row.traceId ? `${row.traceId.slice(0, 8)}…` : "—"}

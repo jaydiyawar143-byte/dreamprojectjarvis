@@ -29,11 +29,11 @@ import { WidgetShell, FreshnessBadge } from "./widget-shell";
 const REFRESH_MS = 60_000;
 
 function ChangePill({ pct }: { pct: number | null }) {
-  if (pct === null) return <span className="text-[0.62rem] text-sys-dim">—</span>;
+  if (pct === null) return <span className="text-xs text-sys-dim">—</span>;
   const up = pct >= 0;
   return (
     <span
-      className={`font-mono text-[0.62rem] [font-variant-numeric:tabular-nums] ${
+      className={`font-mono text-xs [font-variant-numeric:tabular-nums] ${
         up ? "text-emerald-300/90" : "text-red-300/90"
       }`}
     >
@@ -92,13 +92,13 @@ export function MarketsWidget({ indicesEnabled = false }: { indicesEnabled?: boo
         <ul data-testid="crypto-list" className="space-y-1.5">
           {(crypto?.value ?? []).map((coin) => (
             <li key={coin.id} className="flex items-center gap-2">
-              <span className="w-9 shrink-0 font-mono text-[0.62rem] text-white/90">
+              <span className="w-9 shrink-0 font-mono text-xs text-white/90">
                 {coin.symbol}
               </span>
-              <span className="min-w-0 flex-1 truncate text-[0.62rem] text-sys-dim">
+              <span className="min-w-0 flex-1 truncate text-xs text-sys-dim">
                 {coin.name}
               </span>
-              <span className="font-mono text-[0.68rem] text-sys-text/90 [font-variant-numeric:tabular-nums]">
+              <span className="font-mono text-xs text-sys-text/90 [font-variant-numeric:tabular-nums]">
                 ${formatPrice(coin.price)}
               </span>
               <span className="w-14 text-right">
@@ -111,7 +111,7 @@ export function MarketsWidget({ indicesEnabled = false }: { indicesEnabled?: boo
         {/* Indices carry their own badge — see the note at the top of the file. */}
         <div className="border-t border-white/[0.06] pt-2">
           <div className="mb-1.5 flex items-center gap-2">
-            <p className="flex-1 font-mono text-[0.45rem] uppercase tracking-hud text-sys-dim/70">
+            <p className="flex-1 font-mono text-xs uppercase tracking-hud text-sys-dim">
               Indian indices
             </p>
             {indices?.meta && <FreshnessBadge meta={indices.meta} />}
@@ -121,15 +121,15 @@ export function MarketsWidget({ indicesEnabled = false }: { indicesEnabled?: boo
             <ul data-testid="indices-list" className="space-y-1.5">
               {indices.value.map((idx) => (
                 <li key={idx.symbol} className="flex items-center gap-2">
-                  <span className="min-w-0 flex-1 truncate font-mono text-[0.62rem] text-white/90">
+                  <span className="min-w-0 flex-1 truncate font-mono text-xs text-white/90">
                     {idx.symbol}
                   </span>
                   {idx.marketState && idx.marketState !== "UNKNOWN" && (
-                    <span className="font-mono text-[0.45rem] uppercase tracking-hud text-sys-dim">
+                    <span className="font-mono text-xs uppercase tracking-hud text-sys-dim">
                       {idx.marketState === "OPEN" ? "Open" : "Closed"}
                     </span>
                   )}
-                  <span className="font-mono text-[0.68rem] text-sys-text/90 [font-variant-numeric:tabular-nums]">
+                  <span className="font-mono text-xs text-sys-text/90 [font-variant-numeric:tabular-nums]">
                     {idx.value.toLocaleString(undefined, { maximumFractionDigits: 2 })}
                   </span>
                   <span className="w-14 text-right">
@@ -139,7 +139,7 @@ export function MarketsWidget({ indicesEnabled = false }: { indicesEnabled?: boo
               ))}
             </ul>
           ) : (
-            <p data-testid="indices-unavailable" className="text-[0.62rem] leading-relaxed text-sys-dim">
+            <p data-testid="indices-unavailable" className="text-xs leading-relaxed text-sys-dim">
               {indices?.meta.reason ??
                 "Real-time NIFTY and BANKNIFTY are licensed data. No provider is configured, so no value is shown."}
             </p>
