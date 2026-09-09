@@ -88,7 +88,7 @@ function AgentCard({ agent }: { agent: AgentSummary }) {
             <h3 className="text-sm font-semibold text-white" data-testid="agent-name">
               {agentTitle(agent.agentId)}
             </h3>
-            <p className="mt-0.5 font-mono text-[0.58rem] uppercase tracking-hud text-sys-dim">
+            <p className="mt-0.5 font-mono text-xs uppercase tracking-hud text-sys-dim">
               {DOMAIN_LABEL[agent.domain] ?? agent.domain}
             </p>
           </div>

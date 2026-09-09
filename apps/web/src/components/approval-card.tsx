@@ -142,14 +142,14 @@ export function ApprovalCard({
       className="glass-panel glass-edge space-y-3 rounded-xl p-4"
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <span className="font-mono text-[0.62rem] text-sys-dim">{approval.toolId}</span>
+        <span className="font-mono text-xs text-sys-dim">{approval.toolId}</span>
 
         <div className="flex items-center gap-2">
           {approval.risk && (
             <span
               data-testid="approval-risk-badge"
               title="Declared by the tool that would execute this action."
-              className={`rounded border px-2 py-0.5 font-mono text-[0.5rem] uppercase tracking-hud ${RISK_TONE[approval.risk] ?? "border-sys-line bg-white/[0.03] text-sys-dim"}`}
+              className={`rounded border px-2 py-0.5 font-mono text-xs uppercase tracking-hud ${RISK_TONE[approval.risk] ?? "border-sys-line bg-white/[0.03] text-sys-dim"}`}
             >
               {RISK_LABEL[approval.risk] ?? approval.risk}
             </span>
@@ -157,7 +157,7 @@ export function ApprovalCard({
 
           <span
             data-testid="approval-status-badge"
-            className={`rounded border px-2 py-0.5 font-mono text-[0.5rem] uppercase tracking-hud ${
+            className={`rounded border px-2 py-0.5 font-mono text-xs uppercase tracking-hud ${
               effectiveStatus === "idle"
                 ? "border-amber-400/40 bg-amber-400/10 text-amber-300"
                 : effectiveStatus === "approved"
@@ -201,7 +201,7 @@ export function ApprovalCard({
 
       {/* Display-only parameters: editing is forbidden by design. */}
       <details className="text-xs">
-        <summary className="cursor-pointer text-sys-dim/70">
+        <summary className="cursor-pointer text-sys-dim">
           Parameters ({Object.keys(approval.params).length})
         </summary>
         <pre
@@ -231,7 +231,7 @@ export function ApprovalCard({
             data-testid="reject-button"
             disabled={busy}
             onClick={() => decide("reject")}
-            className="sys-focus rounded-md border border-sys-line bg-white/[0.03] px-3.5 py-1.5 font-mono text-[0.6rem] uppercase tracking-hud text-sys-text/85 transition-colors enabled:hover:border-red-400/40 enabled:hover:text-red-300 disabled:opacity-45"
+            className="sys-focus rounded-md border border-sys-line bg-white/[0.03] px-3.5 py-1.5 font-mono text-xs uppercase tracking-hud text-sys-text/85 transition-colors enabled:hover:border-red-400/40 enabled:hover:text-red-300 disabled:opacity-45"
           >
             {busy && ui === "rejecting" ? "Rejecting…" : "Reject"}
           </button>
@@ -239,7 +239,7 @@ export function ApprovalCard({
             data-testid="approve-button"
             disabled={busy}
             onClick={() => decide("approve")}
-            className="sys-focus rounded-md border border-emerald-400/40 bg-emerald-400/10 px-3.5 py-1.5 font-mono text-[0.6rem] uppercase tracking-hud text-emerald-300 transition-colors enabled:hover:border-emerald-400/70 enabled:hover:bg-emerald-400/20 disabled:opacity-45"
+            className="sys-focus rounded-md border border-emerald-400/40 bg-emerald-400/10 px-3.5 py-1.5 font-mono text-xs uppercase tracking-hud text-emerald-300 transition-colors enabled:hover:border-emerald-400/70 enabled:hover:bg-emerald-400/20 disabled:opacity-45"
           >
             {busy && ui === "approving" ? "Approving…" : "Approve"}
           </button>

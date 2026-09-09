@@ -46,7 +46,7 @@ export function SystemStatus({ state }: { state: SystemState }) {
 
       <span
         aria-live="polite"
-        className={`font-mono text-[0.55rem] uppercase tracking-hud transition-colors duration-300 sm:text-[0.6rem] ${tone.text}`}
+        className={`font-mono text-xs uppercase tracking-hud transition-colors duration-300 sm:text-sm ${tone.text}`}
       >
         {LABEL[state]}
       </span>

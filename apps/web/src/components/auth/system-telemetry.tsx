@@ -28,7 +28,7 @@ export function SystemTelemetry() {
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           transition={{ duration: 0.9, delay: BOOT.hud + 0.25 + i * 0.09 }}
-          className={`absolute ${r.pos} ${r.align} font-mono text-[0.5rem] uppercase leading-relaxed tracking-[0.18em] text-sys-dim/45 lg:text-[0.55rem]`}
+          className={`absolute ${r.pos} ${r.align} font-mono text-chrome uppercase leading-relaxed tracking-[0.18em] text-sys-dim/45`}
         >
           {r.lines.map((line) => (
             <div key={line}>{line}</div>

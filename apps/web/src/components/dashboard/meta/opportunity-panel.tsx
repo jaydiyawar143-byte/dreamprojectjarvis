@@ -24,7 +24,7 @@ const PRIORITY_CHIP: Record<string, string> = {
   HIGH: "border-amber-400/50 bg-amber-400/10 text-amber-300",
   MEDIUM: "border-sys-cyan/40 bg-sys-cyan/[0.08] text-sys-cyan",
   LOW: "border-sys-line bg-white/[0.03] text-sys-dim",
-  IGNORE: "border-sys-line bg-white/[0.02] text-sys-dim/70",
+  IGNORE: "border-sys-line bg-white/[0.02] text-sys-dim",
 };
 
 function chipFor(priority?: OpportunityPriority | string | null): string {
@@ -60,7 +60,7 @@ export function OpportunityPanel({
           <Link
             href="/opportunities"
             data-testid="all-opportunities"
-            className="sys-focus inline-flex items-center gap-1 rounded border border-sys-line px-2 py-1 font-mono text-[0.55rem] uppercase tracking-hud text-sys-dim transition-colors hover:border-sys-cyan/40 hover:text-sys-text"
+            className="sys-focus inline-flex items-center gap-1 rounded border border-sys-line px-2 py-1 font-mono text-xs uppercase tracking-hud text-sys-dim transition-colors hover:border-sys-cyan/40 hover:text-sys-text"
           >
             All <ArrowUpRight size={11} aria-hidden="true" />
           </Link>
@@ -95,7 +95,7 @@ export function OpportunityPanel({
                   <span
                     data-testid="opportunity-priority"
                     className={cn(
-                      "mt-0.5 shrink-0 rounded border px-1.5 py-px font-mono text-[0.5rem] uppercase tracking-hud",
+                      "mt-0.5 shrink-0 rounded border px-1.5 py-px font-mono text-xs uppercase tracking-hud",
                       chipFor(priority)
                     )}
                   >
@@ -123,7 +123,7 @@ export function OpportunityPanel({
                     <Link
                       href={`/opportunities/${id}`}
                       data-testid={`review-${id}`}
-                      className="sys-focus shrink-0 rounded border border-sys-line px-2 py-1 font-mono text-[0.55rem] uppercase tracking-hud text-sys-dim transition-colors hover:border-sys-cyan/45 hover:text-sys-text"
+                      className="sys-focus shrink-0 rounded border border-sys-line px-2 py-1 font-mono text-xs uppercase tracking-hud text-sys-dim transition-colors hover:border-sys-cyan/45 hover:text-sys-text"
                     >
                       Review
                     </Link>

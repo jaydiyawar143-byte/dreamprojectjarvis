@@ -200,7 +200,7 @@ export function AuthExperience({ initialMode }: { initialMode: AuthMode }) {
         {/* Footer readout */}
         <p
           aria-hidden="true"
-          className="mt-6 text-center font-mono text-[0.5rem] uppercase tracking-hud text-sys-dim/45"
+          className="mt-6 text-center font-mono text-chrome uppercase tracking-hud text-sys-dim/45"
         >
           Secure Channel · Encryption Active
         </p>

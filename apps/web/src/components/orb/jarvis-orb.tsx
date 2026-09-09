@@ -198,7 +198,7 @@ export function JarvisOrb({ status, className, showCaption = true }: JarvisOrbPr
         <p
           data-testid="orb-caption"
           data-orb-state={state}
-          className="mt-3 text-center font-mono text-[0.58rem] uppercase tracking-hud text-sys-dim"
+          className="mt-3 text-center font-mono text-xs uppercase tracking-hud text-sys-dim"
         >
           {caption}
         </p>

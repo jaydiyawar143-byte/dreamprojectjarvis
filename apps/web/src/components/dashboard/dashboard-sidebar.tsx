@@ -56,7 +56,7 @@ export function DashboardSidebar({
           aria-hidden="true"
           className="h-1.5 w-1.5 rounded-full bg-sys-cyan shadow-[0_0_10px_2px_rgba(62,224,242,0.55)]"
         />
-        <span className={cn("font-mono text-[0.7rem] uppercase tracking-hud text-white", revealed)}>
+        <span className={cn("font-mono text-xs uppercase tracking-hud text-white", revealed)}>
           JARVIS
         </span>
       </div>
@@ -67,7 +67,7 @@ export function DashboardSidebar({
           <div key={group.title} className="mb-5 last:mb-0">
             <p
               className={cn(
-                "px-3 pb-2 font-mono text-[0.53rem] uppercase tracking-hud text-sys-dim/70",
+                "px-3 pb-2 font-mono text-xs uppercase tracking-hud text-sys-dim",
                 revealed
               )}
             >
@@ -84,11 +84,11 @@ export function DashboardSidebar({
                       <span
                         data-testid={`nav-soon-${item.label.toLowerCase().replace(/\s+/g, "-")}`}
                         aria-disabled="true"
-                        className="flex cursor-not-allowed items-center gap-2.5 rounded-md px-3 py-2 text-sm text-sys-dim/45"
+                        className="flex cursor-not-allowed items-center gap-2.5 rounded-md px-3 py-2 text-sm text-sys-dim"
                       >
                         <Icon size={15} className="shrink-0" aria-hidden="true" />
                         <span className={cn("truncate", revealed)}>{item.label}</span>
-                        <span className="ml-auto rounded border border-sys-line px-1.5 py-px font-mono text-[0.5rem] uppercase tracking-hud text-sys-dim/60">
+                        <span className="ml-auto rounded border border-sys-line px-1.5 py-px font-mono text-xs uppercase tracking-hud text-sys-dim">
                           Soon
                         </span>
                       </span>

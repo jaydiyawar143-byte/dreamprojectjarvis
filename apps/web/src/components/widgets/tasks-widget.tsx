@@ -156,7 +156,7 @@ export function TasksWidget() {
             onChange={(e) => setDraft(e.target.value)}
             placeholder="What needs doing?"
             autoFocus
-            className="sys-focus w-full rounded-md border border-sys-line bg-black/30 px-2 py-1.5 text-xs text-white placeholder:text-sys-dim/60"
+            className="sys-focus w-full rounded-md border border-sys-control bg-black/30 px-2 py-1.5 text-sm text-white placeholder:text-sys-dim"
           />
           <div className="flex gap-1.5">
             <label htmlFor="task-due" className="sr-only">
@@ -168,12 +168,12 @@ export function TasksWidget() {
               type="datetime-local"
               value={draftDue}
               onChange={(e) => setDraftDue(e.target.value)}
-              className="sys-focus min-w-0 flex-1 rounded-md border border-sys-line bg-black/30 px-2 py-1 text-[0.62rem] text-sys-text/85"
+              className="sys-focus min-w-0 flex-1 rounded-md border border-sys-control bg-black/30 px-2 py-1 text-sm text-sys-text/85"
             />
             <button
               type="submit"
               disabled={!draft.trim()}
-              className="sys-focus rounded-md border border-sys-cyan/40 bg-sys-cyan/10 px-2.5 py-1 font-mono text-[0.5rem] uppercase tracking-hud text-sys-cyan transition-colors enabled:hover:bg-sys-cyan/20 disabled:opacity-40"
+              className="sys-focus rounded-md border border-sys-cyan/40 bg-sys-cyan/10 px-2.5 py-1 font-mono text-xs uppercase tracking-hud text-sys-cyan transition-colors enabled:hover:bg-sys-cyan/20 disabled:opacity-40"
             >
               Add
             </button>
@@ -182,7 +182,7 @@ export function TasksWidget() {
       )}
 
       {!hasAny && !adding && (
-        <p className="text-[0.68rem] text-sys-dim">
+        <p className="text-xs text-sys-dim">
           Nothing due. Ask JARVIS to remind you, or add a task above.
         </p>
       )}
@@ -193,7 +193,7 @@ export function TasksWidget() {
           if (items.length === 0) return null;
           return (
             <div key={bucket} data-testid={`task-bucket-${bucket}`}>
-              <p className={`mb-1 font-mono text-[0.45rem] uppercase tracking-hud ${BUCKET_TONE[bucket]}`}>
+              <p className={`mb-1 font-mono text-xs uppercase tracking-hud ${BUCKET_TONE[bucket]}`}>
                 {BUCKET_LABEL[bucket]} · {items.length}
               </p>
               <ul className="space-y-1">
@@ -212,11 +212,11 @@ export function TasksWidget() {
                         <Circle size={12} aria-hidden="true" />
                       )}
                     </button>
-                    <span className="min-w-0 flex-1 truncate text-[0.68rem] text-sys-text/90">
+                    <span className="min-w-0 flex-1 truncate text-xs text-sys-text/90">
                       {task.title}
                     </span>
                     {task.dueAt && (
-                      <span className="shrink-0 font-mono text-[0.5rem] text-sys-dim">
+                      <span className="shrink-0 font-mono text-xs text-sys-dim">
                         {dueLabel(task)}
                       </span>
                     )}

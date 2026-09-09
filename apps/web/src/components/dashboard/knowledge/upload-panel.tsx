@@ -119,14 +119,14 @@ export function UploadPanel({ onUploaded }: { onUploaded: () => void }) {
           {busy ? (
             <>
               <Loader2 size={15} className="animate-spin" aria-hidden="true" />
-              <span className="font-mono text-[0.6rem] uppercase tracking-hud">
+              <span className="font-mono text-xs uppercase tracking-hud">
                 {phase === "reading" ? "Reading file…" : "Processing document…"}
               </span>
             </>
           ) : (
             <>
               <FileUp size={15} aria-hidden="true" />
-              <span className="font-mono text-[0.6rem] uppercase tracking-hud">Choose a file</span>
+              <span className="font-mono text-xs uppercase tracking-hud">Choose a file</span>
             </>
           )}
         </label>
@@ -158,7 +158,7 @@ export function UploadPanel({ onUploaded }: { onUploaded: () => void }) {
             className="flex items-start justify-between gap-3 rounded-md border border-sys-ok/35 bg-sys-ok/[0.06] p-3"
           >
             <div className="min-w-0 space-y-1">
-              <p className="font-mono text-[0.6rem] uppercase tracking-hud text-sys-ok">
+              <p className="font-mono text-xs uppercase tracking-hud text-sys-ok">
                 {result.searchable ? "Added and searchable" : "Added, not yet searchable"}
               </p>
               <p className="truncate text-sm text-sys-text/85">{result.document.title}</p>

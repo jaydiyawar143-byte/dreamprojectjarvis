@@ -57,7 +57,7 @@ export function FreshnessBadge({ meta }: { meta: ProviderMeta }) {
       data-testid="freshness-badge"
       data-freshness={meta.freshness}
       title={`${meta.source} · observed ${new Date(meta.observedAt).toLocaleString()}`}
-      className={`shrink-0 rounded border px-1.5 py-0.5 font-mono text-[0.45rem] uppercase tracking-hud ${badge.className}`}
+      className={`shrink-0 rounded border px-1.5 py-0.5 font-mono text-xs uppercase tracking-hud ${badge.className}`}
     >
       {badge.label}
       {meta.freshness !== "UNAVAILABLE" && ` · ${formatAge(age)}`}
@@ -101,13 +101,17 @@ export function WidgetShell({
       aria-label={title}
       className={`glass-panel glass-edge relative flex min-w-0 flex-col rounded-xl p-3.5 ${className}`}
     >
-      <header className="mb-2.5 flex items-center gap-2">
+      {/* Wraps rather than overflows. At the Phase A type size a title plus an
+          action plus a freshness badge no longer fit on one line inside a
+          single-column widget, and `shrink-0` on the badge meant the overflow
+          left the panel instead of being absorbed. */}
+      <header className="mb-2.5 flex flex-wrap items-center gap-x-2 gap-y-1">
         {icon && (
           <span aria-hidden="true" className="shrink-0 text-sys-dim">
             {icon}
           </span>
         )}
-        <h3 className="min-w-[3.5rem] flex-1 truncate font-mono text-[0.55rem] uppercase tracking-hud text-sys-dim">
+        <h3 className="min-w-[6rem] flex-1 truncate font-mono text-xs uppercase tracking-hud text-sys-dim">
           {title}
         </h3>
         {action}
@@ -135,7 +139,7 @@ export function WidgetShell({
             <button
               type="button"
               onClick={onRetry}
-              className="sys-focus self-start rounded border border-sys-line px-2 py-1 font-mono text-[0.5rem] uppercase tracking-hud text-sys-dim transition-colors hover:text-white"
+              className="sys-focus self-start rounded border border-sys-line px-2 py-1 font-mono text-xs uppercase tracking-hud text-sys-dim transition-colors hover:text-white"
             >
               Retry
             </button>

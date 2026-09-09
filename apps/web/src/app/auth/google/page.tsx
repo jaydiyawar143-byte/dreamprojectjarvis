@@ -61,7 +61,7 @@ function GoogleHandoff() {
         <p
           role="status"
           aria-live="polite"
-          className="font-mono text-[0.62rem] uppercase tracking-hud text-sys-dim"
+          className="font-mono text-xs uppercase tracking-hud text-sys-dim"
         >
           {failed ? "Sign-in could not be completed" : "Establishing secure session…"}
         </p>

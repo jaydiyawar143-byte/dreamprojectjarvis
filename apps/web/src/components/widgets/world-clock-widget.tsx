@@ -87,12 +87,12 @@ export function WorldClockWidget({
             const parts = formatInZone(now, city.timeZone, hourFormat === "12");
             return (
               <li key={city.timeZone} className="flex items-baseline gap-2">
-                <span className="min-w-0 flex-1 truncate text-[0.68rem] text-sys-text/85">
+                <span className="min-w-0 flex-1 truncate text-xs text-sys-text/85">
                   {city.label}
                 </span>
                 {parts ? (
                   <>
-                    <span className="shrink-0 font-mono text-[0.5rem] text-sys-dim">
+                    <span className="shrink-0 font-mono text-xs text-sys-dim">
                       {parts.day}
                     </span>
                     <span className="shrink-0 font-mono text-[0.78rem] text-white [font-variant-numeric:tabular-nums]">
@@ -100,7 +100,7 @@ export function WorldClockWidget({
                     </span>
                   </>
                 ) : (
-                  <span className="shrink-0 text-[0.6rem] text-sys-dim">Unknown zone</span>
+                  <span className="shrink-0 text-xs text-sys-dim">Unknown zone</span>
                 )}
               </li>
             );

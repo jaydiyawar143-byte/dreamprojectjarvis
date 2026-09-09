@@ -34,7 +34,7 @@ export function DashboardTopbar({ onOpenNav }: { onOpenNav: () => void }) {
 
       <span
         data-testid="topbar-section"
-        className="font-mono text-[0.62rem] uppercase tracking-hud text-sys-text/75"
+        className="font-mono text-xs uppercase tracking-hud text-sys-text/75"
       >
         {section}
       </span>
@@ -44,7 +44,7 @@ export function DashboardTopbar({ onOpenNav }: { onOpenNav: () => void }) {
           aria-hidden="true"
           className="h-1.5 w-1.5 rounded-full bg-sys-ok animate-sys-pulse"
         />
-        <span className="hidden font-mono text-[0.55rem] uppercase tracking-hud text-sys-dim sm:inline">
+        <span className="hidden font-mono text-xs uppercase tracking-hud text-sys-dim sm:inline">
           Connected
         </span>
       </div>

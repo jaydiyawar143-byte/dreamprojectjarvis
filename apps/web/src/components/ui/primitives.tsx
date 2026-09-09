@@ -77,7 +77,7 @@ export function Badge({
       title={title}
       className={cx(
         "inline-flex items-center gap-1.5 rounded border px-2 py-0.5",
-        "font-mono text-[0.6rem] uppercase tracking-hud",
+        "font-mono text-xs uppercase tracking-hud",
         TONE_CHIP[tone],
         className
       )}
@@ -110,7 +110,7 @@ export function StatusDot({
       className={cx("inline-flex items-center gap-2", className)}
     >
       <span aria-hidden className={cx("h-1.5 w-1.5 rounded-full", TONE_DOT[tone])} />
-      <span className={cx("font-mono text-[0.62rem] uppercase tracking-hud", TONE_TEXT[tone])}>
+      <span className={cx("font-mono text-xs uppercase tracking-hud", TONE_TEXT[tone])}>
         {label}
       </span>
     </span>
@@ -125,7 +125,7 @@ export type ButtonVariant = "primary" | "secondary" | "ghost" | "danger";
 
 const BUTTON_VARIANT: Record<ButtonVariant, string> = {
   primary: "border-sys-cyan/40 bg-sys-cyan/15 text-sys-cyan hover:bg-sys-cyan/25",
-  secondary: "border-sys-line bg-sys-edge/40 text-sys-text hover:bg-sys-edge/60",
+  secondary: "border-sys-control bg-sys-edge/40 text-sys-text hover:bg-sys-edge/60",
   ghost: "border-transparent bg-transparent text-sys-dim hover:text-sys-text",
   danger: "border-sys-danger/40 bg-sys-danger/10 text-sys-danger hover:bg-sys-danger/20",
 };
@@ -150,7 +150,7 @@ export function Button({
         "sys-focus inline-flex items-center justify-center gap-2 rounded border",
         "font-mono uppercase tracking-hud transition-colors",
         "disabled:cursor-not-allowed disabled:opacity-40",
-        size === "sm" ? "px-2.5 py-1 text-[0.6rem]" : "px-3.5 py-1.5 text-[0.65rem]",
+        size === "sm" ? "px-2.5 py-1 text-xs" : "px-3.5 py-1.5 text-xs",
         BUTTON_VARIANT[variant],
         className
       )}
@@ -208,10 +208,10 @@ export function Tabs<T extends string>({
             data-selected={selected}
             onClick={() => onChange(option.value)}
             className={cx(
-              "sys-focus rounded border px-3 py-1 font-mono text-[0.62rem] uppercase tracking-hud transition-colors",
+              "sys-focus rounded border px-3 py-1 font-mono text-xs uppercase tracking-hud transition-colors",
               selected
                 ? "border-sys-cyan/40 bg-sys-cyan/10 text-sys-cyan"
-                : "border-sys-line bg-transparent text-sys-dim hover:text-sys-text"
+                : "border-sys-control bg-transparent text-sys-dim hover:text-sys-text"
             )}
           >
             {option.label}
@@ -267,7 +267,7 @@ export function DataTable<Row>({
                 key={column.key}
                 scope="col"
                 className={cx(
-                  "px-3 py-2 font-mono text-[0.58rem] uppercase tracking-hud text-sys-dim",
+                  "px-3 py-2 font-mono text-xs uppercase tracking-hud text-sys-dim",
                   column.numeric && "text-right",
                   column.className
                 )}

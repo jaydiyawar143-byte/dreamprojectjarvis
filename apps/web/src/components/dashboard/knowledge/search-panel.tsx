@@ -60,13 +60,13 @@ export function SearchPanel({ hasDocuments }: { hasDocuments: boolean }) {
           onChange={(e) => setQuery(e.target.value)}
           placeholder="What does my policy say about…"
           maxLength={4096}
-          className="sys-focus sys-input min-w-0 flex-1 rounded-md border border-sys-line bg-sys-panel px-3 py-2 text-sm text-sys-text placeholder:text-sys-dim/70"
+          className="sys-focus sys-input min-w-0 flex-1 rounded-md border border-sys-control bg-sys-panel px-3 py-2 text-sm text-sys-text placeholder:text-sys-dim"
         />
         <button
           type="submit"
           data-testid="search-submit"
           disabled={loading || query.trim().length === 0}
-          className="sys-focus inline-flex shrink-0 items-center gap-1.5 rounded-md border border-sys-cyan/45 bg-sys-cyan/[0.08] px-3 py-2 font-mono text-[0.58rem] uppercase tracking-hud text-sys-cyan-soft transition-colors hover:border-sys-cyan/80 disabled:cursor-not-allowed disabled:opacity-45"
+          className="sys-focus inline-flex shrink-0 items-center gap-1.5 rounded-md border border-sys-cyan/45 bg-sys-cyan/[0.08] px-3 py-2 font-mono text-xs uppercase tracking-hud text-sys-cyan-soft transition-colors hover:border-sys-cyan/80 disabled:cursor-not-allowed disabled:opacity-45"
         >
           <Search size={12} aria-hidden="true" />
           Search
@@ -104,12 +104,12 @@ export function SearchPanel({ hasDocuments }: { hasDocuments: boolean }) {
               <div className="mb-1.5 flex flex-wrap items-baseline gap-x-2 gap-y-1">
                 <span
                   data-testid="hit-source"
-                  className="font-mono text-[0.55rem] uppercase tracking-hud text-sys-cyan/85"
+                  className="font-mono text-xs uppercase tracking-hud text-sys-cyan/85"
                 >
                   {hit.documentTitle}
                 </span>
                 {hit.pageNumbers.length > 0 && (
-                  <span className="font-mono text-[0.55rem] uppercase tracking-hud text-sys-dim">
+                  <span className="font-mono text-xs uppercase tracking-hud text-sys-dim">
                     page{hit.pageNumbers.length > 1 ? "s" : ""} {hit.pageNumbers.join(", ")}
                   </span>
                 )}
@@ -118,11 +118,11 @@ export function SearchPanel({ hasDocuments }: { hasDocuments: boolean }) {
                     twice, so the section is shown only when it adds something. */}
                 {hit.primarySection?.title &&
                   hit.primarySection.title.trim() !== hit.documentTitle.trim() && (
-                    <span className="font-mono text-[0.55rem] uppercase tracking-hud text-sys-dim">
+                    <span className="font-mono text-xs uppercase tracking-hud text-sys-dim">
                       {hit.primarySection.title}
                     </span>
                   )}
-                <span className="ml-auto font-mono text-[0.55rem] tabular-nums text-sys-dim">
+                <span className="ml-auto font-mono text-xs tabular-nums text-sys-dim">
                   {hit.score.toFixed(2)}
                 </span>
               </div>

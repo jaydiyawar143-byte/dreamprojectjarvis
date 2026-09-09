@@ -66,14 +66,14 @@ export function AuthConsole({
           {/* aria-live so the heading change is announced on mode switch */}
           <h2
             aria-live="polite"
-            className="font-mono text-[0.62rem] uppercase tracking-hud text-sys-text sm:text-[0.68rem]"
+            className="font-mono text-xs uppercase tracking-hud text-sys-text sm:text-sm"
           >
             {isLogin ? "Operator Identification" : "Initialize Operator"}
           </h2>
         </div>
         <span
           aria-hidden="true"
-          className="font-mono text-[0.5rem] uppercase tracking-hud text-sys-dim/60"
+          className="font-mono text-chrome uppercase tracking-hud text-sys-dim/60"
         >
           {isLogin ? "AUTH/01" : "AUTH/02"}
         </span>
@@ -115,7 +115,7 @@ export function AuthConsole({
         initial="hidden"
         animate="show"
         transition={{ delay: BOOT.controls + 0.26 }}
-        className="mt-6 text-center font-mono text-[0.55rem] uppercase tracking-hud text-sys-dim"
+        className="mt-6 text-center font-mono text-xs uppercase tracking-hud text-sys-dim"
       >
         {isLogin ? "New operator? " : "Already registered? "}
         <button

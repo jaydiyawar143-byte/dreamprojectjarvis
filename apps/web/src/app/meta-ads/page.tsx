@@ -162,7 +162,7 @@ export default function MetaAdsPage() {
         actions={
           <span
             data-testid="read-only-badge"
-            className="inline-flex items-center gap-1.5 rounded border border-sys-ok/40 bg-sys-ok/[0.07] px-2 py-1 font-mono text-[0.55rem] uppercase tracking-hud text-sys-ok"
+            className="inline-flex items-center gap-1.5 rounded border border-sys-ok/40 bg-sys-ok/[0.07] px-2 py-1 font-mono text-xs uppercase tracking-hud text-sys-ok"
           >
             <ShieldCheck size={11} aria-hidden="true" />
             Read only
@@ -184,7 +184,7 @@ export default function MetaAdsPage() {
               ["Timezone", account?.timezone ?? "—"],
             ].map(([label, value]) => (
               <div key={label} className="min-w-0">
-                <dt className="font-mono text-[0.55rem] uppercase tracking-hud text-sys-dim">{label}</dt>
+                <dt className="font-mono text-xs uppercase tracking-hud text-sys-dim">{label}</dt>
                 <dd className="truncate text-sm text-sys-text" title={String(value)}>
                   {value}
                 </dd>
