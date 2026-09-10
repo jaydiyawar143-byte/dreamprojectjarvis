@@ -51,7 +51,10 @@ export function CustomizeBar({
 
   if (!customizing) {
     return (
-      <div className="relative z-10 mb-3 flex w-full max-w-6xl justify-end">
+      // V3.1 — no `max-w-6xl`. The toolbar sits above a workspace that now uses
+      // the full width after the sidebar, and a 1152px cap on the bar left the
+      // Customise button stranded in the middle of a 1920px screen.
+      <div className="relative z-10 mb-2 flex w-full shrink-0 justify-end">
         <button
           type="button"
           data-testid="customize-toggle"
@@ -68,7 +71,7 @@ export function CustomizeBar({
   const hidden = layout.filter((p) => p.hidden);
 
   return (
-    <div className="relative z-20 mb-4 w-full max-w-6xl">
+    <div className="relative z-20 mb-2 w-full shrink-0">
       <div className="glass-panel glass-edge flex flex-wrap items-center gap-2 rounded-xl px-3 py-2">
         <p className="mr-auto flex items-center gap-1.5 font-mono text-xs uppercase tracking-hud text-sys-cyan-soft">
           <Sliders size={10} aria-hidden="true" />

@@ -343,3 +343,217 @@ body {
     font-size: max(16px, 1em);
   }
 }
+
+/* ---------------------------------------------------------------------------
+   V4 — react-grid-layout, dressed as JARVIS.
+
+   The library's own stylesheet is NOT imported. It ships a red placeholder and
+   a grey corner triangle, which would be the only two things on this screen not
+   drawn in the HUD palette. What it actually requires is small and stated here:
+   positioned items, a transition, and a handle that can be grabbed. Everything
+   below that is ours.
+
+   The transitions are deliberately absent while dragging or resizing. RGL sets
+   `transform` every pointer move; animating that lags the widget behind the
+   cursor, which reads as the drag "sticking".
+   --------------------------------------------------------------------------- */
+
+.react-grid-layout {
+  position: relative;
+  transition: height 200ms ease;
+}
+
+.react-grid-item {
+  transition: transform 180ms ease, width 180ms ease, height 180ms ease;
+}
+
+.react-grid-item.cssTransforms {
+  transition-property: transform, width, height;
+}
+
+/* The widget under the cursor leads the stack and stops animating: it must
+   track the pointer exactly, not ease towards it. */
+.react-grid-item.resizing,
+.react-grid-item.react-draggable-dragging {
+  transition: none !important;
+  z-index: 30;
+  will-change: transform, width, height;
+}
+
+.react-grid-item.react-draggable-dragging {
+  cursor: grabbing;
+}
+
+/* Where it will land. This is the "visible drop target": it is the only
+   feedback that makes a snap-to-grid drag predictable rather than a guess. */
+.react-grid-item.react-grid-placeholder {
+  z-index: 10;
+  border-radius: 0.75rem;
+  border: 1px dashed rgba(62, 224, 242, 0.55);
+  background: rgba(62, 224, 242, 0.1);
+  transition-duration: 100ms;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* ---- Resize handles ------------------------------------------------------
+   The hit area is deliberately larger than the mark: 18px of grabbable corner
+   behind a small bracket, because a handle you can see but not hit is worse
+   than no handle.
+
+   THE HIDE RULE IS LOAD-BEARING. `isResizable={false}` does NOT remove the
+   handles from the DOM — react-grid-layout 1.5 always wraps the item, then
+   passes `disabled` to the resizer and tags the wrapper `.react-resizable-hide`
+   (GridItem.js: `className: isResizable ? undefined : "react-resizable-hide"`).
+   Hiding them is the stylesheet's job, and since this file replaces the
+   library's own stylesheet, it is this file's job. Without the rule below,
+   every widget wears a corner bracket and two edge bars in the clean, non-
+   customising dashboard — inert, since the resizer is disabled, but visible,
+   which is exactly the "no handles when customise mode is off" promise broken. */
+.react-resizable-hide > .react-resizable-handle {
+  display: none;
+}
+
+.react-resizable-handle {
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  opacity: 0.75;
+  transition: opacity 150ms ease;
+  touch-action: none;
+}
+
+.react-resizable-handle:hover,
+.react-grid-item:hover > .react-resizable-handle {
+  opacity: 1;
+}
+
+.react-resizable-handle::after {
+  content: "";
+  position: absolute;
+  border-color: rgba(62, 224, 242, 0.75);
+}
+
+/* Bottom-right corner: an L-bracket, the universal "drag me" mark. */
+.react-resizable-handle-se {
+  right: 1px;
+  bottom: 1px;
+  cursor: se-resize;
+}
+.react-resizable-handle-se::after {
+  right: 4px;
+  bottom: 4px;
+  width: 7px;
+  height: 7px;
+  border-right: 2px solid;
+  border-bottom: 2px solid;
+}
+
+/* Edges: a short bar centred on the side it resizes. */
+.react-resizable-handle-e {
+  right: 1px;
+  top: 50%;
+  height: 34px;
+  margin-top: -17px;
+  cursor: ew-resize;
+}
+.react-resizable-handle-e::after {
+  right: 4px;
+  top: 50%;
+  height: 16px;
+  margin-top: -8px;
+  border-right: 2px solid;
+}
+
+.react-resizable-handle-s {
+  bottom: 1px;
+  left: 50%;
+  width: 34px;
+  margin-left: -17px;
+  cursor: ns-resize;
+}
+.react-resizable-handle-s::after {
+  bottom: 4px;
+  left: 50%;
+  width: 16px;
+  margin-left: -8px;
+  border-bottom: 2px solid;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .react-grid-layout,
+  .react-grid-item {
+    transition: none;
+  }
+}
+
+/* ---- Grid guides ---------------------------------------------------------
+   Shown only in customise mode. The cell size is not a constant — it is the
+   viewport divided by 12 — so it arrives as custom properties set by the
+   component that measured it. Without them this paints nothing, which is the
+   correct fallback. */
+.jarvis-grid-guides {
+  background-image:
+    linear-gradient(to right, rgba(62, 224, 242, 0.09) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(62, 224, 242, 0.09) 1px, transparent 1px);
+  background-size: var(--jarvis-cell-w, 0) var(--jarvis-cell-h, 0);
+  background-position: var(--jarvis-grid-x, 0) var(--jarvis-grid-y, 0);
+}
+
+/* ---------------------------------------------------------------------------
+   Contextual surfaces — liquid glass.
+
+   The brief asks for holographic; the constraint is that the text on top of it
+   has to stay readable. So the fill is opaque ENOUGH (0.72 alpha over the void,
+   not 0.2) and the blur sits behind it rather than under the words. A panel you
+   can see through but cannot read is a failed panel, however good it looks in a
+   screenshot.
+
+   One glow, one hairline rim, one highlight along the top edge. No neon, no
+   particles, nothing animating on a loop — a surface that appears mid-sentence
+   must not pull the eye away from the answer it came to support.
+   --------------------------------------------------------------------------- */
+
+.surface-glass {
+  position: relative;
+  background:
+    linear-gradient(180deg, rgba(16, 27, 40, 0.82), rgba(9, 16, 25, 0.88));
+  border: 1px solid rgba(131, 228, 255, 0.16);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  backdrop-filter: blur(18px) saturate(140%);
+  box-shadow:
+    /* the rim */
+    0 0 0 1px rgba(62, 224, 242, 0.06),
+    /* the lift */
+    0 24px 60px -24px rgba(0, 0, 0, 0.85),
+    /* the one glow */
+    0 0 40px -22px rgba(62, 224, 242, 0.45);
+}
+
+/* The highlight along the top edge — what makes it read as glass rather than
+   as a dark rectangle. Purely decorative, so it never takes the pointer. */
+.surface-glass::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding-top: 1px;
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.14),
+    transparent 42%
+  );
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+}
+
+/* Where backdrop-filter is unavailable the panel becomes solid rather than
+   translucent. Translucency without blur is just unreadable text over a map. */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .surface-glass {
+    background: linear-gradient(180deg, rgba(12, 21, 32, 0.98), rgba(8, 14, 22, 0.99));
+  }
+}

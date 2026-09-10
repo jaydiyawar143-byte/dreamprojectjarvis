@@ -204,7 +204,12 @@ describe("dashboard route", () => {
 
     expect(screen.getByTestId("command-center")).toBeInTheDocument();
     expect(screen.getByTestId("command-input")).toBeInTheDocument();
-    expect(screen.getByText("How can I help?")).toBeInTheDocument();
+    // V4 — the greeting headline is gone. The Orb is a widget the user can drag
+    // and resize now, so a line of copy sized to it would be sized to nothing
+    // the moment they shrank it; the status readout under the Orb says what the
+    // system is doing, and the command bar below says what to do about it.
+    expect(screen.getByTestId("command-readout")).toBeInTheDocument();
+    expect(screen.getByTestId("command-bar")).toBeInTheDocument();
 
     // The BI surface must NOT be here. This is the assertion that keeps the
     // dashboard from silently growing back into a card wall.

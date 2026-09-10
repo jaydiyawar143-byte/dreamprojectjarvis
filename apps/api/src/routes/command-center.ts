@@ -118,22 +118,59 @@ const PreferencesSchema = z
       })
       .nullable()
       .optional(),
-    // Widget layout: order, size and visibility.
+    // Widget layout: position, size and visibility.
     //
     // Bounded on every axis. This document is written by the client and read on
     // every dashboard load, so an unbounded array would let one user store
     // arbitrary data in a table every user shares. The server does NOT validate
     // widget ids against a list — the client repairs unknown ids on read, which
     // means shipping a new widget does not require a coordinated API deploy.
+    //
+    // TWO SHAPES, because two versions of the client have written this column.
+    //
+    //   V4 — {x, y, w, h} on a 12-column grid. What the dashboard writes now.
+    //   V3 — {size: {w, h}} with the order carried by the array. Still in the
+    //        database for anyone who saved a layout before the free-form grid,
+    //        and still accepted so their row keeps validating; the client
+    //        migrates it on read.
+    //
+    // The union is not decoration. This schema is `.strict()`, so before V4 was
+    // added here the new payload was REJECTED WHOLESALE — the dashboard saved,
+    // the request 400'd, and the next load quietly served the old layout back.
+    // "Save, reload, unchanged" looked like a front-end persistence bug and was
+    // this object.
+    //
+    // The bounds mirror GRID_COLS (12) and MAX_ROWS (32) in the web app. They
+    // are duplicated rather than imported: the API does not depend on the web
+    // package, and this limit's job is to stop unbounded values reaching the
+    // database, not to re-state the client's layout rules.
+    //
+    // It must stay at or above the client's ceiling. When it sat below — 20
+    // here against 32 there — a deep arrangement failed validation, the save
+    // 400'd, and the dashboard silently served the previous layout on the next
+    // load. A row bound that is too tight does not correct a layout; it
+    // discards one.
     layout: z
       .array(
-        z
-          .object({
-            id: z.string().trim().max(40),
-            size: z.object({ w: z.number().int().min(1).max(4), h: z.number().int().min(1).max(3) }),
-            hidden: z.boolean().optional(),
-          })
-          .strict()
+        z.union([
+          z
+            .object({
+              id: z.string().trim().max(40),
+              x: z.number().int().min(0).max(12),
+              y: z.number().int().min(0).max(32),
+              w: z.number().int().min(1).max(12),
+              h: z.number().int().min(1).max(32),
+              hidden: z.boolean().optional(),
+            })
+            .strict(),
+          z
+            .object({
+              id: z.string().trim().max(40),
+              size: z.object({ w: z.number().int().min(1).max(4), h: z.number().int().min(1).max(3) }),
+              hidden: z.boolean().optional(),
+            })
+            .strict(),
+        ])
       )
       .max(32)
       .optional(),

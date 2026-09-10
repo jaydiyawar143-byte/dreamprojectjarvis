@@ -109,13 +109,16 @@ export function WidgetShell({
     <section
       data-testid={testId}
       aria-label={title}
-      className={`glass-panel glass-edge relative flex min-w-0 flex-col rounded-xl p-3.5 ${className}`}
+      // `min-h-0` so the panel can be shorter than its content once the grid
+      // row is a fraction of the viewport rather than a fixed 10.5rem. Without
+      // it the panel wins the argument, the row grows, and the page scrolls.
+      className={`glass-panel glass-edge relative flex min-h-0 min-w-0 flex-col rounded-xl p-3 ${className}`}
     >
       {/* Wraps rather than overflows. At the Phase A type size a title plus an
           action plus a freshness badge no longer fit on one line inside a
           single-column widget, and `shrink-0` on the badge meant the overflow
           left the panel instead of being absorbed. */}
-      <header className="mb-2.5 flex flex-wrap items-center gap-x-2 gap-y-1">
+      <header className="mb-2 flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1">
         {icon && (
           <span aria-hidden="true" className="shrink-0 text-sys-dim">
             {icon}
@@ -171,15 +174,30 @@ export function WidgetShell({
       )}
 
       {!loading && !error && !unavailable && (
-        // `flex-1` would stretch short content down a tall grid cell, so by
-        // default the content sits at the top and lets the cell end where it
-        // ends — a weather reading floating in the middle of a tall card reads
-        // as a layout bug.
+        // `fill` opts in for the widgets that ARE their cell — a map sized to
+        // its own minimum is a map you cannot read.
         //
-        // `fill` opts out for the widgets that ARE their cell. Without it a map
-        // gets only its own min-height and leaves the rest of the cell empty.
+        // Both branches now take `min-h-0 flex-1`. The note that used to be
+        // here said `flex-1` would strand a short reading in the middle of a
+        // tall card; it does not, because these children are block-level and
+        // stack from the top — the box grows, the content stays put. What
+        // `flex-1` buys is a BOUNDED height, which is what makes an overflow
+        // rule mean anything now that a row is a fraction of the viewport.
+        //
+        // The two branches then want opposite things:
+        //
+        //   fill  — a canvas. It is sized TO the box, so it can never have
+        //           more to show than fits; `hidden` keeps a stray sub-pixel
+        //           from putting a scrollbar over a map, and keeps the wheel
+        //           doing what Google Maps expects.
+        //   list  — readings and rows. These genuinely can exceed a short
+        //           cell, so they scroll INSIDE their own panel. That is the
+        //           only scrolling this dashboard has, and deliberately not
+        //           the page's.
         <div
-          className={`min-w-0 ${fill ? "flex min-h-0 flex-1 flex-col" : ""}`}
+          className={`min-h-0 min-w-0 flex-1 ${
+            fill ? "flex flex-col overflow-hidden" : "overflow-y-auto"
+          }`}
           data-fill={fill ? "true" : undefined}
         >
           {children}

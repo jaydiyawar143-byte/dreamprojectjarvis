@@ -285,7 +285,8 @@ export async function getMe(): Promise<ApiResponse<SafeUser>> {
 export async function sendChatMessage(
   message: string,
   conversationId?: string,
-  agentId?: string
+  agentId?: string,
+  activeSurfaceKeys?: string[]
 ): Promise<
   ApiResponse<{
     message: string;
@@ -297,7 +298,20 @@ export async function sendChatMessage(
 > {
   return request("/chat", {
     method: "POST",
-    body: JSON.stringify({ message, conversationId, agentId }),
+    body: JSON.stringify({
+      message,
+      conversationId,
+      agentId,
+      // Which contextual surfaces are on screen RIGHT NOW.
+      //
+      // Only the browser knows: a surface may have closed itself on an idle
+      // timer since the last turn. The server uses it to decide whether to
+      // update the panel already open or open a new one — without it, "Bitcoin
+      // ka bhi" stacks a second market card beside the first.
+      ...(activeSurfaceKeys && activeSurfaceKeys.length > 0
+        ? { metadata: { activeSurfaceKeys } }
+        : {}),
+    }),
   });
 }
 
@@ -1398,8 +1412,23 @@ export interface CommandCenterPreferences {
   clockMode?: "DIGITAL" | "ANALOG";
   hourFormat?: "12" | "24";
   weatherLocation?: { latitude: number; longitude: number; label?: string } | null;
-  /** Widget order, size and visibility. Repaired on read, never trusted raw. */
-  layout?: Array<{ id: string; size: { w: number; h: number }; hidden?: boolean }>;
+  /**
+   * Widget position, size and visibility. Repaired on read, never trusted raw.
+   *
+   * V4 stores grid coordinates. The V3 `{ size: { w, h } }` shape is still in
+   * the database for anyone who saved one and is accepted here so it can be
+   * migrated on read — see `normalizeLayout`.
+   */
+  layout?: Array<{
+    id: string;
+    x?: number;
+    y?: number;
+    w?: number;
+    h?: number;
+    /** V3 only. */
+    size?: { w: number; h: number };
+    hidden?: boolean;
+  }>;
   /** Kept for preferences written by the first V3 build. */
   widgets?: string[];
   hiddenWidgets?: string[];

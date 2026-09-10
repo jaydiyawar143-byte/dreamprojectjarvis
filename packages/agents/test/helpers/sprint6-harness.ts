@@ -190,6 +190,13 @@ export function productionLikeTools(): ITool[] {
     read("maps.route"),
     read("maps.distance"),
     read("maps.place"),
+    // Ambient. All READ_ONLY: these read the weather, a market price and this
+    // machine's own telemetry, and none of them can write, spend or reach
+    // anything the user's dashboard could not already see.
+    read("weather.current"),
+    read("market.quote"),
+    read("system.status"),
+    read("time.now"),
   ];
 }
 

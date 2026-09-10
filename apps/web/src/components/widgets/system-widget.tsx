@@ -17,7 +17,7 @@
 // a single path per series.
 // ---------------------------------------------------------------------------
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Cpu, HardDrive, MemoryStick, Network, Thermometer } from "lucide-react";
 import type { Maybe, ProviderMeta } from "@/lib/api";
 import { useSystemStream, type MetricHistory } from "@/lib/use-system-stream";
@@ -152,6 +152,37 @@ export function SystemWidget() {
   const [range, setRange] = useState<Range>(60);
   const { snapshot, history, status } = useSystemStream(true);
 
+  // ---------------------------------------------------------------------------
+  // Tile columns follow the WIDGET's width, not the window's.
+  //
+  // The six tiles used to sit in two fixed `grid-cols-2` blocks, which meant
+  // three rows of tiles no matter how wide the widget was — so a panel the user
+  // has dragged out to half the screen would still stack tiles two abreast,
+  // wasting the width it has and then needing height it does not have. That is
+  // what made the monitor the first widget to clip on a 1366×768 screen.
+  //
+  // A viewport breakpoint cannot express this: the widget's width comes from its
+  // column span, so the same screen can hold a 1-wide and a 3-wide System. This
+  // observes the element itself. Three columns puts the six tiles in two rows,
+  // which is what makes the monitor fit at 1366×768 and 1440×900; below ~340px
+  // three columns would be unreadable, so it falls back to two.
+  // ---------------------------------------------------------------------------
+  const tilesRef = useRef<HTMLDivElement | null>(null);
+  const [tileCols, setTileCols] = useState<2 | 3>(2);
+
+  useEffect(() => {
+    const el = tilesRef.current;
+    // ResizeObserver is absent in jsdom. Its absence must not take the widget
+    // down — two columns is a correct layout, just not the roomiest one.
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(([entry]) => {
+      const width = entry?.contentRect.width ?? 0;
+      if (width > 0) setTileCols(width >= 340 ? 3 : 2);
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [snapshot !== null]);
+
   // The tail of each series, so switching range is a slice rather than a refetch.
   const windowed = useMemo(() => {
     const cut = (s: number[]) => s.slice(-range);
@@ -204,7 +235,20 @@ export function SystemWidget() {
     >
       {snapshot && (
         <div className="space-y-2">
-          <div className="grid grid-cols-2 gap-1.5">
+          {/*
+            ONE grid for all six tiles, not two grids of four and two.
+
+            Two separate grids could never produce fewer than three rows: four
+            tiles two-abreast is two rows, and the disk/network pair is a third.
+            Merged, three columns give two rows — the row of height the monitor
+            needed to stop clipping.
+          */}
+          <div
+            ref={tilesRef}
+            data-testid="system-tiles"
+            data-columns={tileCols}
+            className={`grid gap-1.5 ${tileCols === 3 ? "grid-cols-3" : "grid-cols-2"}`}
+          >
             <Tile
               testId="tile-cpu"
               label="CPU"
@@ -240,9 +284,6 @@ export function SystemWidget() {
               unit="%"
               tone="text-emerald-300/90"
             />
-          </div>
-
-          <div className="grid grid-cols-2 gap-1.5">
             <div
               data-testid="tile-disk"
               className="min-w-0 rounded-lg border border-white/[0.06] bg-white/[0.02] p-2"

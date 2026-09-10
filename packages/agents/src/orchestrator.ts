@@ -30,7 +30,8 @@ import type {
   KnowledgeContextConfig,
   IPermissionChecker,
 } from "@jarvis/core";
-import { JarvisError } from "@jarvis/core";
+import { JarvisError, decideSurface } from "@jarvis/core";
+import type { SurfaceDecision } from "@jarvis/core";
 import type { AgentPolicy, AgentResolution } from "@jarvis/core";
 import type { AgentRegistry } from "./registry.js";
 import { rankAgentCandidates, isAmbiguous } from "./agent-router.js";
@@ -249,6 +250,41 @@ export class Orchestrator implements IOrchestrator {
           if (pendingActionData) {
             responseMetadata.pendingAction = pendingActionData;
           }
+
+          // ---------------------------------------------------------------
+          // Contextual surface.
+          //
+          // Decided from the ORIGINAL message and the tool results that
+          // actually came back — never from `output.message`, which is the
+          // model's prose and is exactly the thing a surface must not be
+          // built out of. `decideSurface` returns null far more often than
+          // not, and a null is the normal, correct outcome.
+          //
+          // It rides `metadata` because `pendingAction` already does: the
+          // client, the route and the persistence layer all forward this
+          // object unchanged, so a surface needs no new transport.
+          // ---------------------------------------------------------------
+          const surfaceDecision = decideSurface({
+            message: request.message,
+            toolResults: allToolResults,
+            activeContextKeys: readActiveContextKeys(request.metadata),
+            // The last few things the USER said, for follow-ups that carry no
+            // subject of their own ("Tokyo bhi").
+            recentUserMessages: (request.conversationHistory ?? [])
+              .filter((m) => m.role === "user")
+              .slice(-6)
+              .map((m) => m.content),
+          });
+
+          if (surfaceDecision.directive) {
+            responseMetadata.surface = surfaceDecision.directive;
+          }
+
+          // Audited whichever way it went. "Why did a panel appear" and "why
+          // did one NOT appear" are both questions worth being able to answer,
+          // and the rationale carries no user data — only the intent label,
+          // the confidence and a one-line outcome.
+          await this.auditSurfaceDecision(context, surfaceDecision);
 
           return this.buildSuccessResponse(
             output.message,
@@ -1088,4 +1124,58 @@ export class Orchestrator implements IOrchestrator {
       },
     });
   }
+
+  /**
+   * Records that JARVIS decided to show — or not to show — a surface.
+   *
+   * Both outcomes are logged. "Why did a map appear" and "why did nothing
+   * appear when I asked for a route" are the same class of question, and only
+   * one of them is answerable if the null case is silent.
+   *
+   * Deliberately carries NO user content: the intent label, the confidence and
+   * a one-line outcome, plus the surface type when there is one. The message
+   * itself is already audited by `auditRequest`; repeating it here would put a
+   * second copy of everything the user says into the audit trail for no gain.
+   */
+  private async auditSurfaceDecision(
+    context: SessionContext,
+    decision: SurfaceDecision
+  ): Promise<void> {
+    const directive = decision.directive;
+    try {
+      await this.auditLogger.log({
+        userId: context.auth.userId,
+        agentId: context.agentId,
+        action: directive ? `surface.${directive.op}` : "surface.none",
+        result: "success",
+        traceId: context.traceId,
+        ipAddress: context.ipAddress,
+        metadata: {
+          intent: decision.rationale.intent,
+          confidence: decision.rationale.confidence,
+          outcome: decision.rationale.outcome,
+          ...(directive?.op === "open" ? { surfaceType: directive.surface.type } : {}),
+        },
+      });
+    } catch {
+      // A surface is a convenience. Failing the user's whole request because
+      // the audit sink was briefly unavailable would not be.
+    }
+  }
+}
+
+/**
+ * Which surfaces the client says are already on screen.
+ *
+ * Sent by the browser on each turn, because only the browser knows: a surface
+ * may have closed itself on an idle timer since the last message. Validated
+ * strictly and silently dropped if malformed — a bad hint costs a reuse, which
+ * is a duplicate panel, not a wrong answer.
+ */
+function readActiveContextKeys(metadata: Record<string, unknown> | undefined): string[] {
+  const raw = metadata?.activeSurfaceKeys;
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((k): k is string => typeof k === "string" && k.length > 0 && k.length <= 160)
+    .slice(0, 4);
 }

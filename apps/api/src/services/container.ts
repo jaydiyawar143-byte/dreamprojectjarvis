@@ -19,6 +19,11 @@ import {
   isToolAllowed,
 } from "@jarvis/agents";
 import { createCurrentLocationPort, createMapsPort } from "./maps-adapter.js";
+import {
+  createMarketPort,
+  createSystemPort,
+  createWeatherPort,
+} from "./ambient-adapter.js";
 import { MapsUsageGuard, resolveMonthlyLimit, setMapsUsageGuard } from "./maps-usage-guard.js";
 import { OpenAIAdapter, OpenAIEmbeddingProvider } from "@jarvis/ai-openai";
 import {
@@ -46,6 +51,7 @@ import {
   N8nTriggerWorkflowTool,
   createBrowserTools,
   createMapsTools,
+  createAmbientTools,
 } from "@jarvis/tools";
 import {
   BrowserRuntime,
@@ -404,7 +410,31 @@ function createMetaToolRegistry(
     new MapsUsageGuard(new PrismaMapsUsageRepository(prisma), resolveMonthlyLimit())
   );
 
-  for (const tool of createMapsTools(createMapsPort(), createCurrentLocationPort())) {
+  const mapsPort = createMapsPort();
+  const locationPort = createCurrentLocationPort();
+
+  for (const tool of createMapsTools(mapsPort, locationPort)) {
+    registry.register(tool);
+  }
+
+  // -------------------------------------------------------------------------
+  // Ambient capability — weather, markets, and this machine.
+  //
+  // The dashboard widgets could already read all three. The ASSISTANT could
+  // not, which left it fielding "aaj Solana ka kya price hai?" with no way to
+  // look the number up — the exact position from which a language model invents
+  // one. These run over the SAME cached providers the widgets call, so the
+  // assistant and the dashboard can never disagree on screen.
+  //
+  // All READ_ONLY, no approval, no writes.
+  // -------------------------------------------------------------------------
+  for (const tool of createAmbientTools(
+    createWeatherPort(),
+    createMarketPort(),
+    createSystemPort(),
+    mapsPort,
+    locationPort
+  )) {
     registry.register(tool);
   }
 

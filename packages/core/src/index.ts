@@ -5,6 +5,12 @@ export * from "./types/events.js";
 export * from "./types/context.js";
 export * from "./types/conversation.js";
 export * from "./types/request.js";
+// Contextual surfaces. The schema in types/surface.ts is the security
+// boundary: it is what stops a model emitting markup instead of a decision.
+export * from "./types/surface.js";
+export * from "./surface-registry.js";
+export * from "./surface-intent.js";
+export * from "./surface-decision.js";
 export * from "./types/errors.js";
 export * from "./types/streaming.js";
 export * from "./types/execution.js";

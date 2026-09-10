@@ -8,6 +8,7 @@ import {
   type Conversation,
   type ConversationMessage,
 } from "./api";
+import { useSurfaceStore, surfaceDirectiveFrom } from "./surface-store";
 
 interface ChatState {
   conversations: Conversation[];
@@ -67,7 +68,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     set({ messages: [...messages, userMsg], sending: true, error: null, lastFailedMessage: null });
 
-    const res = await sendChatMessage(content, activeConversationId ?? undefined);
+    // The surfaces already on screen go WITH the message, so the server can
+    // update one instead of opening a duplicate.
+    const res = await sendChatMessage(
+      content,
+      activeConversationId ?? undefined,
+      undefined,
+      useSurfaceStore.getState().activeContextKeys()
+    );
 
     if (res.success && res.data) {
       const assistantMsg: ConversationMessage = {
@@ -80,6 +88,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
         },
         createdAt: new Date().toISOString(),
       };
+
+      // A contextual surface, if the orchestrator decided one would help.
+      //
+      // It rides `metadata.surface` exactly as `pendingAction` rides
+      // `metadata.pendingAction`, and it is VALIDATED inside the store before
+      // anything renders — a malformed directive is dropped and the user keeps
+      // the text answer. Most turns carry none, which is the normal case.
+      const directive = surfaceDirectiveFrom(res.data.metadata);
+      if (directive) useSurfaceStore.getState().applyDirective(directive);
 
       const newConvId = res.data.conversationId;
       set((state) => ({

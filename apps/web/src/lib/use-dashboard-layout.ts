@@ -1,7 +1,7 @@
 "use client";
 
 // ---------------------------------------------------------------------------
-// V3 — dashboard layout state and persistence.
+// V4 — dashboard layout state and persistence.
 //
 // Server-side persistence, reusing the preferences endpoint that already
 // exists. A layout follows the user to another device, and — the reason it is
@@ -18,10 +18,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { getPreferences, savePreferences, type CommandCenterPreferences } from "./api";
 import {
   DEFAULT_LAYOUT,
-  move as moveWidget,
-  moveTo,
   normalizeLayout,
-  resize as resizeWidget,
+  nudge as nudgeWidget,
+  resizeBy as resizeWidgetBy,
   setHidden as setWidgetHidden,
   type WidgetId,
   type WidgetPlacement,
@@ -36,14 +35,31 @@ export interface DashboardLayoutState {
   customizing: boolean;
 
   setCustomizing: (on: boolean) => void;
-  move: (id: WidgetId, direction: -1 | 1) => void;
-  dropOn: (sourceId: WidgetId, targetId: WidgetId) => void;
-  resize: (id: WidgetId, delta: { w?: number; h?: number }) => void;
+  /**
+   * The whole arrangement, as the grid now has it.
+   *
+   * V4 — this is how a drag and a corner-resize both arrive. The grid library
+   * owns the interaction and reports the RESULT, already bounded horizontally
+   * by the caller. The ROW is taken as given; see the body for why re-clamping
+   * it here is what made widgets fall out of the workspace.
+   */
+  applyLayout: (next: WidgetPlacement[]) => void;
+  /** Keyboard equivalents of dragging and corner-resizing. */
+  nudge: (id: WidgetId, dx: number, dy: number) => void;
+  resizeBy: (id: WidgetId, dw: number, dh: number) => void;
   setHidden: (id: WidgetId, hidden: boolean) => void;
   save: () => Promise<void>;
   reset: () => void;
   /** Non-layout preferences (clock mode, weather location) save immediately. */
   updatePreferences: (patch: Partial<CommandCenterPreferences>) => void;
+}
+
+/** Same widgets, same cells — used to tell a real edit from an echo. */
+function sameLayout(a: WidgetPlacement[], b: WidgetPlacement[]): boolean {
+  if (a.length !== b.length) return false;
+  const key = (p: WidgetPlacement) => `${p.id}:${p.x},${p.y},${p.w},${p.h},${p.hidden ? 1 : 0}`;
+  const seen = new Set(a.map(key));
+  return b.every((p) => seen.has(key(p)));
 }
 
 export function useDashboardLayout(): DashboardLayoutState {
@@ -67,7 +83,8 @@ export function useDashboardLayout(): DashboardLayoutState {
       if (res.success && res.data) {
         const prefs = res.data.preferences ?? {};
         // `normalizeLayout` repairs anything a previous version wrote: unknown
-        // ids dropped, new widgets appended, sizes re-clamped.
+        // ids dropped, new widgets appended, placements re-clamped, and a V3
+        // layout migrated to coordinates.
         const restored = normalizeLayout((prefs as { layout?: unknown }).layout);
         setLayout(restored);
         savedRef.current = restored;
@@ -91,23 +108,41 @@ export function useDashboardLayout(): DashboardLayoutState {
     });
   }, []);
 
-  const move = useCallback(
-    (id: WidgetId, direction: -1 | 1) => edit((c) => moveWidget(c, id, direction)),
-    [edit]
-  );
-
-  const dropOn = useCallback(
-    (sourceId: WidgetId, targetId: WidgetId) =>
+  const applyLayout = useCallback(
+    (next: WidgetPlacement[]) =>
       edit((current) => {
-        const visible = current.filter((p) => !p.hidden);
-        const targetIndex = visible.findIndex((p) => p.id === targetId);
-        return targetIndex === -1 ? current : moveTo(current, sourceId, targetIndex);
+        // Taken as given, NOT re-clamped.
+        //
+        // The caller has already applied `clampToColumns`. Clamping again here
+        // — with the row-bounding `clampPlacement`, as this did — pinned every
+        // deep widget to `MAX_ROWS - h` while the grid library went on
+        // rendering it where its own compaction had put it. The two disagreed
+        // permanently: the row height was computed from this shallower layout
+        // and was therefore too tall for what was actually on screen, so the
+        // bottom widgets hung out of the workspace. Exactly the symptom the
+        // clamp existed to prevent, caused by the clamp.
+        //
+        // Hidden widgets are not handed to the grid, so they are not in `next`.
+        // Their placements are carried across untouched — hiding a widget must
+        // not also forget where it was.
+        const moved = new Map(next.map((p) => [p.id, p]));
+        const merged = current.map((p) => moved.get(p.id) ?? p);
+
+        // The grid fires a change event on mount and at the end of every drag,
+        // including one that put the widget back where it started. Treating
+        // those as edits would light up "unsaved" for doing nothing.
+        return sameLayout(current, merged) ? current : merged;
       }),
     [edit]
   );
 
-  const resize = useCallback(
-    (id: WidgetId, delta: { w?: number; h?: number }) => edit((c) => resizeWidget(c, id, delta)),
+  const nudge = useCallback(
+    (id: WidgetId, dx: number, dy: number) => edit((c) => nudgeWidget(c, id, dx, dy)),
+    [edit]
+  );
+
+  const resizeBy = useCallback(
+    (id: WidgetId, dw: number, dh: number) => edit((c) => resizeWidgetBy(c, id, dw, dh)),
     [edit]
   );
 
@@ -156,9 +191,9 @@ export function useDashboardLayout(): DashboardLayoutState {
     saving,
     customizing,
     setCustomizing,
-    move,
-    dropOn,
-    resize,
+    applyLayout,
+    nudge,
+    resizeBy,
     setHidden,
     save,
     reset,

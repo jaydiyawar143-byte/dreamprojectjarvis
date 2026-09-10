@@ -13,6 +13,10 @@
     "./voice": {
       "types": "./dist/types/voice.d.ts",
       "import": "./dist/types/voice.js"
+    },
+    "./surface": {
+      "types": "./dist/surface.d.ts",
+      "import": "./dist/surface.js"
     }
   },
   "scripts": {

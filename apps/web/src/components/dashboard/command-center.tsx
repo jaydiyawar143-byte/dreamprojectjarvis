@@ -1,32 +1,66 @@
 "use client";
 
 // ---------------------------------------------------------------------------
-// UI V2 — the command centre.
+// V4 — the command centre.
 //
-// This IS the dashboard now. The Orb, one input, one status line, and — only
-// when something is genuinely waiting on a human — one approval panel.
+// This IS the dashboard: a bounded workspace of widgets the user arranges by
+// hand, with the Orb among them and one command bar anchored beneath.
 //
 // The counts, KPIs and charts that used to sit under the Orb have not been
 // deleted; they live in the pages they belong to (/approvals, /opportunities,
 // /knowledge, /meta-ads), reachable from the sidebar. A command centre answers
-// "what should I do now"; a BI dashboard answers "what happened", and stacking
-// nine cards under the Orb made the screen the second thing while pretending
-// to be the first.
+// "what should I do now"; a BI dashboard answers "what happened".
 //
 // EVERYTHING SHOWN IS OBSERVED. The status line reads the real chat store and
 // the real voice state machine. The approval panel is populated from
 // GET /api/v1/approvals and renders the EXISTING ApprovalCard, so the decision
-// runs through the same audited endpoints as the approvals page — there is no
-// second approval path, which is the only way the "voice can never approve"
-// rule stays true.
+// runs through the same audited endpoints as the approvals page. It does not
+// own a second chat pipeline either — submitting calls the SAME
+// `useChatStore.sendMessage` the assistant page uses.
 //
-// It does not own a second chat pipeline either. Submitting calls the SAME
-// `useChatStore.sendMessage` the assistant page uses, so agent routing, memory,
-// tool allowlists, approvals and audit stay in one place.
+// ---------------------------------------------------------------------------
+// THE LAYOUT, AND WHY THE PAGE CANNOT SCROLL.
+//
+// Three bands, in a column pinned to the height the shell gives it:
+//
+//     CustomizeBar   shrink-0    natural height
+//     workspace      flex-1      whatever is left  <- the grid lives here
+//     command bar    shrink-0    natural height
+//     approvals      shrink-0    only when something is waiting, capped
+//
+// The workspace is MEASURED, and the grid's row height is then derived from it:
+// however many rows the arrangement needs, they always add up to exactly the
+// space available. That is what makes a page scrollbar structurally impossible
+// rather than merely absent — not a rule that the grid must not grow, but an
+// arithmetic in which growing costs row HEIGHT instead of overflow. Nothing
+// here clips anything; there is no overflow to clip.
+//
+// The shipped layout needs twelve rows and fills them. A drag that displaces
+// widgets can push the arrangement to fourteen, and then there are fourteen
+// shorter rows — see MAX_ROWS in widgets/layout.ts for why that beats the two
+// alternatives (refusing every drop, or scrolling the workspace).
+//
+// WHY THE COMMAND BAR IS ITS OWN BAND AND NOT PART OF THE ORB.
+//
+// It used to live inside the Orb widget. That was fine when the Orb's size came
+// from a fixed grid, and became a bug the moment the user could drag the Orb's
+// corner: shrinking the hero would have squeezed the composer — the one control
+// on this screen that must always be usable — until it was unreachable. Pulling
+// it out of the grid means no arrangement the user can build can take the
+// command bar away, and it also stops the composer's height participating in
+// the grid's height at all.
 // ---------------------------------------------------------------------------
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useRouter } from "next/navigation";
+import GridLayout, { type Layout } from "react-grid-layout";
 import { ArrowUp, ShieldAlert } from "lucide-react";
 import {
   getCapabilities,
@@ -35,15 +69,20 @@ import {
   type CommandCenterCapabilities,
 } from "@/lib/api";
 import { useDashboardLayout } from "@/lib/use-dashboard-layout";
+import { useSurfaceStore } from "@/lib/surface-store";
 import { AttachButton, AttachmentList, type AttachedFile } from "./attach-button";
 import {
-  COL_SPAN,
-  ROW_SPAN,
+  GRID_COLS,
+  CONSTRAINTS,
+  clampToColumns,
+  gridRowHeight,
+  MAX_ROWS,
+  layoutRows,
   visibleWidgets,
   type WidgetId,
   type WidgetPlacement,
 } from "@/components/widgets/layout";
-import { WidgetFrame } from "@/components/widgets/widget-frame";
+import { WidgetFrame, DRAG_HANDLE_CLASS } from "@/components/widgets/widget-frame";
 import { CustomizeBar, WIDGET_LABELS } from "@/components/widgets/customize-bar";
 import { WorldClockWidget } from "@/components/widgets/world-clock-widget";
 import { ClockWidget } from "@/components/widgets/clock-widget";
@@ -57,6 +96,15 @@ import { useVoiceStore } from "@/lib/voice/voice-store";
 import { MicButton } from "@/components/voice/mic-button";
 import { ApprovalCard } from "@/components/approval-card";
 import { JarvisOrb } from "@/components/orb/jarvis-orb";
+
+/** Gap between cells, in px. Also the grid's own outer padding is zero. */
+const CELL_MARGIN = 10;
+
+/**
+ * Below this the 12-column grid stops being usable — a cell would be ~30px —
+ * so the dashboard stacks instead and the grid is not rendered at all.
+ */
+const GRID_MIN_WIDTH = 1024;
 
 /** The most recent assistant turn, for the status readout. */
 function useLatestAssistant(): string | null {
@@ -89,6 +137,42 @@ function useConversationPendingAction(): boolean {
     }
     return false;
   }, [messages]);
+}
+
+/**
+ * The workspace's real size.
+ *
+ * The grid needs a definite width and height in pixels — it positions in px,
+ * not percentages — and both are "whatever is left after the chrome", which
+ * only the browser knows. `useLayoutEffect` so the first paint already has the
+ * measurement and the widgets do not visibly jump into place.
+ */
+function useElementSize<T extends HTMLElement>() {
+  const ref = useRef<T | null>(null);
+  const [size, setSize] = useState({ width: 0, height: 0 });
+
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+
+    const read = () =>
+      setSize((prev) => {
+        const width = el.clientWidth;
+        const height = el.clientHeight;
+        // Sub-pixel churn from the sidebar's hover transition would otherwise
+        // re-render every widget several times a frame.
+        if (Math.abs(prev.width - width) < 1 && Math.abs(prev.height - height) < 1) return prev;
+        return { width, height };
+      });
+
+    read();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(read);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
+  return [ref, size] as const;
 }
 
 export function CommandCenter() {
@@ -139,12 +223,13 @@ export function CommandCenter() {
   // ---------------------------------------------------------------------------
   // Widgets and layout.
   //
-  // Capabilities decide what CAN render; the saved layout decides order, size
-  // and visibility. Both load once — this is a dashboard, not a feed.
+  // Capabilities decide what CAN render; the saved layout decides position,
+  // size and visibility. Both load once — this is a dashboard, not a feed.
   // ---------------------------------------------------------------------------
   const [capabilities, setCapabilities] = useState<CommandCenterCapabilities | null>(null);
   const [attachments, setAttachments] = useState<AttachedFile[]>([]);
   const dash = useDashboardLayout();
+  const [workspaceRef, workspace] = useElementSize<HTMLDivElement>();
 
   useEffect(() => {
     void (async () => {
@@ -154,23 +239,66 @@ export function CommandCenter() {
   }, []);
 
   const prefs = dash.preferences;
+  const visible = useMemo(() => visibleWidgets(dash.layout), [dash.layout]);
 
-  // Visible widgets, minus the Orb — it is rendered as its own grid cell rather
-  // than through the generic widget switch, because it is the hero and owns the
-  // prompt and composer beneath it.
-  const gridWidgets = useMemo(
-    () => visibleWidgets(dash.layout).filter((p) => p.id !== "orb"),
-    [dash.layout]
+  // ---------------------------------------------------------------------------
+  // The grid's geometry, derived from the measured workspace.
+  //
+  // `rowHeight` is the whole trick. Twelve rows plus eleven gaps must come to no
+  // more than the height available, so the row height is that height divided
+  // back out — and floored, because a fractional row height rounded UP is
+  // exactly how a layout ends up one pixel taller than its container.
+  // ---------------------------------------------------------------------------
+  const useGrid = workspace.width >= GRID_MIN_WIDTH && workspace.height > 0;
+
+  // How many rows THIS arrangement ACTUALLY needs — twelve for the shipped
+  // layout, more while a drag has displaced widgets downward.
+  //
+  // Not capped. Capping it was a bug: the library does not honour `maxRows`
+  // during compaction, so a capped count computed a row height for a shallower
+  // layout than the one being rendered, and the bottom widgets hung out of the
+  // workspace. Taking the real depth is what keeps the arithmetic true.
+  const rows = useMemo(() => layoutRows(dash.layout), [dash.layout]);
+
+  const rowHeight = useMemo(
+    () => (useGrid ? gridRowHeight(workspace.height, CELL_MARGIN, rows) : 0),
+    [useGrid, workspace.height, rows]
   );
 
-  // The Orb is always present — `normalizeLayout` guarantees it — but the
-  // fallback keeps the type honest rather than asserting non-null.
-  const orbPlacement: WidgetPlacement = useMemo(
-    () => dash.layout.find((p) => p.id === "orb") ?? { id: "orb", size: { w: 2, h: 3 } },
-    [dash.layout]
+  const colWidth = useGrid
+    ? (workspace.width - CELL_MARGIN * (GRID_COLS - 1)) / GRID_COLS
+    : 0;
+
+  // What react-grid-layout is handed. Hidden widgets are simply not present.
+  const rglLayout: Layout[] = useMemo(
+    () =>
+      visible.map((p) => ({
+        i: p.id,
+        x: p.x,
+        y: p.y,
+        w: p.w,
+        h: p.h,
+        minW: CONSTRAINTS[p.id].minW,
+        minH: CONSTRAINTS[p.id].minH,
+        maxW: CONSTRAINTS[p.id].maxW,
+        maxH: CONSTRAINTS[p.id].maxH,
+      })),
+    [visible]
   );
 
-  const visibleOrder = useMemo(() => visibleWidgets(dash.layout), [dash.layout]);
+  const onLayoutChange = useCallback(
+    (next: Layout[]) => {
+      // Horizontal bounds and size limits are re-applied on the way in rather
+      // than trusted — they must hold even if the library is misconfigured,
+      // upgraded or swapped out. The ROW is deliberately taken as given: see
+      // clampToColumns for why clamping it here makes widgets fall out of the
+      // workspace instead of keeping them in it.
+      dash.applyLayout(
+        next.map((l) => clampToColumns({ id: l.i as WidgetId, x: l.x, y: l.y, w: l.w, h: l.h }))
+      );
+    },
+    [dash]
+  );
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -179,6 +307,32 @@ export function CommandCenter() {
     setDraft("");
     await sendMessage(text);
   };
+
+  // ---------------------------------------------------------------------------
+  // Surface actions.
+  //
+  // "Alternatives", "Analyse", "Retry" are PHRASES, not function calls. Each
+  // one is sent through `sendMessage` — the same path the composer uses — so a
+  // button on a panel reaches the orchestrator, the permission checks and the
+  // approval gate exactly as if the user had typed it. There is deliberately no
+  // route from a surface control to a tool that skips any of that.
+  // ---------------------------------------------------------------------------
+  useEffect(() => {
+    const onSurfaceIntent = (event: Event) => {
+      const intent = (event as CustomEvent<{ intent?: string }>).detail?.intent;
+      if (typeof intent === "string" && intent.trim()) void sendMessage(intent.trim());
+    };
+    window.addEventListener("jarvis:surface-intent", onSurfaceIntent);
+    return () => window.removeEventListener("jarvis:surface-intent", onSurfaceIntent);
+  }, [sendMessage]);
+
+  // The surface layer needs to know when the dashboard is being rearranged, so
+  // it can stop animating and stop retiring panels mid-drag. This is the ONLY
+  // thing the two systems tell each other — no layout is shared, and a surface
+  // still cannot read or move a widget.
+  useEffect(() => {
+    useSurfaceStore.getState().setDashboardCustomizing(dash.customizing);
+  }, [dash.customizing]);
 
   const awaitingApproval = approvals.length > 0 || conversationPending;
 
@@ -220,6 +374,8 @@ export function CommandCenter() {
   /** One widget, by id. Kept as a function so the grid below stays readable. */
   function renderWidget(id: WidgetId) {
     switch (id) {
+      case "orb":
+        return <OrbWidget status={status} label={readout.label} text={readout.text} tone={toneClass} />;
       case "clock":
         return (
           <ClockWidget
@@ -250,11 +406,25 @@ export function CommandCenter() {
     }
   }
 
+  /** A widget inside its frame, used by both the grid and the stacked fallback. */
+  const framed = (p: WidgetPlacement) => (
+    <WidgetFrame
+      placement={p}
+      label={WIDGET_LABELS[p.id]}
+      customizing={dash.customizing}
+      onNudge={(dx, dy) => dash.nudge(p.id, dx, dy)}
+      onResizeBy={(dw, dh) => dash.resizeBy(p.id, dw, dh)}
+      onHide={() => dash.setHidden(p.id, true)}
+    >
+      <div className="h-full min-h-0 w-full [&>section]:h-full">{renderWidget(p.id)}</div>
+    </WidgetFrame>
+  );
+
   return (
     <section
       data-testid="command-center"
       aria-label="JARVIS command centre"
-      className="relative flex w-full flex-col items-center px-4 py-5"
+      className="relative flex h-full min-h-0 w-full flex-col px-3 py-2.5"
     >
       {/*
         Atmosphere, in its own clipping wrapper.
@@ -281,141 +451,196 @@ export function CommandCenter() {
         onReset={dash.reset}
       />
 
-      {/* ---- The command centre grid ---------------------------------------
-          Four columns on a large screen, two on a tablet, one on a phone. The
-          Orb is a CELL like any other — which is what puts the widgets around
-          it rather than stacked underneath, and what lets it be resized.
+      {/* ---- The workspace -------------------------------------------------
+          The bounded surface the widgets live inside. It takes the height the
+          column has left (`flex-1` + `min-h-0`) and the full width after the
+          sidebar — no `max-width`, so a 1920px screen gets a ~1840px dashboard
+          rather than 1152px in the middle of one.
 
-          Dense auto-flow means the browser packs the cells: no collision
-          maths, no holes, and it reflows correctly at every breakpoint without
-          storing a second layout per screen size.
+          It does not scroll on desktop, because the grid inside it is sized to
+          fit exactly. Below the grid's minimum width it becomes a stacked
+          column, and THEN it scrolls — inside itself, never the page.
       */}
       <div
-        data-testid="command-grid"
-        className="relative grid w-full max-w-6xl grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4 lg:[grid-auto-flow:dense] lg:[grid-auto-rows:10.5rem]"
+        ref={workspaceRef}
+        data-testid="command-workspace"
+        data-mode={useGrid ? "grid" : "stacked"}
+        className={`relative min-h-0 flex-1 ${
+          useGrid ? "overflow-hidden" : "overflow-y-auto overflow-x-hidden"
+        }`}
       >
-        {/* ---- Orb cell ---- */}
-        <WidgetFrame
-          placement={orbPlacement}
-          label={WIDGET_LABELS.orb}
-          customizing={dash.customizing}
-          index={visibleOrder.findIndex((p) => p.id === "orb")}
-          total={visibleOrder.length}
-          onMove={(d) => dash.move("orb", d)}
-          onResize={(delta) => dash.resize("orb", delta)}
-          onHide={() => undefined}
-          onDropOn={(sourceId) => dash.dropOn(sourceId, "orb")}
-          className={`sm:col-span-2 ${COL_SPAN[orbPlacement.size.w]} ${ROW_SPAN[orbPlacement.size.h]}`}
-        >
-          <div className="flex h-full flex-col items-center justify-center">
-            <JarvisOrb
-              status={status}
-              showCaption={false}
-              className="w-[min(17rem,62vw)] sm:w-[min(20rem,42vw)] lg:w-[min(22rem,26vw)]"
-            />
+        {/* Grid guides. Customise mode only — the clean dashboard shows no
+            spreadsheet. The cell size is dynamic, so it is handed to CSS as
+            custom properties rather than hard-coded in the stylesheet. */}
+        {useGrid && dash.customizing && (
+          <div
+            aria-hidden="true"
+            data-testid="grid-guides"
+            className="jarvis-grid-guides pointer-events-none absolute inset-0 rounded-lg"
+            style={
+              {
+                "--jarvis-cell-w": `${colWidth + CELL_MARGIN}px`,
+                "--jarvis-cell-h": `${rowHeight + CELL_MARGIN}px`,
+              } as React.CSSProperties
+            }
+          />
+        )}
 
-            <h1 className="mt-2 text-center text-lg font-light tracking-tight text-white/90 sm:text-xl">
-              How can I help?
-            </h1>
-
-            <div className="mt-2 min-h-[2.5rem] w-full max-w-xl text-center">
-              <p className="font-mono text-xs uppercase tracking-hud text-sys-dim">
-                {readout.label}
-              </p>
-              <p
-                data-testid="command-readout"
-                role="status"
-                aria-live="polite"
-                className={`mt-0.5 line-clamp-2 text-[0.8rem] ${toneClass}`}
-              >
-                {readout.text}
-              </p>
-            </div>
-
-            {/* ---- Compact command bar ---- */}
-            <form onSubmit={submit} className="mt-2 w-full max-w-xl">
-              <AttachmentList
-                attachments={attachments}
-                onRemove={(id) => setAttachments((prev) => prev.filter((a) => a.id !== id))}
-              />
-
-              <div className="glass-panel glass-edge flex items-center gap-1 rounded-full py-1.5 pl-2 pr-2 transition-colors focus-within:border-sys-cyan/40">
-                {/* Uploads go through the EXISTING knowledge pipeline, so an
-                    attachment becomes a retrievable, citable document rather
-                    than one-shot context for the next message. */}
-                <AttachButton attachments={attachments} onChange={setAttachments} disabled={sending} />
-
-                <label htmlFor="command-input" className="sr-only">
-                  Message JARVIS
-                </label>
-                <input
-                  id="command-input"
-                  ref={inputRef}
-                  data-testid="command-input"
-                  value={draft}
-                  onChange={(e) => setDraft(e.target.value)}
-                  placeholder="Ask JARVIS…"
-                  autoComplete="off"
-                  disabled={sending}
-                  className="min-w-0 flex-1 bg-transparent text-sm text-white placeholder:text-sys-dim focus:outline-none disabled:opacity-60"
-                />
-
-                <MicButton />
-
-                <button
-                  type="submit"
-                  data-testid="command-send"
-                  disabled={!draft.trim() || sending}
-                  aria-label="Send message"
-                  className="sys-focus flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-sys-cyan/15 text-sys-cyan transition-colors enabled:hover:bg-sys-cyan/25 disabled:opacity-35"
-                >
-                  <ArrowUp size={15} aria-hidden="true" />
-                </button>
-              </div>
-
-              <p className="mt-1.5 text-center font-mono text-xs uppercase tracking-hud text-sys-dim">
-                Enter to send · tap the mic to speak
-                {latestReply ? (
-                  <>
-                    {" · "}
-                    <button
-                      type="button"
-                      onClick={() => router.push("/chat")}
-                      className="sys-focus underline decoration-dotted underline-offset-2 hover:text-sys-dim"
-                    >
-                      Full conversation
-                    </button>
-                  </>
-                ) : null}
-              </p>
-            </form>
-          </div>
-        </WidgetFrame>
-
-        {/* ---- Everything else ---- */}
-        {gridWidgets.map((placement) => (
-          <WidgetFrame
-            key={placement.id}
-            placement={placement}
-            label={WIDGET_LABELS[placement.id]}
-            customizing={dash.customizing}
-            index={visibleOrder.findIndex((p) => p.id === placement.id)}
-            total={visibleOrder.length}
-            onMove={(d) => dash.move(placement.id, d)}
-            onResize={(delta) => dash.resize(placement.id, delta)}
-            onHide={() => dash.setHidden(placement.id, true)}
-            onDropOn={(sourceId) => dash.dropOn(sourceId, placement.id)}
-            className={`${COL_SPAN[placement.size.w]} ${ROW_SPAN[placement.size.h]} min-w-0`}
+        {useGrid ? (
+          <GridLayout
+            className="relative"
+            data-testid="command-grid"
+            layout={rglLayout}
+            cols={GRID_COLS}
+            // Advisory only. Measured NOT to constrain vertical compaction —
+            // the arrangement goes deeper than this and the library is content.
+            // It is passed because it does bound a direct drag, and the row
+            // height above is what actually guarantees the fit.
+            maxRows={MAX_ROWS}
+            rowHeight={rowHeight}
+            width={workspace.width}
+            margin={[CELL_MARGIN, CELL_MARGIN]}
+            containerPadding={[0, 0]}
+            // Vertical compaction is what turns a collision into a REFLOW: a
+            // dropped widget pushes the ones it lands on, and everything then
+            // settles back upward. `preventCollision` off is what allows the
+            // push rather than refusing the drop, and `allowOverlap` off is the
+            // guarantee that two widgets can never occupy the same cell.
+            //
+            // Settling upward is not tidiness for its own sake. Without it a
+            // push is permanent: one drag of the Orb across two columns shoved
+            // the whole right-hand side down eight rows and left it there,
+            // which drove the arrangement into the row ceiling and shrank every
+            // widget. With it, the rows displaced by a drag are reclaimed the
+            // moment the drag ends, and the layout returns to twelve rows.
+            //
+            // The cost is real and worth naming: a user cannot leave a
+            // deliberate vertical gap, because compaction will close it. That
+            // is the trade for never opening the dashboard to a hole in the
+            // middle of it.
+            compactType="vertical"
+            preventCollision={false}
+            allowOverlap={false}
+            isBounded
+            isDraggable={dash.customizing}
+            isResizable={dash.customizing}
+            // Only the grip moves a widget. Without this the whole card is a
+            // drag surface and the map inside it could never be panned.
+            draggableHandle={`.${DRAG_HANDLE_CLASS}`}
+            resizeHandles={["s", "e", "se"]}
+            onLayoutChange={onLayoutChange}
+            useCSSTransforms
           >
-            <div className="h-full [&>section]:h-full">{renderWidget(placement.id)}</div>
-          </WidgetFrame>
-        ))}
+            {visible.map((p) => (
+              <div
+                key={p.id}
+                data-testid={`cell-${p.id}`}
+                // The placement in GRID UNITS, which is what is actually stored
+                // and restored. Pixel geometry is a function of the viewport and
+                // of whether the customise toolbar is open, so a test that
+                // compares pixels across a reload compares the wrong thing.
+                data-x={p.x}
+                data-y={p.y}
+                data-w={p.w}
+                data-h={p.h}
+                className="min-h-0 min-w-0"
+              >
+                {framed(p)}
+              </div>
+            ))}
+          </GridLayout>
+        ) : (
+          /* Phone and small tablet: one column, in the user's own order. The
+             grid's coordinates still decide that order — reading top-to-bottom
+             then left-to-right is what a person means by "the order they are
+             in" — so a rearrangement made on a desktop is still recognisable
+             here. */
+          <div data-testid="command-stack" className="flex flex-col gap-2.5 pb-1">
+            {[...visible]
+              .sort((a, b) => a.y - b.y || a.x - b.x)
+              .map((p) => (
+                <div key={p.id} data-testid={`cell-${p.id}`} className="min-h-[13rem]">
+                  {framed(p)}
+                </div>
+              ))}
+          </div>
+        )}
       </div>
 
+      {/* ---- Command bar ---------------------------------------------------
+          Outside the grid, and deliberately so: no arrangement the user can
+          build can shrink it, cover it, or push it off the screen.
+      */}
+      <form
+        onSubmit={submit}
+        data-testid="command-bar"
+        className="relative mx-auto mt-2 w-full max-w-3xl shrink-0"
+      >
+        <AttachmentList
+          attachments={attachments}
+          onRemove={(id) => setAttachments((prev) => prev.filter((a) => a.id !== id))}
+        />
+
+        <div className="glass-panel glass-edge flex items-center gap-1 rounded-full py-1.5 pl-2 pr-2 transition-colors focus-within:border-sys-cyan/40">
+          {/* Uploads go through the EXISTING knowledge pipeline, so an
+              attachment becomes a retrievable, citable document rather than
+              one-shot context for the next message. */}
+          <AttachButton attachments={attachments} onChange={setAttachments} disabled={sending} />
+
+          <label htmlFor="command-input" className="sr-only">
+            Message JARVIS
+          </label>
+          <input
+            id="command-input"
+            ref={inputRef}
+            data-testid="command-input"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            placeholder="Ask JARVIS…"
+            autoComplete="off"
+            disabled={sending}
+            className="min-w-0 flex-1 bg-transparent text-sm text-white placeholder:text-sys-dim focus:outline-none disabled:opacity-60"
+          />
+
+          <MicButton />
+
+          <button
+            type="submit"
+            data-testid="command-send"
+            disabled={!draft.trim() || sending}
+            aria-label="Send message"
+            className="sys-focus flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-sys-cyan/15 text-sys-cyan transition-colors enabled:hover:bg-sys-cyan/25 disabled:opacity-35"
+          >
+            <ArrowUp size={15} aria-hidden="true" />
+          </button>
+        </div>
+
+        <p className="mt-1 text-center font-mono text-xs uppercase tracking-hud text-sys-dim">
+          Enter to send · tap the mic to speak
+          {latestReply ? (
+            <>
+              {" · "}
+              <button
+                type="button"
+                onClick={() => router.push("/chat")}
+                className="sys-focus underline decoration-dotted underline-offset-2 hover:text-sys-dim"
+              >
+                Full conversation
+              </button>
+            </>
+          ) : null}
+        </p>
+      </form>
+
       {/* ---- Approval ------------------------------------------------------
-          Below the grid, full width, and only when something is genuinely
-          waiting. It is the one thing that BLOCKS on the person looking at the
-          screen, so it is never a widget that could be hidden.
+          Only when something is genuinely waiting. It is the one thing that
+          BLOCKS on the person looking at the screen, so it is never a widget
+          that could be hidden or dragged away.
+
+          `shrink-0` so a decision is never squeezed to nothing, capped and
+          scrolled internally so three queued approvals cannot push the
+          workspace out of the viewport. The grid gives up the space, which is
+          correct: this is the thing that blocks.
 
           ApprovalCard is the existing component from the approvals page —
           reused, not reimplemented, so approve/reject go through the same
@@ -424,14 +649,12 @@ export function CommandCenter() {
       {approvals.length > 0 && (
         <div
           data-testid="command-approvals"
-          className="relative mt-4 w-full max-w-3xl space-y-2"
+          className="relative mx-auto mt-2 max-h-[34%] w-full max-w-3xl shrink-0 space-y-2 overflow-y-auto"
           aria-label="Actions awaiting your approval"
         >
           <div className="flex items-center justify-center gap-2 text-amber-300/90">
             <ShieldAlert size={14} aria-hidden="true" />
-            <p className="font-mono text-xs uppercase tracking-hud">
-              Action requires approval
-            </p>
+            <p className="font-mono text-xs uppercase tracking-hud">Action requires approval</p>
           </div>
 
           {approvals.map((approval) => (
@@ -458,3 +681,46 @@ export function CommandCenter() {
   );
 }
 
+// ---------------------------------------------------------------------------
+// The Orb, as a widget like any other.
+//
+// It is sized by its CELL now, not by the viewport: `h-full` with a square
+// aspect makes the height the input and the width follow, so the Orb is always
+// as large as the box the user dragged it to and never larger. The status line
+// sits beneath it and is `shrink-0`, so shrinking the widget takes space from
+// the animation rather than from the words.
+// ---------------------------------------------------------------------------
+function OrbWidget({
+  status,
+  label,
+  text,
+  tone,
+}: {
+  status: { thinking: boolean; awaitingApproval: boolean; failed: boolean };
+  label: string;
+  text: string;
+  tone: string;
+}) {
+  return (
+    <section
+      aria-label="JARVIS Orb"
+      className="glass-panel glass-edge relative flex h-full min-h-0 min-w-0 flex-col items-center justify-center gap-2 rounded-xl p-3"
+    >
+      <div className="flex min-h-0 w-full flex-1 items-center justify-center">
+        <JarvisOrb status={status} showCaption={false} className="aspect-square h-full max-w-full" />
+      </div>
+
+      <div className="w-full shrink-0 text-center">
+        <p className="font-mono text-xs uppercase tracking-hud text-sys-dim">{label}</p>
+        <p
+          data-testid="command-readout"
+          role="status"
+          aria-live="polite"
+          className={`mt-0.5 line-clamp-2 text-[0.8rem] ${tone}`}
+        >
+          {text}
+        </p>
+      </div>
+    </section>
+  );
+}

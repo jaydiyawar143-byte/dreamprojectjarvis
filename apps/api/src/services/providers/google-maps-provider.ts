@@ -591,7 +591,12 @@ export async function googlePlaceDetails(
 interface RoutesApiResponse {
   routes?: Array<{
     distanceMeters?: number;
+    /** Traffic-aware, when the request asked for it. */
     duration?: string;
+    /** Free-flow. The pair is what makes a congestion delay statable. */
+    staticDuration?: string;
+    /** The provider's own label, e.g. "via NH 543". */
+    description?: string;
     polyline?: { encodedPolyline?: string };
   }>;
   error?: { status?: string; message?: string };
@@ -680,7 +685,16 @@ export async function googleRoute(
           "X-Goog-Api-Key": serverKey,
           // A field mask is REQUIRED by the Routes API, and asking for only
           // what is drawn keeps the response small and the cost lower.
-          "X-Goog-FieldMask": "routes.distanceMeters,routes.duration,routes.polyline.encodedPolyline",
+          // A field mask is REQUIRED by the Routes API, and asking for only
+          // what is drawn keeps the response small and the cost lower.
+          //
+          // `staticDuration` is the free-flow time and `duration` is the
+          // traffic-aware one; both are requested so the UI can say how much of
+          // the journey is congestion WITHOUT modelling traffic itself.
+          // `description` is the provider's own route label ("via NH 543") —
+          // the only honest way to name an alternative.
+          "X-Goog-FieldMask":
+            "routes.distanceMeters,routes.duration,routes.staticDuration,routes.description,routes.polyline.encodedPolyline",
         },
         body: JSON.stringify({
           // A Place ID names the endpoint unambiguously; coordinates are the
@@ -690,6 +704,13 @@ export async function googleRoute(
           travelMode,
           // Traffic-aware routing is only valid for DRIVE.
           ...(travelMode === "DRIVE" ? { routingPreference: "TRAFFIC_AWARE" } : {}),
+          // Real alternatives, from the routing engine.
+          //
+          // Without this the API returns a single route, and any answer that
+          // "compared the options" would have been comparing routes we made up.
+          // Driving only: Google does not compute alternatives for the other
+          // modes, and asking anyway just costs a slower response.
+          ...(travelMode === "DRIVE" ? { computeAlternativeRoutes: true } : {}),
           polylineQuality: "OVERVIEW",
         }),
       });
@@ -707,17 +728,43 @@ export async function googleRoute(
     }
 
     // `duration` arrives as a protobuf duration string, e.g. "3204s".
-    const seconds = Number.parseInt(String(best.duration ?? "0").replace(/[^0-9]/g, ""), 10) || 0;
+    const toMinutes = (v: string | undefined): number =>
+      Math.round((Number.parseInt(String(v ?? "0").replace(/[^0-9]/g, ""), 10) || 0) / 60);
+
+    /** One API route, mapped. Every field is present only if Google sent it. */
+    const shape = (r: NonNullable<RoutesApiResponse["routes"]>[number]) => {
+      const trafficMinutes = toMinutes(r.duration);
+      const freeFlowMinutes = r.staticDuration ? toMinutes(r.staticDuration) : undefined;
+      return {
+        distanceKm: Math.round(((r.distanceMeters ?? 0) / 1000) * 10) / 10,
+        // `durationMinutes` stays the headline number the rest of the app
+        // already reads. When Google modelled traffic it is the traffic-aware
+        // one, because that is what "how long will it take" means.
+        durationMinutes: trafficMinutes,
+        ...(freeFlowMinutes !== undefined && freeFlowMinutes !== trafficMinutes
+          ? { durationInTrafficMinutes: trafficMinutes }
+          : {}),
+        ...(r.description ? { summary: r.description } : {}),
+        ...(r.polyline?.encodedPolyline
+          ? { geometry: decodePolyline(r.polyline.encodedPolyline) }
+          : {}),
+        attribution: GOOGLE_ATTRIBUTION,
+      };
+    };
+
+    // Everything after the first, as real candidates. `slice(1)` and not a
+    // re-sort: Google has already ranked them, and re-ranking on distance alone
+    // would present "shortest" as "best".
+    const alternatives = (payload.routes ?? [])
+      .slice(1)
+      .filter((r) => typeof r.distanceMeters === "number")
+      .map(shape);
 
     const result: RouteResult = {
       from,
       to,
-      distanceKm: Math.round((best.distanceMeters / 1000) * 10) / 10,
-      durationMinutes: Math.round(seconds / 60),
-      ...(best.polyline?.encodedPolyline
-        ? { geometry: decodePolyline(best.polyline.encodedPolyline) }
-        : {}),
-      attribution: GOOGLE_ATTRIBUTION,
+      ...shape(best),
+      ...(alternatives.length > 0 ? { alternatives } : {}),
     };
 
     const observedAt = new Date();

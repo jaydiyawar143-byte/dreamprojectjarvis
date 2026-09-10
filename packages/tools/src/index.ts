@@ -158,3 +158,23 @@ export type {
   MapsOutcome,
   Coordinates,
 } from "./tools/maps-tools.js";
+
+// Ambient capability — weather, markets, this machine. All READ_ONLY, all over
+// the providers the dashboard widgets already use. See tools/ambient-tools.ts
+// for why the assistant needed these to exist at all.
+export {
+  WeatherCurrentTool,
+  MarketQuoteTool,
+  SystemStatusTool,
+  TimeNowTool,
+  createAmbientTools,
+} from "./tools/ambient-tools.js";
+export type {
+  WeatherPort,
+  MarketPort,
+  SystemPort,
+  AmbientOutcome,
+  WeatherReading,
+  MarketQuote,
+  SystemReading,
+} from "./tools/ambient-tools.js";

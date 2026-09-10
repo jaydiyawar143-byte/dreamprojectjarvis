@@ -10,6 +10,26 @@
 // on backdrop click, and it is removed from the accessibility tree while shut
 // rather than merely hidden, so a screen reader never walks a nav that is not
 // on screen.
+//
+// ---------------------------------------------------------------------------
+// V3.1 — `fullscreen`, and why it is OPT-IN.
+//
+// This shell is worn by twelve routes. Eleven of them are documents: /approvals
+// and /knowledge are lists that legitimately run past the fold, and capping
+// them at the viewport would strand their content behind a scrollbar that no
+// longer exists. So the default stays exactly as it was — `min-h-screen`, page
+// scrolls.
+//
+// /dashboard is the exception, and a genuinely different kind of surface: a
+// command centre is read at a glance, so it is sized TO the viewport rather
+// than allowed to grow past it. `fullscreen` switches the column from "as tall
+// as its content" to "exactly the viewport, and the workspace divides what is
+// left" — which is what lets the page itself never scroll.
+//
+// The `min-h-0` on the content column is load-bearing, not defensive: a flex
+// child's default `min-height: auto` refuses to shrink below its content, so
+// without it the column would still grow past 100dvh and the `overflow-hidden`
+// below would merely CLIP the overflow instead of preventing it.
 // ---------------------------------------------------------------------------
 
 import { useCallback, useEffect, useState, type ReactNode } from "react";
@@ -17,8 +37,21 @@ import { usePathname } from "next/navigation";
 import { X } from "lucide-react";
 import { DashboardSidebar } from "./dashboard-sidebar";
 import { DashboardTopbar } from "./dashboard-topbar";
+import { SurfaceLayer } from "@/components/surfaces/surface-layer";
 
-export function DashboardShell({ children }: { children: ReactNode }) {
+export function DashboardShell({
+  children,
+  fullscreen = false,
+}: {
+  children: ReactNode;
+  /**
+   * Fit the shell to the viewport instead of growing with its content.
+   *
+   * Only /dashboard sets this. See the note at the top of the file for why it
+   * is not the default.
+   */
+  fullscreen?: boolean;
+}) {
   const [navOpen, setNavOpen] = useState(false);
   const pathname = usePathname();
 
@@ -39,7 +72,13 @@ export function DashboardShell({ children }: { children: ReactNode }) {
   }, [navOpen]);
 
   return (
-    <div data-testid="dashboard-shell" className="flex min-h-screen bg-sys-void text-sys-text">
+    <div
+      data-testid="dashboard-shell"
+      data-fullscreen={fullscreen ? "true" : undefined}
+      className={`flex bg-sys-void text-sys-text ${
+        fullscreen ? "h-[100dvh] max-h-[100dvh] overflow-hidden" : "min-h-screen"
+      }`}
+    >
       {/*
         Desktop rail — UI V2.
 
@@ -92,10 +131,27 @@ export function DashboardShell({ children }: { children: ReactNode }) {
         </div>
       )}
 
+      {/*
+        Contextual surfaces.
+
+        Above the dashboard and outside the content column, so a panel is never
+        clipped by the workspace's `overflow-hidden` and never participates in
+        the grid's height. It is `pointer-events-none` except on the panels
+        themselves, so the widgets underneath keep every click that is not on
+        one — dragging a widget with a clock on screen still drags the widget.
+
+        It renders nothing at all when no surface is open, which is most of the
+        time.
+      */}
+      <SurfaceLayer />
+
       {/* Content column */}
-      <div className="flex min-w-0 flex-1 flex-col">
+      <div className={`flex min-w-0 flex-1 flex-col ${fullscreen ? "min-h-0" : ""}`}>
         <DashboardTopbar onOpenNav={() => setNavOpen(true)} />
-        <main data-testid="dashboard-main" className="flex-1">
+        <main
+          data-testid="dashboard-main"
+          className={`flex-1 ${fullscreen ? "min-h-0 overflow-hidden" : ""}`}
+        >
           {children}
         </main>
       </div>

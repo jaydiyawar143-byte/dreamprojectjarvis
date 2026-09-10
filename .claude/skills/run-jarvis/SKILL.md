@@ -163,6 +163,33 @@ node .claude/skills/run-jarvis/driver.mjs web:shot /opportunities opportunities
 and screenshots the reply. **Look at the PNG** — it is the only proof the change
 you made actually renders.
 
+## Checking the dashboard
+
+Two committed scripts, both driving the real app in real Chrome. Both need the
+stack up and both exit non-zero on failure, so either can gate a change.
+
+```bash
+node .claude/skills/run-jarvis/viewport-audit.mjs      # no page scroll, full width
+node .claude/skills/run-jarvis/dashboard-acceptance.mjs  # drag, resize, persist
+```
+
+`viewport-audit` logs in at 1280×720, 1366×768, 1440×900, 1920×1080 and
+2560×1440 and reports `documentElement.scrollWidth/scrollHeight` against the
+viewport at each. It exists because the vitest suite cannot answer this
+question: jsdom has no layout engine, so `scrollHeight <= innerHeight` passes
+there whatever the CSS says. Pass a comma-separated list to override the sizes.
+It also reports which widgets are scrolling **inside their own panel**, which is
+the designed behaviour on a short screen rather than a defect.
+
+`dashboard-acceptance` drives customise mode with the mouse: it drags widgets by
+their grips, drags a corner handle to resize the map, drags an edge handle to
+resize the system monitor, hides and restores a widget, saves, logs in again and
+compares the layout **in grid units**. It restores the shipped default on the
+way out, so it is safe to run repeatedly. Compare pixels across a save/reload
+and you will chase a phantom: the customise toolbar is ~18px taller than the
+collapsed one, which changes every row height and therefore every widget's
+pixel size while the stored layout is identical.
+
 ## Run (human path)
 
 Two terminals. Useful for watching logs; useless for an agent, since neither

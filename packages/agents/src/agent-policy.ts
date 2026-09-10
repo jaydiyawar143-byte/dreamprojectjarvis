@@ -92,6 +92,22 @@ export const MAPS_TOOLS = [
   "maps.place",
 ] as const;
 
+/**
+ * Ambient reads: the weather, a market price, this machine's telemetry.
+ *
+ * READ_ONLY, and granted to the general assistant for the same reason the maps
+ * tools are: these questions arrive in the middle of other conversations. "aaj
+ * Solana ka kya price hai?" is not a session with a market agent, it is one
+ * sentence — and an assistant that cannot look the number up is an assistant
+ * that answers from memory, which for a live price means answering wrongly.
+ */
+export const AMBIENT_TOOLS = [
+  "weather.current",
+  "market.quote",
+  "system.status",
+  "time.now",
+] as const;
+
 // ---------------------------------------------------------------------------
 // Policies
 // ---------------------------------------------------------------------------
@@ -123,6 +139,7 @@ const GENERAL_POLICY = policy({
     ...GOOGLE_READ_TOOLS,
     ...ANALYSIS_TOOLS,
     ...MAPS_TOOLS,
+    ...AMBIENT_TOOLS,
   ],
   requiredPermissions: ["read"],
   writesRequireApproval: true,
