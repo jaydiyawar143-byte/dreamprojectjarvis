@@ -294,19 +294,76 @@ function GenericBody({ data }: { data: Extract<Surface["data"], { kind: "generic
 
 // ---------------------------------------------------------------------------
 
+/**
+ * The evidence panel.
+ *
+ * Shows what was RETRIEVED, not what was answered — the answer is already in
+ * the conversation. Every row here corresponds to a stored chunk: the document,
+ * the page, the section and the similarity score all come from the retriever,
+ * and the excerpt is verbatim. That is what makes a citation checkable rather
+ * than merely plausible.
+ */
 function KnowledgeBody({ data }: { data: Extract<Surface["data"], { kind: "knowledge" }> }) {
+  if (data.citations.length === 0) {
+    // Defensive: the decision layer does not emit a citation-less knowledge
+    // surface, because a sources panel with no sources implies an answer came
+    // from documents when it did not.
+    return <p className="text-sm text-sys-dim">No passages were retrieved.</p>;
+  }
+
   return (
     <div data-testid="knowledge-body">
-      <p className="whitespace-pre-wrap text-sm leading-relaxed text-sys-text/85">{data.summary}</p>
-      {data.citations.length > 0 && (
-        <ul className="mt-3 space-y-2 border-t border-white/[0.06] pt-2">
-          {data.citations.map((c, i) => (
-            <li key={`${c.documentId}-${i}`}>
-              <p className="font-mono text-xs uppercase tracking-hud text-sys-dim">{c.documentName}</p>
-              <p className="mt-0.5 text-xs leading-relaxed text-sys-text/70">{c.excerpt}</p>
-            </li>
-          ))}
-        </ul>
+      {/* Usually absent — see the note on `summary` in the schema. */}
+      {data.summary && (
+        <p className="mb-3 whitespace-pre-wrap text-sm leading-relaxed text-sys-text/85">
+          {data.summary}
+        </p>
+      )}
+
+      <ol className="space-y-2.5">
+        {data.citations.map((c, i) => (
+          <li
+            key={c.chunkId}
+            data-testid={`citation-${i}`}
+            className="rounded-lg border border-white/[0.07] bg-white/[0.02] p-2.5"
+          >
+            <div className="flex items-baseline justify-between gap-2">
+              <p className="min-w-0 flex-1 truncate font-mono text-xs uppercase tracking-hud text-sys-cyan-soft">
+                {c.documentName}
+              </p>
+              {/* The retriever's own similarity. Shown because a weak match the
+                  user can see is better than a weak match they cannot. */}
+              <span className="shrink-0 font-mono text-xs tabular-nums text-sys-dim">
+                {(c.score * 100).toFixed(0)}%
+              </span>
+            </div>
+
+            {(c.pages.length > 0 || c.section) && (
+              <p className="mt-0.5 font-mono text-xs uppercase tracking-hud text-sys-dim">
+                {c.section}
+                {c.section && c.pages.length > 0 ? " · " : ""}
+                {c.pages.length === 1
+                  ? `p. ${c.pages[0]}`
+                  : c.pages.length > 1
+                    ? `pp. ${c.pages[0]}–${c.pages[c.pages.length - 1]}`
+                    : ""}
+              </p>
+            )}
+
+            <p className="mt-1.5 whitespace-pre-wrap text-xs leading-relaxed text-sys-text/75">
+              {c.excerpt}
+            </p>
+          </li>
+        ))}
+      </ol>
+
+      {data.retrievedAt && (
+        <p
+          data-testid="surface-provenance"
+          className="mt-3 border-t border-white/[0.06] pt-2 font-mono text-xs uppercase tracking-hud text-sys-dim"
+        >
+          Knowledge base · {new Date(data.retrievedAt).toLocaleTimeString()}
+        </p>
       )}
     </div>
   );

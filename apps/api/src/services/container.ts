@@ -22,6 +22,7 @@ import { createCurrentLocationPort, createMapsPort } from "./maps-adapter.js";
 import {
   createMarketPort,
   createSystemPort,
+  createTasksPort,
   createWeatherPort,
 } from "./ambient-adapter.js";
 import { MapsUsageGuard, resolveMonthlyLimit, setMapsUsageGuard } from "./maps-usage-guard.js";
@@ -94,6 +95,7 @@ import {
   PrismaWhatsAppRepository,
   PrismaN8nRepository,
   PrismaMapsUsageRepository,
+  PrismaTaskRepository,
 } from "@jarvis/db";
 import { MemoryExtractionService, KnowledgeRetrievalService } from "@jarvis/memory";
 
@@ -433,7 +435,11 @@ function createMetaToolRegistry(
     createMarketPort(),
     createSystemPort(),
     mapsPort,
-    locationPort
+    locationPort,
+    // The SAME repository the /tasks route uses, so the assistant and the
+    // Tasks widget read one table through one query. The port scopes every
+    // read to the authenticated caller.
+    createTasksPort(new PrismaTaskRepository(prisma))
   )) {
     registry.register(tool);
   }

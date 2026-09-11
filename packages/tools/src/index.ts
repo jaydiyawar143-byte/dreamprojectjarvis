@@ -167,12 +167,15 @@ export {
   MarketQuoteTool,
   SystemStatusTool,
   TimeNowTool,
+  TasksListTool,
   createAmbientTools,
 } from "./tools/ambient-tools.js";
 export type {
   WeatherPort,
   MarketPort,
   SystemPort,
+  TasksPort,
+  TaskReading,
   AmbientOutcome,
   WeatherReading,
   MarketQuote,

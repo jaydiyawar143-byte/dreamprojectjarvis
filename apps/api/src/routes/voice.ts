@@ -177,7 +177,7 @@ export function createVoiceRouter(container: Container, deps: VoiceRouterDeps): 
       return fail(res, "VOICE_AUDIO_INVALID", "audio and mimeType are required", traceId);
     }
 
-    const { audio, mimeType, language, durationMs } = parsed.data;
+    const { audio, mimeType, language, durationMs, requestId, conversationId } = parsed.data;
 
     if (!isSupportedAudioMimeType(mimeType)) {
       return fail(
@@ -213,6 +213,8 @@ export function createVoiceRouter(container: Container, deps: VoiceRouterDeps): 
           audioBytes: decoded.bytes.length,
           transcriptLength: result.text.length,
           ...(durationMs !== undefined ? { audioDurationMs: durationMs } : {}),
+          ...(requestId ? { requestId } : {}),
+          ...(conversationId ? { conversationId } : {}),
           latencyMs: result.latencyMs,
         },
       });
@@ -227,6 +229,9 @@ export function createVoiceRouter(container: Container, deps: VoiceRouterDeps): 
           empty: result.text.length === 0,
           model: result.model,
           latencyMs: result.latencyMs,
+          // Echoed back so the client can prove the transcript it received
+          // belongs to the turn it asked about, without trusting call ordering.
+          ...(requestId ? { requestId } : {}),
         },
         traceId,
         timestamp: now(),
@@ -240,6 +245,7 @@ export function createVoiceRouter(container: Container, deps: VoiceRouterDeps): 
         ipAddress: req.ip,
         metadata: {
           audioBytes: decoded.bytes.length,
+          ...(requestId ? { requestId } : {}),
           error: err instanceof JarvisError ? err.code : "UNKNOWN",
         },
       });
@@ -274,7 +280,7 @@ export function createVoiceRouter(container: Container, deps: VoiceRouterDeps): 
       return fail(res, "VOICE_TEXT_EMPTY", "text is required", traceId);
     }
 
-    const { text, voice, format } = parsed.data;
+    const { text, voice, format, requestId, conversationId } = parsed.data;
 
     if (text.trim().length === 0) {
       return fail(res, "VOICE_TEXT_EMPTY", "text is required", traceId);
@@ -312,6 +318,8 @@ export function createVoiceRouter(container: Container, deps: VoiceRouterDeps): 
           format: result.format,
           characterCount: text.length,
           audioBytes: result.audio.length,
+          ...(requestId ? { requestId } : {}),
+          ...(conversationId ? { conversationId } : {}),
           latencyMs,
         },
       });
@@ -326,6 +334,7 @@ export function createVoiceRouter(container: Container, deps: VoiceRouterDeps): 
           format: result.format,
           characterCount: text.length,
           latencyMs,
+          ...(requestId ? { requestId } : {}),
         },
         traceId,
         timestamp: now(),
@@ -339,6 +348,7 @@ export function createVoiceRouter(container: Container, deps: VoiceRouterDeps): 
         ipAddress: req.ip,
         metadata: {
           characterCount: text.length,
+          ...(requestId ? { requestId } : {}),
           error: err instanceof JarvisError ? err.code : "UNKNOWN",
         },
       });

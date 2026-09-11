@@ -203,6 +203,172 @@ function RouteMap({
 }
 
 // ---------------------------------------------------------------------------
+// Places — a search result, on the map
+// ---------------------------------------------------------------------------
+
+function PlacesSurface({ data, surfaceId }: { data: MapData; surfaceId: string }) {
+  const { status, retry } = useGoogleMaps();
+  const hostRef = useRef<HTMLDivElement | null>(null);
+  const mapRef = useRef<google.maps.Map | null>(null);
+  const markersRef = useRef<google.maps.Marker[]>([]);
+  const setLoading = useSurfaceStore((s) => s.setLoading);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  useEffect(() => {
+    setLoading(surfaceId, status === "checking" || status === "loading");
+  }, [status, surfaceId, setLoading]);
+
+  useEffect(() => {
+    if (status !== "ready" || !hostRef.current || mapRef.current) return;
+    mapRef.current = new google.maps.Map(hostRef.current, {
+      disableDefaultUI: true,
+      zoomControl: true,
+      gestureHandling: "greedy",
+      backgroundColor: "#0a0f16",
+      styles: [
+        { elementType: "geometry", stylers: [{ color: "#0d1520" }] },
+        { elementType: "labels.text.fill", stylers: [{ color: "#6f8296" }] },
+        { elementType: "labels.text.stroke", stylers: [{ color: "#0a0f16" }] },
+        { featureType: "water", elementType: "geometry", stylers: [{ color: "#0a1622" }] },
+        { featureType: "road", elementType: "geometry", stylers: [{ color: "#182633" }] },
+      ],
+    });
+  }, [status]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (status !== "ready" || !map) return;
+
+    for (const marker of markersRef.current) marker.setMap(null);
+    markersRef.current = [];
+
+    const bounds = new google.maps.LatLngBounds();
+    let located = 0;
+
+    data.places.forEach((place, i) => {
+      if (!place.position) return;
+      located++;
+      const marker = new google.maps.Marker({
+        position: place.position,
+        map,
+        // Numbered to match the list beneath, so "the third one" is findable.
+        label: { text: String(i + 1), color: "#04121a", fontSize: "11px", fontWeight: "700" },
+        title: place.name,
+      });
+      marker.addListener("click", () => setSelectedId(place.id));
+      markersRef.current.push(marker);
+      bounds.extend(place.position);
+    });
+
+    if (located === 0) return;
+    if (located === 1) {
+      map.setCenter(bounds.getCenter());
+      map.setZoom(data.zoom);
+    } else {
+      map.fitBounds(bounds, 36);
+    }
+  }, [status, data]);
+
+  useEffect(() => {
+    const host = hostRef.current;
+    const map = mapRef.current;
+    if (!host || !map || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => google.maps.event.trigger(map, "resize"));
+    observer.observe(host);
+    return () => observer.disconnect();
+  }, [status]);
+
+  useEffect(
+    () => () => {
+      for (const marker of markersRef.current) marker.setMap(null);
+      markersRef.current = [];
+      mapRef.current = null;
+    },
+    []
+  );
+
+  const anyLocated = data.places.some((p) => p.position);
+
+  return (
+    <div data-testid="places-body">
+      {/* The map is skipped entirely when nothing has coordinates. An empty
+          map beside a list of addresses is decoration, and a grey rectangle
+          reads as "broken" rather than "these results have no position". */}
+      {anyLocated &&
+        (status === "unconfigured" || status === "error" ? (
+          <div className="flex h-28 items-center justify-center rounded-lg border border-white/[0.07] bg-white/[0.02] px-4 text-center">
+            <div>
+              <p className="text-xs leading-relaxed text-sys-dim">
+                {status === "unconfigured"
+                  ? "No Google Maps key is configured, so these cannot be plotted."
+                  : "Google Maps could not be loaded."}
+              </p>
+              {status === "error" && (
+                <button
+                  type="button"
+                  onClick={retry}
+                  className="sys-focus mt-2 rounded border border-sys-line px-2 py-1 font-mono text-xs uppercase tracking-hud text-sys-dim hover:text-white"
+                >
+                  Retry
+                </button>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div
+            ref={hostRef}
+            data-testid="places-map"
+            className="h-[min(32vh,15rem)] w-full overflow-hidden rounded-lg border border-white/[0.07]"
+            onPointerDown={(e) => e.stopPropagation()}
+          />
+        ))}
+
+      <ol data-testid="places-list" className={anyLocated ? "mt-3 space-y-1.5" : "space-y-1.5"}>
+        {data.places.map((place, i) => (
+          <li key={`${place.id}-${i}`}>
+            <button
+              type="button"
+              data-testid={`place-${i}`}
+              onClick={() => {
+                setSelectedId(place.id);
+                const map = mapRef.current;
+                if (map && place.position) {
+                  map.panTo(place.position);
+                  map.setZoom(15);
+                }
+              }}
+              aria-pressed={selectedId === place.id}
+              className={`sys-focus flex w-full items-start gap-2 rounded-lg border px-2.5 py-2 text-left transition-colors ${
+                selectedId === place.id
+                  ? "border-sys-cyan/40 bg-sys-cyan/10"
+                  : "border-white/[0.07] bg-white/[0.02] hover:border-white/[0.14]"
+              }`}
+            >
+              <span className="mt-0.5 shrink-0 font-mono text-xs tabular-nums text-sys-dim">
+                {i + 1}
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-sm text-white/90">{place.name}</span>
+                {place.address && (
+                  <span className="block truncate text-xs text-sys-dim">{place.address}</span>
+                )}
+              </span>
+            </button>
+          </li>
+        ))}
+      </ol>
+
+      <p
+        data-testid="surface-provenance"
+        className="mt-3 border-t border-white/[0.06] pt-2 font-mono text-xs uppercase tracking-hud text-sys-dim"
+      >
+        {data.provenance.source}
+      </p>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 
 export function RouteSurface({ surface }: { surface: Surface }) {
   const data = surface.data as RouteData | MapData;
@@ -227,9 +393,9 @@ export function RouteSurface({ surface }: { surface: Surface }) {
     }
   }, [recommended]);
 
-  if (!routeData) {
-    return <p className="text-sm text-sys-dim">No route to show.</p>;
-  }
+  // A `map` surface is places, not a journey. Same loader, same styling, same
+  // resize handling — a different thing drawn on it.
+  if (!routeData) return <PlacesSurface data={data as MapData} surfaceId={surface.surfaceId} />;
 
   const selected = routeData.routes.find((r) => r.id === selectedId) ?? routeData.routes[0]!;
 

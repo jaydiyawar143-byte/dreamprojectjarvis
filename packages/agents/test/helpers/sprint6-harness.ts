@@ -197,6 +197,7 @@ export function productionLikeTools(): ITool[] {
     read("market.quote"),
     read("system.status"),
     read("time.now"),
+    read("tasks.list"),
   ];
 }
 

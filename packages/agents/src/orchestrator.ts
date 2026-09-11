@@ -29,6 +29,7 @@ import type {
   IKnowledgeRetriever,
   KnowledgeContextConfig,
   IPermissionChecker,
+  RetrievedChunk,
 } from "@jarvis/core";
 import { JarvisError, decideSurface } from "@jarvis/core";
 import type { SurfaceDecision } from "@jarvis/core";
@@ -46,11 +47,57 @@ import {
   shouldRetrieveKnowledge,
 } from "./knowledge-context.js";
 
+/**
+ * What knowledge retrieval produced for one turn.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THIS REPLACED A BARE `string`.
+ *
+ * Knowledge injection used to return the augmented prompt and nothing
+ * else, which meant the retrieved passages existed for exactly as long as it
+ * took to concatenate them into a string and were then unrecoverable. A
+ * Knowledge surface needs the SAME passages as structured rows — document,
+ * chunk, page, score — and the only two ways to get them were to parse them
+ * back out of the prompt, or to run retrieval a second time. Parsing generated
+ * text is brittle; a second retrieval is a second embedding call and a second
+ * chance for the two to disagree about what was cited.
+ *
+ * So the method now returns both. `message` is byte-identical to what it
+ * returned before — every existing RAG test pins that string, and they all
+ * still pass — and `chunks` is the same array the block was built from, which
+ * is what makes a citation on screen provably the passage the model was shown.
+ *
+ * `outcome` distinguishes the four ways this can produce no passages, because
+ * "the retriever is off", "this message was not worth searching for", "nothing
+ * matched" and "retrieval threw" are four different things and only the last
+ * is a problem.
+ * ---------------------------------------------------------------------------
+ */
+export interface KnowledgeInjection {
+  /** The prompt, with the knowledge block prepended when there was one. */
+  message: string;
+  /** The passages the block was built from, in the order they were used. */
+  chunks: RetrievedChunk[];
+  outcome: "retrieved" | "empty" | "skipped" | "disabled" | "failed";
+  /** ISO timestamp of the retrieval, or null when none ran. */
+  retrievedAt: string | null;
+}
+
 const DEFAULT_MAX_TOOL_EXECUTIONS = 10;
 const DEFAULT_MAX_ORCHESTRATION_DEPTH = 5;
 const DEFAULT_RELEVANCE_THRESHOLD = 0.3;
 const DEFAULT_MAX_MEMORIES = 5;
 const DEFAULT_CONTEXT_BUDGET_CHARS = 2000;
+
+/**
+ * How long a memory-subsystem health answer is trusted.
+ *
+ * Short enough that an outage is noticed within a conversational beat, long
+ * enough that a burst of turns does not re-probe a remote provider for each
+ * one. Failures expire sooner than successes so recovery is picked up quickly.
+ */
+const MEMORY_AVAILABILITY_TTL_MS = 60_000;
+const MEMORY_UNAVAILABILITY_TTL_MS = 10_000;
 
 const createNoopMemoryStore = (): IMemoryStore => ({
   id: "noop-memory",
@@ -162,19 +209,27 @@ export class Orchestrator implements IOrchestrator {
         }));
       }
 
-      const withMemory = await this.injectMemoryContext(
-        request.message,
-        context.auth.userId,
-      );
+      // ---------------------------------------------------------------------
+      // Memory and knowledge, CONCURRENTLY.
+      //
+      // Both take the ORIGINAL message as their query — recalled memories are
+      // about the user, and folding them into the retrieval vector would pull
+      // the search away from what was actually asked — so neither depends on
+      // the other's result. Only the final string depends on both. Run in
+      // series they cost two sequential embedding calls plus two sequential
+      // database round trips in front of every single turn, on the critical
+      // path of a person waiting for an answer out loud.
+      //
+      // The composed prompt is BYTE-IDENTICAL to what serial execution
+      // produced: knowledge block, then memory block, then the message.
+      // ---------------------------------------------------------------------
+      const [withMemory, knowledgeResult] = await Promise.all([
+        this.injectMemoryContext(request.message, context.auth.userId),
+        this.retrieveKnowledgeContext(request.message, context.auth.userId),
+      ]);
 
-      // The retrieval query is the ORIGINAL message, not the memory-augmented
-      // one: recalled memories are about the user, and folding them into the
-      // query vector would pull the search away from what was actually asked.
-      const userMessage = await this.injectKnowledgeContext(
-        withMemory,
-        request.message,
-        context.auth.userId,
-      );
+      const knowledge = knowledgeResult.applyTo(withMemory);
+      const userMessage = knowledge.message;
 
       if (process.env.NODE_ENV === "development") {
         console.log(JSON.stringify({
@@ -216,13 +271,35 @@ export class Orchestrator implements IOrchestrator {
 
             this.logStructuredToolExecution(context, toolSummary, startedAt);
 
+            // ---------------------------------------------------------------
+            // A surface even on the failure path.
+            //
+            // §32: when a provider cannot answer, say so — do not fall back to
+            // silence. Without this, a maps search that failed because the user
+            // has not shared their location produced a bare error and no panel,
+            // so the one thing that could have told them what to DO about it
+            // never appeared.
+            // ---------------------------------------------------------------
+            const failureSurface = decideSurface({
+              message: request.message,
+              toolResults: allToolResults,
+              activeContextKeys: readActiveContextKeys(request.metadata),
+            });
+            await this.auditSurfaceDecision(context, failureSurface);
+
             return this.buildErrorResponse(
               new JarvisError(
                 "TOOL_EXECUTION_FAILED",
-                "Data retrieval failed. Meta Ads data could not be fetched.",
+                // Was "Meta Ads data could not be fetched", on a path every
+                // agent reaches. A maps lookup that failed for want of a
+                // location reported itself as a Meta Ads outage, which sent
+                // anyone reading it to entirely the wrong system. The tools
+                // that actually failed are named in `reason`.
+                "Data retrieval failed.",
                 {
                   toolExecution: toolSummary,
                   reason: failedTools,
+                  ...(failureSurface.directive ? { surface: failureSurface.directive } : {}),
                 }
               ),
               traceId,
@@ -274,6 +351,13 @@ export class Orchestrator implements IOrchestrator {
               .filter((m) => m.role === "user")
               .slice(-6)
               .map((m) => m.content),
+            // The passages the model was actually shown, so a Knowledge
+            // surface cites what was retrieved rather than what was written.
+            knowledge: {
+              chunks: knowledge.chunks,
+              retrievedAt: knowledge.retrievedAt,
+              outcome: knowledge.outcome,
+            },
           });
 
           if (surfaceDecision.directive) {
@@ -367,6 +451,45 @@ export class Orchestrator implements IOrchestrator {
   // Memory recall + context injection
   // -----------------------------------------------------------------------
 
+  /**
+   * Whether memory can be used, without paying for the answer every turn.
+   *
+   * `memoryStore.isAvailable()` is not a local check: it probes the embedding
+   * provider, which for OpenAI is a live `GET /v1/models` over the network.
+   * Measured from this deployment, that call costs ~1.3 seconds — and the
+   * orchestrator was making it TWICE per turn, once here and once again inside
+   * `recallMemories`, for ~2.7 seconds of dead time in front of every answer,
+   * spoken or typed. That was the largest single component of chat latency.
+   *
+   * A health answer is not stale after one second, so it is cached briefly.
+   * Positives are held longer than negatives: a system that has just come back
+   * should be used again promptly, whereas one that was fine a moment ago
+   * almost certainly still is — and if it is not, every path below this is
+   * fail-open and the turn proceeds without memory rather than breaking.
+   */
+  private memoryAvailability: { value: boolean; until: number } | null = null;
+
+  private async isMemoryAvailable(): Promise<boolean> {
+    if (!this.memoryStore) return false;
+
+    const now = Date.now();
+    if (this.memoryAvailability && now < this.memoryAvailability.until) {
+      return this.memoryAvailability.value;
+    }
+
+    try {
+      const value = await this.memoryStore.isAvailable();
+      this.memoryAvailability = {
+        value,
+        until: now + (value ? MEMORY_AVAILABILITY_TTL_MS : MEMORY_UNAVAILABILITY_TTL_MS),
+      };
+      return value;
+    } catch {
+      this.memoryAvailability = { value: false, until: now + MEMORY_UNAVAILABILITY_TTL_MS };
+      return false;
+    }
+  }
+
   private async injectMemoryContext(
     userMessage: string,
     userId: string,
@@ -374,7 +497,7 @@ export class Orchestrator implements IOrchestrator {
     if (!this.memoryStore) return userMessage;
 
     try {
-      const isAvailable = await this.memoryStore.isAvailable();
+      const isAvailable = await this.isMemoryAvailable();
       if (!isAvailable) return userMessage;
 
       const memories = await this.recallMemories(userMessage, userId);
@@ -393,7 +516,7 @@ export class Orchestrator implements IOrchestrator {
     if (!this.memoryStore) return [];
 
     try {
-      const isAvailable = await this.memoryStore.isAvailable();
+      const isAvailable = await this.isMemoryAvailable();
       if (!isAvailable) return [];
 
       const queryEmbedding = await this.getQueryEmbedding(query);
@@ -502,16 +625,34 @@ export class Orchestrator implements IOrchestrator {
    * @param message  the message to prepend onto, memory block included
    * @param query    the original user text, used as the retrieval query
    */
-  private async injectKnowledgeContext(
-    message: string,
+  /**
+   * Retrieval, separated from the string it will eventually be prepended to.
+   *
+   * The split exists so retrieval can run CONCURRENTLY with memory recall: the
+   * search depends only on the user's original words, while the composition
+   * depends on both. `applyTo` is pure and synchronous, so the prompt is built
+   * the moment both halves are in hand — and built in the same order as before,
+   * which is what keeps the prompt byte-identical.
+   */
+  private async retrieveKnowledgeContext(
     query: string,
     userId: string,
-  ): Promise<string> {
-    if (!this.knowledgeRetriever || !this.knowledgeConfig.enabled) return message;
+  ): Promise<{ applyTo: (message: string) => KnowledgeInjection }> {
+    /** The unchanged-prompt outcome, in every shape it can occur. */
+    const untouched = (why: KnowledgeInjection["outcome"]) => ({
+      applyTo: (message: string): KnowledgeInjection => ({
+        message,
+        chunks: [],
+        outcome: why,
+        retrievedAt: null,
+      }),
+    });
+
+    if (!this.knowledgeRetriever || !this.knowledgeConfig.enabled) return untouched("disabled");
 
     // Cheap gate first: acknowledgements and greetings carry nothing to search
     // for, and skipping them avoids an embedding call per confirmation turn.
-    if (!shouldRetrieveKnowledge(query)) return message;
+    if (!shouldRetrieveKnowledge(query)) return untouched("skipped");
 
     try {
       const result = await this.knowledgeRetriever.retrieve(userId, query, {
@@ -528,15 +669,27 @@ export class Orchestrator implements IOrchestrator {
       // Nothing relevant: leave the prompt alone rather than inject an empty
       // block. An empty block invites the model to explain an absence it was
       // never asked about.
-      if (selected.length === 0) return message;
+      if (selected.length === 0) return untouched("empty");
 
       const block = formatKnowledgeBlock(
         selected,
         this.knowledgeConfig.contextBudgetChars,
       );
-      if (!block) return message;
+      if (!block) return untouched("empty");
 
-      return block + "\n\n" + message;
+      const retrievedAt = new Date().toISOString();
+      return {
+        applyTo: (message: string): KnowledgeInjection => ({
+          // BYTE-IDENTICAL to what this method returned before it was given a
+          // typed contract. The prompt is the thing every existing RAG test
+          // pins, and the structured evidence beside it must cost the answer
+          // nothing.
+          message: block + "\n\n" + message,
+          chunks: selected,
+          outcome: "retrieved",
+          retrievedAt,
+        }),
+      };
     } catch (error) {
       // Logged rather than silently swallowed: a persistently failing retriever
       // should be visible in the logs even though it never breaks a request.
@@ -546,7 +699,7 @@ export class Orchestrator implements IOrchestrator {
         userId,
         error: error instanceof Error ? error.message : String(error),
       }));
-      return message;
+      return untouched("failed");
     }
   }
 

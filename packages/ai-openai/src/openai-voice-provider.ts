@@ -25,12 +25,71 @@ export interface OpenAIVoiceConfig {
   sttModel?: string;
   ttsModel?: string;
   defaultVoice?: string;
+  /** Delivery direction for the voice. Ignored by the older tts-1 models. */
+  ttsInstructions?: string;
+  /** Default BCP-47 hint. A per-request `language` still wins. */
+  sttLanguage?: string;
   timeoutMs?: number;
 }
 
+/**
+ * Speech-to-text default.
+ *
+ * Kept as `whisper-1` after measuring the alternatives — see
+ * DEFAULT_STT_LANGUAGE, which is where the accuracy problem actually was.
+ *
+ * `gpt-4o-mini-transcribe` is about 550ms faster per turn, and was tried for
+ * exactly that reason. It transcribed this operator's Hinglish into DEVANAGARI
+ * on 10 of 18 fixture runs, with or without a language hint, where whisper-1
+ * with the hint managed 18 of 18 in Latin script. Half a second is not worth a
+ * transcript the intent rules cannot read.
+ */
 const DEFAULT_STT_MODEL = "whisper-1";
 const DEFAULT_TTS_MODEL = "gpt-4o-mini-tts";
-const DEFAULT_VOICE = "alloy";
+
+/**
+ * Text-to-speech default.
+ *
+ * `alloy` is the neutral house voice: light, even, and conspicuously tentative
+ * when it reads a factual answer. `onyx` is the deep, grounded one, and paired
+ * with the delivery instructions below it reads as an assistant that is sure of
+ * what it just said.
+ */
+const DEFAULT_VOICE = "onyx";
+
+/**
+ * How the voice should carry, not what it should say.
+ *
+ * This steers DELIVERY only — pace, weight, inflection — and is fixed
+ * server-side. It is never assembled from a request, because it is text going
+ * into a provider call and a caller-supplied one would be a way to put words
+ * in JARVIS's mouth.
+ */
+const DEFAULT_TTS_INSTRUCTIONS =
+  "Speak with calm authority, in the manner of a trusted chief of staff giving a briefing. " +
+  "Measured, unhurried pace. Clear, fully-formed consonants. Land each statement with a " +
+  "confident downward inflection rather than an upward, questioning one. Warm but never " +
+  "chirpy, never breathy, never apologetic. Read numbers, times and names deliberately.";
+
+/**
+ * Default language hint.
+ *
+ * This is the fix for the transcription defect, and it costs nothing.
+ *
+ * The operator speaks Hinglish — Hindi words, Latin script, English nouns. Left
+ * to detect the language itself, whisper-1 decided the speech was URDU and
+ * wrote it in Arabic script: "Balaghat mein best restaurants dikhao" came back
+ * as "بلگ ہاتھ میں بیسٹ ریسٹرانٹز دکھاؤ". Every downstream intent rule matches
+ * on Latin text, so that is not a cosmetic problem — a perfectly clear request
+ * became unroutable, and the user got an answer to something they had not
+ * asked. Measured over 18 fixture runs: 12 of 18 in Latin script without the
+ * hint, 18 of 18 with it, at the same latency.
+ *
+ * A per-request `language` still wins, and `OPENAI_STT_LANGUAGE` sets a
+ * different default for a deployment whose operator speaks something else.
+ */
+const DEFAULT_STT_LANGUAGE = "en";
+
 const DEFAULT_TIMEOUT_MS = 30_000;
 
 /**
@@ -94,6 +153,8 @@ export class OpenAIVoiceProvider implements IVoiceProvider {
   readonly defaultVoice: string;
 
   private readonly client: OpenAI;
+  private readonly ttsInstructions: string;
+  private readonly sttLanguage: string;
 
   constructor(config: OpenAIVoiceConfig = {}) {
     const apiKey = config.apiKey ?? process.env.OPENAI_API_KEY;
@@ -108,6 +169,12 @@ export class OpenAIVoiceProvider implements IVoiceProvider {
     this.ttsModel = config.ttsModel ?? process.env.OPENAI_TTS_MODEL ?? DEFAULT_TTS_MODEL;
     this.defaultVoice =
       config.defaultVoice ?? process.env.OPENAI_TTS_VOICE ?? DEFAULT_VOICE;
+    this.ttsInstructions =
+      config.ttsInstructions ??
+      process.env.OPENAI_TTS_INSTRUCTIONS ??
+      DEFAULT_TTS_INSTRUCTIONS;
+    this.sttLanguage =
+      config.sttLanguage ?? process.env.OPENAI_STT_LANGUAGE ?? DEFAULT_STT_LANGUAGE;
 
     this.client = new OpenAI({
       apiKey,
@@ -139,7 +206,10 @@ export class OpenAIVoiceProvider implements IVoiceProvider {
         {
           file,
           model: this.sttModel,
-          ...(input.language ? { language: input.language } : {}),
+          // A caller-supplied language wins; otherwise the configured default.
+          ...(input.language || this.sttLanguage
+            ? { language: input.language || this.sttLanguage }
+            : {}),
           response_format: "json",
         },
         { signal: input.signal }
@@ -150,7 +220,11 @@ export class OpenAIVoiceProvider implements IVoiceProvider {
         // whitespace, and the transcript is shown to the user verbatim.
         text: (response.text ?? "").trim(),
         model: this.sttModel,
-        ...(input.language ? { language: input.language } : {}),
+        // The language actually SENT, not merely the one asked for — a caller
+        // reading this back should see what the recognizer was told.
+        ...(input.language || this.sttLanguage
+          ? { language: input.language || this.sttLanguage }
+          : {}),
         latencyMs: Date.now() - startedAt,
       };
     } catch (err) {
@@ -181,6 +255,11 @@ export class OpenAIVoiceProvider implements IVoiceProvider {
           voice,
           input: input.text,
           response_format: format,
+          // `instructions` is a gpt-4o-mini-tts capability; tts-1 and tts-1-hd
+          // ignore it, so sending it costs an operator on an older model
+          // nothing. `speed` is deliberately NOT sent — it is the parameter the
+          // newer model does not accept.
+          ...(this.ttsInstructions ? { instructions: this.ttsInstructions } : {}),
         },
         { signal: input.signal }
       );

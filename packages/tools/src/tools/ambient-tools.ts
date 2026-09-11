@@ -75,6 +75,23 @@ export interface SystemPort {
   snapshot(): AmbientOutcome<SystemReading>;
 }
 
+export interface TaskReading {
+  id: string;
+  title: string;
+  /** ISO timestamp, or null when the task has no due date. */
+  dueAt: string | null;
+  priority: string;
+  done: boolean;
+}
+
+export interface TasksPort {
+  /**
+   * The CALLER's tasks. `userId` is the authenticated user, never a parameter
+   * the model supplied — see the note on `TasksListTool.execute`.
+   */
+  list(userId: string, options: { includeCompleted: boolean }): Promise<AmbientOutcome<TaskReading[]>>;
+}
+
 abstract class AmbientTool extends BaseTool {
   constructor(
     id: string,
@@ -304,8 +321,55 @@ export class SystemStatusTool extends AmbientTool {
   }
 }
 
+// ---------------------------------------------------------------------------
+// tasks.list
+// ---------------------------------------------------------------------------
+
+export class TasksListTool extends AmbientTool {
+  constructor(private readonly tasks: TasksPort) {
+    super(
+      "tasks.list",
+      "List Tasks",
+      "Read the user's own saved tasks: title, due date, priority and whether each is done. " +
+        "Use this before answering any question about what they have to do, what is pending, " +
+        "or what is due — never answer from memory or from earlier in the conversation.",
+      [
+        {
+          name: "includeCompleted",
+          type: "boolean",
+          description: "Include tasks already finished. Default false — pending only.",
+          required: false,
+        },
+      ]
+    );
+  }
+
+  async execute(params: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
+    // ---------------------------------------------------------------------
+    // TENANT ISOLATION.
+    //
+    // The owner is `context.userId` — the AUTHENTICATED caller — and there is
+    // deliberately no `userId` parameter for the model to fill in. A tool that
+    // accepted one would be a tool that could be talked into reading somebody
+    // else's task list, and no amount of prompt wording makes that safe.
+    // ---------------------------------------------------------------------
+    const includeCompleted = params.includeCompleted === true;
+
+    const result = await this.tasks.list(context.userId, { includeCompleted });
+    if (!result.data) return this.fromOutcome(result, "Tasks could not be loaded.");
+
+    // An empty list is a SUCCESS carrying zero rows, not a failure. "Nothing is
+    // due" is a real answer, and reporting it as an error would make the
+    // assistant apologise for a clear diary.
+    return this.success(
+      { tasks: result.data, count: result.data.length, includeCompleted },
+      { source: result.source, observedAt: result.observedAt, readOnly: true }
+    );
+  }
+}
+
 /**
- * All three, for registration.
+ * All of them, for registration.
  *
  * Mirrors `createMapsTools` so the container wires ambient capability the same
  * way it wires location capability.
@@ -315,12 +379,14 @@ export function createAmbientTools(
   market: MarketPort,
   system: SystemPort,
   maps: MapsPort,
-  location: CurrentLocationPort
+  location: CurrentLocationPort,
+  tasks: TasksPort
 ): BaseTool[] {
   return [
     new WeatherCurrentTool(weather, maps, location),
     new MarketQuoteTool(market),
     new SystemStatusTool(system),
     new TimeNowTool(),
+    new TasksListTool(tasks),
   ];
 }

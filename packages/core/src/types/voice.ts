@@ -214,6 +214,16 @@ export const TranscriptionRequestSchema = z.object({
   language: z.string().min(2).max(16).optional(),
   /** For audit correlation. Never used to load or mutate conversation state. */
   conversationId: z.string().optional(),
+  /**
+   * The client's id for the spoken turn this upload belongs to.
+   *
+   * Audit correlation only, and bounded so it cannot be used to write arbitrary
+   * text into the audit log. It lets a client-side trace — "this turn was
+   * retired before its transcript came back" — be matched against the server's
+   * record of the same request, which is the only way to tell a dropped reply
+   * from one that was never produced.
+   */
+  requestId: z.string().max(64).optional(),
 });
 
 export type TranscriptionRequest = z.infer<typeof TranscriptionRequestSchema>;
@@ -256,6 +266,8 @@ export const SpeechSynthesisRequestSchema = z.object({
   format: SpeechAudioFormatSchema.optional(),
   /** For audit correlation only. */
   conversationId: z.string().optional(),
+  /** The client's id for the spoken turn. Audit correlation only. */
+  requestId: z.string().max(64).optional(),
 });
 
 export type SpeechSynthesisRequest = z.infer<typeof SpeechSynthesisRequestSchema>;

@@ -4,6 +4,8 @@ import type {
   MarketQuote,
   SystemPort,
   SystemReading,
+  TasksPort,
+  TaskReading,
   WeatherPort,
   WeatherReading,
 } from "@jarvis/tools";
@@ -151,6 +153,44 @@ export function createMarketPort(): MarketPort {
       }));
 
       return { data: quotes, source: result.meta.source, observedAt: result.meta.observedAt };
+    },
+  };
+}
+
+/**
+ * The caller's own tasks, over the repository the `/tasks` route already uses.
+ *
+ * `userId` is threaded straight through to `list`, which scopes its query by
+ * owner in SQL. There is no path here that reads a task belonging to anyone
+ * else, and none that writes: creating and completing tasks stay on the
+ * existing route, behind the permissions they already had.
+ */
+export function createTasksPort(tasks: {
+  list(userId: string, options: { includeCompleted?: boolean; limit?: number }): Promise<
+    Array<{ id: string; title: string; dueAt: Date | string | null; priority: string; completedAt: Date | string | null }>
+  >;
+}): TasksPort {
+  return {
+    async list(userId, options): Promise<AmbientOutcome<TaskReading[]>> {
+      try {
+        const rows = await tasks.list(userId, { includeCompleted: options.includeCompleted, limit: 50 });
+        return {
+          data: rows.map((t) => ({
+            id: t.id,
+            title: t.title,
+            dueAt: t.dueAt ? new Date(t.dueAt).toISOString() : null,
+            priority: t.priority,
+            done: t.completedAt !== null,
+          })),
+          source: "JARVIS tasks",
+          observedAt: new Date().toISOString(),
+        };
+      } catch {
+        // The reason is deliberately vague to the model: a database error
+        // message is an internal detail, and "could not be read" is all the
+        // user can act on.
+        return { data: null, source: "JARVIS tasks", reason: "Your tasks could not be read." };
+      }
     },
   };
 }

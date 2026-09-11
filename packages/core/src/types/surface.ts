@@ -313,21 +313,49 @@ const TasksDataSchema = z
   })
   .strict();
 
+/**
+ * One retrieved passage, as evidence.
+ *
+ * Every field is copied from a chunk the retriever actually returned. There is
+ * no field here a model could fill in, which is the mechanical reason a
+ * citation on this surface cannot be fabricated: a document name that was never
+ * retrieved has no chunk to come from, and the decision layer builds this list
+ * from `RetrievedChunk[]` or not at all.
+ */
+const KnowledgeCitationSchema = z
+  .object({
+    documentId: z.string().max(64),
+    documentName: z.string().max(200),
+    /** The specific chunk, so a citation is checkable against storage. */
+    chunkId: z.string().max(64),
+    /** Position within the document. */
+    chunkIndex: z.number().int().min(0),
+    /** Pages this passage overlaps. Empty for unpaginated documents. */
+    pages: z.array(z.number().int().min(0)).max(20),
+    /** The section heading containing the passage, when the document has one. */
+    section: z.string().max(200).nullable(),
+    /** Cosine similarity from the retriever. Shown, never invented. */
+    score: z.number().min(-1).max(1),
+    excerpt: z.string().max(1200),
+  })
+  .strict();
+
 const KnowledgeDataSchema = z
   .object({
     kind: z.literal("knowledge"),
-    summary: z.string().max(4000),
-    citations: z
-      .array(
-        z
-          .object({
-            documentId: z.string().max(64),
-            documentName: z.string().max(200),
-            excerpt: z.string().max(600),
-          })
-          .strict()
-      )
-      .max(10),
+    /**
+     * Optional, and usually absent.
+     *
+     * The ANSWER already exists in the conversation; repeating the model's
+     * prose inside the evidence panel would put a generated paragraph next to
+     * verbatim excerpts in the same visual frame, which is precisely the
+     * confusion between "what was said" and "what was found" that citing
+     * sources exists to prevent. The panel shows what was RETRIEVED.
+     */
+    summary: z.string().max(4000).optional(),
+    citations: z.array(KnowledgeCitationSchema).max(10),
+    /** When the retrieval ran. */
+    retrievedAt: z.string().datetime().optional(),
   })
   .strict();
 

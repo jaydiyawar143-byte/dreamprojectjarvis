@@ -45,9 +45,13 @@ describe("Sprint 8.0 — voice configuration defaults", () => {
   it("applies the documented defaults when nothing is set", () => {
     const config = createVoiceConfig({}, EMPTY_ENV);
 
+    // The voice changed from `alloy`, which reads factual answers tentatively,
+    // to `onyx`. The recognizer did not: a faster model transcribed Hinglish in
+    // the wrong script, and the accuracy problem was the missing language hint,
+    // which the provider now supplies.
     expect(config.sttModel).toBe("whisper-1");
     expect(config.ttsModel).toBe("gpt-4o-mini-tts");
-    expect(config.ttsVoice).toBe("alloy");
+    expect(config.ttsVoice).toBe("onyx");
     expect(config.maxAudioBytes).toBe(4 * 1024 * 1024);
     expect(config.maxTtsChars).toBe(4000);
   });

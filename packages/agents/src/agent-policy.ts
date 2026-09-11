@@ -106,6 +106,11 @@ export const AMBIENT_TOOLS = [
   "market.quote",
   "system.status",
   "time.now",
+  // Reads the CALLER's own tasks and nothing else — the owner is the
+  // authenticated user, not a parameter. READ_ONLY: listing is granted here,
+  // and creating or completing a task still goes through the write path and
+  // its approval gate, exactly as it did before.
+  "tasks.list",
 ] as const;
 
 // ---------------------------------------------------------------------------

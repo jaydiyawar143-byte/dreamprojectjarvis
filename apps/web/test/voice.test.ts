@@ -55,8 +55,17 @@ vi.mock("@/lib/voice/audio-capture", async () => {
 });
 
 const mockPlay = vi.fn();
+const mockEnqueue = vi.fn();
 const mockStop = vi.fn();
 const mockUnlock = vi.fn();
+
+/**
+ * Generation the fake playback reports as live.
+ *
+ * A test that wants to model "the user stopped while the reply was being
+ * synthesized" moves this on, exactly as the real `stop()` does.
+ */
+let playbackGeneration = 1;
 
 vi.mock("@/lib/voice/audio-playback", async () => {
   const actual = await vi.importActual<typeof import("@/lib/voice/audio-playback")>(
@@ -65,10 +74,23 @@ vi.mock("@/lib/voice/audio-playback", async () => {
   return {
     ...actual,
     AudioPlayback: class {
+      claim() {
+        return playbackGeneration;
+      }
+      isCurrent(generation: number) {
+        return generation === playbackGeneration;
+      }
+      setSegmentListeners() {
+        return undefined;
+      }
+      enqueue(...args: unknown[]) {
+        return mockEnqueue(...args) ?? Promise.resolve();
+      }
       play(...args: unknown[]) {
         return mockPlay(...args);
       }
       stop(...args: unknown[]) {
+        playbackGeneration += 1;
         return mockStop(...args);
       }
       unlock(...args: unknown[]) {
@@ -144,8 +166,21 @@ describe("Sprint 8 — voice client", () => {
       data: { audio: "BBBB", mimeType: "audio/mpeg", model: "tts", voice: "alloy" },
     });
     mockPlay.mockResolvedValue(undefined);
-    mockSendMessage.mockImplementation(async () => {
+    mockEnqueue.mockResolvedValue(undefined);
+    playbackGeneration = 1;
+
+    // `sendMessage` returns the reply it produced. The voice turn speaks THAT
+    // string rather than looking for the newest assistant message, which is
+    // what let a slow turn read out the previous turn's answer.
+    mockSendMessage.mockImplementation(async (content: string, options?: { requestId?: string }) => {
       chatState.messages.push({ role: "assistant", content: "Here is the report." });
+      return {
+        requestId: options?.requestId ?? "chat-1",
+        conversationId: chatState.activeConversationId,
+        reply: "Here is the report.",
+        superseded: false,
+        error: null,
+      };
     });
   });
 
@@ -232,7 +267,10 @@ describe("Sprint 8 — voice client", () => {
       await useVoiceStore.getState().startListening();
       await useVoiceStore.getState().stopListening();
 
-      expect(mockSendMessage).toHaveBeenCalledWith("show me campaign performance");
+      expect(mockSendMessage).toHaveBeenCalledWith(
+        "show me campaign performance",
+        expect.objectContaining({ requestId: expect.stringMatching(/^vt-/) })
+      );
     });
   });
 
@@ -246,7 +284,12 @@ describe("Sprint 8 — voice client", () => {
       await useVoiceStore.getState().stopListening();
 
       expect(mockSendMessage).toHaveBeenCalledTimes(1);
-      expect(mockSendMessage).toHaveBeenCalledWith("show me campaign performance");
+      // The transcript is unchanged; the second argument is the turn's identity,
+      // which is how the reply that comes back is known to belong to it.
+      expect(mockSendMessage).toHaveBeenCalledWith(
+        "show me campaign performance",
+        expect.objectContaining({ requestId: expect.stringMatching(/^vt-/) })
+      );
     });
 
     it("speaks the reply and returns to idle", async () => {
@@ -254,7 +297,8 @@ describe("Sprint 8 — voice client", () => {
       await useVoiceStore.getState().stopListening();
 
       expect(mockSynthesize).toHaveBeenCalledTimes(1);
-      expect(mockPlay).toHaveBeenCalledWith("BBBB", "audio/mpeg");
+      // Queued under the turn's playback token, not played blind.
+      expect(mockEnqueue).toHaveBeenCalledWith("BBBB", "audio/mpeg", 1);
       expect(useVoiceStore.getState().state).toBe("idle");
     });
 
@@ -263,7 +307,8 @@ describe("Sprint 8 — voice client", () => {
       await useVoiceStore.getState().stopListening();
 
       expect(mockTranscribe).toHaveBeenCalledWith(
-        expect.objectContaining({ conversationId: "conv-1" })
+        expect.objectContaining({ conversationId: "conv-1" }),
+        expect.anything()
       );
     });
 
@@ -363,8 +408,15 @@ describe("Sprint 8 — voice client", () => {
     });
 
     it("surfaces a chat pipeline failure", async () => {
-      mockSendMessage.mockImplementation(async () => {
+      mockSendMessage.mockImplementation(async (_content: string, options?: { requestId?: string }) => {
         chatState.error = "Meta data retrieval failed";
+        return {
+          requestId: options?.requestId ?? "chat-1",
+          conversationId: "conv-1",
+          reply: "",
+          superseded: false,
+          error: "Meta data retrieval failed",
+        };
       });
 
       await useVoiceStore.getState().startListening();

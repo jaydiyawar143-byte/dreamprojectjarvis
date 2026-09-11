@@ -1,4 +1,5 @@
 import type { ToolExecutionResult } from "./types/execution.js";
+import type { RetrievedChunk } from "./types/knowledge-retrieval.js";
 import {
   SurfaceSchema,
   type Surface,
@@ -49,6 +50,20 @@ export interface SurfaceDecisionInput {
    * London the instant Tokyo is mentioned.
    */
   recentUserMessages?: string[];
+  /**
+   * What RAG retrieved for this turn, if anything.
+   *
+   * Passed in rather than re-fetched: these are the exact passages the model
+   * was shown, which is what makes a citation on screen checkable rather than
+   * merely plausible. Re-running retrieval here would cost a second embedding
+   * call and could return a different set, so the panel and the answer would
+   * cite different things.
+   */
+  knowledge?: {
+    chunks: RetrievedChunk[];
+    retrievedAt: string | null;
+    outcome: "retrieved" | "empty" | "skipped" | "disabled" | "failed";
+  };
   /** The user's clock preference, so a clock surface matches their dashboard. */
   hourFormat?: "12" | "24";
   /** Injected for tests. */
@@ -690,13 +705,229 @@ export function decideSurface(input: SurfaceDecisionInput): SurfaceDecision {
       );
     }
 
-    // ---- not yet backed by a real integration ----------------------------
-    //
-    // PLACE_SEARCH, TASKS and KNOWLEDGE have surfaces defined and renderers
-    // ready, but no decision branch until the tool that would feed them is
-    // wired. Returning nothing is the honest state: the assistant still answers
-    // in text, and no empty panel appears claiming to be a result.
+    // ---- place search ----------------------------------------------------
+    case "PLACE_SEARCH": {
+      // Either tool can answer this: `maps.search` for a named query,
+      // `maps.nearby` for "what is around me". Whichever ran is read.
+      const usedTool = toolData(results, "maps.search") ? "maps.search" : "maps.nearby";
+      const data = toolData(results, usedTool);
+
+      if (!data) {
+        const failure = toolFailure(results, "maps.search") ?? toolFailure(results, "maps.nearby");
+        // The location cases arrive here as ordinary tool failures carrying the
+        // tool's own wording — "no current location is available, ask them to
+        // allow location access". That message is shown verbatim rather than
+        // rewritten, because the tool knows why it could not answer and this
+        // layer does not.
+        if (failure) return unavailable("Places", failure, "search for that again");
+        return nothing("place-search intent, but no maps tool ran");
+      }
+
+      const rawPlaces = Array.isArray(data.places) ? data.places : [];
+      const places = rawPlaces
+        .map((p) => p as Record<string, unknown>)
+        .slice(0, 20)
+        .map((p) => ({
+          id: str(p.placeId) ?? str(p.name) ?? "?",
+          name: str(p.name) ?? "Unnamed place",
+          address: str(p.address) ?? str(p.type),
+          position:
+            num(p.latitude) !== null && num(p.longitude) !== null
+              ? { lat: num(p.latitude)!, lng: num(p.longitude)! }
+              : null,
+        }));
+
+      // A search that genuinely found nothing gets an honest panel, not an
+      // empty map. An empty map reads as "still loading" or "broken", and both
+      // are worse than the true answer.
+      if (places.length === 0) {
+        const query = str(data.query);
+        return unavailable(
+          "Places",
+          query ? `Nothing was found for "${query}".` : "No places were found.",
+          null
+        );
+      }
+
+      const located = places.filter((p) => p.position !== null);
+      const d = def("place-search");
+      const query = str(data.query) ?? "Nearby";
+
+      return finish(
+        {
+          surfaceId: nextId(),
+          type: "place-search",
+          mode: d.mode,
+          title: query,
+          subtitle: `${places.length} result${places.length === 1 ? "" : "s"}`,
+          status: "opening",
+          conversationBound: true,
+          // Keyed on the QUERY, so "aur dikhao" refines the same panel rather
+          // than opening a second map beside it.
+          contextKey: `places:${query.toLowerCase()}`,
+          autoClose: { enabled: d.autoClose, idleSeconds: d.idleSeconds },
+          position: { anchor: d.anchor },
+          data: {
+            kind: "map",
+            // Centre on the first located result. Null when the provider gave
+            // no coordinates at all, which the renderer handles by listing.
+            center: located[0]?.position ?? null,
+            zoom: located.length > 1 ? 12 : 14,
+            places,
+            provenance: provenanceOf(results, usedTool, "Maps provider"),
+          },
+          actions: d.actions,
+          reason: "Places are positions; a list of names without a map answers half the question.",
+        },
+        `place-search surface with ${places.length} result(s)`
+      );
+    }
+
+    // ---- tasks -----------------------------------------------------------
+    case "TASKS": {
+      const data = toolData(results, "tasks.list");
+      if (!data) {
+        const failure = toolFailure(results, "tasks.list");
+        if (failure) return unavailable("Tasks", failure, "show my tasks again");
+        return nothing("tasks intent, but no tasks tool ran");
+      }
+
+      const rawTasks = Array.isArray(data.tasks) ? data.tasks : [];
+      const all = rawTasks
+        .map((t) => t as Record<string, unknown>)
+        .map((t) => ({
+          id: str(t.id) ?? "?",
+          title: str(t.title) ?? "Untitled",
+          dueAt: str(t.dueAt),
+          priority: str(t.priority) ?? "NORMAL",
+          done: t.done === true,
+        }));
+
+      // ---- filters, applied to REAL rows ---------------------------------
+      //
+      // The message narrows what is shown; it never adds. A filter that matches
+      // nothing produces an empty list, and an empty list is a real answer
+      // ("nothing is high priority") rather than a reason to widen the query
+      // until something appears.
+      const text = input.message.toLowerCase();
+      const wantsPending = /(pending|baaki|bache|incomplete|adhura|todo|to do)/u.test(text);
+      const wantsHigh = /(high priority|urgent|zaroori|important|jaruri)/u.test(text);
+      const wantsToday = /(today|aaj|aaj ke|aaj ka)/u.test(text);
+      const wantsTomorrow = /(tomorrow|kal)/u.test(text);
+
+      const sameDay = (iso: string | null, offsetDays: number): boolean => {
+        if (!iso) return false;
+        const due = new Date(iso);
+        if (Number.isNaN(due.getTime())) return false;
+        const target = new Date(now);
+        target.setDate(target.getDate() + offsetDays);
+        return (
+          due.getFullYear() === target.getFullYear() &&
+          due.getMonth() === target.getMonth() &&
+          due.getDate() === target.getDate()
+        );
+      };
+
+      let tasks = all;
+      if (wantsPending) tasks = tasks.filter((t) => !t.done);
+      if (wantsHigh) tasks = tasks.filter((t) => t.priority.toUpperCase() === "HIGH");
+      if (wantsToday) tasks = tasks.filter((t) => sameDay(t.dueAt, 0));
+      else if (wantsTomorrow) tasks = tasks.filter((t) => sameDay(t.dueAt, 1));
+
+      tasks = tasks.slice(0, 20);
+
+      const filtered = wantsPending || wantsHigh || wantsToday || wantsTomorrow;
+      const d = def("tasks");
+
+      return finish(
+        {
+          surfaceId: nextId(),
+          type: "tasks",
+          mode: d.mode,
+          title: "Tasks",
+          subtitle: filtered
+            ? `${tasks.length} of ${all.length}`
+            : tasks.length > 0
+              ? `${tasks.length}`
+              : undefined,
+          status: "opening",
+          conversationBound: true,
+          contextKey: "tasks",
+          autoClose: { enabled: d.autoClose, idleSeconds: d.idleSeconds },
+          position: { anchor: d.anchor },
+          // An EMPTY list is rendered, deliberately. "Nothing is due" is the
+          // answer to "what are my tasks", and the panel showing a clear diary
+          // is not an empty surface pretending to hold data — it is the data.
+          data: { kind: "tasks", tasks },
+          actions: d.actions,
+          reason: "A due list is read down a column, not along a sentence.",
+        },
+        `tasks surface with ${tasks.length} task(s)${filtered ? " (filtered)" : ""}`
+      );
+    }
+
+    // ---- knowledge -------------------------------------------------------
+    case "KNOWLEDGE": {
+      const knowledge = input.knowledge;
+
+      if (!knowledge || knowledge.outcome === "failed") {
+        return knowledge?.outcome === "failed"
+          ? unavailable("Knowledge base", "Your documents could not be searched.", "search my documents again")
+          : nothing("knowledge intent, but retrieval did not run");
+      }
+
+      // Nothing retrieved is NOT a surface. A citations panel with no citations
+      // would suggest the answer came from documents when it did not, which is
+      // the precise failure that citing sources exists to prevent.
+      if (knowledge.outcome !== "retrieved" || knowledge.chunks.length === 0) {
+        return nothing(`knowledge intent, but retrieval was ${knowledge.outcome}`);
+      }
+
+      const citations = knowledge.chunks.slice(0, 10).map((chunk) => ({
+        documentId: chunk.documentId,
+        documentName: chunk.documentTitle,
+        chunkId: chunk.chunkId,
+        chunkIndex: chunk.chunkIndex,
+        pages: Array.isArray(chunk.pageNumbers) ? chunk.pageNumbers.slice(0, 20) : [],
+        section: chunk.primarySection?.title ?? null,
+        score: chunk.score,
+        // Verbatim, and truncated rather than summarised. A paraphrased
+        // "excerpt" is not a quotation, and this panel's whole value is that
+        // what it shows is what is stored.
+        excerpt: chunk.content.slice(0, 1200),
+      }));
+
+      const documents = new Set(citations.map((c) => c.documentId)).size;
+      const d = def("knowledge");
+
+      return finish(
+        {
+          surfaceId: nextId(),
+          type: "knowledge",
+          mode: d.mode,
+          title: "Sources",
+          subtitle: `${citations.length} passage${citations.length === 1 ? "" : "s"} from ${documents} document${documents === 1 ? "" : "s"}`,
+          status: "opening",
+          conversationBound: true,
+          contextKey: "knowledge",
+          autoClose: { enabled: d.autoClose, idleSeconds: d.idleSeconds },
+          position: { anchor: d.anchor },
+          // No `summary`. The answer is already in the conversation; repeating
+          // the model's prose beside verbatim excerpts, in one frame, is how a
+          // reader stops being able to tell which is which.
+          data: {
+            kind: "knowledge",
+            citations,
+            ...(knowledge.retrievedAt ? { retrievedAt: knowledge.retrievedAt } : {}),
+          },
+          actions: d.actions,
+          reason: "The user asked what the answer was based on, so the passages are the answer.",
+        },
+        `knowledge surface with ${citations.length} citation(s)`
+      );
+    }
+
     default:
-      return nothing(`no surface builder for ${intent} yet; answered without one`);
+      return nothing(`no surface builder for ${intent}; answered without one`);
   }
 }

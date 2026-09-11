@@ -80,6 +80,21 @@ interface Rule {
 const w = (...alts: string[]) => new RegExp(`(?:^| )(?:${alts.join("|")})(?: |$)`, "u");
 
 /**
+ * Kinds of place a person actually searches a map for.
+ *
+ * An explicit list rather than "any noun". A map surface is only useful when
+ * the answer is a POSITION, and "find my keys" or "search the logs" are neither
+ * — so the intent requires one of these to be present before it will cover the
+ * screen with a map. Plurals are handled by the trailing `s?`.
+ */
+const PLACE_NOUNS =
+  "restaurants?|cafes?|coffee|hotels?|dhaba|pharmac(?:y|ies)|chemist|medical|hospitals?|clinics?|" +
+  "atms?|banks?|petrol|diesel|fuel|pumps?|gas station|stations?|airports?|bus stand|" +
+  "shops?|stores?|markets?|malls?|supermarkets?|groceries|grocery|" +
+  "schools?|colleges?|gyms?|salons?|parks?|temples?|mandir|masjid|church|" +
+  "police|post office|library|libraries";
+
+/**
  * Ordered by specificity: the first rule that fires wins.
  *
  * "Solana mein invest karna chahiye" contains a coin name AND an investment
@@ -146,12 +161,23 @@ const RULES: Rule[] = [
   {
     intent: "PLACE_SEARCH",
     any: [
-      w("near me", "nearby", "aas paas", "aaspaas", "paas mein", "najdeek", "nazdeek"),
-      /(?:find|search|dhundo|dhundho|batao) .*(?:restaurant|hotel|cafe|atm|hospital|petrol|pump|station|shop|store)/u,
+      w("near me", "nearby", "aas paas", "aaspaas", "paas mein", "mere paas", "najdeek", "nazdeek"),
+      // A search verb near a KIND OF PLACE. Both halves are needed: "dikhao"
+      // alone is half the sentences in this language, and "restaurant" alone
+      // appears in "is restaurant ka number kya hai", which is not a map
+      // question.
+      new RegExp(
+        `(?:find|search|show|dhundo|dhundho|dikhao|dikha|batao|khojo|karo)` +
+          `|(?:${PLACE_NOUNS})`,
+        "u"
+      ),
       w("map", "naksha"),
       /where is /u,
       /(?:kahan|kaha) (?:hai|par hai)/u,
     ],
+    // The place noun is mandatory, which is what stops the very broad verb list
+    // above from claiming every imperative sentence in the language.
+    requires: [new RegExp(`(?:${PLACE_NOUNS}|near me|nearby|aas ?paas|mere paas|map|naksha)`, "u")],
     weight: 0.75,
   },
 
@@ -250,9 +276,14 @@ const RULES: Rule[] = [
     intent: "KNOWLEDGE",
     any: [
       /(?:summar(?:ise|ize|y)|saaransh|sarans) /u,
-      /(?:is|this|the) (?:pdf|document|doc|file|report) /u,
-      /(?:pdf|document|doc) (?:ka|ki|mein|me) /u,
-      w("knowledge base", "uploaded"),
+      /(?:is|this|the|these|mere|my) (?:pdf|documents?|docs?|files?|reports?) /u,
+      // Hindi particles after the noun: "document ka", "documents ke saath",
+      // "PDF mein", "files se". The particle list is what the earlier rule was
+      // missing — it had `ka|ki|mein|me` and not `ke|se|par`, so "source
+      // documents ke saath answer do" resolved to nothing at all.
+      /(?:pdf|documents?|docs?|files?|reports?) (?:ka|ki|ke|mein|me|se|par)(?: |$)/u,
+      w("knowledge base", "uploaded", "source documents", "citations", "sources"),
+      /relevant (?:sections?|passages?|parts?|chunks?)/u,
     ],
     weight: 0.8,
   },

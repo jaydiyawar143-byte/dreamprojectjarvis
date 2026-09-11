@@ -174,6 +174,21 @@ const LOCATION_SIGNALS: RegExp[] = [
   // The user's own position.
   /\b(my|current)\s+location\b/i,
   /\b(meri|mera)\s+(current\s+)?location\b/i,
+
+  // ---------------------------------------------------------------------
+  // Finding a KIND OF PLACE.
+  //
+  // The signals above cover maps, routes, distances and proximity, and miss
+  // the commonest map question there is: "Balaghat mein best restaurants
+  // dikhao". Nothing in it names a map, a route or "near me", so it fell
+  // through to the Meta Ads heuristic — which claims it on `best` and
+  // `dikhao` — and came back "Meta Ads data could not be fetched". Caught by
+  // a live run of the place-search surface.
+  //
+  // A place NOUN is required, not just a verb: `dikhao` and `show` appear in
+  // half the sentences this product receives, and routing all of them to the
+  // maps agent would be worse than the bug it fixes.
+  /\b(restaurants?|cafes?|coffee\s+shops?|hotels?|dhaba|pharmac(?:y|ies)|chemist|hospitals?|clinics?|atms?|banks?|petrol\s*(?:pump|station)?|fuel|gas\s+station|airports?|bus\s+stand|railway\s+station|shops?|stores?|markets?|malls?|supermarkets?|gyms?|salons?|parks?|temples?|mandir|police\s+station|post\s+office)\b/i,
 ];
 
 function matches(signals: RegExp[], text: string): boolean {

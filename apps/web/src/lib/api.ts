@@ -187,7 +187,18 @@ async function request<T>(
     }
 
     return body;
-  } catch {
+  } catch (err) {
+    // An abort is a decision this app made — a voice turn the user replaced,
+    // a panel that unmounted — not a failure of the network. Reporting it as
+    // one puts "Network request failed" in front of a user who did nothing
+    // wrong, and hides the fact that the request was deliberately dropped.
+    if ((err as { name?: string })?.name === "AbortError") {
+      return {
+        success: false,
+        error: { code: "ABORTED", message: "Request was cancelled" },
+        timestamp: new Date().toISOString(),
+      };
+    }
     return {
       success: false,
       error: { code: "NETWORK_ERROR", message: "Network request failed" },
@@ -286,7 +297,8 @@ export async function sendChatMessage(
   message: string,
   conversationId?: string,
   agentId?: string,
-  activeSurfaceKeys?: string[]
+  activeSurfaceKeys?: string[],
+  signal?: AbortSignal
 ): Promise<
   ApiResponse<{
     message: string;
@@ -298,6 +310,7 @@ export async function sendChatMessage(
 > {
   return request("/chat", {
     method: "POST",
+    ...(signal ? { signal } : {}),
     body: JSON.stringify({
       message,
       conversationId,
@@ -950,22 +963,32 @@ export async function getVoiceStatus(): Promise<ApiResponse<VoiceStatus>> {
   return request("/voice/status");
 }
 
-export async function transcribeAudio(input: {
-  audio: string;
-  mimeType: string;
-  durationMs?: number;
-  conversationId?: string;
-}): Promise<ApiResponse<{ text: string; empty: boolean; model: string; latencyMs?: number }>> {
+export async function transcribeAudio(
+  input: {
+    audio: string;
+    mimeType: string;
+    durationMs?: number;
+    conversationId?: string;
+    /** Correlates the client's turn with the server's audit row. */
+    requestId?: string;
+  },
+  signal?: AbortSignal
+): Promise<ApiResponse<{ text: string; empty: boolean; model: string; latencyMs?: number }>> {
   return request("/voice/transcribe", {
     method: "POST",
+    ...(signal ? { signal } : {}),
     body: JSON.stringify(input),
   });
 }
 
-export async function synthesizeSpeech(input: {
-  text: string;
-  conversationId?: string;
-}): Promise<
+export async function synthesizeSpeech(
+  input: {
+    text: string;
+    conversationId?: string;
+    requestId?: string;
+  },
+  signal?: AbortSignal
+): Promise<
   ApiResponse<{
     audio: string;
     mimeType: string;
@@ -973,10 +996,12 @@ export async function synthesizeSpeech(input: {
     voice: string;
     format: string;
     characterCount: number;
+    latencyMs?: number;
   }>
 > {
   return request("/voice/speak", {
     method: "POST",
+    ...(signal ? { signal } : {}),
     body: JSON.stringify(input),
   });
 }

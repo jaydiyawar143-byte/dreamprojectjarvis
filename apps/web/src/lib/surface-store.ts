@@ -373,3 +373,19 @@ export function surfaceDirectiveFrom(metadata: unknown): unknown | null {
   const value = (metadata as Record<string, unknown>).surface;
   return value ?? null;
 }
+
+/**
+ * The same, for a FAILED turn.
+ *
+ * When every tool fails the orchestrator returns an error rather than a
+ * message, so there is no `data.metadata` to carry a surface — and the honest
+ * "this provider could not answer, here is why" panel is exactly what the user
+ * needs at that moment. It rides `error.details.surface` instead.
+ */
+export function surfaceDirectiveFromError(error: unknown): unknown | null {
+  if (!error || typeof error !== "object") return null;
+  const details = (error as { details?: unknown }).details;
+  if (!details || typeof details !== "object") return null;
+  const value = (details as Record<string, unknown>).surface;
+  return value ?? null;
+}

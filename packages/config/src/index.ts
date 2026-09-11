@@ -253,11 +253,23 @@ export function getServerEnv(): ServerEnv {
 // freezing the answer for the life of the process.
 // ---------------------------------------------------------------------------
 
-/** Defaults applied when a voice variable is absent. */
+/**
+ * Defaults applied when a voice variable is absent.
+ *
+ * `ttsVoice` changed after listening to the alternatives: `alloy` is the
+ * neutral house voice and reads factual answers tentatively, where `onyx` has
+ * the weight an assistant's answers are supposed to carry. It is paired with
+ * delivery instructions in the provider.
+ *
+ * `sttModel` deliberately did NOT change. `gpt-4o-mini-transcribe` is faster,
+ * but rendered this operator's Hinglish in Devanagari on most fixture runs; the
+ * transcription problem was the missing language hint, which the provider now
+ * supplies. Overridable by `OPENAI_STT_MODEL` and `OPENAI_TTS_VOICE`.
+ */
 export const VOICE_DEFAULTS = Object.freeze({
   sttModel: "whisper-1",
   ttsModel: "gpt-4o-mini-tts",
-  ttsVoice: "alloy",
+  ttsVoice: "onyx",
   /** 4 MiB of decoded audio — minutes of Opus speech, far past push-to-talk. */
   maxAudioBytes: 4 * 1024 * 1024,
   maxTtsChars: 4000,

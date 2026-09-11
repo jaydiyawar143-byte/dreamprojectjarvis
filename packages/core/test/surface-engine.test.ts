@@ -60,13 +60,16 @@ const ROUTE_TOOL_OUTPUT = {
   },
 };
 
+/** Fixed clock, so the date filters below are deterministic. */
+const NOW = new Date("2026-09-10T12:00:00Z");
+
 const decide = (message: string, toolResults: ToolExecutionResult[] = [], activeContextKeys: string[] = []) =>
   decideSurface({
     message,
     toolResults,
     activeContextKeys,
     idFactory: () => "sfc-test",
-    now: new Date("2026-09-10T12:00:00Z"),
+    now: NOW,
   });
 
 // ---------------------------------------------------------------------------
@@ -469,6 +472,346 @@ describe("security", () => {
       ok("market.quote", { quotes: [{ symbol: "SOL", name: "Solana", price: 101, currency: "USD", changePct24h: 1 }] }),
     ]);
     expect(directive).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Place search
+// ---------------------------------------------------------------------------
+
+const PLACES = {
+  query: "restaurants",
+  count: 2,
+  places: [
+    { name: "Hotel Anand", latitude: 21.81, longitude: 80.19, placeId: "p1", type: "restaurant" },
+    { name: "Sagar Dhaba", latitude: 21.82, longitude: 80.2, placeId: "p2", type: "restaurant" },
+  ],
+};
+
+describe("place search", () => {
+  it("recognises how people actually ask", () => {
+    for (const q of [
+      "Balaghat mein best restaurants dikhao",
+      "Mere paas pharmacy search karo",
+      "Google Maps par nearby petrol pump dikhao",
+      "Is location ke aas paas kya hai?",
+    ]) {
+      expect(detectVisualIntent(q).intent, q).toBe("PLACE_SEARCH");
+    }
+  });
+
+  it("does not fire on a sentence that merely contains a verb", () => {
+    // The verb list is deliberately broad, so a place NOUN is mandatory.
+    // Without that requirement "dikhao" would open a map on half the language.
+    for (const q of ["mujhe screenshot dikhao", "search the logs", "find my keys"]) {
+      expect(detectVisualIntent(q).intent, q).not.toBe("PLACE_SEARCH");
+    }
+  });
+
+  it("maps real provider results onto the surface", () => {
+    const { directive } = decide("Balaghat mein restaurants dikhao", [
+      ok("maps.search", PLACES, { source: "Google Places" }),
+    ]);
+    if (directive?.op !== "open") throw new Error("expected open");
+
+    expect(directive.surface.type).toBe("place-search");
+    const data = directive.surface.data as { kind: string; places: Array<{ name: string }>; provenance: { source: string } };
+    expect(data.kind).toBe("map");
+    expect(data.places.map((p) => p.name)).toEqual(["Hotel Anand", "Sagar Dhaba"]);
+    expect(data.provenance.source).toBe("Google Places");
+  });
+
+  it("opens NOTHING when no maps tool ran", () => {
+    expect(decide("Balaghat mein restaurants dikhao").directive).toBeNull();
+  });
+
+  it("says so honestly when the search found nothing", () => {
+    // An empty map reads as "loading" or "broken". The true answer is better.
+    const { directive } = decide("Balaghat mein restaurants dikhao", [
+      ok("maps.search", { query: "restaurants", places: [], count: 0 }),
+    ]);
+    if (directive?.op !== "open") throw new Error("expected open");
+    expect(directive.surface.type).toBe("unavailable");
+    expect(JSON.stringify(directive.surface.data)).toContain("restaurants");
+  });
+
+  it("surfaces the provider's own failure wording", () => {
+    const { directive } = decide("Mere paas pharmacy dikhao", [
+      failed("maps.nearby", "No current location is available. Ask them to allow location access."),
+    ]);
+    if (directive?.op !== "open") throw new Error("expected open");
+    expect(directive.surface.data).toMatchObject({
+      kind: "unavailable",
+      reason: "No current location is available. Ask them to allow location access.",
+    });
+  });
+
+  it("reads maps.nearby when that is the tool that ran", () => {
+    const { directive } = decide("aas paas cafe dikhao", [ok("maps.nearby", PLACES)]);
+    if (directive?.op !== "open") throw new Error("expected open");
+    expect(directive.surface.type).toBe("place-search");
+  });
+
+  it("keys on the query, so a refinement reuses the panel", () => {
+    const a = decide("Balaghat mein restaurants dikhao", [ok("maps.search", PLACES)]);
+    const b = decide("Balaghat mein restaurants dikhao", [ok("maps.search", PLACES)]);
+    if (a.directive?.op !== "open" || b.directive?.op !== "open") throw new Error("expected opens");
+    expect(a.directive.surface.contextKey).toBe(b.directive.surface.contextKey);
+  });
+
+  it("keeps a place with no coordinates rather than dropping it", () => {
+    // A result the provider could not geocode is still a result. Silently
+    // discarding it would make the count on screen disagree with the answer.
+    const { directive } = decide("restaurants dikhao", [
+      ok("maps.search", { query: "x", places: [{ name: "Somewhere", placeId: "p9" }], count: 1 }),
+    ]);
+    if (directive?.op !== "open") throw new Error("expected open");
+    const data = directive.surface.data as { places: Array<{ name: string; position: unknown }> };
+    expect(data.places).toHaveLength(1);
+    expect(data.places[0]?.position).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tasks
+// ---------------------------------------------------------------------------
+
+const isoIn = (days: number) => {
+  const d = new Date(NOW);
+  d.setDate(d.getDate() + days);
+  return d.toISOString();
+};
+
+const TASK_ROWS = {
+  count: 4,
+  includeCompleted: false,
+  tasks: [
+    { id: "t1", title: "Call supplier", dueAt: isoIn(0), priority: "HIGH", done: false },
+    { id: "t2", title: "File returns", dueAt: isoIn(1), priority: "NORMAL", done: false },
+    { id: "t3", title: "Archive notes", dueAt: null, priority: "LOW", done: true },
+    { id: "t4", title: "Review budget", dueAt: isoIn(0), priority: "NORMAL", done: false },
+  ],
+};
+
+const tasksOf = (directive: unknown) =>
+  ((directive as { surface: { data: { tasks: Array<{ id: string }> } } }).surface.data.tasks ?? []).map((t) => t.id);
+
+describe("tasks", () => {
+  it("recognises how people actually ask", () => {
+    for (const q of [
+      "Mere aaj ke tasks dikhao",
+      "Pending tasks dikhao",
+      "High priority tasks dikhao",
+      "Kal ke tasks kya hain?",
+    ]) {
+      expect(detectVisualIntent(q).intent, q).toBe("TASKS");
+    }
+  });
+
+  it("opens NOTHING when the tasks tool did not run", () => {
+    expect(decide("mere tasks dikhao").directive).toBeNull();
+  });
+
+  it("shows the real rows", () => {
+    const { directive } = decide("mere tasks dikhao", [ok("tasks.list", TASK_ROWS)]);
+    if (directive?.op !== "open") throw new Error("expected open");
+    expect(directive.surface.type).toBe("tasks");
+    expect(tasksOf(directive)).toEqual(["t1", "t2", "t3", "t4"]);
+  });
+
+  it("filters to pending", () => {
+    const { directive } = decide("pending tasks dikhao", [ok("tasks.list", TASK_ROWS)]);
+    if (directive?.op !== "open") throw new Error("expected open");
+    expect(tasksOf(directive)).not.toContain("t3");
+  });
+
+  it("filters to high priority", () => {
+    const { directive } = decide("high priority tasks dikhao", [ok("tasks.list", TASK_ROWS)]);
+    if (directive?.op !== "open") throw new Error("expected open");
+    expect(tasksOf(directive)).toEqual(["t1"]);
+  });
+
+  it("filters to today", () => {
+    const { directive } = decide("aaj ke tasks dikhao", [ok("tasks.list", TASK_ROWS)]);
+    if (directive?.op !== "open") throw new Error("expected open");
+    expect(tasksOf(directive).sort()).toEqual(["t1", "t4"]);
+  });
+
+  it("filters to tomorrow", () => {
+    const { directive } = decide("kal ke tasks kya hain", [ok("tasks.list", TASK_ROWS)]);
+    if (directive?.op !== "open") throw new Error("expected open");
+    expect(tasksOf(directive)).toEqual(["t2"]);
+  });
+
+  it("NARROWS only — a filter never invents a row", () => {
+    const { directive } = decide("high priority tasks dikhao", [ok("tasks.list", TASK_ROWS)]);
+    if (directive?.op !== "open") throw new Error("expected open");
+    const shown = tasksOf(directive);
+    const real = TASK_ROWS.tasks.map((t) => t.id);
+    for (const id of shown) expect(real).toContain(id);
+  });
+
+  it("renders an EMPTY list rather than hiding a clear diary", () => {
+    // "Nothing is due" is the answer to "what are my tasks". Suppressing the
+    // panel would make the user ask again.
+    const { directive } = decide("mere tasks dikhao", [
+      ok("tasks.list", { tasks: [], count: 0, includeCompleted: false }),
+    ]);
+    if (directive?.op !== "open") throw new Error("expected open");
+    expect(directive.surface.type).toBe("tasks");
+    expect(tasksOf(directive)).toEqual([]);
+  });
+
+  it("reports a failure honestly", () => {
+    const { directive } = decide("mere tasks dikhao", [
+      failed("tasks.list", "Your tasks could not be read."),
+    ]);
+    if (directive?.op !== "open") throw new Error("expected open");
+    expect(directive.surface.type).toBe("unavailable");
+  });
+
+  it("shows only what the tool returned, which is only the caller's own", () => {
+    // Tenant isolation is enforced in the tool (the owner is the authenticated
+    // user, never a parameter). This layer's obligation is not to ADD anything:
+    // what is on screen is exactly the set it was handed.
+    const { directive } = decide("mere tasks dikhao", [
+      ok("tasks.list", { tasks: [TASK_ROWS.tasks[0]], count: 1, includeCompleted: false }),
+    ]);
+    if (directive?.op !== "open") throw new Error("expected open");
+    expect(tasksOf(directive)).toEqual(["t1"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Knowledge
+// ---------------------------------------------------------------------------
+
+const chunk = (over: Partial<Record<string, unknown>> = {}) => ({
+  chunkId: "c1",
+  documentId: "d1",
+  documentTitle: "Supplier Agreement.pdf",
+  documentType: "pdf",
+  source: "upload",
+  chunkIndex: 3,
+  content: "Payment terms are net 30 from the date of invoice.",
+  score: 0.82,
+  distance: 0.18,
+  pageNumbers: [4],
+  sections: [],
+  primarySection: { title: "Payment", level: 2, index: 1 },
+  metadata: null,
+  ...over,
+});
+
+const withKnowledge = (message: string, knowledge: Record<string, unknown>) =>
+  decideSurface({
+    message,
+    toolResults: [],
+    idFactory: () => "sfc-test",
+    now: NOW,
+    knowledge: knowledge as never,
+  });
+
+describe("knowledge", () => {
+  it("recognises how people actually ask", () => {
+    for (const q of [
+      "Mere uploaded documents mein iska answer dhundo",
+      "Knowledge base se explain karo",
+      "Is PDF ke relevant sections dikhao",
+      "JARVIS, source documents ke saath answer do",
+    ]) {
+      expect(detectVisualIntent(q).intent, q).toBe("KNOWLEDGE");
+    }
+  });
+
+  it("cites the passages that were actually retrieved", () => {
+    const { directive } = withKnowledge("is pdf ke relevant sections dikhao", {
+      chunks: [chunk()],
+      retrievedAt: "2026-09-11T10:00:00.000Z",
+      outcome: "retrieved",
+    });
+    if (directive?.op !== "open") throw new Error("expected open");
+
+    expect(directive.surface.type).toBe("knowledge");
+    const data = directive.surface.data as {
+      citations: Array<{ documentId: string; chunkId: string; pages: number[]; section: string | null; score: number; excerpt: string }>;
+      retrievedAt?: string;
+    };
+    expect(data.citations).toHaveLength(1);
+    expect(data.citations[0]).toMatchObject({
+      documentId: "d1",
+      chunkId: "c1",
+      pages: [4],
+      section: "Payment",
+      score: 0.82,
+    });
+    expect(data.citations[0]?.excerpt).toContain("net 30");
+    expect(data.retrievedAt).toBe("2026-09-11T10:00:00.000Z");
+  });
+
+  it("NEVER fabricates a citation — no chunks means no panel", () => {
+    // The single most important assertion here. A sources panel with no sources
+    // implies the answer came from documents when it did not.
+    for (const outcome of ["empty", "skipped", "disabled"]) {
+      const { directive } = withKnowledge("knowledge base se explain karo", {
+        chunks: [],
+        retrievedAt: null,
+        outcome,
+      });
+      expect(directive, outcome).toBeNull();
+    }
+  });
+
+  it("opens nothing when retrieval never ran at all", () => {
+    expect(decide("knowledge base se explain karo").directive).toBeNull();
+  });
+
+  it("reports a retrieval failure honestly", () => {
+    const { directive } = withKnowledge("knowledge base se explain karo", {
+      chunks: [],
+      retrievedAt: null,
+      outcome: "failed",
+    });
+    if (directive?.op !== "open") throw new Error("expected open");
+    expect(directive.surface.type).toBe("unavailable");
+  });
+
+  it("quotes verbatim rather than paraphrasing", () => {
+    const content = "The indemnity cap is limited to fees paid in the preceding twelve months.";
+    const { directive } = withKnowledge("source documents ke saath answer do", {
+      chunks: [chunk({ content })],
+      retrievedAt: null,
+      outcome: "retrieved",
+    });
+    if (directive?.op !== "open") throw new Error("expected open");
+    const data = directive.surface.data as { citations: Array<{ excerpt: string }> };
+    expect(data.citations[0]?.excerpt).toBe(content);
+  });
+
+  it("does not put the model's prose in the evidence panel", () => {
+    // The answer is in the conversation. Repeating generated text beside
+    // verbatim excerpts, in one frame, is how a reader loses track of which is
+    // which — so there is no summary.
+    const { directive } = withKnowledge("is pdf ke relevant sections dikhao", {
+      chunks: [chunk()],
+      retrievedAt: null,
+      outcome: "retrieved",
+    });
+    if (directive?.op !== "open") throw new Error("expected open");
+    expect((directive.surface.data as { summary?: string }).summary).toBeUndefined();
+  });
+
+  it("shows only the chunks it was handed, which are the caller's own", () => {
+    // Tenant isolation lives in the retriever, which is scoped by userId. This
+    // layer must not widen that set — it copies, it does not fetch.
+    const { directive } = withKnowledge("knowledge base se explain karo", {
+      chunks: [chunk({ chunkId: "only" })],
+      retrievedAt: null,
+      outcome: "retrieved",
+    });
+    if (directive?.op !== "open") throw new Error("expected open");
+    const data = directive.surface.data as { citations: Array<{ chunkId: string }> };
+    expect(data.citations.map((c) => c.chunkId)).toEqual(["only"]);
   });
 });
 

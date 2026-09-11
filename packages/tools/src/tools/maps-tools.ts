@@ -206,7 +206,16 @@ export class MapsSearchPlaceTool extends BaseMapsTool {
     super(
       "maps.search",
       "Search Places",
-      "Search the map for a city, address, business, landmark, restaurant, hotel or airport. Set nearMe to true to bias results to the user's current location.",
+      // `nearMe` is opt-IN and narrowly scoped on purpose. Left as a bare
+      // "set it to bias results", the model set it for "Balaghat mein best
+      // restaurants dikhao" — a query that names its own city — and the tool
+      // then correctly refused for want of a location fix, so a perfectly
+      // answerable search failed. Naming a place and asking for somewhere
+      // nearby are different requests.
+      "Search the map for a city, address, business, landmark, restaurant, hotel or airport. " +
+        "Set nearMe to true ONLY when the user asks for somewhere near THEM " +
+        "(\"near me\", \"aas paas\", \"mere paas\") and names no place of their own. " +
+        "If the query names a city or area, leave nearMe false and put the place in the query.",
       [
         { name: "query", type: "string", description: "What to look for, e.g. 'Gondia' or 'cafes'", required: true },
         { name: "nearMe", type: "boolean", description: "Bias results to the user's current location", required: false },
