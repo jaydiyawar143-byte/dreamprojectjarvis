@@ -181,3 +181,54 @@ export type {
   MarketQuote,
   SystemReading,
 } from "./tools/ambient-tools.js";
+
+// Integration management — the JARVIS arm of the universal integration
+// contract. Every tool here delegates to IntegrationCommandPort, which the API
+// implements over the SAME IntegrationCommandService the REST routes use.
+export {
+  ListIntegrationsTool,
+  GetIntegrationStatusTool,
+  GetIntegrationHealthTool,
+  GetIntegrationPermissionsTool,
+  GetIntegrationAuditTool,
+  TestIntegrationConnectionTool,
+  ValidateIntegrationConfigTool,
+  ConnectIntegrationTool,
+  ConfigureIntegrationTool,
+  ReconnectIntegrationTool,
+  EnableIntegrationTool,
+  DisableIntegrationTool,
+  DisconnectIntegrationTool,
+  createIntegrationTools,
+  INTEGRATION_TOOL_IDS,
+} from "./tools/integration-tools.js";
+export type { IntegrationCommandPort } from "./tools/integration-tools.js";
+
+// Capability discovery — the answer to "what can you do?", derived from the
+// live registry and real integration state rather than from a system prompt.
+export {
+  GetAvailableCapabilitiesTool,
+  GetConnectedIntegrationsTool,
+  GetIntegrationCapabilitiesTool,
+  GetPermissionsOverviewTool,
+  createCapabilityTools,
+  CAPABILITY_TOOL_IDS,
+} from "./tools/capability-tools.js";
+export type { CapabilityPort } from "./tools/capability-tools.js";
+
+// Phase 12 — real read-only Gmail, Drive and Calendar tasks. Every tool routes
+// to the SAME GoogleWorkspaceTaskService the dashboard panels call.
+export {
+  ListUnreadGmailTool,
+  SearchGmailTool,
+  GetGmailMessageTool,
+  GetGmailThreadTool,
+  SearchDriveFilesTool,
+  ListRecentDriveFilesTool,
+  GetDriveFileMetadataTool,
+  ListUpcomingCalendarEventsTool,
+  GetCalendarEventTool,
+  createGoogleWorkspaceTools,
+  GOOGLE_WORKSPACE_TOOL_IDS,
+} from "./tools/google-workspace-tools.js";
+export type { GoogleWorkspaceTaskPort } from "./tools/google-workspace-tools.js";

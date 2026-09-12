@@ -1745,6 +1745,21 @@ export type IntegrationHealth =
   | "ERROR"
   | "NOT_CONNECTED"
   | "CONFIG_REQUIRED"
+  | "NEEDS_REAUTH"
+  | "DISABLED";
+
+/**
+ * Whether the integration is SET UP — a fact about stored configuration.
+ *
+ * Separate from health, which is whether it actually WORKS. Collapsing the two
+ * is the bug the Integration Center exists to prevent: credentials being
+ * present is not a working connection.
+ */
+export type IntegrationConnectionState =
+  | "CONNECTED"
+  | "NOT_CONNECTED"
+  | "PARTIAL"
+  | "NEEDS_REAUTH"
   | "DISABLED";
 
 export type IntegrationCategory =
@@ -1754,12 +1769,58 @@ export type IntegrationCategory =
   | "automation"
   | "advertising";
 
-export interface IntegrationCapability {
+export type IntegrationConfigKind = "oauth" | "form" | "server-managed";
+
+export type IntegrationCommand =
+  | "list"
+  | "status"
+  | "connect"
+  | "configure"
+  | "validateConfig"
+  | "testConnection"
+  | "getPermissions"
+  | "reconnect"
+  | "enable"
+  | "disable"
+  | "disconnect"
+  | "getHealth"
+  | "getAudit"
+  | "executeAction";
+
+/**
+ * One configuration field as the server reports it.
+ *
+ * `value` is only ever populated for NON-secret fields. A stored secret arrives
+ * as `hasValue: true` plus a `masked` string of dots — there is no field on
+ * this type that could carry the real value, which is the same structural
+ * control the server-side type has.
+ */
+export interface IntegrationFieldState {
+  name: string;
+  label: string;
+  kind: "secret" | "text" | "url" | "number" | "boolean";
+  required: boolean;
+  hasValue: boolean;
+  masked: string | null;
+  value: string | null;
+  serverManaged: boolean;
+  help?: string;
+}
+
+export interface IntegrationPermission {
+  id: string;
+  label: string;
+  granted: boolean;
+  access: "read" | "write";
+  service?: string;
+}
+
+export interface IntegrationActionSpec {
   id: string;
   label: string;
   available: boolean;
-  /** Marked so a connected card cannot read as "this dashboard can execute". */
-  requiresApproval?: boolean;
+  writesExternally: boolean;
+  toolId?: string;
 }
 
 export interface IntegrationUsage {
@@ -1770,26 +1831,52 @@ export interface IntegrationUsage {
   blocked: boolean;
 }
 
+export interface IntegrationAuditEntry {
+  id: string;
+  integration: string;
+  command: string;
+  result: "success" | "failure";
+  at: string;
+  detail?: string;
+}
+
+/**
+ * One integration's full state.
+ *
+ * This is the SAME shape JARVIS receives for the same question — there is one
+ * server-side type and one command service behind both. A field cannot exist
+ * for the dashboard and be missing for the agent.
+ */
 export interface Integration {
   id: string;
   name: string;
   subtitle: string;
   category: IntegrationCategory;
+  configKind: IntegrationConfigKind;
+
+  connection: IntegrationConnectionState;
   health: IntegrationHealth;
   detail: string;
-  capabilities: IntegrationCapability[];
+
   /** Non-secret identifiers only — an account email, an account id, a base URL. */
   account: { label: string; detail?: string } | null;
+
+  config: IntegrationFieldState[];
+  configComplete: boolean;
+  missingConfig: string[];
+
+  permissions: IntegrationPermission[];
+  actions: IntegrationActionSpec[];
+  enabledServices: string[];
+
   usage: IntegrationUsage | null;
-  lastCheckedAt: string | null;
+
+  lastTestedAt: string | null;
+  lastSuccessfulSyncAt: string | null;
   lastError: string | null;
+
   effectiveSource: string;
-  actions: {
-    testable: boolean;
-    connectUrl?: string;
-    configureUrl?: string;
-    disconnectUrl?: string;
-  };
+  supportedCommands: IntegrationCommand[];
 }
 
 export interface IntegrationCheckResult {
@@ -1802,6 +1889,10 @@ export async function listIntegrations(): Promise<
   ApiResponse<{ integrations: Integration[] }>
 > {
   return request("/integrations");
+}
+
+export async function getIntegration(id: string): Promise<ApiResponse<Integration>> {
+  return request(`/integrations/${id}`);
 }
 
 /** Runs a REAL connection test. Every provider's test is a read. */
@@ -1821,4 +1912,84 @@ export async function refreshIntegration(
   id: string
 ): Promise<ApiResponse<Integration>> {
   return request(`/integrations/${id}/refresh`, { method: "POST" });
+}
+
+// ---------------------------------------------------------------------------
+// The management verbs.
+//
+// Each one posts to the endpoint that the JARVIS tool of the same name reaches
+// through its port. There is no client-side business logic here and there must
+// never be: a check written in this file would be absent from the voice path.
+// ---------------------------------------------------------------------------
+
+/** Begins OAuth consent. Returns a URL for the browser to follow. */
+export async function connectIntegration(
+  id: string,
+  services?: string[]
+): Promise<ApiResponse<{ authUrl: string; services: string[]; message: string }>> {
+  return request(`/integrations/${id}/connect`, {
+    method: "POST",
+    body: JSON.stringify(services ? { services } : {}),
+  });
+}
+
+/**
+ * Saves configuration.
+ *
+ * Secrets travel OUT of the browser here and never come back. A field the user
+ * did not touch is posted as its mask, which the server reads as "unchanged"
+ * rather than overwriting the stored value with dots.
+ */
+export async function configureIntegration(
+  id: string,
+  config: Record<string, string>
+): Promise<ApiResponse<{ saved: string[]; missing: string[]; message: string; view?: Integration }>> {
+  return request(`/integrations/${id}/config`, {
+    method: "PUT",
+    body: JSON.stringify({ config }),
+  });
+}
+
+/** Validates without saving, using the same server-side validator. */
+export async function validateIntegrationConfig(
+  id: string,
+  config?: Record<string, string>
+): Promise<ApiResponse<{ valid: boolean; missing?: string[]; message: string }>> {
+  return request(`/integrations/${id}/validate`, {
+    method: "POST",
+    body: JSON.stringify({ config: config ?? {} }),
+  });
+}
+
+export async function getIntegrationPermissions(
+  id: string
+): Promise<ApiResponse<{ permissions: IntegrationPermission[]; message: string }>> {
+  return request(`/integrations/${id}/permissions`);
+}
+
+export async function getIntegrationAudit(
+  id: string,
+  limit = 20
+): Promise<ApiResponse<{ entries: IntegrationAuditEntry[]; message: string }>> {
+  return request(`/integrations/${id}/audit?limit=${limit}`);
+}
+
+export async function reconnectIntegration(
+  id: string
+): Promise<ApiResponse<{ refreshed?: boolean; message: string; view?: Integration }>> {
+  return request(`/integrations/${id}/reconnect`, { method: "POST" });
+}
+
+export async function setIntegrationEnabled(
+  id: string,
+  enabled: boolean
+): Promise<ApiResponse<{ enabled: boolean; message: string; view?: Integration }>> {
+  return request(`/integrations/${id}/${enabled ? "enable" : "disable"}`, { method: "POST" });
+}
+
+/** Removes credentials and revokes at the provider where it supports revocation. */
+export async function disconnectIntegration(
+  id: string
+): Promise<ApiResponse<{ disconnected: boolean; message: string; view?: Integration }>> {
+  return request(`/integrations/${id}`, { method: "DELETE" });
 }

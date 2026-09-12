@@ -10,7 +10,10 @@ export function ChatArea() {
     useChatStore();
 
   return (
-    <div className="flex-1 flex flex-col h-screen">
+    // `h-full min-h-0` rather than `h-screen`: the parent already owns the
+    // viewport height, and `min-h-0` is what lets the message list inside
+    // actually shrink and scroll instead of growing the page.
+    <div className="flex h-full min-h-0 flex-1 flex-col">
       {error && (
         <div className="bg-red-900/30 border border-red-800 text-red-300 px-4 py-3 flex items-center justify-between">
           <div className="flex items-center gap-2">

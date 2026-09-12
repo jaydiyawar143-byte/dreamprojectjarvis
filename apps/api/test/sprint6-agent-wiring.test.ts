@@ -80,6 +80,29 @@ const ALL_REGISTERED_TOOLS = [
   "google.insights",
   "whatsapp.send",
   "n8n.trigger",
+  // Integration management — registered by the container whenever
+  // JARVIS_ENCRYPTION_KEY is set, i.e. whenever a credential can be stored at
+  // all. These are the JARVIS arm of the two-path integration contract.
+  "integration.list",
+  "integration.status",
+  "integration.health",
+  "integration.permissions",
+  "integration.audit",
+  "integration.test",
+  "integration.validate",
+  "integration.connect",
+  "integration.configure",
+  "integration.reconnect",
+  "integration.enable",
+  "integration.disable",
+  "integration.disconnect",
+  // Capability discovery — registered alongside the integration tools, and
+  // granted to EVERY policy so a capability question never falls back to an
+  // agent's own system prompt.
+  "capabilities.list",
+  "capabilities.connected",
+  "capabilities.integration",
+  "capabilities.permissions",
   // Sprint 7 — registered by the container when BROWSER_ENABLED is set.
   "browser.navigate",
   "browser.inspect",
@@ -101,6 +124,15 @@ const ALL_REGISTERED_TOOLS = [
   "maps.route",
   "maps.distance",
   "maps.place",
+  // Ambient reads — registered unconditionally alongside the maps tools. These
+  // were granted to the general assistant when they were added but never listed
+  // here, which left the "no policy grants an unregistered tool" check below
+  // failing on `weather.current`.
+  "weather.current",
+  "market.quote",
+  "system.status",
+  "time.now",
+  "tasks.list",
 ];
 
 function fakeTool(overrides: Partial<ITool> & { id: string }): ITool {
@@ -141,6 +173,20 @@ const stubProvider = {
 
 // ---------------------------------------------------------------------------
 
+/**
+ * Tool names with the cross-cutting MANAGEMENT groups removed.
+ *
+ * Integration management and capability discovery are granted to every agent
+ * on purpose — "is this connected?" and "what can you do?" are asked of
+ * whichever agent the router picked, and an agent without them answers from its
+ * own system prompt, which is the bug capability discovery exists to remove.
+ *
+ * So the per-agent assertions below are about what an agent can ACT with. The
+ * model sees sanitized names (dots become dashes), hence the dashed prefixes.
+ */
+const actingOnly = (names: string[]): string[] =>
+  names.filter((n) => !n.startsWith("integration-") && !n.startsWith("capabilities-"));
+
 describe("Sprint 6 — per-agent tool definition filtering", () => {
   const all = definitionsFor(ALL_REGISTERED_TOOLS);
 
@@ -156,36 +202,60 @@ describe("Sprint 6 — per-agent tool definition filtering", () => {
     expect(defs).not.toContain("google-insights");
   });
 
-  it("offers the automation agent exactly one tool", () => {
+  it("offers the automation agent exactly one ACTING tool", () => {
     const defs = toolDefsFor(
       all,
       AGENT_POLICIES[AGENT_IDS.automation]!.allowedTools
     ).map((d) => d.name);
 
-    expect(defs).toEqual(["n8n-trigger"]);
+    // One tool that can do something, plus the read-only integration lookups
+    // that let it answer "is n8n still connected?" without guessing.
+    expect(actingOnly(defs)).toEqual(["n8n-trigger"]);
+    expect(defs).not.toContain("whatsapp-send");
+    expect(defs).not.toContain("meta-insights");
+    // It can READ integration state; it cannot change anyone's connection.
+    expect(defs).not.toContain("integration-disconnect");
+    expect(defs).not.toContain("integration-configure");
   });
 
-  it("offers the communication agent exactly one tool", () => {
+  it("offers the communication agent exactly one ACTING tool", () => {
     const defs = toolDefsFor(
       all,
       AGENT_POLICIES[AGENT_IDS.communication]!.allowedTools
     ).map((d) => d.name);
 
-    expect(defs).toEqual(["whatsapp-send"]);
+    expect(actingOnly(defs)).toEqual(["whatsapp-send"]);
+    expect(defs).not.toContain("n8n-trigger");
+    expect(defs).not.toContain("meta-insights");
+    expect(defs).not.toContain("integration-disconnect");
   });
 
-  it("offers the knowledge agent nothing", () => {
-    expect(
-      toolDefsFor(all, AGENT_POLICIES[AGENT_IDS.knowledge]!.allowedTools)
-    ).toEqual([]);
+  it("offers the knowledge agent nothing it can ACT with", () => {
+    // Retrieval already happened before this agent ran, so it still owns no
+    // search tool and no provider tool. It holds capability discovery only, so
+    // a "what can you do?" landing here reaches the registry.
+    const defs = toolDefsFor(all, AGENT_POLICIES[AGENT_IDS.knowledge]!.allowedTools).map(
+      (d) => d.name
+    );
+    expect(actingOnly(defs)).toEqual([]);
+    expect(defs.every((n) => n.startsWith("capabilities-"))).toBe(true);
   });
 
-  it("offers the Google agent only Google tools", () => {
+  it("offers the Google agent only Google tools and its own connection lifecycle", () => {
     const defs = toolDefsFor(all, AGENT_POLICIES[AGENT_IDS.googleAds]!.allowedTools).map(
       (d) => d.name
     );
 
-    expect(defs).toEqual(["google-accounts", "google-campaigns", "google-insights"]);
+    expect(actingOnly(defs)).toEqual([
+      "google-accounts",
+      "google-campaigns",
+      "google-insights",
+    ]);
+    // "Google Ads reconnect karo" routes here, so this agent owns the
+    // management verbs. It still cannot touch another provider's data.
+    expect(defs).toContain("integration-reconnect");
+    expect(defs).not.toContain("meta-insights");
+    expect(defs).not.toContain("whatsapp-send");
   });
 
   it("no longer offers the general assistant the external-integration tools", () => {
@@ -205,8 +275,15 @@ describe("Sprint 6 — per-agent tool definition filtering", () => {
       ALL_REGISTERED_TOOLS.filter((t) => !t.startsWith("whatsapp") && !t.startsWith("n8n"))
     );
 
+    // Nothing it can ACT with. The integration lookups survive, because they
+    // describe JARVIS's own configuration and stay meaningful — in fact
+    // especially meaningful — when the provider is unconfigured.
     expect(
-      toolDefsFor(partial, AGENT_POLICIES[AGENT_IDS.communication]!.allowedTools)
+      actingOnly(
+        toolDefsFor(partial, AGENT_POLICIES[AGENT_IDS.communication]!.allowedTools).map(
+          (d) => d.name
+        )
+      )
     ).toEqual([]);
     expect(
       toolDefsFor(partial, AGENT_POLICIES[AGENT_IDS.metaAds]!.allowedTools).length

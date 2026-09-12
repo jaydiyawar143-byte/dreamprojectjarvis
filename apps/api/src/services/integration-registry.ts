@@ -56,6 +56,14 @@ export type IntegrationHealth =
   | "UNVERIFIED"
   /** Configured, but the last verification failed. */
   | "ERROR"
+  /**
+   * The provider REJECTED the stored authorization — a revoked grant, a refresh
+   * token Google will no longer honour. Distinct from ERROR because the remedy
+   * is different and only the user can apply it: no amount of retrying fixes a
+   * grant that no longer exists, so the UI must offer re-consent rather than a
+   * Test button.
+   */
+  | "NEEDS_REAUTH"
   /** Nothing is configured for this integration. */
   | "NOT_CONNECTED"
   /** Partially configured — some required settings are missing. */
@@ -202,6 +210,8 @@ export interface IntegrationDeps {
       scopes: string[];
       connectedAt: Date;
       expiresAt: Date;
+      /** Set once the grant is gone at Google's end. A retry cannot clear it. */
+      revokedAt?: Date | null;
     } | null>;
   } | null;
   /** Decrypted Meta credentials for one user, or null. Supplied by the route. */
@@ -563,6 +573,17 @@ async function testGoogle(userId: string, deps: IntegrationDeps): Promise<CheckR
     return {
       health: "DEGRADED",
       detail: `Access token expired at ${connection.expiresAt.toISOString()}. It will be refreshed on the next Ads call; if that fails, reconnect.`,
+      checkedAt: now,
+    };
+  }
+
+  // A grant the user revoked at Google's end still has a local row until
+  // something tries to use it. `revokedAt` is set by the disconnect path and by
+  // a refused refresh, and it is the one state a retry cannot clear.
+  if (connection.revokedAt != null) {
+    return {
+      health: "NEEDS_REAUTH",
+      detail: "The Google grant has been revoked. Reconnect to authorize again.",
       checkedAt: now,
     };
   }

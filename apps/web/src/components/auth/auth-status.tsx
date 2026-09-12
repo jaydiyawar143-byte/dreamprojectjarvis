@@ -1,12 +1,26 @@
 "use client";
 
 import { motion } from "framer-motion";
-import { AlertTriangle, Check, ShieldCheck } from "lucide-react";
+import { AlertTriangle, Check, ShieldCheck, WifiOff } from "lucide-react";
 import { springTechnical } from "./motion";
 
 export type StageKey = "identity" | "credential" | "security" | "system";
 export type StageState = "pending" | "active" | "ok" | "failed";
 export type AuthPhase = "idle" | "authenticating" | "granted" | "denied";
+
+/**
+ * Error codes that mean the request never reached a server.
+ *
+ * These are produced CLIENT-SIDE by `lib/api.ts` when `fetch` throws — there is
+ * no server response behind them. Rendering them as "Access Denied" tells the
+ * operator to check credentials that were never even submitted anywhere, which
+ * is the wrong instruction and costs real debugging time.
+ */
+const TRANSPORT_FAILURE_CODES = new Set(["NETWORK_ERROR", "ABORTED"]);
+
+export function isTransportFailure(code?: string): boolean {
+  return code !== undefined && TRANSPORT_FAILURE_CODES.has(code);
+}
 
 export const STAGE_ORDER: StageKey[] = ["identity", "credential", "security", "system"];
 
@@ -80,13 +94,20 @@ export function AuthStatus({
   phase,
   stages,
   error,
+  errorCode,
   onDismiss,
 }: {
   phase: AuthPhase;
   stages: Record<StageKey, StageState>;
   error?: string;
+  /** API envelope error code. Absent when the request never reached a server. */
+  errorCode?: string;
   onDismiss?: () => void;
 }) {
+  // A failed CONNECTION and a rejected CREDENTIAL are different problems with
+  // different remedies, so they get different panels. Collapsing them is what
+  // made a stopped API server read as a wrong password.
+  const unreachable = isTransportFailure(errorCode);
 
   if (phase === "idle") return null;
 
@@ -155,21 +176,42 @@ export function AuthStatus({
           animate={{ opacity: 1, x: 0 }}
           transition={{ duration: 0.3 }}
           className="flex flex-col items-center text-center"
+          data-testid={unreachable ? "auth-unreachable" : "auth-denied"}
         >
-          <span className="mb-4 flex h-11 w-11 items-center justify-center rounded-full border border-sys-danger/40 bg-sys-danger/10">
-            <AlertTriangle className="h-5 w-5 text-sys-danger" aria-hidden="true" />
+          {/* Amber, not red: an unreachable server is an outage, not a rejected
+              identity, and colouring it as a security event misreads the room. */}
+          <span
+            className={`mb-4 flex h-11 w-11 items-center justify-center rounded-full border ${
+              unreachable
+                ? "border-amber-400/40 bg-amber-400/10"
+                : "border-sys-danger/40 bg-sys-danger/10"
+            }`}
+          >
+            {unreachable ? (
+              <WifiOff className="h-5 w-5 text-amber-300" aria-hidden="true" />
+            ) : (
+              <AlertTriangle className="h-5 w-5 text-sys-danger" aria-hidden="true" />
+            )}
           </span>
-          <p className="font-mono text-[0.8rem] uppercase tracking-hud text-sys-danger">
-            Access Denied
+          <p
+            className={`font-mono text-[0.8rem] uppercase tracking-hud ${
+              unreachable ? "text-amber-300" : "text-sys-danger"
+            }`}
+          >
+            {unreachable ? "Connection Failed" : "Access Denied"}
           </p>
 
-          {/* The real server message, verbatim. Never replaced by flavour text. */}
+          {/* The real message, verbatim. Never replaced by flavour text. */}
           <p className="mt-3 max-w-[19rem] text-[0.78rem] leading-relaxed text-sys-text">
-            {error || "Identity verification failed."}
+            {unreachable
+              ? "Could not reach the JARVIS API. Your credentials were not submitted."
+              : error || "Identity verification failed."}
           </p>
 
+          {/* The REMEDY, and it must match the actual fault. Telling someone to
+              re-check a password when the server is down is a wrong turn. */}
           <p className="mt-2.5 font-mono text-xs uppercase tracking-hud text-sys-dim">
-            Check Operator ID and Access Key
+            {unreachable ? "Check that the API server is running" : "Check Operator ID and Access Key"}
           </p>
 
           {onDismiss && (

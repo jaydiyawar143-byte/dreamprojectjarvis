@@ -169,6 +169,29 @@ export function productionLikeTools(): ITool[] {
     write("whatsapp.send"),
     write("n8n.trigger"),
     read("data.csv.analyze"),
+    // Integration management. The reads and the own-store writes are
+    // unapproved; only `integration.disconnect` is modelled as an external side
+    // effect, because it revokes a token at the provider and cannot be undone
+    // from inside JARVIS.
+    read("integration.list"),
+    read("integration.status"),
+    read("integration.health"),
+    read("integration.permissions"),
+    read("integration.audit"),
+    read("integration.test"),
+    read("integration.validate"),
+    read("integration.connect"),
+    read("integration.configure"),
+    read("integration.reconnect"),
+    read("integration.enable"),
+    read("integration.disable"),
+    write("integration.disconnect"),
+    // Capability discovery. All READ_ONLY: asking what you can do changes
+    // nothing, and none of these can execute what they describe.
+    read("capabilities.list"),
+    read("capabilities.connected"),
+    read("capabilities.integration"),
+    read("capabilities.permissions"),
     // Sprint 7 — browser. The four reads are open; the six actions are all
     // approval-gated, which is what `write()` models here.
     read("browser.navigate"),

@@ -9,16 +9,17 @@
 //
 // THREE THINGS IT DELIBERATELY DOES NOT DO.
 //
-// 1. IT DOES NOT SAVE SECRETS. The credential form stays at Settings →
-//    Connections, which is the one path that validates, encrypts, stores and
-//    audits. A second form here would be a second way to get that wrong. The
-//    drawer links there instead.
+// 1. IT HOLDS NO BUSINESS LOGIC. Every control posts to an endpoint that the
+//    identically-named JARVIS tool also reaches, through ONE backend service.
+//    A check written in this file would be a check the voice path does not
+//    perform, and the two ways of operating an integration would quietly stop
+//    being equivalent.
 //
-// 2. IT DOES NOT EXECUTE. There is no button that sends a WhatsApp message,
-//    triggers a workflow or changes a Meta budget. Those are tools, and tools
-//    run USER → Orchestrator → agent → ToolExecutor → permission → approval →
-//    audit. A dashboard shortcut around that is the one thing this page must
-//    never become.
+// 2. IT DOES NOT EXECUTE UNGATED. There is no button that sends a WhatsApp
+//    message, triggers a workflow or changes a Meta budget without
+//    confirmation. Those are tools, and tools run USER → ToolExecutor →
+//    permission → approval → audit. A dashboard shortcut around that is the one
+//    thing this page must never become.
 //
 // 3. IT DOES NOT GUESS. An integration whose credentials exist but has not been
 //    verified reads "Not checked", never "Connected". The Test button is the
@@ -33,11 +34,11 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Search } from "lucide-react";
 
 import {
-  connectGoogle,
-  disconnectGoogle,
+  connectIntegration,
+  getIntegration,
   listIntegrations,
-  refreshIntegration,
-  removeCredentials,
+  reconnectIntegration,
+  setIntegrationEnabled,
   testIntegration,
   type Integration,
   type IntegrationCategory,
@@ -73,12 +74,13 @@ function matchesFilter(integration: Integration, filter: Filter): boolean {
       return integration.health === "NOT_CONNECTED" || integration.health === "DISABLED";
     case "attention":
       // Anything an operator would want to act on: a failed check, a partial
-      // configuration, or a degraded provider. "Not checked" is not attention —
-      // it is simply unverified.
+      // configuration, a degraded provider, or a grant that has expired. "Not
+      // checked" is not attention — it is simply unverified.
       return (
         integration.health === "ERROR" ||
         integration.health === "DEGRADED" ||
-        integration.health === "CONFIG_REQUIRED"
+        integration.health === "CONFIG_REQUIRED" ||
+        integration.health === "NEEDS_REAUTH"
       );
     default:
       return true;
@@ -121,6 +123,19 @@ export default function IntegrationsPage() {
     );
   }, []);
 
+  /** Re-reads ONE card from the server, so a change is never guessed at. */
+  const reload = useCallback(
+    async (id: string) => {
+      const res = await getIntegration(id);
+      if (res.success && res.data) {
+        patch(id, res.data);
+        return;
+      }
+      void load();
+    },
+    [patch, load]
+  );
+
   const runTest = useCallback(
     async (id: string) => {
       setBusyId(id);
@@ -132,73 +147,83 @@ export default function IntegrationsPage() {
         patch(id, {
           health: res.data.health,
           detail: res.data.detail,
-          lastCheckedAt: res.data.checkedAt,
+          lastTestedAt: res.data.checkedAt,
           lastError:
             res.data.health === "ERROR" || res.data.health === "DEGRADED" ? res.data.detail : null,
         });
         return;
       }
+      // A failed test is a RESULT, not a page error: the reason the server gave
+      // is the most useful thing on screen, so it is shown rather than hidden
+      // behind a generic message.
       setNotice(res.error?.message ?? "The connection test could not be completed.");
+      await reload(id);
     },
-    [patch]
+    [patch, reload]
   );
 
-  const runConnect = useCallback(async (integration: Integration) => {
-    setBusyId(integration.id);
-    setNotice(null);
-
-    // Google is the only OAuth integration. Everything else is configured on the
-    // server or through the credential form, and says so.
-    if (integration.id === "google") {
-      const res = await connectGoogle();
-      setBusyId(null);
-      if (res.success && res.data?.authUrl) {
-        // The authorisation URL is built and signed by the server; the browser
-        // only follows it.
-        window.location.href = res.data.authUrl;
-        return;
-      }
-      setNotice(res.error?.message ?? "Could not start the Google authorization flow.");
-      return;
-    }
-
-    setBusyId(null);
-    setNotice(
-      integration.actions.configureUrl
-        ? "Enter credentials at Settings → Connections, then test the connection here."
-        : "This integration is configured from the server environment. Set its variables and restart."
-    );
-  }, []);
-
-  const runDisconnect = useCallback(
+  /**
+   * Begins consent.
+   *
+   * The authorization URL is built and signed by the SERVER — the browser only
+   * follows it. Nothing about the scope set is decided here, which is what
+   * stops the page from asking for more access than the server intends.
+   */
+  const runConnect = useCallback(
     async (integration: Integration) => {
       setBusyId(integration.id);
       setNotice(null);
 
-      // Both paths go through the EXISTING endpoints, which revoke where the
-      // provider supports it, delete the encrypted credential and write an
-      // audit event. Nothing is deleted here directly.
-      const res =
-        integration.id === "google" ? await disconnectGoogle() : await removeCredentials("meta");
+      const res = await connectIntegration(integration.id);
+      setBusyId(null);
 
-      if (!res.success) {
-        setBusyId(null);
-        setNotice(res.error?.message ?? "Could not disconnect.");
+      if (res.success && res.data?.authUrl) {
+        window.location.href = res.data.authUrl;
         return;
       }
-
-      // Drop the cached verdict so the card cannot keep showing a result from
-      // before the credential was removed.
-      const refreshed = await refreshIntegration(integration.id);
-      setBusyId(null);
-      if (refreshed.success && refreshed.data) {
-        patch(integration.id, refreshed.data);
-        setOpenId(null);
-      } else {
-        void load();
-      }
+      setNotice(res.error?.message ?? "Could not start the authorization flow.");
     },
-    [patch, load]
+    []
+  );
+
+  /**
+   * Refreshes authorization without discarding the connection.
+   *
+   * When the provider refuses the refresh the server answers with a re-consent
+   * link inside the message, which is shown verbatim — it is the actionable
+   * part, and paraphrasing it would lose the link.
+   */
+  const runReconnect = useCallback(
+    async (integration: Integration) => {
+      setBusyId(integration.id);
+      setNotice(null);
+
+      const res = await reconnectIntegration(integration.id);
+      setBusyId(null);
+
+      setNotice(res.success ? (res.data?.message ?? "Reconnected.") : (res.error?.message ?? "Could not reconnect."));
+      await reload(integration.id);
+    },
+    [reload]
+  );
+
+  const runToggleEnabled = useCallback(
+    async (integration: Integration, enabled: boolean) => {
+      setBusyId(integration.id);
+      setNotice(null);
+
+      const res = await setIntegrationEnabled(integration.id, enabled);
+      setBusyId(null);
+
+      if (res.success && res.data) {
+        setNotice(res.data.message);
+        if (res.data.view) patch(integration.id, res.data.view);
+        else await reload(integration.id);
+        return;
+      }
+      setNotice(res.error?.message ?? "Could not change the integration state.");
+    },
+    [patch, reload]
   );
 
   const visible = useMemo(() => {
@@ -211,7 +236,7 @@ export default function IntegrationsPage() {
         i.name.toLowerCase().includes(needle) ||
         i.subtitle.toLowerCase().includes(needle) ||
         CATEGORY_LABEL[i.category].toLowerCase().includes(needle) ||
-        i.capabilities.some((c) => c.label.toLowerCase().includes(needle))
+        i.actions.some((a) => a.label.toLowerCase().includes(needle))
       );
     });
   }, [integrations, query, filter]);
@@ -325,7 +350,8 @@ export default function IntegrationsPage() {
                     onTest={() => void runTest(integration.id)}
                     onManage={() => setOpenId(integration.id)}
                     onConnect={() => void runConnect(integration)}
-                    onDisconnect={() => void runDisconnect(integration)}
+                    onReconnect={() => void runReconnect(integration)}
+                    onToggleEnabled={(enabled) => void runToggleEnabled(integration, enabled)}
                   />
                 ))}
               </div>
@@ -340,6 +366,11 @@ export default function IntegrationsPage() {
           busy={busyId === open.id}
           onClose={() => setOpenId(null)}
           onTest={() => void runTest(open.id)}
+          onReconnect={() => void runReconnect(open)}
+          onChanged={(message) => {
+            setNotice(message);
+            void reload(open.id);
+          }}
         />
       )}
     </PageContainer>

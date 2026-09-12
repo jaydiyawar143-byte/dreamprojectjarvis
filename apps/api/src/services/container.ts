@@ -98,6 +98,12 @@ import {
   PrismaTaskRepository,
 } from "@jarvis/db";
 import { MemoryExtractionService, KnowledgeRetrievalService } from "@jarvis/memory";
+import { IntegrationCommandService } from "./integrations/command-service.js";
+import { createIntegrationTools, type IntegrationCommandPort } from "@jarvis/tools";
+import { createCapabilityTools, type CapabilityPort } from "@jarvis/tools";
+import { CapabilityService } from "./capabilities/capability-service.js";
+import { INTEGRATION_CATALOG } from "@jarvis/core";
+import { buildIntegrationCommandService } from "./integrations/build.js";
 
 export interface Container {
   tokenService: TokenService;
@@ -117,6 +123,28 @@ export interface Container {
   approvalRepo: PrismaApprovalRepository;
   /** Registry used by the approval flow to re-validate stored parameters. */
   toolRegistry: ToolRegistry;
+  /**
+   * THE single integration command path.
+   *
+   * Held on the container precisely so there is ONE instance: the REST router
+   * and the JARVIS integration tools both receive this object, which is what
+   * makes "a button and a sentence do the same thing" a fact about the object
+   * graph rather than a claim in a comment. A second construction site would
+   * quietly reintroduce the two-implementations problem this replaced.
+   *
+   * Null when JARVIS_ENCRYPTION_KEY is absent: without it no third-party
+   * secret can be stored at rest, and storing one in plaintext is not an
+   * acceptable fallback.
+   */
+  integrationCommands: IntegrationCommandService | null;
+  /**
+   * Capability discovery — the single source for "what can you do?".
+   *
+   * Shared by the REST route and the JARVIS capability tools for the same
+   * reason the command service is: one instance means a page and a spoken
+   * answer cannot disagree about what is available.
+   */
+  capabilities: CapabilityService | null;
   /**
    * UI V2 — the agent registry, exposed so `GET /api/v1/agents` can report which
    * agents ACTUALLY registered rather than which ones have a policy.
@@ -209,7 +237,25 @@ let _container: Container | null = null;
 let _browserRuntime: BrowserRuntime | null = null;
 
 function createMetaToolRegistry(
-  approvalConsumption: PrismaApprovalRepository
+  approvalConsumption: PrismaApprovalRepository,
+  /**
+   * The integration command service, when this deployment can hold secrets.
+   *
+   * Passed IN rather than constructed here so that the tools registered below
+   * and the REST routes share one object. Null means no encryption key, in
+   * which case the integration tools are not registered at all — an agent that
+   * offers to connect Google on a server that cannot store the token would be
+   * offering something it cannot do.
+   */
+  integrationCommands: IntegrationCommandService | null,
+  /**
+   * Capability discovery, or null when integration state cannot be read.
+   *
+   * Passed in for the same reason the command service is: the REST route and
+   * these tools must share ONE instance, so a rendered page and a spoken answer
+   * can never report different capabilities.
+   */
+  capabilities: CapabilityService | null
 ): ToolRegistry {
   const registry = new ToolRegistry();
   const metaAccessToken = process.env.META_ACCESS_TOKEN;
@@ -430,6 +476,59 @@ function createMetaToolRegistry(
   //
   // All READ_ONLY, no approval, no writes.
   // -------------------------------------------------------------------------
+  // -------------------------------------------------------------------------
+  // Integration management — the JARVIS arm of the two-path contract.
+  //
+  // These are what make "JARVIS, Gmail connection test karo" work, and they
+  // reach the SAME IntegrationCommandService the Integrations page posts to.
+  // The port below is the whole implementation: one method, forwarding an
+  // already-typed command. There is deliberately no provider logic in it, so a
+  // tool cannot acquire a capability the button does not have.
+  // -------------------------------------------------------------------------
+  if (integrationCommands) {
+    const integrationPort: IntegrationCommandPort = {
+      execute: (input, context) => integrationCommands.execute(input, context),
+    };
+    for (const tool of createIntegrationTools(integrationPort)) {
+      registry.register(tool);
+    }
+  } else {
+    console.log(JSON.stringify({
+      level: "info",
+      event: "integration_tools_disabled",
+      reason: "JARVIS_ENCRYPTION_KEY is not set",
+    }));
+  }
+
+  // -------------------------------------------------------------------------
+  // Capability discovery.
+  //
+  // Registered LAST, deliberately: its own report reads `registry.getAll()`, so
+  // everything above is already present by the time it can be called. The
+  // reader is a closure rather than a snapshot for the same reason — the
+  // registry object exists now, its contents are finished a few lines later.
+  //
+  // These are what make "what can you do?" answerable from the system instead
+  // of from a system prompt.
+  // -------------------------------------------------------------------------
+  if (capabilities) {
+    const capabilityPort: CapabilityPort = {
+      report: (userId) => capabilities.report(userId),
+      forIntegration: (userId, id) => capabilities.forIntegration(userId, id),
+      connectedIntegrations: (userId) => capabilities.connectedIntegrations(userId),
+      permissions: (userId) => capabilities.permissions(userId),
+    };
+    for (const tool of createCapabilityTools(capabilityPort)) {
+      registry.register(tool);
+    }
+  } else {
+    console.log(JSON.stringify({
+      level: "warn",
+      event: "capability_tools_disabled",
+      reason: "integration state unavailable (JARVIS_ENCRYPTION_KEY is not set)",
+    }));
+  }
+
   for (const tool of createAmbientTools(
     createWeatherPort(),
     createMarketPort(),
@@ -484,7 +583,41 @@ export function getContainer(options?: {
   const approvalRepo = new PrismaApprovalRepository(prisma);
   const approvalService = new ApprovalService(approvalRepo);
 
-  const toolRegistry = createMetaToolRegistry(approvalRepo);
+  // Built BEFORE the tool registry, because the JARVIS integration tools are
+  // registered into it and must be present when the agents' function
+  // definitions are computed a few lines below. Its executor is bound after the
+  // ToolExecutor exists — see `setExecutor` for why that circularity is real.
+  const integrationCommands = buildIntegrationCommandService({
+    prisma,
+    auditLogger,
+  });
+
+  // Capability discovery composes three things that already exist: the tool
+  // registry (what is registered), the agent policies (what is reachable) and
+  // the integration command service (what is actually connected, per user).
+  // It adds no provider access of its own.
+  const registryRef: { current: ToolRegistry | null } = { current: null };
+
+  const capabilityService = integrationCommands
+    ? new CapabilityService({
+        // Lazy: the registry is populated moments after this object is built.
+        toolRegistry: { getAll: () => registryRef.current?.getAll() ?? [] },
+        integrations: {
+          listIntegrations: async (userId: string) =>
+            Promise.all(
+              INTEGRATION_CATALOG.map((d) => integrationCommands.buildView(d.id, userId))
+            ),
+        },
+        // A registered tool no policy grants cannot be triggered by any
+        // conversation, so it is not a capability.
+        allowedToolIds: new Set(
+          Object.values(AGENT_POLICIES).flatMap((policy) => [...policy.allowedTools])
+        ),
+      })
+    : null;
+
+  const toolRegistry = createMetaToolRegistry(approvalRepo, integrationCommands, capabilityService);
+  registryRef.current = toolRegistry;
 
   const adapter = new OpenAIAdapter();
 
@@ -499,51 +632,77 @@ export function getContainer(options?: {
   const toolDefsFor = (allowed: readonly string[]): AIToolDefinition[] =>
     agentTools.filter((def) => isToolAllowed(def.name, allowed));
 
+  // -------------------------------------------------------------------------
+  // The general assistant's system prompt.
+  //
+  // ROOT CAUSE THIS REPLACES. This prompt used to open with "You are JARVIS, a
+  // helpful AI assistant with direct access to the user's Meta Ads account" and
+  // then describe only Meta tooling. Because this agent is the ROUTING
+  // FALLBACK — every message matching no domain signal lands here, including
+  // "what can you do?" — that identity became the answer to every capability
+  // question, on every deployment, regardless of what was registered or
+  // connected. It also listed Gmail actions on servers with no Google OAuth
+  // client, because a prompt cannot know that and was never asked to.
+  //
+  // The fix is not better wording. It is removing the claim entirely: this
+  // agent no longer describes its own capabilities at all, and is instead
+  // required to call `get_available_capabilities`, which derives the answer
+  // from the live tool registry and the user's real integration state.
+  //
+  // The Meta account id is still injected, because Meta tools need it as a
+  // parameter — but it is now explicitly marked as never-to-be-displayed, and
+  // the chat route masks identifiers on the way out as a second line of
+  // defence.
+  // -------------------------------------------------------------------------
   const systemPrompt = [
-    "You are JARVIS, a helpful AI assistant with direct access to the user's Meta Ads account.",
+    "You are JARVIS, a personal AI operating system. You are a general-purpose assistant with many tools across several domains — advertising, maps and location, web browsing, automations, messaging, documents, and your own integration management.",
     "",
-    "You have tools to read and manage Meta Ads campaigns. The Meta ad account ID is already configured in the system — you do NOT need to ask the user for it.",
+    "=== CAPABILITY QUESTIONS: ALWAYS USE THE TOOL ===",
+    "You do NOT know what you can do. Your tools and your connected integrations differ per deployment and per user, and change at runtime.",
+    "For ANY question about your capabilities, tools, features, permissions or what is connected — including 'what can you do', 'tum kya kar sakte ho', 'available tools batao', 'what are your features', 'mere tools aur permissions batao' — you MUST call `get_available_capabilities` (registry id `capabilities.list`) and answer from its result.",
+    "NEVER answer a capability question from memory, from this prompt, or from what you have seen in the conversation. You do not have that information; the tool does.",
+    "Related tools, to be used in preference to guessing:",
+    "- `capabilities.connected` — which integrations are actually connected.",
+    "- `capabilities.integration` — what can be done with ONE integration (gmail, drive, maps, meta, …).",
+    "- `capabilities.permissions` — which permissions are granted versus merely known.",
     "",
-    `IMPORTANT: Your configured Meta Ad Account ID is: ${process.env.META_AD_ACCOUNT_ID}. When calling any Meta tool that requires an "accountId" parameter, you MUST use exactly this value: "${process.env.META_AD_ACCOUNT_ID}". Never invent, guess, or use a different account ID.`,
+    "=== REPORTING CAPABILITIES HONESTLY ===",
+    "The capability tools return separate lists, and the distinction is the whole point:",
+    "- `executableNow` — you can do these right now. Offer them.",
+    "- `needsConfirmation` — you can do these, but they change something outside JARVIS and will stop for explicit user confirmation first. Say so.",
+    "- `unavailable` — you CANNOT do these. Each carries a `reason` and a `requiredAction`. Report them as unavailable and state what the user must do.",
+    "- `planned` — not built. Never present these as things you can do.",
+    "Never merge these lists. Never describe an unavailable or planned capability as available. If an integration is not connected, say it is not connected and give the required action.",
     "",
-    "When the user asks about their Meta Ads performance, campaigns, ad sets, ads, or insights, use the appropriate tool to fetch real data. Do NOT say you cannot access the account.",
+    "=== NEVER REVEAL IDENTIFIERS ===",
+    "Never print a full account id, customer id, phone number id, token, API key or webhook secret in your reply, even when a tool result contains one.",
+    "When you must refer to an account, use a masked form (for example act_2478••••••1624) or just the provider name.",
+    `For Meta tool calls that require an "accountId" parameter you MUST pass exactly this configured value: "${process.env.META_AD_ACCOUNT_ID ?? ""}". Use it as a PARAMETER only — never display it, never repeat it back to the user, and never include it in prose.`,
     "",
-    "For read-only queries (performance, metrics, lists), use the tools directly.",
-    "For write operations (pause, resume, budget changes, create campaign), call the tool directly. The system will handle the confirmation and approval flow automatically.",
+    "=== USING TOOLS FOR FACTS ===",
+    "Never invent, estimate or fabricate data of any kind — metrics, distances, prices, statuses, ids. If a fact requires a tool, call the tool.",
+    "Only report data a tool actually returned. Check each tool result's STATUS field.",
+    "If a tool's STATUS is not COMPLETED, or DATA_RETRIEVAL_FAILED appears, state plainly that retrieval failed and include the tool's ERROR. Do NOT present any values as factual.",
+    "If a tool returns no data, say no data was found for those criteria.",
+    "Include provenance when presenting provider data: which provider answered, and the date range.",
     "",
-    "DATE RANGE DEFAULTS:",
-    "- If the user asks about 'current performance' or 'recent performance' or doesn't specify dates, use the last 30 days.",
-    "- If the user says 'this week', use the last 7 days.",
-    "- If the user says 'this month', use the first day of the current month to today.",
-    "- If the user says 'last month', use the first day of the previous month to the last day of the previous month.",
-    "- Always use YYYY-MM-DD format.",
-    "- Do NOT ask the user for dates if you can infer a reasonable default.",
+    "=== ADVERTISING DATA (when asked) ===",
+    "For Meta or Google Ads questions, fetch real data with the appropriate read tool rather than describing what you could do.",
+    "DATE RANGE DEFAULTS: 'current'/'recent'/unspecified -> last 30 days; 'this week' -> last 7 days; 'this month' -> first of this month to today; 'last month' -> the whole previous month. Always YYYY-MM-DD. Do not ask for dates you can reasonably infer.",
     "",
-    "CRITICAL RULES — ANTI-HALLUCINATION:",
-    "- NEVER invent, estimate, or fabricate Meta Ads metrics (Spend, CTR, CPC, CPM, CPA, conversions, ROAS, impressions, clicks, or any other numeric values).",
-    "- ONLY report data that was ACTUALLY returned by a tool. Check each tool result's STATUS field.",
-    "- If a tool's STATUS is not COMPLETED, or if DATA_RETRIEVAL_FAILED appears, you MUST NOT present any metrics as factual values.",
-    "- If data retrieval failed, explicitly state: 'Meta data retrieval failed' and include the ERROR from the tool result.",
-    "- When presenting real data, include provenance: source (Meta API), account ID, and date range.",
-    "- If a tool returns DATA: (empty — no data returned), state that no data was found for the specified criteria.",
-    "- Never say 'Source: Meta API' unless the tool actually returned real data with STATUS: COMPLETED.",
+    "=== WRITES AND APPROVALS ===",
+    "For write operations, call the tool directly. The system intercepts it, creates a pending action and runs the confirmation and approval flow.",
+    "When the system returns a pending action, present the details and ask the user to confirm. NEVER say 'I cannot proceed' — a pending action is the normal workflow.",
+    "When the user confirms ('haan kar do', 'yes', 'go ahead'), the system executes it; you do not call the tool again.",
+    "Never claim a mutation happened without a tool result confirming it.",
     "",
-    "MULTI-TURN CONTEXT RESOLUTION:",
-    "- You have access to the FULL conversation history. Use it to resolve references.",
-    "- When the user says short follow-ups like 'yes', 'please do', 'do it', 'proceed', 'create it', 'go ahead', 'haan', 'kar do', 'nahi tum karo', 'same', 'same details', 'proceed with that' — resolve them against the immediately preceding conversation context.",
-    "- NEVER re-ask for information that was ALREADY provided in the conversation.",
-    "- If all required information for a requested action is available in the conversation history, proceed directly.",
-    "- If information is genuinely missing for a required action, ask ONLY for the specific missing fields.",
-    "- Do NOT invent or guess values the user has not provided.",
-    "- For write operations: call the tool directly with all the parameters the user has provided. The system will create a pending action and handle the confirmation flow.",
-    "- When the user confirms (e.g. 'please do', 'yes', 'go ahead'), the system will automatically execute the confirmed action. You do not need to call the tool again.",
+    "=== MULTI-TURN CONTEXT ===",
+    "You have the full conversation history. Resolve short follow-ups ('yes', 'kar do', 'proceed', 'same', 'nahi tum karo') against the immediately preceding context.",
+    "NEVER re-ask for information already provided. If everything needed is present, proceed. If something is genuinely missing, ask only for that.",
+    "Do not invent or guess values the user has not provided.",
     "",
-    "APPROVAL HANDLING:",
-    "- The system will automatically intercept write tool calls and create pending actions for user confirmation.",
-    "- When the system returns a pending action, present the details to the user and ask them to confirm.",
-    "- NEVER say 'I cannot proceed' or 'unfortunately I cannot' when you see a pending action. This is a normal part of the workflow.",
-    "- When the user confirms (e.g. 'haan kar do', 'yes', 'go ahead'), the system will automatically execute the action.",
-    "- When the tool returns STATUS: COMPLETED with DATA, the action was executed successfully. Present the results to the user.",
+    "=== LANGUAGE ===",
+    "Reply in the language and register the user wrote in — English, Hindi or Hinglish. Keep technical identifiers in English.",
   ].join("\n");
 
   const agent = new ConversationalAssistant({
@@ -805,6 +964,12 @@ export function getContainer(options?: {
 
   const recommendationRepo = new PrismaRecommendationRepository(prisma);
 
+  // The execution authority, bound once now that it exists. An integration
+  // action requested by EITHER path therefore still runs through the permission
+  // check, the approval gate and the journal: this service gates actions, it
+  // does not execute them.
+  integrationCommands?.setExecutor(toolExecutor);
+
   _container = {
     tokenService,
     authService,
@@ -815,6 +980,8 @@ export function getContainer(options?: {
     approvalRepo,
     toolRegistry,
     agentRegistry,
+    integrationCommands,
+    capabilities: capabilityService,
     executor: toolExecutor,
     recommendationRepo,
     lifecycle: options?.lifecycle,

@@ -171,18 +171,31 @@ const has = (el: Element, c: string) => classes(el).has(c);
 // ---------------------------------------------------------------------------
 
 describe("dashboard shell viewport mode", () => {
-  it("keeps ordinary document scrolling by default", () => {
-    // Eleven routes wear this shell and are documents: /approvals and
-    // /knowledge are lists that legitimately run past the fold. Capping them at
-    // the viewport would strand their content behind a scrollbar that no longer
-    // exists, so the default must NOT change.
+  it("keeps long pages reachable by scrolling INSIDE main, not the document", () => {
+    // The intent here is unchanged and still load-bearing: /approvals and
+    // /knowledge are lists that legitimately run past the fold, and capping
+    // them at the viewport must not strand their content.
+    //
+    // What changed is WHERE the scrollbar lives. The document no longer scrolls
+    // at all (html/body are pinned in globals.css, because the chat route was
+    // putting a scrollbar on the page), so `min-h-screen` would now be the
+    // worst outcome — content could grow with nothing able to scroll it, and it
+    // would simply clip. Instead the shell is viewport-height and `<main>`
+    // carries the scroll region.
     renderShell(false);
 
     const shell = screen.getByTestId("dashboard-shell");
-    expect(has(shell, "min-h-screen")).toBe(true);
-    expect(has(shell, "overflow-hidden")).toBe(false);
+    expect(has(shell, "min-h-screen")).toBe(false);
+    expect(has(shell, "h-[100dvh]")).toBe(true);
     expect(shell.getAttribute("data-fullscreen")).toBeNull();
-    expect(has(screen.getByTestId("dashboard-main"), "overflow-hidden")).toBe(false);
+
+    const main = screen.getByTestId("dashboard-main");
+    // Reachable: it scrolls itself.
+    expect(has(main, "overflow-y-auto")).toBe(true);
+    expect(has(main, "overflow-hidden")).toBe(false);
+    // And able to shrink, or the overflow rule would never engage.
+    expect(has(main, "min-h-0")).toBe(true);
+    expect(main.getAttribute("data-scroll")).toBe("internal");
   });
 
   it("pins itself to the viewport when a route opts in", () => {

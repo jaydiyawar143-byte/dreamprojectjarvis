@@ -26,20 +26,35 @@ interface AuthState {
   authenticated: boolean;
 }
 
+/**
+ * What a failed auth attempt reports back.
+ *
+ * `code` travels alongside the message because the two say different things and
+ * the UI must distinguish them: `AUTHENTICATION_REQUIRED` means the credentials
+ * were rejected, `NETWORK_ERROR` means the request never reached a server. A
+ * screen that only has the message has to guess, and guessing wrong tells
+ * someone to re-type a password that was never the problem.
+ */
+export interface AuthFailure {
+  error?: string;
+  /** The API envelope's error code, when there was a response at all. */
+  code?: string;
+}
+
 interface AuthContextType extends AuthState {
   login: (
     email: string,
     password: string,
     rememberMe?: boolean
-  ) => Promise<{ error?: string }>;
+  ) => Promise<AuthFailure>;
   register: (
     email: string,
     name: string,
     password: string,
     rememberMe?: boolean
-  ) => Promise<{ error?: string }>;
+  ) => Promise<AuthFailure>;
   /** Picks up a session created by an OAuth redirect. */
-  adoptSession: () => Promise<{ error?: string }>;
+  adoptSession: () => Promise<AuthFailure>;
   logout: () => Promise<void>;
 }
 
@@ -107,7 +122,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         });
         return {};
       }
-      return { error: res.error?.message || "Login failed" };
+      return {
+        error: res.error?.message || "Login failed",
+        ...(res.error?.code ? { code: res.error.code } : {}),
+      };
     },
     []
   );
@@ -125,7 +143,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         });
         return {};
       }
-      return { error: res.error?.message || "Registration failed" };
+      return {
+        error: res.error?.message || "Registration failed",
+        ...(res.error?.code ? { code: res.error.code } : {}),
+      };
     },
     []
   );
@@ -146,7 +167,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return {};
     }
     clearTokens();
-    return { error: res.error?.message || "Could not load your account" };
+    return {
+      error: res.error?.message || "Could not load your account",
+      ...(res.error?.code ? { code: res.error.code } : {}),
+    };
   }, []);
 
   // Revokes server-side before dropping local state, so the refresh token

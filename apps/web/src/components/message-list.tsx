@@ -31,7 +31,11 @@ export function MessageList({ messages, loading, sending, onRetry, activeConvers
   }
 
   return (
-    <div className="flex-1 overflow-y-auto px-4 py-6">
+    // `min-h-0` is load-bearing. A flex child defaults to `min-height: auto`,
+    // so with `flex-1` alone this refused to shrink below its content, grew
+    // past the viewport and put a scrollbar on the DOCUMENT — the overflow rule
+    // never engaged. This is the internal scroll region for messages.
+    <div className="min-h-0 flex-1 overflow-y-auto px-4 py-6">
       <div className="max-w-3xl mx-auto space-y-6">
         {messages.map((msg, idx) => {
           const meta = msg.metadata as Record<string, unknown> | undefined;

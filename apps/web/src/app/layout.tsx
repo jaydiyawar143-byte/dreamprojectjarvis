@@ -29,8 +29,10 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en" className={`dark ${inter.variable} ${jetbrainsMono.variable}`}>
-      <body className="bg-gray-950 font-sans text-gray-100">
+    // `h-full` on both, matching the height chain in globals.css: this is an app
+    // shell with internal scroll regions, not a scrolling document.
+    <html lang="en" className={`dark h-full ${inter.variable} ${jetbrainsMono.variable}`}>
+      <body className="h-full overflow-hidden bg-gray-950 font-sans text-gray-100">
         <AuthProvider>{children}</AuthProvider>
       </body>
     </html>

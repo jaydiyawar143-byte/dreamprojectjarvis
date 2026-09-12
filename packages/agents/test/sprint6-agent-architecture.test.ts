@@ -29,6 +29,7 @@ import {
   productionLikeTools,
   toolRegistryOf,
 } from "./helpers/sprint6-harness.js";
+import { INTEGRATION_READ_TOOLS, CAPABILITY_TOOLS } from "../src/agent-policy.js";
 
 describe("Sprint 6.1 — agent architecture", () => {
   let provider: ScriptedAIProvider;
@@ -167,19 +168,47 @@ describe("Sprint 6.1 — agent architecture", () => {
       expect(meta.allowedTools).not.toContain("n8n.trigger");
       expect(meta.allowedTools).not.toContain("google.insights");
 
+      // The specialised agents each hold their own domain tool plus the
+      // integration READS. The reads are what let an agent answer "is this
+      // still connected?" from the system instead of from the conversation;
+      // they are READ_ONLY and cannot change any provider.
       const automation = AGENT_POLICIES[AGENT_IDS.automation]!;
-      expect(automation.allowedTools).toEqual(["n8n.trigger"]);
+      expect(automation.allowedTools).toEqual([
+        "n8n.trigger",
+        ...INTEGRATION_READ_TOOLS,
+        ...CAPABILITY_TOOLS,
+      ]);
 
       const communication = AGENT_POLICIES[AGENT_IDS.communication]!;
-      expect(communication.allowedTools).toEqual(["whatsapp.send"]);
+      expect(communication.allowedTools).toEqual([
+        "whatsapp.send",
+        ...INTEGRATION_READ_TOOLS,
+        ...CAPABILITY_TOOLS,
+      ]);
 
       const google = AGENT_POLICIES[AGENT_IDS.googleAds]!;
       expect(google.allowedTools).not.toContain("whatsapp.send");
-      expect(google.allowedTools.every((t) => t.startsWith("google."))).toBe(true);
+      // Google Ads additionally owns the connection lifecycle for its OWN
+      // provider, because "Google Ads reconnect karo" routes here rather than
+      // to the fallback.
+      expect(
+        google.allowedTools.every(
+          (t) =>
+            t.startsWith("google.") ||
+            t.startsWith("integration.") ||
+            t.startsWith("capabilities.")
+        )
+      ).toBe(true);
     });
 
-    it("gives the knowledge agent no tools at all", () => {
-      expect(AGENT_POLICIES[AGENT_IDS.knowledge]!.allowedTools).toEqual([]);
+    it("gives the knowledge agent no EXECUTION tools, only capability discovery", () => {
+      // Retrieval already happened before this agent ran, so it still owns no
+      // search tool. Capability discovery is the one exception: a "what can you
+      // do?" landing here must reach the registry rather than this agent's
+      // prompt, which is the failure the capability tools exist to remove.
+      const allowed = AGENT_POLICIES[AGENT_IDS.knowledge]!.allowedTools;
+      expect([...allowed].sort()).toEqual([...CAPABILITY_TOOLS].sort());
+      expect(allowed.every((t) => t.startsWith("capabilities."))).toBe(true);
     });
 
     it("keeps the analytics agent read-only", () => {
@@ -301,12 +330,16 @@ describe("Sprint 6.1 — agent architecture", () => {
   describe("policy immutability", () => {
     it("cannot be widened at runtime", () => {
       const policy = AGENT_POLICIES[AGENT_IDS.knowledge]!;
+      const before = [...policy.allowedTools];
 
       expect(() => {
         (policy.allowedTools as string[]).push("whatsapp.send");
       }).toThrow();
 
-      expect(AGENT_POLICIES[AGENT_IDS.knowledge]!.allowedTools).toEqual([]);
+      // The property is IMMUTABILITY, not emptiness: the list is unchanged and
+      // the tool the push tried to add is still absent.
+      expect([...AGENT_POLICIES[AGENT_IDS.knowledge]!.allowedTools]).toEqual(before);
+      expect(AGENT_POLICIES[AGENT_IDS.knowledge]!.allowedTools).not.toContain("whatsapp.send");
     });
 
     it("cannot have an agent swapped into the table", () => {

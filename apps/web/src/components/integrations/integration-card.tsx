@@ -8,18 +8,22 @@
 // it is not folded into "Connected" just because credentials are present, and
 // the Test button is the only thing that can produce a green dot.
 //
-// The second rule is about EXECUTION. A capability that changes something
-// outside JARVIS is rendered with an "approval" badge. Connecting an
-// integration is configuration; sending a WhatsApp message or changing a Meta
-// budget is execution, and execution goes through ToolExecutor and stops at the
-// approval boundary. Nothing on this card can trigger one.
+// TWO AXES, SHOWN SEPARATELY. `connection` says whether it is SET UP;
+// `health` says whether it WORKS. A card shows both because they answer
+// different questions and the difference is exactly where a misleading status
+// page goes wrong — "credentials saved" is not "we checked and it works".
+//
+// EVERY CONTROL HERE HAS A JARVIS EQUIVALENT. Test, Reconnect, Enable, Disable,
+// Disconnect and Configure each post to an endpoint that the identically-named
+// JARVIS tool also reaches, through one backend service. The button is not a
+// shortcut past anything the sentence has to pass.
 //
 // There is no field on `Integration` that can hold a secret, so there is
 // nothing here to accidentally render.
 // ---------------------------------------------------------------------------
 
 import { Loader2, ShieldCheck } from "lucide-react";
-import type { Integration, IntegrationHealth } from "@/lib/api";
+import type { Integration, IntegrationHealth, IntegrationConnectionState } from "@/lib/api";
 import { Badge, Button, StatusDot, type Tone } from "@/components/ui/primitives";
 import { Panel } from "@/components/dashboard/panel";
 
@@ -32,7 +36,16 @@ const HEALTH: Record<IntegrationHealth, { tone: Tone; label: string }> = {
   ERROR: { tone: "danger", label: "Error" },
   NOT_CONNECTED: { tone: "neutral", label: "Not connected" },
   CONFIG_REQUIRED: { tone: "warn", label: "Configuration required" },
+  NEEDS_REAUTH: { tone: "danger", label: "Reauthorization needed" },
   DISABLED: { tone: "neutral", label: "Disabled" },
+};
+
+const CONNECTION_LABEL: Record<IntegrationConnectionState, string> = {
+  CONNECTED: "Set up",
+  NOT_CONNECTED: "Not set up",
+  PARTIAL: "Partially configured",
+  NEEDS_REAUTH: "Authorization expired",
+  DISABLED: "Switched off",
 };
 
 /** "2 min ago" — how long since the check, not when the page loaded. */
@@ -62,29 +75,39 @@ function usageTone(level: string): { bar: string; text: string } {
   }
 }
 
+export interface IntegrationCardProps {
+  integration: Integration;
+  busy: boolean;
+  onTest: () => void;
+  onManage: () => void;
+  onConnect: () => void;
+  onReconnect: () => void;
+  onToggleEnabled: (enabled: boolean) => void;
+}
+
 export function IntegrationCard({
   integration,
   busy,
   onTest,
   onManage,
   onConnect,
-  onDisconnect,
-}: {
-  integration: Integration;
-  busy: boolean;
-  onTest: () => void;
-  onManage: () => void;
-  onConnect: () => void;
-  onDisconnect: () => void;
-}) {
+  onReconnect,
+  onToggleEnabled,
+}: IntegrationCardProps) {
   const health = HEALTH[integration.health];
-  const notConnected =
-    integration.health === "NOT_CONNECTED" || integration.health === "CONFIG_REQUIRED";
+  const can = (command: string) => integration.supportedCommands.includes(command as never);
+
+  const disabled = integration.connection === "DISABLED";
+  const needsReauth =
+    integration.connection === "NEEDS_REAUTH" || integration.health === "NEEDS_REAUTH";
+  const notSetUp =
+    integration.connection === "NOT_CONNECTED" || integration.connection === "PARTIAL";
 
   return (
     <Panel
       data-testid={`integration-card-${integration.id}`}
       data-health={integration.health}
+      data-connection={integration.connection}
       title={integration.name}
       description={integration.subtitle}
       action={<StatusDot tone={health.tone} label={health.label} />}
@@ -104,25 +127,44 @@ export function IntegrationCard({
           </div>
         )}
 
-        {/* Capabilities. A tick means this deployment can really do it. */}
+        {/* Setup state, stated separately from health so neither implies the
+            other. "Set up" plus "Not checked" is a real and common combination
+            and the card has to be able to say it. */}
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+          <span data-testid={`integration-connection-${integration.id}`} className="text-sys-dim">
+            {CONNECTION_LABEL[integration.connection]}
+          </span>
+          {!integration.configComplete && integration.missingConfig.length > 0 && (
+            <span
+              data-testid={`integration-missing-${integration.id}`}
+              className="text-amber-300/90"
+            >
+              Missing: {integration.missingConfig.join(", ")}
+            </span>
+          )}
+        </div>
+
+        {/* What this deployment can actually do once connected. Writes are
+            badged, so a connected card cannot be read as "this dashboard can
+            spend money" — it cannot; writes stop at the approval boundary. */}
         <ul className="space-y-1" data-testid={`integration-capabilities-${integration.id}`}>
-          {integration.capabilities.map((cap) => (
-            <li key={cap.id} className="flex items-center gap-2 text-xs">
+          {integration.actions.map((action) => (
+            <li key={action.id} className="flex items-center gap-2 text-xs">
               <span
                 aria-hidden
-                className={cap.available ? "text-emerald-300/90" : "text-sys-dim/60"}
+                className={action.available ? "text-emerald-300/90" : "text-sys-dim/60"}
               >
-                {cap.available ? "✓" : "✕"}
+                {action.available ? "✓" : "✕"}
               </span>
-              <span className={cap.available ? "text-sys-text/85" : "text-sys-dim/70"}>
-                {cap.label}
+              <span className={action.available ? "text-sys-text/85" : "text-sys-dim/70"}>
+                {action.label}
               </span>
-              <span className="sr-only">{cap.available ? "available" : "unavailable"}</span>
-              {cap.requiresApproval && (
+              <span className="sr-only">{action.available ? "available" : "unavailable"}</span>
+              {action.writesExternally && (
                 <Badge
                   tone="warn"
                   className="ml-auto"
-                  title="Runs through ToolExecutor and stops at the approval boundary. This page cannot trigger it."
+                  title="Changes something outside JARVIS. Requires explicit confirmation and stops at the approval boundary."
                 >
                   <ShieldCheck size={9} aria-hidden />
                   Approval
@@ -137,7 +179,8 @@ export function IntegrationCard({
           <div data-testid={`integration-usage-${integration.id}`}>
             <div className="flex items-baseline gap-2 text-xs">
               <span className="font-mono text-sys-text/85 [font-variant-numeric:tabular-nums]">
-                {integration.usage.used.toLocaleString()} / {integration.usage.limit.toLocaleString()}
+                {integration.usage.used.toLocaleString()} /{" "}
+                {integration.usage.limit.toLocaleString()}
               </span>
               <span className={`ml-auto font-mono ${usageTone(integration.usage.level).text}`}>
                 {integration.usage.percentUsed}%
@@ -162,7 +205,15 @@ export function IntegrationCard({
         )}
 
         <p className="text-xs text-sys-dim">
-          Last checked: <span data-testid={`integration-checked-${integration.id}`}>{sinceLabel(integration.lastCheckedAt)}</span>
+          Last tested:{" "}
+          <span data-testid={`integration-checked-${integration.id}`}>
+            {sinceLabel(integration.lastTestedAt)}
+          </span>
+          {" · "}
+          Last successful sync:{" "}
+          <span data-testid={`integration-sync-${integration.id}`}>
+            {sinceLabel(integration.lastSuccessfulSyncAt)}
+          </span>
         </p>
 
         {integration.lastError && (
@@ -175,28 +226,48 @@ export function IntegrationCard({
         )}
 
         <div className="flex flex-wrap gap-2 pt-1">
-          {notConnected && integration.actions.connectUrl && (
-            <Button data-testid={`integration-connect-${integration.id}`} onClick={onConnect} disabled={busy}>
-              Connect
-            </Button>
-          )}
-          {integration.actions.testable && (
+          {/* Re-authorization is the ONLY thing offered when the grant is gone:
+              a Test button here would just fail again, and offering it invites
+              the user to retry something that cannot succeed. */}
+          {needsReauth && can("reconnect") ? (
             <Button
-              data-testid={`integration-test-${integration.id}`}
-              variant="secondary"
-              onClick={onTest}
+              data-testid={`integration-reconnect-${integration.id}`}
+              onClick={onReconnect}
               disabled={busy}
             >
-              {busy ? (
-                <>
-                  <Loader2 size={11} className="animate-spin" aria-hidden />
-                  Testing…
-                </>
-              ) : (
-                "Test Connection"
-              )}
+              Reauthorize
             </Button>
+          ) : (
+            <>
+              {notSetUp && can("connect") && (
+                <Button
+                  data-testid={`integration-connect-${integration.id}`}
+                  onClick={onConnect}
+                  disabled={busy}
+                >
+                  Connect
+                </Button>
+              )}
+              {!disabled && (
+                <Button
+                  data-testid={`integration-test-${integration.id}`}
+                  variant="secondary"
+                  onClick={onTest}
+                  disabled={busy}
+                >
+                  {busy ? (
+                    <>
+                      <Loader2 size={11} className="animate-spin" aria-hidden />
+                      Testing…
+                    </>
+                  ) : (
+                    "Test Connection"
+                  )}
+                </Button>
+              )}
+            </>
           )}
+
           <Button
             data-testid={`integration-manage-${integration.id}`}
             variant="secondary"
@@ -204,16 +275,18 @@ export function IntegrationCard({
           >
             Manage
           </Button>
-          {integration.actions.disconnectUrl && (
-            <Button
-              data-testid={`integration-disconnect-${integration.id}`}
-              variant="danger"
-              onClick={onDisconnect}
-              disabled={busy}
-            >
-              Disconnect
-            </Button>
-          )}
+
+          {/* Disable, not disconnect. Switching off keeps the credential, so
+              turning it back on needs no second consent round trip — which is
+              what most people actually mean by "turn it off". */}
+          <Button
+            data-testid={`integration-toggle-${integration.id}`}
+            variant="secondary"
+            onClick={() => onToggleEnabled(disabled)}
+            disabled={busy}
+          >
+            {disabled ? "Enable" : "Disable"}
+          </Button>
         </div>
       </div>
     </Panel>

@@ -18,7 +18,7 @@ export default function ChatPage() {
 
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-950">
+      <div className="flex h-[100dvh] items-center justify-center bg-gray-950">
         <p className="text-gray-400">Loading...</p>
       </div>
     );
@@ -27,7 +27,11 @@ export default function ChatPage() {
   if (!authenticated) return null;
 
   return (
-    <div className="min-h-screen flex bg-gray-950">
+    // `min-h-screen` let this grow past the viewport; `h-[100dvh]` pins it and
+    // `overflow-hidden` keeps any inner overflow from reaching the document.
+    // `dvh` rather than `vh` so mobile browser chrome does not push the
+    // composer off-screen.
+    <div className="flex h-[100dvh] overflow-hidden bg-gray-950">
       <Sidebar />
       <ChatArea />
     </div>

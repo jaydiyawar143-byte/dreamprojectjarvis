@@ -38,9 +38,9 @@ importers:
       '@jarvis/google-ads':
         specifier: workspace:*
         version: link:../../packages/google-ads
-      '@jarvis/integrations':
+      '@jarvis/google-workspace':
         specifier: workspace:*
-        version: link:../../packages/integrations
+        version: link:../../packages/google-workspace
       '@jarvis/memory':
         specifier: workspace:*
         version: link:../../packages/memory
@@ -403,11 +403,14 @@ importers:
         specifier: ^4.1.10
         version: 4.1.10(@types/node@20.19.43)(jsdom@30.0.1)(vite@8.2.1(@types/node@20.19.43)(esbuild@0.28.2)(jiti@1.21.7)(tsx@4.23.12))
 
-  packages/integrations:
+  packages/google-workspace:
     dependencies:
       '@jarvis/core':
         specifier: workspace:*
         version: link:../core
+      '@jarvis/google-ads':
+        specifier: workspace:*
+        version: link:../google-ads
     devDependencies:
       '@types/node':
         specifier: ^20.14.0
@@ -415,6 +418,9 @@ importers:
       typescript:
         specifier: ^5.5.0
         version: 5.9.3
+      vitest:
+        specifier: ^4.1.10
+        version: 4.1.10(@types/node@20.19.43)(jsdom@30.0.1)(vite@8.2.1(@types/node@20.19.43)(esbuild@0.28.2)(jiti@1.21.7)(tsx@4.23.12))
 
   packages/memory:
     dependencies:

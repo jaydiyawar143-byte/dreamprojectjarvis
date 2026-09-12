@@ -243,17 +243,38 @@ body {
 }
 
 /* ---------------------------------------------------------------------------
-   UI V2 — horizontal overflow guard.
+   Document overflow guard — this is an APP SHELL, not a document.
 
-   Nothing in this app is meant to scroll sideways. A single overflowing child
-   (a wide table, an absolutely-positioned glow) otherwise adds a horizontal
-   scrollbar to the whole document, which on a dark full-bleed layout reads as a
-   rendering fault. Vertical scrolling is left alone.
+   Nothing in this app is meant to scroll sideways, and nothing is meant to
+   scroll the DOCUMENT either. Both axes are pinned here so a single
+   overflowing child cannot add a scrollbar to the whole page, which on a dark
+   full-bleed layout reads as a rendering fault.
+
+   `height: 100%` is what makes that safe. Without an explicit height on both
+   elements, a child asking for `height: 100%` resolves against `auto` and
+   collapses, and `overflow: hidden` would then clip content instead of letting
+   an inner region scroll it.
+   
+   SCROLLING IS NOT REMOVED, IT IS MOVED INWARDS. Long pages scroll inside
+   `<main>` and message lists scroll inside themselves — see `dashboard-shell`
+   and `message-list`. Every such region needs `min-h-0` as well as
+   `overflow-y-auto`, because a flex child's default `min-height: auto` makes it
+   refuse to shrink below its content, so it grows past the viewport and the
+   overflow rule never engages. That exact omission is what put a page-level
+   scrollbar on the chat route.
    --------------------------------------------------------------------------- */
 html,
 body {
-  overflow-x: hidden;
+  height: 100%;
+  overflow: hidden;
   max-width: 100%;
+}
+
+/* The Next.js root. It has to carry the height too, or the shell inside it has
+   nothing to be 100% of. */
+#__next,
+body > div:first-child {
+  height: 100%;
 }
 
 /* ---------------------------------------------------------------------------

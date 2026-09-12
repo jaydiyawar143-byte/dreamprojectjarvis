@@ -44,6 +44,7 @@ import { createGoogleSignInConfig, describeGoogleSignInStatus } from "@jarvis/co
 import { createGoogleSignInRouter } from "./routes/google-signin.js";
 import { createCredentialsRouter } from "./routes/credentials.js";
 import { createIntegrationsRouter } from "./routes/integrations.js";
+import { createCapabilitiesRouter } from "./routes/capabilities.js";
 import { createCommandCenterRouter } from "./routes/command-center.js";
 import { installSystemStream } from "./socket/system-stream.js";
 import { OpenAIVoiceProvider } from "@jarvis/ai-openai";
@@ -231,6 +232,15 @@ app.use(
   })
 );
 app.use("/api/v1/activity", createActivityRouter(container));
+
+// ---------------------------------------------------------------------------
+// Capability discovery — what this deployment can ACTUALLY do, per user.
+//
+// Mounted unconditionally so the route can explain its own unavailability
+// rather than 404ing: a missing endpoint is not something a UI can act on,
+// and "JARVIS_ENCRYPTION_KEY is not set" is.
+// ---------------------------------------------------------------------------
+app.use("/api/v1/capabilities", createCapabilitiesRouter(container));
 // Sprint 5.2 — Google OAuth connection management (read-only Ads integration).
 //
 // Mounted only when an encryption key is present. Without one no Google token

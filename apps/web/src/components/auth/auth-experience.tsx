@@ -40,7 +40,7 @@ export function AuthExperience({ initialMode }: { initialMode: AuthMode }) {
   const [direction, setDirection] = useState(1);
   const [handoff, setHandoff] = useState(false);
 
-  const { phase, stages, error, run, reset } = useAuthSequence(reduced);
+  const { phase, stages, error, errorCode, run, reset } = useAuthSequence(reduced);
 
   // ---------------------------------------------------------------------------
   // Google channel.
@@ -186,6 +186,7 @@ export function AuthExperience({ initialMode }: { initialMode: AuthMode }) {
           phase={phase}
           stages={stages}
           error={error ?? channelError ?? undefined}
+          errorCode={errorCode}
           onLogin={handleLogin}
           onSignup={handleSignup}
           onSwitch={switchMode}

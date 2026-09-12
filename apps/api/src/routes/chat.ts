@@ -2,6 +2,7 @@ import { Router } from "express";
 import type { Response } from "express";
 import { randomUUID } from "crypto";
 import { JarvisRequestSchema, JarvisError } from "@jarvis/core";
+import { maskIdentifiersInText } from "@jarvis/core";
 import type { SessionContext, AuthContext } from "@jarvis/core";
 import { createAuthMiddleware, type AuthenticatedRequest } from "../middleware/auth.js";
 import type { Container } from "../services/container.js";
@@ -301,6 +302,23 @@ export function createChatRouter(container: Container): Router {
         if (meta.pendingAction) {
           pendingActionData = meta.pendingAction as Record<string, unknown>;
         }
+      }
+
+      // -----------------------------------------------------------------
+      // Outbound identifier masking.
+      //
+      // The model is instructed never to print an account id, and the Meta id
+      // reaches it only as a tool PARAMETER. But a model that has a value in
+      // context will sometimes echo it, and the cost of that leaking into a
+      // screenshot or a screen share is real, so the value is scrubbed on the
+      // way out as well as withheld on the way in.
+      //
+      // Applied BEFORE persistence, so the stored transcript never holds a full
+      // identifier either — a chat history is long-lived and widely read, and
+      // masking only the live response would leave the durable copy exposed.
+      // -----------------------------------------------------------------
+      if (response.success && response.data?.message) {
+        response.data.message = maskIdentifiersInText(response.data.message);
       }
 
       if (response.success && response.data?.message) {

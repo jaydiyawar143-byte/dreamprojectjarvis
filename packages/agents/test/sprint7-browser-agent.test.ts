@@ -95,12 +95,22 @@ describe("Sprint 7 — browser agent", () => {
       expect(policy.requiredPermissions).toEqual(["read", "write"]);
     });
 
-    it("holds exactly the ten browser tools and nothing else", () => {
+    it("holds exactly the ten browser tools, plus capability discovery", () => {
       const allowed = [...getAgentPolicy(AGENT_IDS.browser)!.allowedTools];
-      expect(allowed.sort()).toEqual(
+
+      // Capability discovery is granted to every agent so "what can you do?"
+      // reaches the registry instead of this agent's system prompt. The
+      // browser-specific assertion is that nothing ELSE leaked in.
+      const browserOnly = allowed.filter((id) => !id.startsWith("capabilities."));
+      expect(browserOnly.slice().sort()).toEqual(
         [...BROWSER_READ_TOOL_IDS, ...BROWSER_ACTION_TOOL_IDS].slice().sort()
       );
-      for (const id of allowed) expect(id.startsWith("browser.")).toBe(true);
+      for (const id of browserOnly) expect(id.startsWith("browser.")).toBe(true);
+
+      // It can describe other domains; it cannot reach them.
+      for (const off of ["meta.insights", "whatsapp.send", "n8n.trigger", "maps.route"]) {
+        expect(allowed, off).not.toContain(off);
+      }
     });
 
     it("is frozen, like every other policy", () => {

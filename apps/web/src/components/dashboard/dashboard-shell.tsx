@@ -12,24 +12,33 @@
 // on screen.
 //
 // ---------------------------------------------------------------------------
-// V3.1 — `fullscreen`, and why it is OPT-IN.
+// The shell is ALWAYS viewport-height. `fullscreen` now selects only where the
+// scrolling happens.
 //
-// This shell is worn by twelve routes. Eleven of them are documents: /approvals
-// and /knowledge are lists that legitimately run past the fold, and capping
-// them at the viewport would strand their content behind a scrollbar that no
-// longer exists. So the default stays exactly as it was — `min-h-screen`, page
-// scrolls.
+// This changed when the document stopped scrolling. `html`/`body` are pinned to
+// `height: 100%; overflow: hidden` (see globals.css), because a page-level
+// scrollbar on a dark full-bleed layout reads as a rendering fault and the
+// chat route was producing one. With the document pinned, a `min-h-screen`
+// shell would be the worst of both worlds: content could still grow, but
+// nothing would be able to scroll it, so it would simply clip.
 //
-// /dashboard is the exception, and a genuinely different kind of surface: a
-// command centre is read at a glance, so it is sized TO the viewport rather
-// than allowed to grow past it. `fullscreen` switches the column from "as tall
-// as its content" to "exactly the viewport, and the workspace divides what is
-// left" — which is what lets the page itself never scroll.
+// So every route now wears the same fixed shell, and the difference is which
+// element owns the scroll region:
 //
-// The `min-h-0` on the content column is load-bearing, not defensive: a flex
-// child's default `min-height: auto` refuses to shrink below its content, so
-// without it the column would still grow past 100dvh and the `overflow-hidden`
-// below would merely CLIP the overflow instead of preventing it.
+//   fullscreen (/dashboard) — a command centre read at a glance. Its own panes
+//                             scroll internally; `<main>` must NOT, so it stays
+//                             `overflow-hidden`.
+//   everything else         — /approvals, /knowledge, /integrations and the
+//                             rest are documents that legitimately run past the
+//                             fold. `<main>` gets `overflow-y-auto`, which puts
+//                             their scrollbar inside the content column instead
+//                             of on the page. Nothing becomes unreachable.
+//
+// The `min-h-0` on the content column and on `<main>` is load-bearing, not
+// defensive: a flex child's default `min-height: auto` refuses to shrink below
+// its content, so without it the column grows past 100dvh and the overflow rule
+// never engages — it would merely CLIP. That exact omission, on the chat route's
+// message list, is what put a scrollbar on the document in the first place.
 // ---------------------------------------------------------------------------
 
 import { useCallback, useEffect, useState, type ReactNode } from "react";
@@ -75,9 +84,11 @@ export function DashboardShell({
     <div
       data-testid="dashboard-shell"
       data-fullscreen={fullscreen ? "true" : undefined}
-      className={`flex bg-sys-void text-sys-text ${
-        fullscreen ? "h-[100dvh] max-h-[100dvh] overflow-hidden" : "min-h-screen"
-      }`}
+      // ALWAYS viewport-height now, not only in fullscreen. The document no
+      // longer scrolls (see globals.css), so a `min-h-screen` shell would let
+      // content grow with nothing able to scroll it — the page would simply
+      // clip. Every route is a fixed shell with internal scroll regions.
+      className={`flex h-[100dvh] max-h-[100dvh] overflow-hidden bg-sys-void text-sys-text`}
     >
       {/*
         Desktop rail — UI V2.
@@ -146,11 +157,26 @@ export function DashboardShell({
       <SurfaceLayer />
 
       {/* Content column */}
-      <div className={`flex min-w-0 flex-1 flex-col ${fullscreen ? "min-h-0" : ""}`}>
+      <div className="flex min-w-0 flex-1 flex-col min-h-0">
         <DashboardTopbar onOpenNav={() => setNavOpen(true)} />
+        {/*
+          This is where page scrolling now lives.
+
+          `fullscreen` (the dashboard) owns its own internal panes and must not
+          scroll as a whole, so it stays `overflow-hidden`. Every other route —
+          integrations, settings, knowledge — can be taller than the viewport,
+          and with the document pinned they would be unreachable without a
+          scroll region of their own. So they get `overflow-y-auto` HERE, which
+          puts the scrollbar inside the content column rather than on the page.
+
+          `min-h-0` on both this element and its parent is what allows either
+          behaviour: without it the flex child refuses to shrink and grows
+          instead, which is the bug that produced a page-level scrollbar.
+        */}
         <main
           data-testid="dashboard-main"
-          className={`flex-1 ${fullscreen ? "min-h-0 overflow-hidden" : ""}`}
+          data-scroll={fullscreen ? "contained" : "internal"}
+          className={`min-h-0 flex-1 ${fullscreen ? "overflow-hidden" : "overflow-y-auto"}`}
         >
           {children}
         </main>

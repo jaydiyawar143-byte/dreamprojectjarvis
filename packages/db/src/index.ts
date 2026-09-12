@@ -60,3 +60,9 @@ export {
   type MapsServiceUsage,
   type MapsUserUsage,
 } from "./repositories/maps-usage-repository.js";
+
+// Per-user integration enable/disable, service selection and last-sync marker.
+export {
+  PrismaIntegrationStateRepository,
+  type IntegrationState,
+} from "./repositories/integration-state-repository.js";

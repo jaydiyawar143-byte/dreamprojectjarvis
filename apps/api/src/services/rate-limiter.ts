@@ -33,6 +33,10 @@ export const RATE_LIMIT_NAMESPACES = {
   chat: "chat",
   knowledge: "knowledge",
   browser: "browser",
+  // Integration management. Counted separately from everything else so a burst
+  // of connection tests cannot consume a user's chat budget, and so the
+  // integration limits can be tuned without touching the paths above.
+  integration: "integration",
 } as const;
 
 export type RateLimitNamespace =

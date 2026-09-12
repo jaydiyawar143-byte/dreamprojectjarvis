@@ -5,20 +5,28 @@
 //
 //   1. A CARD NEVER CLAIMS MORE THAN THE SERVER SAID. "Credentials present but
 //      unverified" renders as "Not checked", not as connected. Only a real test
-//      result turns it green.
+//      result turns it green, and `connection` (is it set up?) is shown
+//      separately from `health` (does it work?) so neither implies the other.
 //
-//   2. THE PAGE CANNOT EXECUTE. There is no button that sends, triggers or
-//      changes anything outside JARVIS — those are tools behind the approval
-//      boundary, and the cards say so.
+//   2. EVERY MANUAL CONTROL POSTS TO THE SHARED BACKEND. Test, Connect,
+//      Reconnect, Enable, Disable, Configure, Validate and Disconnect each call
+//      the endpoint that the identically-named JARVIS tool also reaches. The
+//      page holds no business logic, so there is nothing here for the voice
+//      path to be missing.
 //
 //   3. NOTHING SECRET IS RENDERED. The server sends no credential, and the page
-//      has nowhere to put one; both halves are asserted.
+//      has nowhere to put one; both halves are asserted, including that an
+//      untouched secret field posts the MASK back rather than blanking a
+//      working token.
+//
+//   4. AN IRREVERSIBLE ACTION ASKS FIRST. Disconnect revokes at the provider,
+//      so it confirms in place and names the consequence.
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent, within, configure } from "@testing-library/react";
 
-// The suite runs alongside thirteen other files; the default 1s wait is enough
+// The suite runs alongside nineteen other files; the default 1s wait is enough
 // on an idle machine and intermittently is not under that load.
 configure({ asyncUtilTimeout: 5000 });
 
@@ -33,11 +41,15 @@ vi.mock("../src/lib/api", async () => {
   return {
     ...actual,
     listIntegrations: vi.fn(),
+    getIntegration: vi.fn(),
     testIntegration: vi.fn(),
-    refreshIntegration: vi.fn(),
-    connectGoogle: vi.fn(),
-    disconnectGoogle: vi.fn(),
-    removeCredentials: vi.fn(),
+    connectIntegration: vi.fn(),
+    reconnectIntegration: vi.fn(),
+    setIntegrationEnabled: vi.fn(),
+    configureIntegration: vi.fn(),
+    validateIntegrationConfig: vi.fn(),
+    disconnectIntegration: vi.fn(),
+    getIntegrationAudit: vi.fn(),
   };
 });
 
@@ -48,24 +60,75 @@ import { sinceLabel } from "../src/components/integrations/integration-card";
 const mocked = vi.mocked(api);
 const ts = () => new Date().toISOString();
 
+const ALL_COMMANDS: api.IntegrationCommand[] = [
+  "status",
+  "configure",
+  "validateConfig",
+  "testConnection",
+  "getPermissions",
+  "reconnect",
+  "enable",
+  "disable",
+  "disconnect",
+  "getHealth",
+  "getAudit",
+];
+
 function integration(over: Partial<api.Integration> = {}): api.Integration {
   return {
     id: "meta",
     name: "Meta Ads",
     subtitle: "Marketing API — reads open, writes approval-gated",
     category: "advertising",
+    configKind: "form",
+    connection: "CONNECTED",
     health: "UNVERIFIED",
     detail: "Credentials present. Test to verify them.",
-    capabilities: [
-      { id: "meta.insights", label: "Insights", available: true },
-      { id: "meta.writes", label: "Budget & status changes", available: true, requiresApproval: true },
-    ],
     account: { label: "act_999" },
+    config: [
+      {
+        name: "accessToken",
+        label: "Access token",
+        kind: "secret",
+        required: true,
+        hasValue: true,
+        masked: "••••••••••••",
+        value: null,
+        serverManaged: false,
+      },
+      {
+        name: "adAccountId",
+        label: "Ad account ID",
+        kind: "text",
+        required: true,
+        hasValue: true,
+        masked: null,
+        value: "act_999",
+        serverManaged: false,
+      },
+    ],
+    configComplete: true,
+    missingConfig: [],
+    permissions: [
+      { id: "ads_read", label: "Read ad accounts and insights", granted: true, access: "read" },
+      { id: "ads_management", label: "Change budgets", granted: true, access: "write" },
+    ],
+    actions: [
+      { id: "meta.insights", label: "Insights", available: true, writesExternally: false },
+      {
+        id: "meta.campaign.budget.update",
+        label: "Budget & status changes",
+        available: true,
+        writesExternally: true,
+      },
+    ],
+    enabledServices: [],
     usage: null,
-    lastCheckedAt: null,
+    lastTestedAt: null,
+    lastSuccessfulSyncAt: null,
     lastError: null,
-    effectiveSource: "server environment",
-    actions: { testable: true, configureUrl: "/credentials/meta" },
+    effectiveSource: "stored",
+    supportedCommands: ALL_COMMANDS,
     ...over,
   };
 }
@@ -81,6 +144,11 @@ function respond(integrations: api.Integration[]) {
 beforeEach(() => {
   vi.clearAllMocks();
   respond([integration()]);
+  mocked.getIntegrationAudit.mockResolvedValue({
+    success: true,
+    data: { entries: [], message: "" },
+    timestamp: ts(),
+  } as never);
 });
 
 // ---------------------------------------------------------------------------
@@ -94,6 +162,15 @@ describe("status honesty", () => {
     expect(card).toHaveAttribute("data-health", "UNVERIFIED");
     expect(within(card).getByText("Not checked")).toBeInTheDocument();
     expect(within(card).queryByText("Connected")).toBeNull();
+  });
+
+  it("shows setup state separately from health, so neither implies the other", async () => {
+    render(<IntegrationsPage />);
+    const card = await screen.findByTestId("integration-card-meta");
+
+    // Set up AND unverified is a real, common combination.
+    expect(within(card).getByTestId("integration-connection-meta")).toHaveTextContent("Set up");
+    expect(card).toHaveAttribute("data-health", "UNVERIFIED");
   });
 
   it("shows Connected only after a test returns CONNECTED", async () => {
@@ -115,23 +192,39 @@ describe("status honesty", () => {
 
   it("shows the failure reason when a test fails, and does not go green", async () => {
     mocked.testIntegration.mockResolvedValue({
+      success: false,
+      error: { code: "PROVIDER_ERROR", message: "Meta Ads: Error validating access token" },
+      timestamp: ts(),
+    } as never);
+    mocked.getIntegration.mockResolvedValue({
       success: true,
-      data: { health: "ERROR", detail: "Error validating access token", checkedAt: ts() },
+      data: integration({ health: "ERROR", lastError: "Error validating access token" }),
       timestamp: ts(),
     } as never);
 
     render(<IntegrationsPage />);
     fireEvent.click(await screen.findByTestId("integration-test-meta"));
 
+    // The reason the server gave is the most useful thing on screen.
     await waitFor(() =>
-      expect(screen.getByTestId("integration-card-meta")).toHaveAttribute("data-health", "ERROR")
+      expect(screen.getByTestId("integration-notice")).toHaveTextContent("access token")
     );
-    expect(screen.getByTestId("integration-error-meta")).toHaveTextContent("access token");
+    expect(screen.getByTestId("integration-card-meta")).not.toHaveAttribute(
+      "data-health",
+      "CONNECTED"
+    );
   });
 
   it("says 'never' rather than inventing a check time", async () => {
     render(<IntegrationsPage />);
     expect(await screen.findByTestId("integration-checked-meta")).toHaveTextContent("never");
+  });
+
+  it("distinguishes last test from last successful sync", async () => {
+    render(<IntegrationsPage />);
+    // Two different questions: "did we check?" and "did data actually flow?"
+    expect(await screen.findByTestId("integration-checked-meta")).toBeInTheDocument();
+    expect(screen.getByTestId("integration-sync-meta")).toBeInTheDocument();
   });
 
   it("reports when the whole status read fails, instead of an empty page", async () => {
@@ -153,17 +246,39 @@ describe("states", () => {
     respond([
       integration({
         id: "google",
-        name: "Google Ads",
+        name: "Google",
         category: "google",
+        configKind: "oauth",
+        connection: "NOT_CONNECTED",
         health: "NOT_CONNECTED",
-        actions: { testable: false, connectUrl: "/google/connect" },
         account: null,
+        supportedCommands: [...ALL_COMMANDS, "connect"],
       }),
     ]);
 
     render(<IntegrationsPage />);
     expect(await screen.findByTestId("integration-connect-google")).toBeInTheDocument();
+  });
+
+  it("offers Reauthorize INSTEAD of Test when the grant is gone", async () => {
+    // A Test button here would just fail again; offering it invites the user to
+    // retry something that cannot succeed.
+    respond([
+      integration({
+        id: "google",
+        name: "Google",
+        category: "google",
+        configKind: "oauth",
+        connection: "NEEDS_REAUTH",
+        health: "NEEDS_REAUTH",
+        supportedCommands: [...ALL_COMMANDS, "connect"],
+      }),
+    ]);
+
+    render(<IntegrationsPage />);
+    expect(await screen.findByTestId("integration-reconnect-google")).toBeInTheDocument();
     expect(screen.queryByTestId("integration-test-google")).toBeNull();
+    expect(screen.queryByTestId("integration-connect-google")).toBeNull();
   });
 
   it("renders a CONFIG_REQUIRED integration with its unmet requirements ticked off", async () => {
@@ -172,14 +287,16 @@ describe("states", () => {
         id: "whatsapp",
         name: "WhatsApp Business",
         category: "communication",
+        configKind: "server-managed",
+        connection: "NOT_CONNECTED",
         health: "CONFIG_REQUIRED",
         detail: "Not configured on the server.",
-        capabilities: [
-          { id: "whatsapp.inbound", label: "Inbound messages", available: false },
-          { id: "whatsapp.send", label: "Outbound send", available: false, requiresApproval: true },
-        ],
         account: null,
-        actions: { testable: false },
+        actions: [
+          { id: "whatsapp.send", label: "Send a message", available: false, writesExternally: true },
+        ],
+        config: [],
+        permissions: [],
       }),
     ]);
 
@@ -187,27 +304,38 @@ describe("states", () => {
     const card = await screen.findByTestId("integration-card-whatsapp");
     expect(card).toHaveAttribute("data-health", "CONFIG_REQUIRED");
     // Availability is conveyed as text too, not only by a tick glyph.
-    expect(within(card).getAllByText("unavailable").length).toBe(2);
+    expect(within(card).getAllByText("unavailable").length).toBe(1);
   });
 
-  it("renders a DISABLED integration without offering actions it cannot perform", async () => {
+  it("names what is missing rather than only saying 'incomplete'", async () => {
     respond([
       integration({
-        id: "google",
-        name: "Google Ads",
-        category: "google",
-        health: "DISABLED",
-        detail: "No Google OAuth client is configured on the server.",
-        account: null,
-        actions: { testable: false },
+        configComplete: false,
+        missingConfig: ["accessToken"],
+        connection: "PARTIAL",
+        health: "CONFIG_REQUIRED",
       }),
     ]);
 
     render(<IntegrationsPage />);
-    const card = await screen.findByTestId("integration-card-google");
+    expect(await screen.findByTestId("integration-missing-meta")).toHaveTextContent("accessToken");
+  });
+
+  it("renders a DISABLED integration without offering a Test it would refuse", async () => {
+    respond([
+      integration({
+        connection: "DISABLED",
+        health: "DISABLED",
+        detail: "Switched off. Credentials are kept.",
+      }),
+    ]);
+
+    render(<IntegrationsPage />);
+    const card = await screen.findByTestId("integration-card-meta");
     expect(within(card).getByText("Disabled")).toBeInTheDocument();
-    expect(screen.queryByTestId("integration-test-google")).toBeNull();
-    expect(screen.queryByTestId("integration-connect-google")).toBeNull();
+    expect(screen.queryByTestId("integration-test-meta")).toBeNull();
+    // And it offers the way back on.
+    expect(screen.getByTestId("integration-toggle-meta")).toHaveTextContent("Enable");
   });
 
   it("renders usage with a percentage when the integration has a ceiling", async () => {
@@ -216,9 +344,9 @@ describe("states", () => {
         id: "google-maps",
         name: "Google Maps",
         category: "maps",
+        configKind: "server-managed",
         health: "CONNECTED",
         usage: { used: 12438, limit: 70000, percentUsed: 17.8, level: "OK", blocked: false },
-        actions: { testable: true },
       }),
     ]);
 
@@ -232,8 +360,88 @@ describe("states", () => {
 
 // ---------------------------------------------------------------------------
 
-describe("the page cannot execute anything", () => {
-  it("marks approval-gated capabilities on the card", async () => {
+describe("manual controls reach the shared backend", () => {
+  it("Test posts to the integration test endpoint", async () => {
+    mocked.testIntegration.mockResolvedValue({
+      success: true,
+      data: { health: "CONNECTED", detail: "ok", checkedAt: ts() },
+      timestamp: ts(),
+    } as never);
+
+    render(<IntegrationsPage />);
+    fireEvent.click(await screen.findByTestId("integration-test-meta"));
+
+    // The SAME endpoint the JARVIS `integration.test` tool reaches through its
+    // port. This is the frontend half of the parity claim.
+    await waitFor(() => expect(mocked.testIntegration).toHaveBeenCalledWith("meta"));
+  });
+
+  it("Connect asks the server for the authorization URL rather than building one", async () => {
+    respond([
+      integration({
+        id: "google",
+        name: "Google",
+        category: "google",
+        configKind: "oauth",
+        connection: "NOT_CONNECTED",
+        health: "NOT_CONNECTED",
+        supportedCommands: [...ALL_COMMANDS, "connect"],
+      }),
+    ]);
+    mocked.connectIntegration.mockResolvedValue({
+      success: true,
+      data: { authUrl: "https://accounts.google.com/o/oauth2/v2/auth?x=1", services: ["ads"], message: "" },
+      timestamp: ts(),
+    } as never);
+
+    render(<IntegrationsPage />);
+    fireEvent.click(await screen.findByTestId("integration-connect-google"));
+
+    // Scope selection is a SERVER decision. The page never composes a consent
+    // URL, so it cannot ask for more access than the server intends.
+    await waitFor(() => expect(mocked.connectIntegration).toHaveBeenCalledWith("google"));
+  });
+
+  it("Disable posts the enable/disable command and keeps credentials", async () => {
+    mocked.setIntegrationEnabled.mockResolvedValue({
+      success: true,
+      data: { enabled: false, message: "Meta Ads disabled. Its credentials are kept.", view: integration({ connection: "DISABLED", health: "DISABLED" }) },
+      timestamp: ts(),
+    } as never);
+
+    render(<IntegrationsPage />);
+    fireEvent.click(await screen.findByTestId("integration-toggle-meta"));
+
+    await waitFor(() => expect(mocked.setIntegrationEnabled).toHaveBeenCalledWith("meta", false));
+    await waitFor(() =>
+      expect(screen.getByTestId("integration-notice")).toHaveTextContent(/credentials are kept/i)
+    );
+  });
+
+  it("Reconnect posts the reconnect command and shows what the server said", async () => {
+    mocked.reconnectIntegration.mockResolvedValue({
+      success: true,
+      data: { refreshed: true, message: "Google access token refreshed. No re-consent was needed." },
+      timestamp: ts(),
+    } as never);
+    mocked.getIntegration.mockResolvedValue({
+      success: true,
+      data: integration(),
+      timestamp: ts(),
+    } as never);
+
+    render(<IntegrationsPage />);
+    fireEvent.click(await screen.findByTestId("integration-manage-meta"));
+    fireEvent.click(await screen.findByTestId("drawer-reconnect"));
+
+    await waitFor(() => expect(mocked.reconnectIntegration).toHaveBeenCalledWith("meta"));
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe("the page cannot execute anything ungated", () => {
+  it("marks actions that change something outside JARVIS", async () => {
     render(<IntegrationsPage />);
     const caps = await screen.findByTestId("integration-capabilities-meta");
     // A connected card must not read as "this dashboard can change budgets".
@@ -246,11 +454,12 @@ describe("the page cannot execute anything", () => {
         id: "whatsapp",
         name: "WhatsApp Business",
         category: "communication",
+        configKind: "server-managed",
         health: "CONNECTED",
-        capabilities: [
-          { id: "whatsapp.send", label: "Outbound send", available: true, requiresApproval: true },
+        config: [],
+        actions: [
+          { id: "whatsapp.send", label: "Send a message", available: true, writesExternally: true },
         ],
-        actions: { testable: true },
       }),
     ]);
 
@@ -258,7 +467,7 @@ describe("the page cannot execute anything", () => {
     await screen.findByTestId("integration-card-whatsapp");
 
     for (const button of screen.getAllByRole("button")) {
-      // Configuration verbs only. Execution goes through ToolExecutor and the
+      // Management verbs only. Execution goes through ToolExecutor and the
       // approval boundary, never through a dashboard button.
       expect(button.textContent ?? "").not.toMatch(/\b(send|trigger|execute|run)\b/i);
     }
@@ -277,6 +486,193 @@ describe("no secret is rendered", () => {
     expect(document.body.textContent ?? "").not.toMatch(/AIza[0-9A-Za-z_-]{10,}/);
     expect(document.body.textContent ?? "").not.toMatch(/Bearer\s/);
   });
+
+  it("renders a stored secret as a mask with a Replace control, not a filled box", async () => {
+    render(<IntegrationsPage />);
+    fireEvent.click(await screen.findByTestId("integration-manage-meta"));
+
+    // A pre-filled password box would imply the value is present in the page.
+    // It is not — the browser was never given it.
+    const masked = await screen.findByTestId("config-masked-accessToken");
+    expect(masked).toHaveTextContent("••••");
+    expect(screen.getByTestId("config-replace-accessToken")).toBeInTheDocument();
+    expect(screen.queryByTestId("config-input-accessToken")).toBeNull();
+  });
+
+  it("posts the MASK back for an untouched secret, so saving does not blank it", async () => {
+    mocked.configureIntegration.mockResolvedValue({
+      success: true,
+      data: { saved: ["adAccountId"], missing: [], message: "Saved." },
+      timestamp: ts(),
+    } as never);
+    mocked.getIntegration.mockResolvedValue({
+      success: true,
+      data: integration(),
+      timestamp: ts(),
+    } as never);
+
+    render(<IntegrationsPage />);
+    fireEvent.click(await screen.findByTestId("integration-manage-meta"));
+
+    // Change ONLY the non-secret field.
+    fireEvent.change(await screen.findByTestId("config-input-adAccountId"), {
+      target: { value: "act_111" },
+    });
+    fireEvent.click(screen.getByTestId("drawer-save"));
+
+    await waitFor(() => expect(mocked.configureIntegration).toHaveBeenCalled());
+    const [, payload] = mocked.configureIntegration.mock.calls[0]!;
+    // The classic way an edit-in-place form destroys the secret it was
+    // displaying is to post the mask as a literal new value. The server reads
+    // this sentinel as "unchanged".
+    expect(payload.accessToken).toBe("••••••••••••");
+    expect(payload.adAccountId).toBe("act_111");
+  });
+
+  it("shows a server-managed secret as set/not set, never as an editable field", async () => {
+    respond([
+      integration({
+        id: "n8n",
+        name: "n8n Automations",
+        category: "automation",
+        configKind: "server-managed",
+        config: [
+          {
+            name: "apiKey",
+            label: "API key",
+            kind: "secret",
+            required: true,
+            hasValue: true,
+            masked: "••••••••••••",
+            value: null,
+            serverManaged: true,
+          },
+        ],
+      }),
+    ]);
+
+    render(<IntegrationsPage />);
+    fireEvent.click(await screen.findByTestId("integration-manage-n8n"));
+
+    const config = await screen.findByTestId("drawer-config");
+    expect(within(config).getByText(/environment variables/i)).toBeInTheDocument();
+    expect(within(config).getByText("set")).toBeInTheDocument();
+    expect(screen.queryByTestId("config-input-apiKey")).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe("configuration form", () => {
+  it("validates without saving", async () => {
+    mocked.validateIntegrationConfig.mockResolvedValue({
+      success: true,
+      data: { valid: true, missing: [], message: "Configuration is valid and complete." },
+      timestamp: ts(),
+    } as never);
+
+    render(<IntegrationsPage />);
+    fireEvent.click(await screen.findByTestId("integration-manage-meta"));
+    fireEvent.click(await screen.findByTestId("drawer-validate"));
+
+    await waitFor(() => expect(mocked.validateIntegrationConfig).toHaveBeenCalled());
+    expect(mocked.configureIntegration).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(screen.getByTestId("drawer-config-notice")).toHaveTextContent(/valid/i)
+    );
+  });
+
+  it("shows the server's rejection rather than a generic failure", async () => {
+    mocked.configureIntegration.mockResolvedValue({
+      success: false,
+      error: { code: "INVALID_CONFIG", message: "Ad account ID must be act_ followed by digits." },
+      timestamp: ts(),
+    } as never);
+
+    render(<IntegrationsPage />);
+    fireEvent.click(await screen.findByTestId("integration-manage-meta"));
+    fireEvent.change(await screen.findByTestId("config-input-adAccountId"), {
+      target: { value: "nope" },
+    });
+    fireEvent.click(screen.getByTestId("drawer-save"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("drawer-config-notice")).toHaveTextContent(/act_ followed by digits/)
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe("permissions are visible", () => {
+  it("lists granted permissions with their access level", async () => {
+    render(<IntegrationsPage />);
+    fireEvent.click(await screen.findByTestId("integration-manage-meta"));
+
+    const panel = await screen.findByTestId("drawer-permissions");
+    expect(within(panel).getByText(/Read ad accounts/i)).toBeInTheDocument();
+    expect(within(panel).getByText("write")).toBeInTheDocument();
+  });
+
+  it("says plainly when nothing is granted", async () => {
+    respond([integration({ permissions: [], connection: "NOT_CONNECTED", health: "NOT_CONNECTED" })]);
+
+    render(<IntegrationsPage />);
+    fireEvent.click(await screen.findByTestId("integration-manage-meta"));
+
+    const panel = await screen.findByTestId("drawer-permissions");
+    expect(within(panel).getByText(/None\./i)).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe("disconnect asks before it acts", () => {
+  it("confirms in place and names the consequence", async () => {
+    render(<IntegrationsPage />);
+    fireEvent.click(await screen.findByTestId("integration-manage-meta"));
+    fireEvent.click(await screen.findByTestId("drawer-disconnect"));
+
+    const confirm = await screen.findByTestId("drawer-disconnect-confirm");
+    expect(confirm).toHaveTextContent(/revokes the token/i);
+    expect(confirm).toHaveTextContent(/consent again/i);
+    // And it points at the reversible alternative.
+    expect(confirm).toHaveTextContent(/Disable/);
+    // Nothing has happened yet.
+    expect(mocked.disconnectIntegration).not.toHaveBeenCalled();
+  });
+
+  it("only disconnects once confirmed", async () => {
+    mocked.disconnectIntegration.mockResolvedValue({
+      success: true,
+      data: { disconnected: true, message: "Meta Ads credentials removed." },
+      timestamp: ts(),
+    } as never);
+    mocked.getIntegration.mockResolvedValue({
+      success: true,
+      data: integration({ connection: "NOT_CONNECTED", health: "NOT_CONNECTED", account: null }),
+      timestamp: ts(),
+    } as never);
+
+    render(<IntegrationsPage />);
+    fireEvent.click(await screen.findByTestId("integration-manage-meta"));
+    fireEvent.click(await screen.findByTestId("drawer-disconnect"));
+    fireEvent.click(await screen.findByTestId("drawer-disconnect-yes"));
+
+    await waitFor(() => expect(mocked.disconnectIntegration).toHaveBeenCalledWith("meta"));
+    // The card is re-read rather than guessed at.
+    await waitFor(() => expect(mocked.getIntegration).toHaveBeenCalledWith("meta"));
+  });
+
+  it("can be cancelled", async () => {
+    render(<IntegrationsPage />);
+    fireEvent.click(await screen.findByTestId("integration-manage-meta"));
+    fireEvent.click(await screen.findByTestId("drawer-disconnect"));
+    fireEvent.click(await screen.findByText("Cancel"));
+
+    await waitFor(() => expect(screen.queryByTestId("drawer-disconnect-confirm")).toBeNull());
+    expect(mocked.disconnectIntegration).not.toHaveBeenCalled();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -288,15 +684,15 @@ describe("search, filter and grouping", () => {
       id: "n8n",
       name: "n8n Automations",
       category: "automation",
+      configKind: "server-managed",
       health: "CONFIG_REQUIRED",
-      actions: { testable: false },
     }),
     integration({
       id: "google-maps",
       name: "Google Maps",
       category: "maps",
+      configKind: "server-managed",
       health: "UNVERIFIED",
-      actions: { testable: true },
     }),
   ];
 
@@ -313,6 +709,17 @@ describe("search, filter and grouping", () => {
     expect(screen.queryByTestId("integration-card-google-maps")).toBeNull();
   });
 
+  it("counts a NEEDS_REAUTH integration as needing attention", async () => {
+    respond([integration({ health: "NEEDS_REAUTH", connection: "NEEDS_REAUTH" })]);
+    render(<IntegrationsPage />);
+    await screen.findByTestId("integration-card-meta");
+
+    fireEvent.click(screen.getByTestId("integration-filter-attention"));
+    await waitFor(() =>
+      expect(screen.getByTestId("integration-card-meta")).toBeInTheDocument()
+    );
+  });
+
   it("filters to verified connections only", async () => {
     respond(many());
     render(<IntegrationsPage />);
@@ -326,7 +733,7 @@ describe("search, filter and grouping", () => {
     expect(screen.queryByTestId("integration-card-google-maps")).toBeNull();
   });
 
-  it("searches by name, category and capability", async () => {
+  it("searches by name, category and action", async () => {
     respond(many());
     render(<IntegrationsPage />);
     await screen.findByTestId("integration-card-meta");
@@ -367,24 +774,33 @@ describe("manage drawer", () => {
     expect(screen.getByTestId("integration-card-meta")).toBeInTheDocument();
   });
 
-  it("states the security posture, including that no secret was sent", async () => {
+  it("states the security posture, including the two-path guarantee", async () => {
     render(<IntegrationsPage />);
     fireEvent.click(await screen.findByTestId("integration-manage-meta"));
 
     const drawer = await screen.findByTestId("integration-drawer");
-    expect(within(drawer).getByText(/Secrets in this response/i)).toBeInTheDocument();
-    expect(within(drawer).getByText("none")).toBeInTheDocument();
-    expect(within(drawer).getByText(/approval boundary/i)).toBeInTheDocument();
+    expect(within(drawer).getByText(/never sent back to this browser/i)).toBeInTheDocument();
+    expect(within(drawer).getByText(/same backend service/i)).toBeInTheDocument();
+    expect(within(drawer).getByText(/cannot be authorized by voice/i)).toBeInTheDocument();
   });
 
-  it("links to the one place credentials are actually entered", async () => {
+  it("shows recent activity from the audit log", async () => {
+    mocked.getIntegrationAudit.mockResolvedValue({
+      success: true,
+      data: {
+        entries: [
+          { id: "a1", integration: "meta", command: "testConnection", result: "success", at: ts() },
+        ],
+        message: "",
+      },
+      timestamp: ts(),
+    } as never);
+
     render(<IntegrationsPage />);
     fireEvent.click(await screen.findByTestId("integration-manage-meta"));
 
-    const link = await screen.findByTestId("integration-drawer-configure");
-    // A second credential form here would be a second write path to the
-    // encrypted store.
-    expect(link).toHaveAttribute("href", "/settings/connections");
+    const audit = await screen.findByTestId("drawer-audit");
+    await waitFor(() => expect(within(audit).getByText("testConnection")).toBeInTheDocument());
   });
 
   it("closes on Escape", async () => {
@@ -394,38 +810,6 @@ describe("manage drawer", () => {
 
     fireEvent.keyDown(document, { key: "Escape" });
     await waitFor(() => expect(screen.queryByTestId("integration-drawer")).toBeNull());
-  });
-});
-
-// ---------------------------------------------------------------------------
-
-describe("disconnect", () => {
-  it("goes through the existing endpoint and then re-reads the status", async () => {
-    respond([
-      integration({
-        health: "CONNECTED",
-        actions: { testable: true, configureUrl: "/credentials/meta", disconnectUrl: "/credentials/meta" },
-      }),
-    ]);
-    mocked.removeCredentials.mockResolvedValue({ success: true, data: {}, timestamp: ts() } as never);
-    mocked.refreshIntegration.mockResolvedValue({
-      success: true,
-      data: integration({ health: "NOT_CONNECTED", account: null, lastCheckedAt: null }),
-      timestamp: ts(),
-    } as never);
-
-    render(<IntegrationsPage />);
-    fireEvent.click(await screen.findByTestId("integration-disconnect-meta"));
-
-    await waitFor(() => expect(mocked.removeCredentials).toHaveBeenCalledWith("meta"));
-    // The cached verdict must not survive the credential being removed.
-    expect(mocked.refreshIntegration).toHaveBeenCalledWith("meta");
-    await waitFor(() =>
-      expect(screen.getByTestId("integration-card-meta")).toHaveAttribute(
-        "data-health",
-        "NOT_CONNECTED"
-      )
-    );
   });
 });
 

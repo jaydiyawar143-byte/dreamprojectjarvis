@@ -93,6 +93,97 @@ export const MAPS_TOOLS = [
 ] as const;
 
 /**
+ * Capability discovery.
+ *
+ * Granted to EVERY agent, without exception. "What can you do?" is not a
+ * domain question — it arrives on whichever agent the router happened to pick,
+ * and an agent without this tool answers it from its own system prompt. That is
+ * precisely the failure this group exists to remove: the fallback agent's
+ * prompt described one provider, so every capability question returned that
+ * provider's feature list regardless of what was registered or connected.
+ *
+ * All READ_ONLY. Asking what you can do changes nothing, and none of these can
+ * execute the capabilities they describe.
+ */
+export const CAPABILITY_TOOLS = [
+  "capabilities.list",
+  "capabilities.connected",
+  "capabilities.integration",
+  "capabilities.permissions",
+] as const;
+
+/**
+ * Google Workspace READS — Phase 12.
+ *
+ * Real Gmail, Drive and Calendar access, all READ_ONLY. There is no write tool
+ * in this group and no write scope behind it: this phase cannot send mail,
+ * delete a file or create an event, and the absence is structural rather than
+ * a policy choice made here.
+ *
+ * Granted to the general assistant (where "meri unread emails dikhao" lands,
+ * since it matches no domain signal) and to the Google Ads agent (which is
+ * where anything naming Google may route). Not granted to the Meta, WhatsApp,
+ * n8n or browser agents: none of them has business reading the user's mail.
+ */
+export const GOOGLE_WORKSPACE_TOOLS = [
+  "gmail.listUnread",
+  "gmail.search",
+  "gmail.getMessage",
+  "gmail.getThread",
+  "drive.searchFiles",
+  "drive.listRecentFiles",
+  "drive.getFileMetadata",
+  "calendar.listUpcomingEvents",
+  "calendar.getEvent",
+] as const;
+
+/**
+ * Integration management READS.
+ *
+ * Every one is READ_ONLY and answers a question about JARVIS's own
+ * configuration rather than about a provider's data. Granted broadly — to the
+ * general assistant and to every domain agent — because "is Google still
+ * connected?" arrives in the middle of a conversation about campaigns at least
+ * as often as it arrives on its own, and an agent that cannot check will answer
+ * from the conversation instead of from the system.
+ *
+ * `integration.test` is here despite reaching a provider: every connection test
+ * in this system is a read that sends nothing and changes nothing, and putting
+ * a diagnostic behind an approval would mean a user debugging a broken
+ * connection needs a second person to let them look at it.
+ */
+export const INTEGRATION_READ_TOOLS = [
+  "integration.list",
+  "integration.status",
+  "integration.health",
+  "integration.permissions",
+  "integration.audit",
+  "integration.test",
+  "integration.validate",
+] as const;
+
+/**
+ * Integration management CHANGES.
+ *
+ * Granted narrowly — to the general assistant, which is where setup
+ * conversations actually happen, and to the domain agents for their own
+ * provider. A Meta agent has no business disconnecting Google.
+ *
+ * `integration.disconnect` is EXTERNAL_SIDE_EFFECT and approval-gated in its
+ * own definition: this allowlist decides who may PROPOSE it, the approval
+ * boundary decides whether it runs. The others write only to our own encrypted
+ * store and reach no provider.
+ */
+export const INTEGRATION_WRITE_TOOLS = [
+  "integration.connect",
+  "integration.configure",
+  "integration.reconnect",
+  "integration.enable",
+  "integration.disable",
+  "integration.disconnect",
+] as const;
+
+/**
  * Ambient reads: the weather, a market price, this machine's telemetry.
  *
  * READ_ONLY, and granted to the general assistant for the same reason the maps
@@ -145,17 +236,23 @@ const GENERAL_POLICY = policy({
     ...ANALYSIS_TOOLS,
     ...MAPS_TOOLS,
     ...AMBIENT_TOOLS,
+    // Setup conversations land here: "Google connect karo" matches no domain
+    // signal, so the fallback is the agent that has to be able to do it.
+    ...INTEGRATION_READ_TOOLS,
+    ...INTEGRATION_WRITE_TOOLS,
+    ...CAPABILITY_TOOLS,
+    ...GOOGLE_WORKSPACE_TOOLS,
   ],
   requiredPermissions: ["read"],
   writesRequireApproval: true,
   clientSelectable: true,
-  description: "General conversational assistant and routing fallback",
+  description: "General conversational assistant, capability discovery, integration management, and routing fallback",
 });
 
 const META_ADS_POLICY = policy({
   agentId: AGENT_IDS.metaAds,
   domain: "meta-ads",
-  allowedTools: [...META_READ_TOOLS, ...META_WRITE_TOOLS],
+  allowedTools: [...META_READ_TOOLS, ...META_WRITE_TOOLS, ...INTEGRATION_READ_TOOLS, ...CAPABILITY_TOOLS],
   requiredPermissions: ["read"],
   writesRequireApproval: true,
   clientSelectable: true,
@@ -165,11 +262,20 @@ const META_ADS_POLICY = policy({
 const GOOGLE_ADS_POLICY = policy({
   agentId: AGENT_IDS.googleAds,
   domain: "google-ads",
-  allowedTools: [...GOOGLE_READ_TOOLS],
+  // "Google Ads reconnect karo" routes HERE, not to the general assistant, so
+  // this agent needs the management verbs for its own provider or the request
+  // dead-ends on an agent that can see the problem and not fix it.
+  allowedTools: [
+    ...GOOGLE_READ_TOOLS,
+    ...INTEGRATION_READ_TOOLS,
+    ...INTEGRATION_WRITE_TOOLS,
+    ...CAPABILITY_TOOLS,
+    ...GOOGLE_WORKSPACE_TOOLS,
+  ],
   requiredPermissions: ["read"],
   writesRequireApproval: true,
   clientSelectable: true,
-  description: "Google Ads domain agent over the Sprint 5.2 read-only provider",
+  description: "Google Ads domain agent over the Sprint 5.2 read-only provider, including its connection lifecycle",
 });
 
 /**
@@ -183,7 +289,10 @@ const GOOGLE_ADS_POLICY = policy({
 const KNOWLEDGE_POLICY = policy({
   agentId: AGENT_IDS.knowledge,
   domain: "knowledge",
-  allowedTools: [],
+  // Capability discovery only. Retrieval already happened before this agent
+  // ran, so it still owns no search tool — but a capability question landing
+  // here must reach the registry rather than this agent's prompt.
+  allowedTools: [...CAPABILITY_TOOLS],
   requiredPermissions: ["read"],
   writesRequireApproval: true,
   clientSelectable: true,
@@ -197,7 +306,13 @@ const KNOWLEDGE_POLICY = policy({
 const ANALYTICS_POLICY = policy({
   agentId: AGENT_IDS.analytics,
   domain: "analytics",
-  allowedTools: [...META_READ_TOOLS, ...GOOGLE_READ_TOOLS, ...ANALYSIS_TOOLS],
+  allowedTools: [
+    ...META_READ_TOOLS,
+    ...GOOGLE_READ_TOOLS,
+    ...ANALYSIS_TOOLS,
+    ...INTEGRATION_READ_TOOLS,
+    ...CAPABILITY_TOOLS,
+  ],
   requiredPermissions: ["read"],
   writesRequireApproval: true,
   clientSelectable: true,
@@ -216,7 +331,7 @@ const ANALYTICS_POLICY = policy({
 const AUTOMATION_POLICY = policy({
   agentId: AGENT_IDS.automation,
   domain: "automation",
-  allowedTools: ["n8n.trigger"],
+  allowedTools: ["n8n.trigger", ...INTEGRATION_READ_TOOLS, ...CAPABILITY_TOOLS],
   requiredPermissions: ["read", "write"],
   writesRequireApproval: true,
   clientSelectable: true,
@@ -226,7 +341,7 @@ const AUTOMATION_POLICY = policy({
 const COMMUNICATION_POLICY = policy({
   agentId: AGENT_IDS.communication,
   domain: "communication",
-  allowedTools: ["whatsapp.send"],
+  allowedTools: ["whatsapp.send", ...INTEGRATION_READ_TOOLS, ...CAPABILITY_TOOLS],
   requiredPermissions: ["read", "write"],
   writesRequireApproval: true,
   clientSelectable: true,
@@ -249,7 +364,7 @@ const COMMUNICATION_POLICY = policy({
 const BROWSER_POLICY = policy({
   agentId: AGENT_IDS.browser,
   domain: "browser",
-  allowedTools: [...BROWSER_READ_TOOL_IDS, ...BROWSER_ACTION_TOOL_IDS],
+  allowedTools: [...BROWSER_READ_TOOL_IDS, ...BROWSER_ACTION_TOOL_IDS, ...CAPABILITY_TOOLS],
   requiredPermissions: ["read", "write"],
   writesRequireApproval: true,
   clientSelectable: true,
@@ -275,7 +390,7 @@ const BROWSER_POLICY = policy({
 const LOCATION_POLICY = policy({
   agentId: AGENT_IDS.location,
   domain: "location",
-  allowedTools: [...MAPS_TOOLS],
+  allowedTools: [...MAPS_TOOLS, ...INTEGRATION_READ_TOOLS, ...CAPABILITY_TOOLS],
   requiredPermissions: ["read"],
   writesRequireApproval: true,
   clientSelectable: true,

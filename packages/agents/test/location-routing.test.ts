@@ -18,7 +18,14 @@
 
 import { describe, it, expect } from "vitest";
 import { rankAgentCandidates } from "../src/agent-router.js";
-import { AGENT_IDS, AGENT_POLICIES, MAPS_TOOLS, isToolAllowed } from "../src/agent-policy.js";
+import {
+  AGENT_IDS,
+  AGENT_POLICIES,
+  MAPS_TOOLS,
+  INTEGRATION_READ_TOOLS,
+  CAPABILITY_TOOLS,
+  isToolAllowed,
+} from "../src/agent-policy.js";
 
 /** The top-ranked candidate for a message. */
 function top(message: string): string {
@@ -108,9 +115,16 @@ describe("existing routing is not disturbed", () => {
 // ---------------------------------------------------------------------------
 
 describe("location policy", () => {
-  it("holds every maps tool and nothing else", () => {
+  it("holds every maps tool, plus integration reads and capability discovery", () => {
+    // The integration READS were added when integration management became
+    // available on both paths: "is Maps still connected?" is a question this
+    // agent is asked, and one it should answer from the system rather than
+    // from the conversation. They are all READ_ONLY and none of them can
+    // change a provider.
     const policy = AGENT_POLICIES[AGENT_IDS.location]!;
-    expect([...policy.allowedTools].sort()).toEqual([...MAPS_TOOLS].sort());
+    expect([...policy.allowedTools].sort()).toEqual(
+      [...MAPS_TOOLS, ...INTEGRATION_READ_TOOLS, ...CAPABILITY_TOOLS].sort()
+    );
   });
 
   it("is read-only", () => {
@@ -120,7 +134,15 @@ describe("location policy", () => {
 
   it("cannot reach an ads or messaging tool", () => {
     const allowed = AGENT_POLICIES[AGENT_IDS.location]!.allowedTools;
-    for (const forbidden of ["meta.campaign.pause", "whatsapp.send", "n8n.trigger", "google.insights"]) {
+    for (const forbidden of [
+      "meta.campaign.pause",
+      "whatsapp.send",
+      "n8n.trigger",
+      "google.insights",
+      // It can READ integration state; it cannot change any of it.
+      "integration.disconnect",
+      "integration.configure",
+    ]) {
       expect(isToolAllowed(forbidden, allowed)).toBe(false);
     }
   });

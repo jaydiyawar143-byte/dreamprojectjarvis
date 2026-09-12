@@ -305,31 +305,102 @@ Knowledge Chunks ─────────────────────
 
 ## 9. Integration Layer
 
-### 9.1 n8n Integration
+> **Permanent rule:** every integration must support both JARVIS command control
+> and manual frontend control **through the same backend integration service**.
 
-- n8n runs as a separate service
-- JARVIS communicates via REST webhooks
-- n8n handles complex workflow automations
-- JARVIS triggers workflows and receives results
+Full reference: [docs/INTEGRATIONS.md](INTEGRATIONS.md).
 
-### 9.2 Google Integration
+### 9.1 The two-path contract
 
-- Google OAuth for account access
-- Google Sheets for data management
-- Google Calendar for scheduling
-- Google Drive for document storage
+```
+  Frontend button ──┐
+                    ├──► IntegrationCommandService ──► permission / rate limit
+  JARVIS command  ──┘              │                   / validation / audit
+                                   ▼
+                          Integration adapter
+                                   ▼
+                         External provider API
+                                   ▼
+                   Result + audit event + health update
+```
 
-### 9.3 Meta Integration
+There is **one** implementation of every integration operation, in
+`apps/api/src/services/integrations/command-service.ts`.
 
-- Meta Business API for ad management
-- Page and Instagram management
-- Audience and campaign data
+| Layer | File | Responsibility |
+|---|---|---|
+| Contract | `packages/core/src/types/integration.ts` | Verbs, argument shapes, result envelope, view type |
+| Catalogue | `packages/core/src/integration-catalog.ts` | Descriptors, config schemas, Google scope map |
+| Command service | `apps/api/src/services/integrations/command-service.ts` | **The single path.** All checks live here |
+| Health engine | `apps/api/src/services/integration-registry.ts` | The cheapest real provider call per integration |
+| Encryption boundary | `apps/api/src/services/integrations/build.ts` | The only place holding the encryption key |
+| HTTP arm | `apps/api/src/routes/integrations.ts` | Translates HTTP → command. No logic |
+| JARVIS arm | `packages/tools/src/tools/integration-tools.ts` | Translates a sentence → command. No logic |
+| Frontend | `apps/web/src/app/integrations/` | Renders the view, posts commands |
 
-### 9.4 WhatsApp Integration
+Both arms hold the **same service instance**, constructed once in
+`container.ts`. That is what makes the guarantee structural rather than
+aspirational, and `apps/api/test/integration-command-parity.test.ts` asserts it.
 
-- WhatsApp Business API
-- Two-way messaging
-- Template management
+### 9.2 Verb set
+
+`list` · `status` · `connect` · `configure` · `validateConfig` ·
+`testConnection` · `getPermissions` · `reconnect` · `enable` · `disable` ·
+`disconnect` · `getHealth` · `getAudit` · `executeAction`
+
+Each maps to one JARVIS tool, one HTTP endpoint and one UI control.
+
+### 9.3 Status model
+
+Two axes, never collapsed:
+
+- **`connection`** — is it set up? A fact about stored configuration.
+- **`health`** — does it work? Knowable only after a real provider call.
+
+Credentials being present yields `UNVERIFIED` ("Not checked"), never
+`CONNECTED`. Only a successful test produces a green dot.
+
+### 9.4 Google
+
+One OAuth foundation, per-service scopes, progressive consent. Initial
+connection requests identity plus **read-only** scopes for the selected
+services; `scopesForConnect()` cannot emit a write scope. Write access is a
+separate, explicit grant. Authorization reads **granted** scopes, never
+requested ones.
+
+Services: Ads (implemented), Gmail, Drive, Calendar, YouTube, Sheets, Docs
+(OAuth foundation present, provider clients not yet built).
+
+Google Ads additionally needs a developer token and customer ID — OAuth consent
+alone is not sufficient.
+
+### 9.5 Google Maps
+
+Two keys with different jobs, reported independently: a referrer-restricted
+**browser** key (map rendering, public by design) and an IP-restricted
+**server** key (Places, Routes, Geocoding, never sent to the browser). A
+browser-key-only deployment reports `PARTIAL`, not "configured". All Maps calls
+including the connection test pass through the monthly usage guard.
+
+### 9.6 Meta, WhatsApp, n8n
+
+- **Meta Ads** — Marketing API, encrypted per-user credentials, reads open,
+  writes approval-gated.
+- **WhatsApp Business** — Cloud API, server-configured, signed inbound webhook,
+  approval-gated outbound.
+- **n8n** — server-configured, HMAC callback, idempotency keys,
+  approval-gated triggers.
+
+### 9.7 Write boundary
+
+```
+Plan → Explain → Confirm → Execute → Audit → Verify → Report
+```
+
+Confirmation tokens are bound to `(user, integration, action, params-hash)`,
+single-use, two-minute expiry. **A voice session cannot confirm a write.**
+Execution goes through `ToolExecutor` — the command service gates, it never
+executes.
 
 ---
 

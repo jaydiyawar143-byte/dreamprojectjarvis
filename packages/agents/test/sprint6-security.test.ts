@@ -567,7 +567,13 @@ describe("Sprint 6.10 — agent layer security", () => {
       }).process({ message: "what do my docs say" }, sessionFor("user-1"));
 
       const ctx = captured.get(AGENT_IDS.knowledge)!;
-      expect(ctx.toolRegistry.getAll()).toEqual([]);
+
+      // The knowledge agent owns no EXECUTION tool — only capability
+      // discovery, so a "what can you do?" landing here reaches the registry
+      // rather than this agent's prompt. The isolation property is unchanged:
+      // it can see nothing that acts on a provider.
+      const visible = ctx.toolRegistry.getAll().map((t: ITool) => t.id);
+      expect(visible.every((id) => id.startsWith("capabilities."))).toBe(true);
       expect(ctx.toolRegistry.get("whatsapp.send")).toBeUndefined();
       expect(ctx.toolRegistry.get("meta.insights")).toBeUndefined();
     });
@@ -578,7 +584,25 @@ describe("Sprint 6.10 — agent layer security", () => {
         AGENT_POLICIES[AGENT_IDS.communication]!.allowedTools
       );
 
-      expect(scoped.getAll().map((t: ITool) => t.id)).toEqual(["whatsapp.send"]);
+      const visible = scoped.getAll().map((t: ITool) => t.id);
+
+      // Exactly its own policy: the one messaging tool plus the READ-ONLY
+      // integration lookups. The property under test is that the scoped view is
+      // the ALLOWLIST, not the registry — so the assertion is derived from the
+      // policy rather than hardcoded, and the exclusions below are what prove
+      // the scoping is real.
+      expect([...visible].sort()).toEqual(
+        [...AGENT_POLICIES[AGENT_IDS.communication]!.allowedTools].sort()
+      );
+
+      for (const offPolicy of [
+        "meta.insights",
+        "google.accounts",
+        "n8n.trigger",
+        "integration.disconnect",
+      ]) {
+        expect(visible, `${offPolicy} must not be visible`).not.toContain(offPolicy);
+      }
     });
   });
 

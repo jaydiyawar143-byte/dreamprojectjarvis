@@ -20,6 +20,7 @@ export function AuthConsole({
   phase,
   stages,
   error,
+  errorCode,
   onLogin,
   onSignup,
   onSwitch,
@@ -33,6 +34,8 @@ export function AuthConsole({
   phase: AuthPhase;
   stages: Record<StageKey, StageState>;
   error?: string;
+  /** API error code, so the status overlay can tell an outage from a rejection. */
+  errorCode?: string;
   onLogin: (email: string, password: string) => void;
   onSignup: (email: string, name: string, password: string) => void;
   onSwitch: (mode: AuthMode) => void;
@@ -149,6 +152,7 @@ export function AuthConsole({
         {phase !== "idle" && (
           <AuthStatus
             phase={phase}
+            errorCode={errorCode}
             stages={stages}
             error={error}
             onDismiss={phase === "denied" ? onDismissError : undefined}

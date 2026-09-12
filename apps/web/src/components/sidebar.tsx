@@ -16,7 +16,9 @@ export function Sidebar() {
   }, [loadConversations]);
 
   return (
-    <div className="w-64 bg-gray-900 border-r border-gray-800 flex flex-col h-screen">
+    // Fixed to the parent's viewport height, and able to shrink so its own
+    // conversation list scrolls internally.
+    <div className="flex h-full min-h-0 w-64 shrink-0 flex-col border-r border-gray-800 bg-gray-900">
       <div className="p-4 border-b border-gray-800">
         <div className="flex items-center justify-between">
           <h1 className="text-lg font-bold text-white">JARVIS</h1>
@@ -58,7 +60,7 @@ export function Sidebar() {
         </Link>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-2 space-y-1">
+      <div className="min-h-0 flex-1 space-y-1 overflow-y-auto p-2">
         {conversations.length === 0 && (
           <p className="text-gray-500 text-sm px-2 py-4">No conversations yet</p>
         )}

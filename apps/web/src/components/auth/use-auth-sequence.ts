@@ -36,6 +36,15 @@ export function useAuthSequence(reduced: boolean | null) {
   const [phase, setPhase] = useState<AuthPhase>("idle");
   const [stages, setStages] = useState<Record<StageKey, StageState>>(IDLE_STAGES);
   const [error, setError] = useState<string | undefined>();
+  /**
+   * The API error CODE for the current failure.
+   *
+   * Carried separately from the message so the denied panel can tell a rejected
+   * credential from an unreachable server. Without it the only signal is
+   * free-text, and branching on prose is how a copy edit silently breaks a
+   * state.
+   */
+  const [errorCode, setErrorCode] = useState<string | undefined>();
 
   const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
   const alive = useRef(true);
@@ -59,16 +68,20 @@ export function useAuthSequence(reduced: boolean | null) {
     setPhase("idle");
     setStages(IDLE_STAGES);
     setError(undefined);
+    setErrorCode(undefined);
   }, [clearTimers]);
 
   /**
-   * @param submit the real network call. Must resolve `{ error }` on failure.
+   * @param submit the real network call. Must resolve `{ error, code }` on
+   *   failure; `code` is the API envelope's error code, absent when the request
+   *   never reached a server.
    * @returns whether authentication genuinely succeeded.
    */
   const run = useCallback(
-    async (submit: () => Promise<{ error?: string }>): Promise<boolean> => {
+    async (submit: () => Promise<{ error?: string; code?: string }>): Promise<boolean> => {
       clearTimers();
       setError(undefined);
+      setErrorCode(undefined);
       setStages(IDLE_STAGES);
       setPhase("authenticating");
 
@@ -114,6 +127,7 @@ export function useAuthSequence(reduced: boolean | null) {
           return next;
         });
         setError(result.error);
+        setErrorCode(result.code);
         setPhase("denied");
         return false;
       }
@@ -132,5 +146,5 @@ export function useAuthSequence(reduced: boolean | null) {
     [clearTimers, reduced]
   );
 
-  return { phase, stages, error, run, reset };
+  return { phase, stages, error, errorCode, run, reset };
 }

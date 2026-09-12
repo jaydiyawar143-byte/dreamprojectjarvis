@@ -66,3 +66,16 @@ export type {
   MemoryEntry as LegacyMemoryEntry,
   IMemoryProvider as LegacyIMemoryProvider,
 } from "./types/memory-provider.js";
+// Universal integration contract — the vocabulary the frontend, the JARVIS
+// tools and the API all speak, so one command service can serve both paths.
+export * from "./types/integration.js";
+export * from "./integration-catalog.js";
+
+// Capability discovery — what this build can do, and what can actually run now.
+// Derived from the live tool registry, agent policies and integration state;
+// never a hand-written feature list.
+export * from "./types/capability.js";
+// Phase 12 — real read-only Gmail, Drive and Calendar task contracts.
+export * from "./types/google-workspace.js";
+export * from "./capability-catalog.js";
+export * from "./utils/mask-identifier.js";
