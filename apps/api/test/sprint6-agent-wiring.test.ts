@@ -103,6 +103,30 @@ const ALL_REGISTERED_TOOLS = [
   "capabilities.connected",
   "capabilities.integration",
   "capabilities.permissions",
+  // Phase 12 — real Gmail, Drive and Calendar reads. Registered whenever a
+  // Google OAuth client and an encryption key are present.
+  "gmail.listUnread",
+  "gmail.search",
+  "gmail.getMessage",
+  "gmail.getThread",
+  "drive.searchFiles",
+  "drive.listRecentFiles",
+  "drive.getFileMetadata",
+  "calendar.listUpcomingEvents",
+  "calendar.getEvent",
+  // Phase 13 — write PLANNING tools. Registered whenever writes are possible.
+  // There is no corresponding execute tool, by design: execution happens only
+  // when a human approves the row a plan created.
+  "google.plan.gmail.createDraft",
+  "google.plan.gmail.updateDraft",
+  "google.plan.gmail.sendDraft",
+  "google.plan.drive.createFolder",
+  "google.plan.drive.uploadFile",
+  "google.plan.drive.moveFile",
+  "google.plan.drive.renameFile",
+  "google.plan.calendar.createEvent",
+  "google.plan.calendar.updateEvent",
+  "google.plan.calendar.deleteEvent",
   // Sprint 7 — registered by the container when BROWSER_ENABLED is set.
   "browser.navigate",
   "browser.inspect",
@@ -246,11 +270,17 @@ describe("Sprint 6 — per-agent tool definition filtering", () => {
       (d) => d.name
     );
 
-    expect(actingOnly(defs)).toEqual([
-      "google-accounts",
-      "google-campaigns",
-      "google-insights",
-    ]);
+    // Phase 12 added the Workspace reads to this agent, since anything naming
+    // Google may route here. They are separated out so the Ads-specific
+    // assertion still means what it did.
+    const workspacePrefixes = ["gmail-", "drive-", "calendar-", "google-plan-"];
+    const adsOnly = actingOnly(defs).filter(
+      (n) => !workspacePrefixes.some((p) => n.startsWith(p))
+    );
+    expect(adsOnly).toEqual(["google-accounts", "google-campaigns", "google-insights"]);
+
+    // And the Workspace reads really are reachable from here.
+    expect(defs).toContain("gmail-listUnread");
     // "Google Ads reconnect karo" routes here, so this agent owns the
     // management verbs. It still cannot touch another provider's data.
     expect(defs).toContain("integration-reconnect");

@@ -1993,3 +1993,236 @@ export async function disconnectIntegration(
 ): Promise<ApiResponse<{ disconnected: boolean; message: string; view?: Integration }>> {
   return request(`/integrations/${id}`, { method: "DELETE" });
 }
+
+// ---------------------------------------------------------------------------
+// Phase 12 — real read-only Gmail, Drive and Calendar.
+//
+// Every function here calls the endpoint that the identically-named JARVIS tool
+// also reaches, through one backend service. There is no client-side business
+// logic and there must never be: a check written here would be absent from the
+// spoken path.
+//
+// These return the SERVER's envelope unchanged — `status` included — because
+// `needs_reauth` and `provider_error` need different UI and only the server can
+// tell them apart. No response carries a token; the normalized types have no
+// field for one.
+// ---------------------------------------------------------------------------
+
+export type GoogleTaskStatus =
+  | "ok"
+  | "not_connected"
+  | "needs_reauth"
+  | "permission_missing"
+  | "provider_error";
+
+export interface GoogleTaskResult<T> {
+  success: boolean;
+  source: "gmail" | "drive" | "calendar";
+  status: GoogleTaskStatus;
+  data: T | null;
+  message?: string;
+  requiredAction?: string;
+  requestId?: string;
+}
+
+export interface GmailMessageSummary {
+  id: string;
+  threadId: string;
+  from: string;
+  to: string[];
+  subject: string;
+  snippet: string;
+  receivedAt: string;
+  unread: boolean;
+  hasAttachments: boolean;
+  labels: string[];
+}
+
+export interface GmailMessageDetail extends GmailMessageSummary {
+  /** Plain text. HTML-only messages are stripped server-side, never rendered. */
+  body: string;
+  attachments: Array<{ filename: string; mimeType: string; sizeBytes: number }>;
+}
+
+export interface GmailThread {
+  id: string;
+  subject: string;
+  messageCount: number;
+  messages: GmailMessageSummary[];
+}
+
+export interface GmailListResult {
+  messages: GmailMessageSummary[];
+  estimatedTotal: number | null;
+  nextPageToken: string | null;
+}
+
+export interface DriveFile {
+  id: string;
+  name: string;
+  mimeType: string;
+  kind: string;
+  modifiedAt: string;
+  createdAt: string | null;
+  sizeBytes: number | null;
+  owners: string[];
+  webViewLink: string | null;
+  shared: boolean;
+  trashed: boolean;
+}
+
+export interface DriveListResult {
+  files: DriveFile[];
+  nextPageToken: string | null;
+}
+
+export interface CalendarEvent {
+  id: string;
+  summary: string;
+  description: string | null;
+  location: string | null;
+  start: string;
+  end: string;
+  allDay: boolean;
+  status: string;
+  organizer: string | null;
+  attendees: Array<{ email: string; responseStatus: string; optional: boolean }>;
+  htmlLink: string | null;
+  calendarId: string;
+}
+
+export interface CalendarListResult {
+  events: CalendarEvent[];
+  from: string;
+  to: string;
+  nextPageToken: string | null;
+}
+
+/**
+ * Calls a Workspace endpoint and returns the envelope.
+ *
+ * A non-2xx is NOT an exception here: the server answers 409 for
+ * `not_connected` and 403 for `permission_missing`, and both bodies carry the
+ * remedy the UI needs to render. Throwing would discard exactly the
+ * information that makes those states actionable.
+ */
+async function workspaceRequest<T>(path: string): Promise<GoogleTaskResult<T>> {
+  const raw = await request<GoogleTaskResult<T>>(path);
+
+  // `request` wraps in its own ApiResponse. When the HTTP layer itself failed
+  // (no network), synthesise a provider_error so callers have one shape.
+  if (raw.success && raw.data) return raw.data;
+
+  const body = (raw as { data?: GoogleTaskResult<T> }).data;
+  if (body && typeof body === "object" && "status" in body) return body;
+
+  return {
+    success: false,
+    source: "gmail",
+    status: "provider_error",
+    data: null,
+    message: raw.error?.message ?? "The request could not be completed.",
+  };
+}
+
+export const listUnreadGmail = (limit = 10) =>
+  workspaceRequest<GmailListResult>(`/workspace/gmail/unread?limit=${limit}`);
+
+export const searchGmail = (query: string, limit = 10) =>
+  workspaceRequest<GmailListResult>(
+    `/workspace/gmail/search?q=${encodeURIComponent(query)}&limit=${limit}`
+  );
+
+export const getGmailMessage = (id: string) =>
+  workspaceRequest<GmailMessageDetail>(`/workspace/gmail/messages/${encodeURIComponent(id)}`);
+
+export const getGmailThread = (id: string) =>
+  workspaceRequest<GmailThread>(`/workspace/gmail/threads/${encodeURIComponent(id)}`);
+
+export const searchDriveFiles = (query: string, limit = 10) =>
+  workspaceRequest<DriveListResult>(
+    `/workspace/drive/search?q=${encodeURIComponent(query)}&limit=${limit}`
+  );
+
+export const listRecentDriveFiles = (limit = 10) =>
+  workspaceRequest<DriveListResult>(`/workspace/drive/recent?limit=${limit}`);
+
+export const getDriveFileMetadata = (id: string) =>
+  workspaceRequest<DriveFile>(`/workspace/drive/files/${encodeURIComponent(id)}`);
+
+export const listUpcomingCalendarEvents = (limit = 10, windowDays = 7) =>
+  workspaceRequest<CalendarListResult>(
+    `/workspace/calendar/upcoming?limit=${limit}&windowDays=${windowDays}`
+  );
+
+export const getCalendarEvent = (id: string, calendarId?: string) =>
+  workspaceRequest<CalendarEvent>(
+    `/workspace/calendar/events/${encodeURIComponent(id)}${
+      calendarId ? `?calendarId=${encodeURIComponent(calendarId)}` : ""
+    }`
+  );
+
+// ---------------------------------------------------------------------------
+// Phase 13 — executing an approved Google write.
+//
+// There is ONE execution endpoint and this is the only client for it. The
+// approve/reject actions stay on the existing approval client, because approval
+// is one concept in this system with one durable store.
+// ---------------------------------------------------------------------------
+
+export type GoogleWriteVerification =
+  | "verified"
+  | "verification_failed"
+  | "provider_reported"
+  | "verification_unavailable"
+  | "indeterminate"
+  | "failed";
+
+export interface GoogleWriteExecuteResult {
+  success: boolean;
+  source: "gmail" | "drive" | "calendar";
+  action: string;
+  status: GoogleTaskStatus;
+  verification: GoogleWriteVerification;
+  /** Normalized provider result. Never a raw payload, never a token. */
+  data: unknown;
+  message?: string;
+  requiredAction?: string;
+  requestId: string;
+  /** Audit row reference, so a user can cite what happened. */
+  auditRef?: string;
+  /** True only when a retry is genuinely safe. Usually false. */
+  retrySafe: boolean;
+}
+
+export interface GoogleWriteDetail {
+  approvalId: string;
+  action: string;
+  status: string;
+  expired: boolean;
+  /** The single condition under which Execute can succeed. */
+  executable: boolean;
+  plan: Record<string, unknown>;
+}
+
+/**
+ * Executes an APPROVED Google write.
+ *
+ * Returns the envelope unchanged, including `verification` — the UI must be
+ * able to say "done and confirmed" differently from "done, not confirmed" and
+ * differently again from "done, but the re-read disagreed".
+ */
+export async function executeGoogleWrite(
+  approvalId: string
+): Promise<ApiResponse<GoogleWriteExecuteResult>> {
+  return request(`/integrations/google/writes/${encodeURIComponent(approvalId)}/execute`, {
+    method: "POST",
+  });
+}
+
+/** Reads a plan and whether it is currently executable. */
+export async function getGoogleWriteDetail(
+  approvalId: string
+): Promise<ApiResponse<GoogleWriteDetail>> {
+  return request(`/integrations/google/writes/${encodeURIComponent(approvalId)}`);
+}

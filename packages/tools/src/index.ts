@@ -232,3 +232,22 @@ export {
   GOOGLE_WORKSPACE_TOOL_IDS,
 } from "./tools/google-workspace-tools.js";
 export type { GoogleWorkspaceTaskPort } from "./tools/google-workspace-tools.js";
+
+// Phase 13 — Google write PLANNING tools. Ten planners, zero executors: the
+// port they hold has no `execute`, so a model cannot perform a Google write
+// however it is prompted. Execution happens only via an approved approval.
+export {
+  CreateGmailDraftTool,
+  UpdateGmailDraftTool,
+  RequestSendGmailDraftTool,
+  CreateDriveFolderTool,
+  UploadDriveFileTool,
+  MoveDriveFileTool,
+  RenameDriveFileTool,
+  CreateCalendarEventTool,
+  UpdateCalendarEventTool,
+  DeleteCalendarEventTool,
+  createGoogleWriteTools,
+  GOOGLE_WRITE_TOOL_IDS,
+} from "./tools/google-write-tools.js";
+export type { GoogleWritePlanPort } from "./tools/google-write-tools.js";

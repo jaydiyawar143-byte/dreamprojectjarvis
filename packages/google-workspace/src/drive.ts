@@ -30,10 +30,10 @@ const MAX_RESULTS = 25;
  * a cache.
  */
 const FIELDS =
-  "nextPageToken,files(id,name,mimeType,modifiedTime,createdTime,size,owners(displayName,emailAddress),webViewLink,shared,trashed)";
+  "nextPageToken,files(id,name,mimeType,modifiedTime,createdTime,size,owners(displayName,emailAddress),webViewLink,shared,trashed,parents)";
 
 const FILE_FIELDS =
-  "id,name,mimeType,modifiedTime,createdTime,size,owners(displayName,emailAddress),webViewLink,shared,trashed";
+  "id,name,mimeType,modifiedTime,createdTime,size,owners(displayName,emailAddress),webViewLink,shared,trashed,parents";
 
 interface RawFile {
   id?: string;
@@ -46,6 +46,7 @@ interface RawFile {
   webViewLink?: string;
   shared?: boolean;
   trashed?: boolean;
+  parents?: string[];
 }
 
 /**
@@ -99,6 +100,8 @@ function toFile(raw: RawFile): DriveFile {
     webViewLink: raw.webViewLink ?? null,
     shared: raw.shared ?? false,
     trashed: raw.trashed ?? false,
+    // Phase 13 reads this to verify a move actually landed.
+    parents: raw.parents ?? [],
   };
 }
 

@@ -191,14 +191,23 @@ describe("Sprint 6.1 — agent architecture", () => {
       // Google Ads additionally owns the connection lifecycle for its OWN
       // provider, because "Google Ads reconnect karo" routes here rather than
       // to the fallback.
+      // Google Ads owns its own provider, its connection lifecycle, capability
+      // discovery, and — from Phase 12 — the Google Workspace reads, since
+      // anything naming Google may route here.
       expect(
         google.allowedTools.every(
           (t) =>
             t.startsWith("google.") ||
+            t.startsWith("gmail.") ||
+            t.startsWith("drive.") ||
+            t.startsWith("calendar.") ||
             t.startsWith("integration.") ||
             t.startsWith("capabilities.")
         )
       ).toBe(true);
+      // It still cannot reach another provider's data.
+      expect(google.allowedTools).not.toContain("meta.insights");
+      expect(google.allowedTools).not.toContain("whatsapp.send");
     });
 
     it("gives the knowledge agent no EXECUTION tools, only capability discovery", () => {

@@ -82,10 +82,44 @@ abstract class GoogleTaskTool extends BaseTool {
     );
 
     if (!result.success) {
-      // The remedy IS the message. A model that receives "not connected" with
-      // no instruction will invent one.
       const remedy = result.requiredAction ? ` ${result.requiredAction}` : "";
-      return this.failure(`${result.message ?? "The Google request failed."}${remedy}`);
+      const text = `${result.message ?? "The Google request failed."}${remedy}`;
+
+      // AN ACTIONABLE STATE IS AN ANSWER, NOT A RETRIEVAL FAILURE.
+      //
+      // "You have not connected Google" is the correct answer to "show my
+      // unread emails" — the user needs to hear it and act on it. Returning it
+      // as a failed ToolResult trips the Orchestrator's all-tools-failed guard,
+      // and the user gets "Data retrieval failed" instead of the one sentence
+      // that would let them fix it. Caught on a live run.
+      //
+      // So the three states only a HUMAN can resolve come back as a successful
+      // lookup carrying bad news, and the model is told what to say. A genuine
+      // provider failure stays a failure, because there a retry is the right
+      // suggestion and the guard is right to fire.
+      const actionable =
+        result.status === "not_connected" ||
+        result.status === "needs_reauth" ||
+        result.status === "permission_missing";
+
+      if (actionable) {
+        return this.success(
+          {
+            available: false,
+            status: result.status,
+            reason: result.message,
+            requiredAction: result.requiredAction,
+          },
+          {
+            message: text,
+            source: result.source,
+            status: result.status,
+            rule: "Tell the user this is not available yet and state the requiredAction verbatim. Do NOT retry, and do NOT invent data.",
+          }
+        );
+      }
+
+      return this.failure(text);
     }
 
     return this.success(result.data, {

@@ -138,6 +138,36 @@ export const GOOGLE_WORKSPACE_TOOLS = [
 ] as const;
 
 /**
+ * Google write PLANNING — Phase 13.
+ *
+ * These tools PLAN. None of them can perform a Google write: the port they
+ * hold has no execute method, so granting them cannot grant the ability to
+ * send an email, move a file or delete an event.
+ *
+ * Execution is not a tool at all. It happens when a human approves the row a
+ * plan created, consumed atomically through the REST approval path — which is
+ * why there is no `GOOGLE_WRITE_EXECUTE_TOOLS` group here to grant, and could
+ * not be.
+ *
+ * Granted to the general assistant (where "Priya ko email likho" lands) and to
+ * the Google Ads agent (where anything naming Google may route). NOT granted
+ * to the Meta, WhatsApp, n8n, browser or knowledge agents: none of them has
+ * business drafting the user's mail or touching their calendar.
+ */
+export const GOOGLE_WRITE_PLAN_TOOLS = [
+  "google.plan.gmail.createDraft",
+  "google.plan.gmail.updateDraft",
+  "google.plan.gmail.sendDraft",
+  "google.plan.drive.createFolder",
+  "google.plan.drive.uploadFile",
+  "google.plan.drive.moveFile",
+  "google.plan.drive.renameFile",
+  "google.plan.calendar.createEvent",
+  "google.plan.calendar.updateEvent",
+  "google.plan.calendar.deleteEvent",
+] as const;
+
+/**
  * Integration management READS.
  *
  * Every one is READ_ONLY and answers a question about JARVIS's own
@@ -242,6 +272,7 @@ const GENERAL_POLICY = policy({
     ...INTEGRATION_WRITE_TOOLS,
     ...CAPABILITY_TOOLS,
     ...GOOGLE_WORKSPACE_TOOLS,
+    ...GOOGLE_WRITE_PLAN_TOOLS,
   ],
   requiredPermissions: ["read"],
   writesRequireApproval: true,
@@ -271,6 +302,7 @@ const GOOGLE_ADS_POLICY = policy({
     ...INTEGRATION_WRITE_TOOLS,
     ...CAPABILITY_TOOLS,
     ...GOOGLE_WORKSPACE_TOOLS,
+    ...GOOGLE_WRITE_PLAN_TOOLS,
   ],
   requiredPermissions: ["read"],
   writesRequireApproval: true,

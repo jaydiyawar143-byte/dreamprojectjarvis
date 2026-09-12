@@ -1,6 +1,8 @@
 export {
   createGoogleConfig,
   isGoogleConfigured,
+  createGoogleOAuthConfig,
+  isGoogleOAuthConfigured,
   normalizeCustomerId,
   buildAdsBaseUrl,
   GOOGLE_ADS_SCOPE,

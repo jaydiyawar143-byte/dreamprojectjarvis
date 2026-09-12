@@ -76,7 +76,17 @@ export interface AccessDeps {
 export async function resolveAccess(
   userId: string,
   service: "gmail" | "drive" | "calendar",
-  deps: AccessDeps
+  deps: AccessDeps,
+  /**
+   * Which scopes to require, overriding the service's READ scopes.
+   *
+   * Phase 13 passes its write scopes here. Without the override this function
+   * would demand the read scope for a write, which is simply wrong:
+   * `gmail.compose` permits creating and sending drafts and does NOT include
+   * `gmail.readonly`, so a correctly-scoped write connection would be refused.
+   * Least privilege cuts both ways — a write must not require read either.
+   */
+  requiredScopes?: readonly string[]
 ): Promise<AccessOutcome> {
   const now = deps.now ?? (() => new Date());
 
@@ -103,7 +113,8 @@ export async function resolveAccess(
   // GRANTED, not requested. Google may hand back fewer scopes than were asked
   // for, and a connection that omitted this service is a real and common state.
   const granted = new Set(summary.scopes);
-  const missing = spec.readScopes.filter((scope) => !granted.has(scope));
+  const needed = requiredScopes ?? spec.readScopes;
+  const missing = needed.filter((scope) => !granted.has(scope));
   if (missing.length > 0) {
     return {
       ok: false,

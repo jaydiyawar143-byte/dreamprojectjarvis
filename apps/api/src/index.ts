@@ -45,6 +45,8 @@ import { createGoogleSignInRouter } from "./routes/google-signin.js";
 import { createCredentialsRouter } from "./routes/credentials.js";
 import { createIntegrationsRouter } from "./routes/integrations.js";
 import { createCapabilitiesRouter } from "./routes/capabilities.js";
+import { createGoogleWorkspaceRouter } from "./routes/google-workspace.js";
+import { createGoogleWritesRouter } from "./routes/google-writes.js";
 import { createCommandCenterRouter } from "./routes/command-center.js";
 import { installSystemStream } from "./socket/system-stream.js";
 import { OpenAIVoiceProvider } from "@jarvis/ai-openai";
@@ -241,6 +243,28 @@ app.use("/api/v1/activity", createActivityRouter(container));
 // and "JARVIS_ENCRYPTION_KEY is not set" is.
 // ---------------------------------------------------------------------------
 app.use("/api/v1/capabilities", createCapabilitiesRouter(container));
+
+// ---------------------------------------------------------------------------
+// Phase 12 — real read-only Gmail, Drive and Calendar.
+//
+// Mounted unconditionally so the routes can explain their own unavailability
+// with the reason rather than 404ing. Every handler is a GET; this phase
+// performs no writes.
+// ---------------------------------------------------------------------------
+// Mounted at /workspace, NOT /google: the OAuth router already owns
+// /api/v1/google (/connect, /callback, /status, /disconnect). Sharing a prefix
+// would work only for as long as no path ever collided, and a future
+// /google/status on either side would silently shadow the other.
+app.use("/api/v1/workspace", createGoogleWorkspaceRouter(container));
+
+// ---------------------------------------------------------------------------
+// Phase 13 — approval-gated Google writes.
+//
+// Plan, read, execute. APPROVING is deliberately NOT here: it happens on the
+// existing /approvals endpoints, so approval stays one concept with one store
+// and one audit trail.
+// ---------------------------------------------------------------------------
+app.use("/api/v1/integrations/google/writes", createGoogleWritesRouter(container));
 // Sprint 5.2 — Google OAuth connection management (read-only Ads integration).
 //
 // Mounted only when an encryption key is present. Without one no Google token

@@ -77,5 +77,7 @@ export * from "./integration-catalog.js";
 export * from "./types/capability.js";
 // Phase 12 — real read-only Gmail, Drive and Calendar task contracts.
 export * from "./types/google-workspace.js";
+// Phase 13 — approval-gated Google write actions.
+export * from "./types/google-write.js";
 export * from "./capability-catalog.js";
 export * from "./utils/mask-identifier.js";

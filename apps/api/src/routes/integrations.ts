@@ -285,9 +285,14 @@ export function createIntegrationsRouter(
       ? (req.body.services as unknown[]).filter((s): s is string => typeof s === "string")
       : undefined;
 
+    // `accessLevel: "write"` is how a write upgrade is requested. It must be
+    // named explicitly — there is no way to obtain a write scope by omission.
+    const accessLevel = req.body?.accessLevel === "write" ? "write" : "read";
+
     await run(req, res, {
       command: "connect",
       integration: id,
+      accessLevel,
       ...(services ? { services } : {}),
     });
   });

@@ -61,7 +61,13 @@ import {
   describeBrowserConfigStatus,
 } from "@jarvis/browser";
 import { createMetaGraphProvider } from "@jarvis/meta-graph";
-import { createGoogleAdsProvider, createGoogleConfig, isGoogleConfigured } from "@jarvis/google-ads";
+import {
+  createGoogleAdsProvider,
+  createGoogleConfig,
+  isGoogleConfigured,
+  createGoogleOAuthConfig,
+  isGoogleOAuthConfigured,
+} from "@jarvis/google-ads";
 import { createWhatsAppProvider, createWhatsAppConfig, isWhatsAppConfigured } from "@jarvis/whatsapp";
 import {
   createN8nProvider,
@@ -96,11 +102,18 @@ import {
   PrismaN8nRepository,
   PrismaMapsUsageRepository,
   PrismaTaskRepository,
+  PrismaIntegrationStateRepository,
 } from "@jarvis/db";
 import { MemoryExtractionService, KnowledgeRetrievalService } from "@jarvis/memory";
 import { IntegrationCommandService } from "./integrations/command-service.js";
 import { createIntegrationTools, type IntegrationCommandPort } from "@jarvis/tools";
 import { createCapabilityTools, type CapabilityPort } from "@jarvis/tools";
+import { createGoogleWorkspaceTools, type GoogleWorkspaceTaskPort } from "@jarvis/tools";
+import { createGoogleWriteTools, type GoogleWritePlanPort } from "@jarvis/tools";
+import { GoogleWorkspaceTaskService } from "./google/workspace-service.js";
+import { GoogleWriteService } from "./google/write-service.js";
+import { buildGoogleWriteService } from "./google/build-write-service.js";
+import { DbBackedRateLimiter } from "./rate-limiter.js";
 import { CapabilityService } from "./capabilities/capability-service.js";
 import { INTEGRATION_CATALOG } from "@jarvis/core";
 import { buildIntegrationCommandService } from "./integrations/build.js";
@@ -145,6 +158,24 @@ export interface Container {
    * answer cannot disagree about what is available.
    */
   capabilities: CapabilityService | null;
+  /**
+   * Phase 12 — real read-only Gmail, Drive and Calendar tasks.
+   *
+   * One instance, shared by the REST routes and the JARVIS Workspace tools, so
+   * a dashboard panel and a spoken request run the same checks. Null when the
+   * server has no Google OAuth client or no encryption key: without either,
+   * there is no connection to read from.
+   */
+  googleWorkspace: GoogleWorkspaceTaskService | null;
+  /**
+   * Phase 13 — approval-gated Google writes.
+   *
+   * One instance, shared by the REST routes, the JARVIS planning tools and the
+   * approval execution path, so all three run the same gate. Null when this
+   * deployment has no Google OAuth client or no encryption key; the routes and
+   * tools then report NOT_CONFIGURED with the reason rather than 404ing.
+   */
+  googleWrites: GoogleWriteService | null;
   /**
    * UI V2 — the agent registry, exposed so `GET /api/v1/agents` can report which
    * agents ACTUALLY registered rather than which ones have a policy.
@@ -255,7 +286,11 @@ function createMetaToolRegistry(
    * these tools must share ONE instance, so a rendered page and a spoken answer
    * can never report different capabilities.
    */
-  capabilities: CapabilityService | null
+  capabilities: CapabilityService | null,
+  /** Phase 12 Workspace tasks, or null when Google cannot be connected here. */
+  googleWorkspace: GoogleWorkspaceTaskService | null,
+  /** Phase 13 write planning, or null when writes are unavailable here. */
+  googleWrites: GoogleWriteService | null
 ): ToolRegistry {
   const registry = new ToolRegistry();
   const metaAccessToken = process.env.META_ACCESS_TOKEN;
@@ -501,6 +536,59 @@ function createMetaToolRegistry(
   }
 
   // -------------------------------------------------------------------------
+  // Phase 12 — Gmail, Drive and Calendar reads.
+  //
+  // Registered whenever a Google connection is POSSIBLE, not only when one
+  // exists: the tools must be present to answer "meri unread emails dikhao"
+  // with "connect Google first". Gating registration on an existing connection
+  // would make the request fall through to an agent with no tool for it, which
+  // is how a model ends up inventing an answer.
+  //
+  // All READ_ONLY. There is no send, delete or create tool in this phase.
+  // -------------------------------------------------------------------------
+  if (googleWorkspace) {
+    const workspacePort: GoogleWorkspaceTaskPort = {
+      executeTask: (input, context) => googleWorkspace.executeTask(input, context),
+    };
+    for (const tool of createGoogleWorkspaceTools(workspacePort)) {
+      registry.register(tool);
+    }
+  } else {
+    console.log(JSON.stringify({
+      level: "info",
+      event: "google_workspace_tools_disabled",
+      reason: "no Google OAuth client or no JARVIS_ENCRYPTION_KEY",
+    }));
+  }
+
+  // -------------------------------------------------------------------------
+  // Phase 13 — Google write PLANNING.
+  //
+  // Ten planners and no executors. The port handed to them exposes only
+  // `plan`, so these tools cannot perform a Google write at all — execution
+  // requires a human approving the row they create, consumed through
+  // GoogleWriteService.execute() from the REST layer.
+  //
+  // Registered whenever writes are POSSIBLE, not only when a connection
+  // exists, so "draft an email to Priya" can answer "connect Google first"
+  // rather than falling through to an agent with no tool for it.
+  // -------------------------------------------------------------------------
+  if (googleWrites) {
+    const writePlanPort: GoogleWritePlanPort = {
+      plan: (action, params, planContext) => googleWrites.plan(action, params, planContext),
+    };
+    for (const tool of createGoogleWriteTools(writePlanPort)) {
+      registry.register(tool);
+    }
+  } else {
+    console.log(JSON.stringify({
+      level: "info",
+      event: "google_write_tools_disabled",
+      reason: "no Google OAuth client or no JARVIS_ENCRYPTION_KEY",
+    }));
+  }
+
+  // -------------------------------------------------------------------------
   // Capability discovery.
   //
   // Registered LAST, deliberately: its own report reads `registry.getAll()`, so
@@ -616,7 +704,58 @@ export function getContainer(options?: {
       })
     : null;
 
-  const toolRegistry = createMetaToolRegistry(approvalRepo, integrationCommands, capabilityService);
+  // Phase 12 — the Workspace task service. Built from the SAME encrypted
+  // connection repository and the SAME OAuth config the integration layer uses;
+  // it adds no second token store and no second consent flow.
+  // Gated on the OAuth client ALONE. Gmail, Drive and Calendar need no Ads
+  // developer token, so `isGoogleConfigured()` — which requires one — would
+  // refuse Workspace access on a deployment fully able to provide it.
+  const googleWorkspaceService =
+    process.env.JARVIS_ENCRYPTION_KEY && isGoogleOAuthConfigured()
+      ? (() => {
+          try {
+            return new GoogleWorkspaceTaskService({
+              connections: new PrismaGoogleConnectionRepository(
+                prisma,
+                EncryptionService.fromEnv()
+              ),
+              config: createGoogleOAuthConfig(),
+              audit: auditLogger,
+              // Counted in the same audit-backed window every other limiter
+              // uses, so the ceiling holds across processes.
+              rateLimiter: new DbBackedRateLimiter(auditLogger, "google"),
+              integrationState: {
+                isEnabled: async (userId, integration) =>
+                  (await new PrismaIntegrationStateRepository(prisma).get(userId, integration))
+                    .enabled,
+              },
+            });
+          } catch (err) {
+            // Misconfiguration must not take the API down; Workspace tools
+            // simply stay unregistered and capability discovery says so.
+            console.log(JSON.stringify({
+              level: "warn",
+              event: "google_workspace_init_skipped",
+              reason: err instanceof Error ? err.message : "unknown",
+            }));
+            return null;
+          }
+        })()
+      : null;
+
+  // Phase 13 — built from the SAME approval repository, execution journal,
+  // encrypted vault and audit logger everything else uses. See
+  // build-write-service.ts for the two adapters and why they are shaped as
+  // they are.
+  const googleWriteService = buildGoogleWriteService({ prisma, auditLogger });
+
+  const toolRegistry = createMetaToolRegistry(
+    approvalRepo,
+    integrationCommands,
+    capabilityService,
+    googleWorkspaceService,
+    googleWriteService
+  );
   registryRef.current = toolRegistry;
 
   const adapter = new OpenAIAdapter();
@@ -982,6 +1121,8 @@ export function getContainer(options?: {
     agentRegistry,
     integrationCommands,
     capabilities: capabilityService,
+    googleWorkspace: googleWorkspaceService,
+    googleWrites: googleWriteService,
     executor: toolExecutor,
     recommendationRepo,
     lifecycle: options?.lifecycle,

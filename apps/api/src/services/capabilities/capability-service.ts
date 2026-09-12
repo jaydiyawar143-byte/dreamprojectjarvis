@@ -33,6 +33,7 @@ import {
   maskEmail,
   maskIdentifier,
   INTEGRATION_CATALOG,
+  GOOGLE_SERVICES,
   isUsable,
   type CapabilityAvailability,
   type CapabilityGroup,
@@ -162,6 +163,50 @@ function permissionGap(
     : `${integration.name} is connected, but the required read permission has not been granted.`;
 }
 
+/**
+ * Whether the granted scopes cover one Google SUB-SERVICE.
+ *
+ * "Google is connected" is not "Gmail is authorized". A user can connect Google
+ * for Ads alone — the progressive-consent model makes that the DEFAULT — and a
+ * Gmail read on that connection returns 403. Reporting `gmail.listUnread` as
+ * executable because the Google integration is connected would be exactly the
+ * over-claim Phase 12 has to avoid.
+ *
+ * The check reads the integration's GRANTED permissions, which for Google are
+ * derived from the scopes Google actually returned (`describeScope` tags each
+ * with its service). A requested-but-not-granted service is therefore invisible
+ * here, which is the correct reading.
+ */
+function googleServiceGap(
+  integration: IntegrationView | undefined,
+  service: "gmail" | "drive" | "calendar" | "ads",
+  /**
+   * Which access level the capability needs.
+   *
+   * A Phase 13 planner needs the WRITE scope. Checking the read scope for it
+   * would report "prepare a draft" as available on a read-only connection,
+   * and the plan would then be refused after the user had already asked for
+   * it — the failure arriving one step too late.
+   */
+  access: "read" | "write" = "read"
+): { reason: string; requiredAction: string } | null {
+  if (!integration || integration.connection !== "CONNECTED") return null;
+
+  const label =
+    service === "ads" ? "Google Ads" : service.charAt(0).toUpperCase() + service.slice(1);
+
+  const granted = integration.permissions.some(
+    (p) => p.granted && p.service === service && p.access === access
+  );
+  if (granted) return null;
+
+  return {
+    reason: `Your Google account is connected, but ${access} access to ${label} was not granted.`,
+    // Explicit about the mechanism: this system never widens a grant silently.
+    requiredAction: `Reconnect Google and approve ${access} access for ${label}.`,
+  };
+}
+
 export class CapabilityService {
   constructor(private readonly deps: CapabilityDeps) {}
 
@@ -193,7 +238,16 @@ export class CapabilityService {
       const isManagement = tool.id.startsWith("integration.");
 
       const meta = describeCapability(tool.id, tool.description);
+
+      // Phase 13 planners are LOW_IMPACT — planning really does write nothing
+      // outside JARVIS — so the risk check alone would report them EXECUTABLE,
+      // which would read as "JARVIS can send email on request". It cannot: the
+      // plan stops at a human. Treated as an external write for reporting, so
+      // it surfaces as REQUIRES_CONFIRMATION.
+      const isWritePlanner = tool.id.startsWith("google.plan.");
+
       const writesExternally =
+        isWritePlanner ||
         tool.risk === "EXTERNAL_SIDE_EFFECT" ||
         tool.risk === "HIGH_IMPACT" ||
         tool.risk === "FINANCIAL";
@@ -216,12 +270,27 @@ export class CapabilityService {
         requiredAction = derived.requiredAction;
 
         // Connected but unscoped is its own state, distinct from disconnected.
+        //
+        // The Google sub-service check runs FIRST and is the more specific one:
+        // a Gmail read on an Ads-only connection must say "Gmail access was not
+        // granted", not the generic "no read permission" — the remedies differ
+        // (reconnect WITH Gmail, versus grant a permission that may not exist).
         if (isUsable(availability)) {
-          const gap = permissionGap(integration, access);
-          if (gap) {
+          const serviceGap = meta.googleService
+            ? googleServiceGap(integration, meta.googleService, isWritePlanner ? "write" : "read")
+            : null;
+
+          if (serviceGap) {
             availability = "PERMISSION_MISSING";
-            reason = gap;
-            requiredAction = `Grant the required ${access} permission for ${integration?.name ?? meta.integration}.`;
+            reason = serviceGap.reason;
+            requiredAction = serviceGap.requiredAction;
+          } else {
+            const gap = permissionGap(integration, access);
+            if (gap) {
+              availability = "PERMISSION_MISSING";
+              reason = gap;
+              requiredAction = `Grant the required ${access} permission for ${integration?.name ?? meta.integration}.`;
+            }
           }
         }
       }
@@ -256,6 +325,49 @@ export class CapabilityService {
         access: planned.access,
         reason: `This build has no client for ${planned.label.replace(" (planned)", "")}, so no action can run even once ${integration?.name ?? "the provider"} is connected.`,
         requiredAction: null,
+      });
+    }
+
+    // --- implemented, but not registered in THIS process ---------------------
+    //
+    // A Google service can be fully built and still have no tools registered
+    // here, because registration needs a Google OAuth client on the server.
+    // Reporting nothing at all would be a worse lie than the one this service
+    // was written to fix: the capability genuinely exists in the build, and
+    // what is missing is configuration the operator can supply.
+    //
+    // So each implemented service with no registered tool is reported with the
+    // reason and the remedy — the "available after connection" bucket.
+    // Only genuinely REGISTERED ids count here. Using every id would let the
+    // planned entries — `google.docs`, `google.sheets` — satisfy the `google.`
+    // prefix check and silently mask Google Ads, which is implemented and
+    // equally unregistered on a server with no OAuth client.
+    const registeredIds = capabilities.filter((c) => c.registered).map((c) => c.id);
+    for (const service of GOOGLE_SERVICES) {
+      if (!service.implemented) continue;
+      // `ads` tools are `google.*`; the Workspace ones are `gmail.*` etc.
+      const prefix = service.id === "ads" ? "google." : `${service.id}.`;
+      if (registeredIds.some((id) => id.startsWith(prefix))) continue;
+
+      const google = byId.get("google");
+      const configured = google !== undefined && google.health !== "DISABLED";
+
+      capabilities.push({
+        id: `${service.id}.unavailable`,
+        label: `${service.label} read actions`,
+        description: service.description,
+        group: "google",
+        integration: "google",
+        // Honest: no tool is registered, so nothing can run.
+        registered: false,
+        availability: configured ? "NOT_CONNECTED" : "NOT_CONFIGURED",
+        access: "read",
+        reason: configured
+          ? `${service.label} reads are built, but no Google account is connected yet.`
+          : `${service.label} reads are built, but this server has no Google OAuth client configured, so no account can be connected.`,
+        requiredAction: configured
+          ? `Connect your Google account and include ${service.label}.`
+          : "Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET and GOOGLE_REDIRECT_URI on the server, then restart.",
       });
     }
 

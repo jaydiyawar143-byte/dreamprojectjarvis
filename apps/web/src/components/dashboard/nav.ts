@@ -16,6 +16,7 @@ import {
   Globe,
   Inbox,
   LayoutDashboard,
+  Mail,
   Megaphone,
   MessageSquare,
   Plug,
@@ -53,6 +54,10 @@ export const NAV_GROUPS: NavGroup[] = [
       { href: "/opportunities", label: "Opportunities", icon: Inbox, available: true },
       { href: "/knowledge", label: "Knowledge Base", icon: BookOpen, available: true },
       { href: "/meta-ads", label: "Meta Ads", icon: Megaphone, available: true },
+      // Phase 12 — real read-only Gmail, Drive and Calendar. The page reports
+      // its own live connection state, so on a deployment with no Google OAuth
+      // client it says so rather than implying access it does not have.
+      { href: "/workspace", label: "Google Workspace", icon: Mail, available: true },
     ],
   },
   {

@@ -99,7 +99,17 @@ export const GOOGLE_SERVICES: readonly GoogleServiceSpec[] = [
     label: "Gmail",
     description: "Read message metadata and content; sending is a separate grant.",
     readScopes: ["https://www.googleapis.com/auth/gmail.readonly"],
-    writeScopes: ["https://www.googleapis.com/auth/gmail.send"],
+    // `gmail.compose`, not `gmail.send`.
+    //
+    // `gmail.send` permits sending and NOTHING else — it cannot create or
+    // update a draft, so Phase 13's draft actions would fail on it with a 403
+    // that looks like a bug. `gmail.compose` is the narrowest scope that covers
+    // exactly this phase's surface: create, update and send drafts.
+    //
+    // It is still meaningfully narrower than the alternatives: it does not
+    // grant reading the mailbox (that is `gmail.readonly`, requested
+    // separately) and it cannot delete mail at all.
+    writeScopes: ["https://www.googleapis.com/auth/gmail.compose"],
     implemented: true,
   },
   {

@@ -87,6 +87,60 @@ export function isGoogleConfigured(env: NodeJS.ProcessEnv = process.env): boolea
   );
 }
 
+// ---------------------------------------------------------------------------
+// OAuth-only configuration
+// ---------------------------------------------------------------------------
+//
+// `isGoogleConfigured` above additionally requires GOOGLE_ADS_DEVELOPER_TOKEN,
+// because Ads API calls genuinely cannot work without one. Gmail, Drive and
+// Calendar need no developer token at all — only the OAuth client — so gating
+// them on the Ads predicate would refuse Workspace access on a deployment that
+// is perfectly able to provide it.
+//
+// The token exchange itself (`refreshAccessToken`) reads only clientId,
+// clientSecret and timeoutMs, so this shape is sufficient for every OAuth
+// operation. `developerToken` is filled with an empty string to satisfy the
+// shared `GoogleConfig` type; anything that actually calls the Ads API must go
+// through `createGoogleConfig`, which requires a real one.
+
+/** True when the OAuth client alone is configured. Ignores Ads requirements. */
+export function isGoogleOAuthConfigured(env: NodeJS.ProcessEnv = process.env): boolean {
+  return Boolean(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET && env.GOOGLE_REDIRECT_URI);
+}
+
+const googleOAuthConfigSchema = googleConfigSchema.omit({ developerToken: true });
+
+/**
+ * Builds a config sufficient for OAuth and for non-Ads Google APIs.
+ *
+ * Throws with FIELD NAMES only, never values — the same discipline as
+ * `createGoogleConfig`, since two of these three are secrets.
+ */
+export function createGoogleOAuthConfig(input: GoogleConfigInput = {}): GoogleConfig {
+  const result = googleOAuthConfigSchema.safeParse({
+    clientId: input.clientId ?? process.env.GOOGLE_CLIENT_ID,
+    clientSecret: input.clientSecret ?? process.env.GOOGLE_CLIENT_SECRET,
+    redirectUri: input.redirectUri ?? process.env.GOOGLE_REDIRECT_URI,
+    loginCustomerId: input.loginCustomerId ?? process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID,
+    apiVersion: input.apiVersion,
+    baseUrl: input.baseUrl,
+    timeoutMs: input.timeoutMs,
+  });
+
+  if (!result.success) {
+    const errors = result.error.flatten().fieldErrors;
+    const messages = Object.entries(errors)
+      .map(([k, v]) => `${k}: ${v?.join(", ")}`)
+      .join("; ");
+    throw new Error(`Google OAuth configuration error: ${messages}`);
+  }
+
+  // Empty developer token: this config is NOT for the Ads API, and an Ads call
+  // made with it will fail its own validation rather than silently sending a
+  // blank header.
+  return { ...result.data, developerToken: "" };
+}
+
 /** Strips dashes and validates the 10-digit Google Ads customer id. */
 export function normalizeCustomerId(customerId: string): string {
   const stripped = customerId.trim().replace(/-/g, "");

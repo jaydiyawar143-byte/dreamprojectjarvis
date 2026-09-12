@@ -37,6 +37,13 @@ export const RATE_LIMIT_NAMESPACES = {
   // of connection tests cannot consume a user's chat budget, and so the
   // integration limits can be tuned without touching the paths above.
   integration: "integration",
+  // Phase 12 — Gmail, Drive and Calendar reads. Counted apart from integration
+  // management so a burst of mail reads cannot consume the budget that
+  // reconnecting a broken integration needs.
+  google: "google",
+  // Phase 13 — approval-gated writes. Its own namespace so a burst of write
+  // planning cannot exhaust the budget a read needs, and vice versa.
+  google_write: "google_write",
 } as const;
 
 export type RateLimitNamespace =

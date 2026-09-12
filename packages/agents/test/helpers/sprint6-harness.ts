@@ -192,6 +192,30 @@ export function productionLikeTools(): ITool[] {
     read("capabilities.connected"),
     read("capabilities.integration"),
     read("capabilities.permissions"),
+    // Phase 12 — real Gmail, Drive and Calendar reads. All READ_ONLY: there is
+    // no write tool in this group and no write scope behind it.
+    read("gmail.listUnread"),
+    read("gmail.search"),
+    read("gmail.getMessage"),
+    read("gmail.getThread"),
+    read("drive.searchFiles"),
+    read("drive.listRecentFiles"),
+    read("drive.getFileMetadata"),
+    read("calendar.listUpcomingEvents"),
+    read("calendar.getEvent"),
+    // Phase 13 — write PLANNING. LOW_IMPACT and unapproved at the tool layer,
+    // because planning writes nothing outside JARVIS: it creates a pending
+    // approval row and stops. Execution is not a tool at all.
+    read("google.plan.gmail.createDraft"),
+    read("google.plan.gmail.updateDraft"),
+    read("google.plan.gmail.sendDraft"),
+    read("google.plan.drive.createFolder"),
+    read("google.plan.drive.uploadFile"),
+    read("google.plan.drive.moveFile"),
+    read("google.plan.drive.renameFile"),
+    read("google.plan.calendar.createEvent"),
+    read("google.plan.calendar.updateEvent"),
+    read("google.plan.calendar.deleteEvent"),
     // Sprint 7 — browser. The four reads are open; the six actions are all
     // approval-gated, which is what `write()` models here.
     read("browser.navigate"),

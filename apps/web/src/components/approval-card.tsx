@@ -21,6 +21,11 @@
 
 import { useState } from "react";
 import {
+  GoogleWritePlanDetail,
+  isGoogleWriteApproval,
+  type WritePlanView,
+} from "@/components/google-write-plan-detail";
+import {
   approveApproval,
   rejectApproval,
   type ApprovalRecord,
@@ -198,6 +203,21 @@ export function ApprovalCard({
           {new Date(approval.expiresAt).toLocaleString()}
         </dd>
       </dl>
+
+      {/*
+        Google write approvals get a rendered PLAN rather than a JSON dump.
+        Nobody can responsibly approve sending an email by reading a blob, and
+        an approval nobody reads is a rubber stamp. The raw parameters stay
+        available below it for anyone who wants them.
+      */}
+      {isGoogleWriteApproval(approval.toolId) && (
+        <div className="rounded border border-sys-line/70 bg-black/20 p-2">
+          <GoogleWritePlanDetail
+            plan={approval.params as WritePlanView}
+            toolId={approval.toolId}
+          />
+        </div>
+      )}
 
       {/* Display-only parameters: editing is forbidden by design. */}
       <details className="text-xs">

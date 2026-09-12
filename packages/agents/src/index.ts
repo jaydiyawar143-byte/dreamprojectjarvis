@@ -40,6 +40,7 @@ export {
   INTEGRATION_WRITE_TOOLS,
   CAPABILITY_TOOLS,
   GOOGLE_WORKSPACE_TOOLS,
+  GOOGLE_WRITE_PLAN_TOOLS,
   getAgentPolicy,
   isToolAllowed,
   resolveAllowedToolId,

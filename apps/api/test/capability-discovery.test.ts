@@ -191,10 +191,14 @@ describe("availability is separate from capability", () => {
     expect(metaInsights.requiredAction).toBeTruthy();
   });
 
-  it("reports Gmail as PLANNED, never as available, even when Google connects", async () => {
-    // The specific misreport from the screenshots: Gmail actions listed as
-    // things JARVIS could do. There is no Gmail client in this build, so it is
-    // planned whatever the connection state.
+  it("never reports Gmail as usable on a connection that did not grant it", async () => {
+    // Phase 11 asserted Gmail was always PLANNED. Phase 12 BUILT it, so that
+    // is no longer true — and the property worth protecting was never
+    // "Gmail is planned", it was "Gmail is never claimed when it cannot run".
+    //
+    // Connecting Google without the Gmail scope is the common case, because
+    // progressive consent defaults to Ads alone. So it must report
+    // PERMISSION_MISSING with the remedy, not EXECUTABLE.
     const connectedGoogle = NOTHING_CONNECTED.map((i) =>
       i.id === "google"
         ? integration({
@@ -206,19 +210,22 @@ describe("availability is separate from capability", () => {
             health: "CONNECTED",
             detail: "Connected.",
             permissions: [
-              { id: "openid", label: "Identify the account", granted: true, access: "read" },
+              { id: "openid", label: "Identify the connected Google account", granted: true, access: "read" },
             ],
           })
         : i
     );
 
-    const service = serviceWith(REGISTERED, connectedGoogle);
+    const service = serviceWith([tool("gmail.listUnread"), ...REGISTERED], connectedGoogle);
     const report = await service.report("u1");
 
-    const gmail = report.capabilities.find((c) => c.id === "google.gmail")!;
-    expect(gmail.availability).toBe("PLANNED");
-    expect(gmail.registered).toBe(false);
-    expect(gmail.reason).toMatch(/no client/i);
+    const gmail = report.capabilities.find((c) => c.id === "gmail.listUnread")!;
+    expect(gmail.availability).toBe("PERMISSION_MISSING");
+    expect(gmail.availability).not.toBe("EXECUTABLE");
+    // Phase 13 made this message name the ACCESS LEVEL, because "Gmail access"
+    // was ambiguous once writes existed: read and write are granted separately
+    // and need different remedies.
+    expect(gmail.reason).toMatch(/read access to Gmail was not granted/i);
   });
 
   it("marks an external write as REQUIRES_CONFIRMATION rather than plainly executable", async () => {
@@ -317,6 +324,156 @@ describe("availability is separate from capability", () => {
 });
 
 // ---------------------------------------------------------------------------
+
+describe("Phase 12 — Workspace capability gating", () => {
+  const WORKSPACE_TOOLS = [
+    tool("gmail.listUnread"),
+    tool("drive.searchFiles"),
+    tool("calendar.listUpcomingEvents"),
+    tool("weather.current"),
+  ];
+
+  const GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.readonly";
+  const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly";
+
+  /** A Google integration connected with exactly these granted services. */
+  function googleWith(services: Array<{ service: string; scope: string }>) {
+    return NOTHING_CONNECTED.map((i) =>
+      i.id === "google"
+        ? integration({
+            id: "google",
+            name: "Google",
+            category: "google",
+            configKind: "oauth",
+            connection: "CONNECTED",
+            health: "CONNECTED",
+            detail: "Connected.",
+            permissions: [
+              { id: "openid", label: "Identify the account", granted: true, access: "read" },
+              ...services.map((s) => ({
+                id: s.scope,
+                label: `Read ${s.service}`,
+                granted: true,
+                access: "read" as const,
+                service: s.service,
+              })),
+            ],
+          })
+        : i
+    );
+  }
+
+  it("makes Gmail executable when Gmail scope IS granted", async () => {
+    const report = await serviceWith(
+      WORKSPACE_TOOLS,
+      googleWith([{ service: "gmail", scope: GMAIL_SCOPE }])
+    ).report("u1");
+
+    const gmail = report.capabilities.find((c) => c.id === "gmail.listUnread")!;
+    expect(gmail.availability).toBe("EXECUTABLE");
+    expect(gmail.reason).toBeNull();
+  });
+
+  it("refuses Gmail when Google is connected WITHOUT the Gmail scope", async () => {
+    // The progressive-consent default is Ads only, so this is the common case
+    // — and reporting Gmail as executable here is precisely the over-claim
+    // Phase 12 must not make.
+    const report = await serviceWith(
+      WORKSPACE_TOOLS,
+      googleWith([{ service: "drive", scope: DRIVE_SCOPE }])
+    ).report("u1");
+
+    const gmail = report.capabilities.find((c) => c.id === "gmail.listUnread")!;
+    expect(gmail.availability).toBe("PERMISSION_MISSING");
+    // Phase 13 made this message name the ACCESS LEVEL, because "Gmail access"
+    // was ambiguous once writes existed: read and write are granted separately
+    // and need different remedies.
+    expect(gmail.reason).toMatch(/read access to Gmail was not granted/i);
+    expect(gmail.requiredAction).toMatch(/approve read access for Gmail/i);
+  });
+
+  it("gates each service independently", async () => {
+    const report = await serviceWith(
+      WORKSPACE_TOOLS,
+      googleWith([{ service: "drive", scope: DRIVE_SCOPE }])
+    ).report("u1");
+
+    // Drive granted, Gmail and Calendar not. One connection, three answers.
+    expect(report.capabilities.find((c) => c.id === "drive.searchFiles")!.availability).toBe(
+      "EXECUTABLE"
+    );
+    expect(report.capabilities.find((c) => c.id === "gmail.listUnread")!.availability).toBe(
+      "PERMISSION_MISSING"
+    );
+    expect(
+      report.capabilities.find((c) => c.id === "calendar.listUpcomingEvents")!.availability
+    ).toBe("PERMISSION_MISSING");
+  });
+
+  it("refuses Workspace reads entirely when Google is not connected", async () => {
+    const report = await serviceWith(WORKSPACE_TOOLS, NOTHING_CONNECTED).report("u1");
+
+    for (const id of ["gmail.listUnread", "drive.searchFiles", "calendar.listUpcomingEvents"]) {
+      const cap = report.capabilities.find((c) => c.id === id)!;
+      expect(cap.availability, id).toBe("NOT_CONNECTED");
+      expect(cap.requiredAction, id).toBeTruthy();
+    }
+  });
+
+  it("reports Workspace reads as unavailable even when no tool is registered", async () => {
+    // A server with no Google OAuth client registers no Workspace tools. The
+    // capability still EXISTS in the build, so reporting nothing at all would
+    // be a worse lie than reporting it as unavailable.
+    const report = await serviceWith([tool("weather.current")], NOTHING_CONNECTED).report("u1");
+
+    for (const id of ["gmail.unavailable", "drive.unavailable", "calendar.unavailable"]) {
+      const cap = report.capabilities.find((c) => c.id === id);
+      expect(cap, id).toBeDefined();
+      expect(cap!.registered, id).toBe(false);
+      expect(["NOT_CONNECTED", "NOT_CONFIGURED"]).toContain(cap!.availability);
+      expect(cap!.reason, id).toBeTruthy();
+    }
+  });
+
+  it("no longer reports Gmail, Drive or Calendar as PLANNED", async () => {
+    // They are implemented now. Reporting them as roadmap items would
+    // under-claim as badly as the old build over-claimed.
+    const report = await serviceWith(
+      WORKSPACE_TOOLS,
+      googleWith([{ service: "gmail", scope: GMAIL_SCOPE }])
+    ).report("u1");
+
+    const planned = report.capabilities.filter((c) => c.availability === "PLANNED").map((c) => c.id);
+    expect(planned).not.toContain("google.gmail");
+    expect(planned).not.toContain("google.drive");
+    expect(planned).not.toContain("google.calendar");
+  });
+
+  it("still reports Sheets, Docs and YouTube as PLANNED", async () => {
+    // Those genuinely have no client, and this phase did not build one.
+    const report = await serviceWith(WORKSPACE_TOOLS, NOTHING_CONNECTED).report("u1");
+    const planned = report.capabilities.filter((c) => c.availability === "PLANNED").map((c) => c.id);
+
+    expect(planned).toContain("google.sheets");
+    expect(planned).toContain("google.docs");
+    expect(planned).toContain("google.youtube");
+  });
+
+  it("lists no write capability for Gmail, Drive or Calendar", async () => {
+    // Sending, deleting and creating must appear nowhere as available.
+    const report = await serviceWith(
+      WORKSPACE_TOOLS,
+      googleWith([{ service: "gmail", scope: GMAIL_SCOPE }])
+    ).report("u1");
+
+    const usable = report.capabilities.filter(
+      (c) => c.availability === "EXECUTABLE" || c.availability === "REQUIRES_CONFIRMATION"
+    );
+    for (const cap of usable) {
+      expect(cap.id).not.toMatch(/send|delete|create|update|modify|trash/i);
+    }
+  });
+});
 
 describe("connected integrations", () => {
   it("returns nothing when nothing is connected", async () => {

@@ -42,7 +42,9 @@ import {
   getIntegrationDescriptor,
   INTEGRATION_CATALOG,
   describeScope,
+  GOOGLE_IDENTITY_SCOPES,
   scopesForConnect,
+  scopesForWriteUpgrade,
   servicesFromGrantedScopes,
   isIntegrationId,
   type IntegrationAuditEntry,
@@ -654,10 +656,25 @@ export class IntegrationCommandService {
       );
     }
 
+    const writeUpgrade = input.accessLevel === "write";
+
     // Default to Ads only — the service this repository actually implements.
     // Connecting everything "just in case" is how consent screens become
     // meaningless, and the user can add a service later without re-typing
     // anything.
+    //
+    // A WRITE UPGRADE HAS NO DEFAULT. Asking for write access to a service the
+    // user did not name is exactly the over-reach the progressive model exists
+    // to prevent, so an unnamed service is refused rather than guessed.
+    if (writeUpgrade && !input.services?.length) {
+      return fail(
+        "connect",
+        id,
+        "INVALID_CONFIG",
+        "A write upgrade must name the services it is for — there is no default. Known services: gmail, drive, calendar."
+      );
+    }
+
     const requested = input.services?.length ? input.services : ["ads"];
     const unknown = requested.filter((s) => !scopesForConnect([s]).some((x) => !["openid", "email", "profile"].includes(x)));
     if (unknown.length > 0) {
@@ -671,7 +688,16 @@ export class IntegrationCommandService {
 
     const { codeVerifier, codeChallenge } = createPkcePair();
     const state = createState();
-    const scopes = scopesForConnect(requested);
+    // The ONLY place a write scope is ever requested.
+    //
+    // `scopesForWriteUpgrade` returns read AND write scopes for each named
+    // service, so an upgrade never silently drops read access the user already
+    // had. `buildAuthUrl` sends `include_granted_scopes=true`, which is what
+    // makes this incremental rather than a replacement: previously granted
+    // scopes for other services survive the upgrade.
+    const scopes = writeUpgrade
+      ? [...GOOGLE_IDENTITY_SCOPES, ...scopesForWriteUpgrade(requested)]
+      : scopesForConnect(requested);
 
     await this.deps.oauthStates.create({
       state,
@@ -692,8 +718,10 @@ export class IntegrationCommandService {
     return ok(
       "connect",
       id,
-      { authUrl, services: requested, scopes },
-      `Open this link to grant JARVIS read access to ${requested.join(", ")}: ${authUrl}`
+      { authUrl, services: requested, scopes, accessLevel: writeUpgrade ? "write" : "read" },
+      writeUpgrade
+        ? `Open this link to grant JARVIS permission to CHANGE ${requested.join(", ")}. Every change will still ask for your approval first: ${authUrl}`
+        : `Open this link to grant JARVIS read access to ${requested.join(", ")}: ${authUrl}`
     );
   }
 

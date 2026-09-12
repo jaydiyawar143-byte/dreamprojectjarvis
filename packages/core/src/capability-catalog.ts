@@ -53,6 +53,13 @@ const PREFIX_RULES: Array<{
   googleService?: "gmail" | "drive" | "calendar" | "ads";
 }> = [
   { prefix: "integration.", group: "system", integration: null },
+  // Phase 13 — write PLANNING. Longest prefix, so it is matched before the
+  // bare `gmail.`/`drive.`/`calendar.` read rules below. Each is gated on the
+  // same sub-service scope as its read counterpart, because a plan that
+  // cannot be executed is not a capability.
+  { prefix: "google.plan.gmail.", group: "google", integration: "google", googleService: "gmail" },
+  { prefix: "google.plan.drive.", group: "google", integration: "google", googleService: "drive" },
+  { prefix: "google.plan.calendar.", group: "google", integration: "google", googleService: "calendar" },
   // Phase 12 — real Workspace reads, each gated on its own granted scope.
   { prefix: "gmail.", group: "google", integration: "google", googleService: "gmail" },
   { prefix: "drive.", group: "google", integration: "google", googleService: "drive" },
@@ -111,6 +118,19 @@ const LABEL_OVERRIDES: Record<string, string> = {
   "drive.getFileMetadata": "Get Drive file details",
   "calendar.listUpcomingEvents": "List upcoming calendar events",
   "calendar.getEvent": "Get calendar event details",
+  // Phase 13 — every label says PREPARE or REQUEST, never the bare verb. A
+  // capability list reading "Send an email" would imply JARVIS can send one on
+  // request; it cannot, and the label is where that is first communicated.
+  "google.plan.gmail.createDraft": "Prepare a Gmail draft (needs approval)",
+  "google.plan.gmail.updateDraft": "Prepare a draft update (needs approval)",
+  "google.plan.gmail.sendDraft": "Request approval to send an email",
+  "google.plan.drive.createFolder": "Prepare a new Drive folder (needs approval)",
+  "google.plan.drive.uploadFile": "Prepare a Drive upload (needs approval)",
+  "google.plan.drive.moveFile": "Request approval to move a Drive file",
+  "google.plan.drive.renameFile": "Request approval to rename a Drive file",
+  "google.plan.calendar.createEvent": "Prepare a calendar event (needs approval)",
+  "google.plan.calendar.updateEvent": "Prepare an event change (needs approval)",
+  "google.plan.calendar.deleteEvent": "Request approval to delete an event",
 };
 
 export function groupForToolId(toolId: string): {

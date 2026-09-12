@@ -410,6 +410,10 @@ describe("navigation model", () => {
       "Opportunities",
       "Knowledge Base",
       "Meta Ads",
+      // Phase 12 — real read-only Gmail, Drive and Calendar. Filed under
+      // Intelligence because it is a source JARVIS reads FROM, alongside the
+      // knowledge base and the ad platforms, rather than a control surface.
+      "Google Workspace",
     ]);
 
     const capabilities = NAV_GROUPS.find((g) => g.title === "Capabilities")!;

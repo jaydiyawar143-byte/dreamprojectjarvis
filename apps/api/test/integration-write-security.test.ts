@@ -401,7 +401,11 @@ describe("progressive Google permissions", () => {
 
   it("adds a write scope only through the explicit upgrade path", () => {
     const upgraded = scopesForWriteUpgrade(["gmail"]);
-    expect(upgraded).toContain("https://www.googleapis.com/auth/gmail.send");
+    // `gmail.compose`, not `gmail.send`: Phase 13 corrected this because
+    // `gmail.send` cannot create or update a draft, so the draft actions would
+    // have failed on it with a 403 that looks like a bug. `compose` is the
+    // narrowest scope covering create + update + send.
+    expect(upgraded).toContain("https://www.googleapis.com/auth/gmail.compose");
     // And the upgrade keeps the read scope, so an upgrade is not a downgrade.
     expect(upgraded).toContain("https://www.googleapis.com/auth/gmail.readonly");
   });
@@ -425,7 +429,7 @@ describe("progressive Google permissions", () => {
     expect(
       hasWriteAccess("gmail", [
         "https://www.googleapis.com/auth/gmail.readonly",
-        "https://www.googleapis.com/auth/gmail.send",
+        "https://www.googleapis.com/auth/gmail.compose",
       ])
     ).toBe(true);
   });
@@ -435,7 +439,7 @@ describe("progressive Google permissions", () => {
       access: "read",
       service: "gmail",
     });
-    expect(describeScope("https://www.googleapis.com/auth/gmail.send")).toMatchObject({
+    expect(describeScope("https://www.googleapis.com/auth/gmail.compose")).toMatchObject({
       access: "write",
       service: "gmail",
     });
@@ -449,12 +453,33 @@ describe("progressive Google permissions", () => {
   });
 
   it("says which Google services actually have tools in this repository", () => {
-    // The honesty rule: the UI may offer to connect Drive, but it must not
-    // imply JARVIS can already read your files.
-    const ads = GOOGLE_SERVICES.find((s) => s.id === "ads")!;
-    const drive = GOOGLE_SERVICES.find((s) => s.id === "drive")!;
-    expect(ads.implemented).toBe(true);
-    expect(drive.implemented).toBe(false);
+    // The honesty rule cuts both ways, and Phase 12 moved three services
+    // across it: Gmail, Drive and Calendar now HAVE clients, so claiming they
+    // are unimplemented would under-claim exactly as badly as the old build
+    // over-claimed. Sheets, Docs and YouTube still have none.
+    const implemented = (id: string) => GOOGLE_SERVICES.find((s) => s.id === id)!.implemented;
+
+    expect(implemented("ads")).toBe(true);
+    // Phase 12.
+    expect(implemented("gmail")).toBe(true);
+    expect(implemented("drive")).toBe(true);
+    expect(implemented("calendar")).toBe(true);
+
+    // Not built. Still reported as planned.
+    expect(implemented("sheets")).toBe(false);
+    expect(implemented("docs")).toBe(false);
+    expect(implemented("youtube")).toBe(false);
+  });
+
+  it("keeps every implemented service READ-ONLY in this phase", () => {
+    // Phase 12 requested no write scopes. The write scopes are declared in the
+    // catalogue for a future phase, but nothing requests them — asserted in
+    // the progressive-permission tests above.
+    for (const id of ["gmail", "drive", "calendar"]) {
+      const service = GOOGLE_SERVICES.find((s) => s.id === id)!;
+      expect(service.readScopes.length, id).toBeGreaterThan(0);
+      expect(service.readScopes.every((s) => s.includes("readonly")), id).toBe(true);
+    }
   });
 
   it("records that Google Ads needs more than OAuth consent", () => {

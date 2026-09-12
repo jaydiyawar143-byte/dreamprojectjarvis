@@ -430,6 +430,15 @@ export interface IntegrationCommandInput {
   config?: Record<string, string | number | boolean | null>;
   /** Sub-services to request scopes for on `connect` / `reconnect`. */
   services?: string[];
+  /**
+   * Which access level to request. Defaults to `read`.
+   *
+   * `write` is the ONLY way a write scope is ever requested, and it exists as a
+   * separate explicit value rather than as extra entries in `services` so that
+   * asking for write access is a distinct decision in the code as well as on
+   * the consent screen. A caller that does not name it cannot obtain one.
+   */
+  accessLevel?: "read" | "write";
   /** For `executeAction`. */
   actionId?: string;
   actionParams?: Record<string, unknown>;

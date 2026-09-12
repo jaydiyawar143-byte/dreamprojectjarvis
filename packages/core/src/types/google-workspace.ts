@@ -146,6 +146,13 @@ export interface DriveFile {
   webViewLink: string | null;
   shared: boolean;
   trashed: boolean;
+  /**
+   * Containing folder ids.
+   *
+   * Added in Phase 13: verifying a move means checking the file is actually in
+   * the destination, which cannot be done without knowing its parents.
+   */
+  parents: string[];
 }
 
 export interface DriveListResult {
