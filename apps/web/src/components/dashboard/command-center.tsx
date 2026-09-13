@@ -84,6 +84,14 @@ import {
 } from "@/components/widgets/layout";
 import { WidgetFrame, DRAG_HANDLE_CLASS } from "@/components/widgets/widget-frame";
 import { CustomizeBar, WIDGET_LABELS } from "@/components/widgets/customize-bar";
+import { OptimizePanel } from "@/components/widgets/optimize-panel";
+import { LayoutHistory } from "@/lib/dashboard/layout-history";
+import {
+  analyzeLayout,
+  applyPlan,
+  type OptimizationPlan,
+  type WidgetObservation,
+} from "@/lib/dashboard/optimizer";
 import { WorldClockWidget } from "@/components/widgets/world-clock-widget";
 import { ClockWidget } from "@/components/widgets/clock-widget";
 import { WeatherWidget } from "@/components/widgets/weather-widget";
@@ -240,6 +248,62 @@ export function CommandCenter() {
 
   const prefs = dash.preferences;
   const visible = useMemo(() => visibleWidgets(dash.layout), [dash.layout]);
+
+  // -------------------------------------------------------------------------
+  // Auto optimize.
+  //
+  // The analysis reads what the widgets actually measured — their rendered box
+  // and whether they overflowed — because "too narrow" is a fact about pixels
+  // and content, not about column counts. Two columns is roomy at 2560px.
+  //
+  // The plan is held in state and applied only on an explicit click. History is
+  // pushed at the moment of applying, never at the moment of proposing, so
+  // dismissing a suggestion leaves nothing to undo.
+  // -------------------------------------------------------------------------
+  const [optimizePlan, setOptimizePlan] = useState<OptimizationPlan | null>(null);
+  const historyRef = useRef(new LayoutHistory());
+
+  const observeWidgets = useCallback((): WidgetObservation[] => {
+    if (typeof document === "undefined") return [];
+    return visibleWidgets(dash.layout).map((p) => {
+      const cell = document.querySelector<HTMLElement>(`[data-testid="cell-${p.id}"]`);
+      const scroller = cell?.querySelector<HTMLElement>("[data-widget-scroll]") ?? cell;
+      const box = cell?.getBoundingClientRect();
+
+      return {
+        id: p.id,
+        width: Math.round(box?.width ?? 0),
+        height: Math.round(box?.height ?? 0),
+        // A scrollbar the user did not ask for is the clearest signal that a
+        // widget is too small for what it is trying to say.
+        overflowing: scroller ? scroller.scrollHeight > scroller.clientHeight + 2 : false,
+        ...(scroller ? { contentHeight: scroller.scrollHeight } : {}),
+      };
+    });
+  }, [dash.layout]);
+
+  const runOptimize = useCallback(() => {
+    setOptimizePlan(
+      analyzeLayout(dash.layout, observeWidgets(), {
+        width: typeof window === "undefined" ? 0 : window.innerWidth,
+        height: typeof window === "undefined" ? 0 : window.innerHeight,
+      })
+    );
+  }, [dash.layout, observeWidgets]);
+
+  const applyOptimization = useCallback(() => {
+    if (!optimizePlan) return;
+    // Recorded BEFORE the change, so undo restores exactly what was on screen.
+    historyRef.current.push(dash.layout, "auto optimization");
+    dash.applyLayout(applyPlan(dash.layout, optimizePlan));
+    setOptimizePlan(null);
+  }, [dash, optimizePlan]);
+
+  const undoOptimization = useCallback(() => {
+    const entry = historyRef.current.undo();
+    if (entry) dash.applyLayout(entry.layout);
+    setOptimizePlan(null);
+  }, [dash]);
 
   // ---------------------------------------------------------------------------
   // The grid's geometry, derived from the measured workspace.
@@ -449,7 +513,21 @@ export function CommandCenter() {
         onSetHidden={dash.setHidden}
         onSave={() => void dash.save()}
         onReset={dash.reset}
+        onOptimize={runOptimize}
       />
+
+      {/* The preview. Present only after the user asks for an analysis, and it
+          changes nothing until they press Apply. */}
+      {optimizePlan && (
+        <OptimizePanel
+          plan={optimizePlan}
+          canUndo={historyRef.current.canUndo}
+          applying={false}
+          onApply={applyOptimization}
+          onDismiss={() => setOptimizePlan(null)}
+          onUndo={undoOptimization}
+        />
+      )}
 
       {/* ---- The workspace -------------------------------------------------
           The bounded surface the widgets live inside. It takes the height the
@@ -527,7 +605,18 @@ export function CommandCenter() {
             // Only the grip moves a widget. Without this the whole card is a
             // drag surface and the map inside it could never be panned.
             draggableHandle={`.${DRAG_HANDLE_CLASS}`}
-            resizeHandles={["s", "e", "se"]}
+            // ALL EIGHT HANDLES: four edges and four corners.
+            //
+            // This was `["s", "e", "se"]`, which is react-grid-layout's own
+            // default and quietly means "you may only grow down and right".
+            // Sizing from the top or the left edge was simply impossible, so a
+            // widget could not be pulled up into space above it — the user had
+            // to move it and then resize it, twice, to express one intent.
+            //
+            // The north and west handles are the ones that change what can be
+            // said: they move the widget's ORIGIN as well as its size, which is
+            // the natural gesture for "start this higher up".
+            resizeHandles={["n", "s", "e", "w", "ne", "nw", "se", "sw"]}
             onLayoutChange={onLayoutChange}
             useCSSTransforms
           >

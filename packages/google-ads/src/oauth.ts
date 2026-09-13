@@ -5,6 +5,9 @@ import {
   GOOGLE_OAUTH_REVOKE_URL,
   GOOGLE_USERINFO_URL,
   REQUIRED_SCOPES,
+  GOOGLE_ADS_SCOPE,
+  ACCOUNT_IDENTITY_SCOPES,
+  grantCovers,
   type GoogleConfig,
 } from "./config.js";
 import { classifyGoogleError, type ClassifiedGoogleError } from "./error-handler.js";
@@ -244,11 +247,23 @@ export async function revokeToken(
 }
 
 /** Reads the connected account email so the UI can name the connection. */
+/**
+ * What account identification learned, without carrying the profile around.
+ *
+ * `email` is returned because the connection row needs it to name the account.
+ * `subjectPresent` is a boolean because the OpenID `sub` is only ever needed as
+ * evidence that a real identity came back — never as a value to store or log.
+ */
+export interface UserInfoResult {
+  email: string;
+  subjectPresent: boolean;
+}
+
 export async function fetchUserInfo(
   config: GoogleConfig,
   accessToken: string,
   fetchImpl: FetchLike = globalThis.fetch as unknown as FetchLike
-): Promise<{ email: string }> {
+): Promise<UserInfoResult> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), config.timeoutMs);
   try {
@@ -267,21 +282,64 @@ export async function fetchUserInfo(
     if (response.status < 200 || response.status >= 300) {
       throw new GoogleOAuthError(classifyGoogleError(response.status, body));
     }
-    const email = (body as { email?: string }).email;
+    const profile = body as { email?: string; sub?: string };
+    const email = profile.email;
     if (!email) {
       throw new GoogleOAuthError(
         classifyGoogleError(502, { error: "invalid_response", error_description: "no email" })
       );
     }
-    return { email };
+    // PRESENCE ONLY for the subject. The OpenID `sub` is a stable per-user
+    // identifier and is not stored or logged anywhere — the caller needs to
+    // know it arrived, not what it is. `email` is returned because the
+    // connection row genuinely needs it to name the account.
+    return { email, subjectPresent: typeof profile.sub === "string" && profile.sub.length > 0 };
   } finally {
     clearTimeout(timer);
   }
 }
 
 /** Verifies Google granted everything the Ads calls need. */
+/**
+ * The floor for storing ANY Google connection: can we name the account?
+ *
+ * WHY THIS IS SEPARATE FROM `hasRequiredScopes`. That one requires the ADS
+ * scope, which was correct when "Google" meant Google Ads and nothing else.
+ * Google is now multi-service, and the shared OAuth callback used the Ads
+ * predicate for every connection — so connecting Gmail, Drive and Calendar
+ * through the Integration Center produced a grant of
+ * `openid email profile gmail.readonly drive.readonly calendar.readonly`,
+ * which the callback rejected with "Google did not grant the Google Ads scope
+ * required for this integration". A complete, correct Workspace consent was
+ * refused for lacking a scope it had never asked for.
+ *
+ * The failure was worse than a bad message. The callback consumes the
+ * single-use state BEFORE this check, so the rejection burned it: the user's
+ * next click produced "Invalid or already-used authorization state", which
+ * points at replay protection and says nothing about scopes. The real cause was
+ * two steps upstream and invisible.
+ *
+ * Identity is the right floor because it is the one thing every flow requests
+ * and the one thing the connection row genuinely cannot do without — it is what
+ * names the account for display and revocation. Everything else is gated per
+ * service at the point of use (`resolveGoogleAccess`, `hasWriteAccess`,
+ * `servicesFromGrantedScopes`), which reads GRANTED scopes and reports
+ * `permission_missing` with a remedy. So a Workspace-only connection stored
+ * here cannot silently attempt an Ads call; it is refused by the layer that
+ * knows what it is refusing.
+ */
+export function hasIdentityScopes(granted: readonly string[]): boolean {
+  // `grantCovers`, not `includes`: Google returns `email` as
+  // `https://www.googleapis.com/auth/userinfo.email`, so a literal comparison
+  // is false against every real consent.
+  return grantCovers(granted, ACCOUNT_IDENTITY_SCOPES);
+}
+
+/** Ads-specific: identity PLUS the adwords scope. Used by Ads callers only. */
 export function hasRequiredScopes(granted: readonly string[]): boolean {
-  return REQUIRED_SCOPES.every(
-    (required) => granted.includes(required) || (required === "openid" && granted.includes("openid"))
-  );
+  // Same canonicalization fix as `hasIdentityScopes`. The old body compared
+  // literals and carried a no-op special case for `openid` (which does come
+  // back verbatim) while silently failing on `email`, which does not — so the
+  // Ads path had this defect too, and would have refused a valid Ads consent.
+  return grantCovers(granted, [GOOGLE_ADS_SCOPE, ...ACCOUNT_IDENTITY_SCOPES]);
 }

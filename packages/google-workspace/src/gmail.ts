@@ -19,6 +19,7 @@
 import type {
   GmailListResult,
   GmailMessageDetail,
+  GmailDraftDetail,
   GmailMessageSummary,
   GmailThread,
 } from "@jarvis/core";
@@ -329,6 +330,49 @@ export class GmailService {
         // reply nor a dashboard panel benefits from all of it.
         body: extractBody(outcome.body.payload).slice(0, 20_000),
         attachments: collectAttachments(outcome.body.payload),
+      },
+    };
+  }
+
+  /**
+   * One draft, read back.
+   *
+   * Added for post-write verification: after JARVIS creates a draft, the only
+   * way to say "verified" rather than "Google said so" is to fetch it and
+   * compare it against what the user approved.
+   *
+   * Needs `gmail.readonly`. `gmail.compose` can create, update and send a draft
+   * but cannot read the mailbox, so a connection holding only compose gets a
+   * 403 here — which the verifier reports as `verification_unavailable`, not as
+   * a failure, because nothing is wrong with the draft.
+   *
+   * `format=full` so the body is present. The caller hashes it rather than
+   * storing or logging it.
+   */
+  async getDraft(
+    accessToken: string,
+    draftId: string,
+    signal?: AbortSignal
+  ): Promise<GoogleCallOutcome<GmailDraftDetail>> {
+    const outcome = await this.call<{ id?: string; message?: RawMessage }>(
+      buildUrl(`${GMAIL_API}/drafts/${encodeURIComponent(draftId)}`, { format: "full" }),
+      accessToken,
+      signal
+    );
+    if (!outcome.ok) return outcome;
+
+    const raw = outcome.body.message ?? {};
+    const summary = toSummary(raw as RawMessage);
+
+    return {
+      ok: true,
+      body: {
+        draftId: outcome.body.id ?? "",
+        messageId: summary.id,
+        to: summary.to,
+        subject: summary.subject,
+        body: extractBody((raw as RawMessage).payload).slice(0, 20_000),
+        labels: summary.labels,
       },
     };
   }

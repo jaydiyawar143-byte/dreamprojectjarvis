@@ -828,3 +828,93 @@ describe("sinceLabel", () => {
     expect(sinceLabel("2026-09-07T12:00:00Z", now)).toBe("2 d ago");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Incremental write consent
+//
+// The gap this covers: the server has supported the write upgrade since
+// Phase 13, but no control in the browser could request it. A user whose Google
+// connection carried only Ads scopes was told "Gmail write permission is
+// missing" and had nowhere to go. `connectIntegration` did not even accept an
+// accessLevel argument.
+// ---------------------------------------------------------------------------
+
+describe("granting write access", () => {
+  function googleIntegration(overrides?: Record<string, unknown>) {
+    return integration({
+      id: "google",
+      name: "Google",
+      connection: "CONNECTED",
+      health: "CONNECTED",
+      supportedCommands: ["test", "connect", "reconnect", "disconnect"],
+      permissions: [
+        { id: "openid", label: "Identify the connected Google account", granted: true, access: "read" },
+        { id: "https://www.googleapis.com/auth/adwords", label: "Read Google Ads", granted: true, access: "read", service: "ads" },
+        {
+          id: "https://www.googleapis.com/auth/gmail.compose",
+          label: "Modify Gmail (approval-gated)",
+          granted: false,
+          access: "write",
+          service: "gmail",
+        },
+      ],
+      ...overrides,
+    });
+  }
+
+  it("offers a grant action naming the service, not a generic upgrade", async () => {
+    respond([googleIntegration()]);
+    render(<IntegrationsPage />);
+
+    const button = await screen.findByTestId("integration-grant-write-google");
+    expect(button.textContent).toMatch(/grant/i);
+    expect(button.textContent).toMatch(/gmail/i);
+  });
+
+  it("requests the write upgrade for exactly the ungranted service", async () => {
+    respond([googleIntegration()]);
+    mocked.connectIntegration.mockResolvedValue({
+      success: true,
+      data: { authUrl: "https://accounts.google.com/o/oauth2/v2/auth?x=1", services: ["gmail"], message: "" },
+      timestamp: "",
+    } as never);
+
+    render(<IntegrationsPage />);
+    fireEvent.click(await screen.findByTestId("integration-grant-write-google"));
+
+    await waitFor(() => expect(mocked.connectIntegration).toHaveBeenCalled());
+    // The THIRD argument is what makes this an upgrade rather than a re-connect.
+    expect(mocked.connectIntegration).toHaveBeenCalledWith("google", ["gmail"], "write");
+  });
+
+  it("does not offer it when every write permission is already granted", async () => {
+    respond([
+      googleIntegration({
+        permissions: [
+          { id: "openid", label: "Identify the connected Google account", granted: true, access: "read" },
+          {
+            id: "https://www.googleapis.com/auth/gmail.compose",
+            label: "Modify Gmail (approval-gated)",
+            granted: true,
+            access: "write",
+            service: "gmail",
+          },
+        ],
+      }),
+    ]);
+    render(<IntegrationsPage />);
+
+    await screen.findByTestId("integration-card-google");
+    expect(screen.queryByTestId("integration-grant-write-google")).toBeNull();
+  });
+
+  it("does not offer it before the account is connected at all", async () => {
+    // An upgrade is incremental consent on top of an existing grant; offering it
+    // next to Connect would be two buttons for the same first step.
+    respond([googleIntegration({ connection: "NOT_CONNECTED", health: "NOT_CONNECTED" })]);
+    render(<IntegrationsPage />);
+
+    await screen.findByTestId("integration-card-google");
+    expect(screen.queryByTestId("integration-grant-write-google")).toBeNull();
+  });
+});

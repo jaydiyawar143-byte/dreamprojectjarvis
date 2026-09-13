@@ -187,6 +187,34 @@ export default function IntegrationsPage() {
   );
 
   /**
+   * Requests the incremental WRITE upgrade for the named services.
+   *
+   * Same server-built consent URL as `runConnect` — the only difference is
+   * `accessLevel: "write"`, which the SERVER turns into read+write scopes for
+   * those services via `scopesForWriteUpgrade`. Nothing here names a scope.
+   *
+   * The existing grant survives: the URL carries `include_granted_scopes=true`,
+   * and the callback unions the newly granted scopes onto the stored ones, so
+   * upgrading Gmail cannot cost the user their Ads access.
+   */
+  const runGrantWrite = useCallback(
+    async (integration: Integration, services: string[]) => {
+      setBusyId(integration.id);
+      setNotice(null);
+
+      const res = await connectIntegration(integration.id, services, "write");
+      setBusyId(null);
+
+      if (res.success && res.data?.authUrl) {
+        window.location.href = res.data.authUrl;
+        return;
+      }
+      setNotice(res.error?.message ?? "Could not start the permission upgrade.");
+    },
+    []
+  );
+
+  /**
    * Refreshes authorization without discarding the connection.
    *
    * When the provider refuses the refresh the server answers with a re-consent
@@ -351,6 +379,7 @@ export default function IntegrationsPage() {
                     onManage={() => setOpenId(integration.id)}
                     onConnect={() => void runConnect(integration)}
                     onReconnect={() => void runReconnect(integration)}
+                    onGrantWrite={(services) => void runGrantWrite(integration, services)}
                     onToggleEnabled={(enabled) => void runToggleEnabled(integration, enabled)}
                   />
                 ))}

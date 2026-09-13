@@ -14,6 +14,10 @@ import type { Response } from "express";
 import { randomUUID } from "crypto";
 import { createAuthMiddleware, type AuthenticatedRequest } from "../middleware/auth.js";
 import type { Container } from "../services/container.js";
+import {
+  executeApprovedGoogleWrite,
+  isGoogleWriteApprovalAction,
+} from "../services/google/execute-approved-action.js";
 
 export function createPendingActionsRouter(container: Container): Router {
   const router = Router();
@@ -128,17 +132,33 @@ export function createPendingActionsRouter(container: Container): Router {
 
       // Execute the tool if approved
       if (result.pendingAction) {
-        const tool = container.toolRegistry.get(result.pendingAction.toolId);
-        if (tool) {
-          const executionResult = await container.executor.execute({
-            toolId: result.pendingAction.toolId,
-            params: result.pendingAction.params,
-            userId: req.auth.userId,
-            role: req.auth.role,
-            conversationId,
-            traceId,
-            approvalId: result.pendingAction.approvalId,
-          });
+        // A Google write approval names an ACTION, not a registered tool — see
+        // execute-approved-action.ts. The registry lookup below finds nothing
+        // for one, so without this branch the approval was marked APPROVED and
+        // then quietly nothing happened: no execution, no error, no draft.
+        const isGoogleWrite = isGoogleWriteApprovalAction(result.pendingAction.action);
+        const tool = isGoogleWrite
+          ? undefined
+          : container.toolRegistry.get(result.pendingAction.toolId);
+
+        if (isGoogleWrite || tool) {
+          const executionResult = isGoogleWrite
+            ? await executeApprovedGoogleWrite(container.googleWrites, {
+                approvalId: result.pendingAction.approvalId,
+                action: result.pendingAction.action,
+                userId: req.auth.userId,
+                conversationId,
+                traceId,
+              })
+            : await container.executor.execute({
+                toolId: result.pendingAction.toolId,
+                params: result.pendingAction.params,
+                userId: req.auth.userId,
+                role: req.auth.role,
+                conversationId,
+                traceId,
+                approvalId: result.pendingAction.approvalId,
+              });
 
           res.status(200).json({
             success: true,

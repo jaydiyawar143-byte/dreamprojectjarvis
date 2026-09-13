@@ -488,9 +488,20 @@ describe("Sprint 5.2 — Google OAuth API", () => {
       expect(res.body.error.message).toMatch(/not granted/i);
     });
 
-    it("REFUSES a partial scope grant rather than storing a doomed connection", async () => {
+    it("REFUSES a grant that cannot even identify the account", async () => {
+      // The floor is IDENTITY, not the Ads scope. Without openid/email there is
+      // no way to name the account for display or revocation, so the connection
+      // row would be unusable and is refused.
       const h = makeHarness([
-        { status: 200, body: { access_token: "ya29.a", refresh_token: "1//r", expires_in: 3600, scope: "openid email" } },
+        {
+          status: 200,
+          body: {
+            access_token: "ya29.a",
+            refresh_token: "1//r",
+            expires_in: 3600,
+            scope: "https://www.googleapis.com/auth/gmail.readonly",
+          },
+        },
         USERINFO_OK,
       ]);
       const start = await call(h.router, "POST", "/connect", { token: h.token });
@@ -500,6 +511,46 @@ describe("Sprint 5.2 — Google OAuth API", () => {
       expect(res.status).toBe(403);
       expect(res.body.error.code).toBe("AUTHORIZATION_FAILED");
       expect(h.connections.rows).toHaveLength(0);
+    });
+
+    it("ACCEPTS a Workspace grant that carries no Ads scope", async () => {
+      // THE REGRESSION THIS FILE EXISTS TO CATCH NOW.
+      //
+      // One callback serves every Google connection. It used to require the
+      // `adwords` scope, so a complete Gmail/Drive/Calendar consent was
+      // rejected for lacking a scope it was never asked for — and because the
+      // single-use state is consumed before that check, the rejection burned
+      // it, so the user's next attempt reported "Invalid or already-used
+      // authorization state" and pointed at replay protection instead.
+      const h = makeHarness([
+        {
+          status: 200,
+          body: {
+            access_token: "ya29.a",
+            refresh_token: "1//r",
+            expires_in: 3600,
+            scope:
+              "openid email profile https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/calendar.readonly",
+          },
+        },
+        USERINFO_OK,
+      ]);
+      const start = await call(h.router, "POST", "/connect", { token: h.token });
+      const state = new URL(start.body.data.authUrl).searchParams.get("state")!;
+
+      const res = await call(h.router, "GET", `/callback?code=c&state=${state}`);
+
+      expect(res.status).toBe(200);
+      expect(h.connections.rows).toHaveLength(1);
+      // Stored exactly what Google granted — no adwords, and that is fine.
+      // Ads calls are refused later by the per-service scope check, which can
+      // explain itself; the connection itself is perfectly valid for Workspace.
+      expect(h.connections.rows[0]!.scopes).not.toContain(
+        "https://www.googleapis.com/auth/adwords"
+      );
+      expect(h.connections.rows[0]!.scopes).toContain(
+        "https://www.googleapis.com/auth/gmail.readonly"
+      );
     });
 
     it("surfaces invalid_grant as 401 without leaking the code", async () => {
@@ -722,5 +773,214 @@ describe("Sprint 5.2 — approval boundary", () => {
       traceId: "t-4",
     });
     expect(check.allowed).toBe(false);
+  });
+
+  // -------------------------------------------------------------------------
+  // Callback diagnostics
+  //
+  // The live failure was invisible: the callback refused a valid consent and
+  // said only "Google did not grant the basic account permissions". Which of
+  // the five steps failed — exchange, token, scopes, userinfo, subject — was
+  // not recoverable from the response or the logs. These pin both that the
+  // diagnostic is emitted and that it can never carry a secret.
+  // -------------------------------------------------------------------------
+  describe("callback diagnostics", () => {
+    function captureLogs(): { lines: string[]; restore: () => void } {
+      const lines: string[] = [];
+      const original = console.log;
+      console.log = (...args: unknown[]) => {
+        lines.push(args.map(String).join(" "));
+      };
+      return { lines, restore: () => { console.log = original; } };
+    }
+
+    async function runCallback(scope: string) {
+      const h = makeHarness([
+        {
+          status: 200,
+          body: { access_token: "ya29.SECRET-ACCESS", refresh_token: "1//SECRET-REFRESH", expires_in: 3600, scope },
+        },
+        { status: 200, body: { email: "ads@example.com", sub: "1029384756" } },
+      ]);
+      const start = await call(h.router, "POST", "/connect", { token: h.token });
+      const state = new URL(start.body.data.authUrl).searchParams.get("state")!;
+
+      const cap = captureLogs();
+      try {
+        const res = await call(h.router, "GET", `/callback?code=SECRET-AUTH-CODE&state=${state}`);
+        return { res, lines: cap.lines, h };
+      } finally {
+        cap.restore();
+      }
+    }
+
+    function diagnostic(lines: string[]): Record<string, unknown> {
+      const line = lines.find((l) => l.includes("google_callback_identity"));
+      expect(line, "no google_callback_identity line was emitted").toBeTruthy();
+      return JSON.parse(line!);
+    }
+
+    it("reports every identity step on a successful callback", async () => {
+      const { res, lines } = await runCallback(
+        "openid https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/adwords"
+      );
+      expect(res.status).toBe(200);
+
+      const d = diagnostic(lines);
+      expect(d.identityScopesRequested).toBe(true);
+      expect(d.accessTokenReceived).toBe(true);
+      expect(d.identityResponseReceived).toBe(true);
+      expect(d.googleSubjectPresent).toBe(true);
+      expect(d.emailPresent).toBe(true);
+    });
+
+    it("reports which step failed when identity scopes are missing", async () => {
+      const { res, lines } = await runCallback("https://www.googleapis.com/auth/gmail.readonly");
+      expect(res.status).toBe(403);
+
+      const d = diagnostic(lines);
+      expect(d.identityScopesRequested).toBe(false);
+      // The token DID arrive — the failure is downstream of the exchange, and
+      // saying so is the whole point.
+      expect(d.accessTokenReceived).toBe(true);
+      expect(d.identityResponseReceived).toBe(false);
+      expect(d.googleSubjectPresent).toBe(false);
+    });
+
+    it("names the missing scopes in the error, so the remedy is visible", async () => {
+      const { res } = await runCallback("https://www.googleapis.com/auth/gmail.readonly");
+
+      expect(res.body.error.message).toMatch(/openid/);
+      expect(res.body.error.message).toMatch(/email/);
+      expect(res.body.error.message).toMatch(/gmail\.readonly/);
+    });
+
+    it("reports a missing OpenID subject without failing the connection", async () => {
+      const h = makeHarness([
+        { status: 200, body: { access_token: "a", refresh_token: "r", expires_in: 3600, scope: "openid email" } },
+        // No `sub` — older userinfo shapes omit it. Identification needs email.
+        { status: 200, body: { email: "ads@example.com" } },
+      ]);
+      const start = await call(h.router, "POST", "/connect", { token: h.token });
+      const state = new URL(start.body.data.authUrl).searchParams.get("state")!;
+
+      const cap = captureLogs();
+      let res;
+      try {
+        res = await call(h.router, "GET", `/callback?code=c&state=${state}`);
+      } finally {
+        cap.restore();
+      }
+
+      expect(res!.status).toBe(200);
+      const d = diagnostic(cap.lines);
+      expect(d.googleSubjectPresent).toBe(false);
+      expect(d.emailPresent).toBe(true);
+    });
+
+    it("NEVER logs a token, a code, a secret or a profile field", async () => {
+      const { lines } = await runCallback(
+        "openid https://www.googleapis.com/auth/userinfo.email"
+      );
+      const all = lines.join("\n");
+
+      expect(all).not.toContain("ya29.SECRET-ACCESS");
+      expect(all).not.toContain("1//SECRET-REFRESH");
+      expect(all).not.toContain("SECRET-AUTH-CODE");
+      expect(all).not.toContain("ads@example.com");
+      expect(all).not.toContain("1029384756");
+      expect(all).not.toContain(config.clientSecret);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Incremental consent
+  //
+  // A Gmail upgrade requests `openid email profile gmail.readonly
+  // gmail.compose` and does NOT re-list `adwords`. Google keeps the earlier
+  // grant alive because include_granted_scopes=true is set, but the token
+  // response is not guaranteed to enumerate it — so writing the response
+  // straight over the stored row can erase Ads from the record while the token
+  // still carries it. The capability layer reads the record.
+  // -------------------------------------------------------------------------
+  describe("incremental consent preserves the existing grant", () => {
+    const ADS = "https://www.googleapis.com/auth/adwords";
+    const GMAIL_COMPOSE = "https://www.googleapis.com/auth/gmail.compose";
+    const IDENTITY = "openid https://www.googleapis.com/auth/userinfo.email";
+
+    async function connectWith(h: ReturnType<typeof makeHarness>) {
+      const start = await call(h.router, "POST", "/connect", { token: h.token });
+      const state = new URL(start.body.data.authUrl).searchParams.get("state")!;
+      return call(h.router, "GET", `/callback?code=c&state=${state}`);
+    }
+
+    it("keeps the Ads scope when Gmail is added later", async () => {
+      // First consent: Ads.
+      const h = makeHarness([
+        { status: 200, body: { access_token: "a1", refresh_token: "r1", expires_in: 3600, scope: `${IDENTITY} ${ADS}` } },
+        USERINFO_OK,
+        // Second consent: Gmail only in the response, as Google may return it.
+        { status: 200, body: { access_token: "a2", refresh_token: "r2", expires_in: 3600, scope: `${IDENTITY} ${GMAIL_COMPOSE}` } },
+        USERINFO_OK,
+      ]);
+
+      await connectWith(h);
+      expect(h.connections.rows[0]!.scopes).toContain(ADS);
+
+      const res = await connectWith(h);
+      expect(res.status).toBe(200);
+
+      // ONE row — an upgrade updates, it does not create a second connection.
+      expect(h.connections.rows).toHaveLength(1);
+      const scopes = h.connections.rows[0]!.scopes;
+      expect(scopes).toContain(GMAIL_COMPOSE);
+      expect(scopes, "Ads access must survive a Gmail upgrade").toContain(ADS);
+    });
+
+    it("does not duplicate a scope that appears in both grants", async () => {
+      const h = makeHarness([
+        { status: 200, body: { access_token: "a1", refresh_token: "r1", expires_in: 3600, scope: `${IDENTITY} ${ADS}` } },
+        USERINFO_OK,
+        { status: 200, body: { access_token: "a2", refresh_token: "r2", expires_in: 3600, scope: `${IDENTITY} ${ADS} ${GMAIL_COMPOSE}` } },
+        USERINFO_OK,
+      ]);
+
+      await connectWith(h);
+      await connectWith(h);
+
+      const scopes = h.connections.rows[0]!.scopes;
+      expect(scopes.filter((s: string) => s === ADS)).toHaveLength(1);
+      expect(new Set(scopes).size).toBe(scopes.length);
+    });
+
+    it("does NOT inherit scopes when a different Google account connects", async () => {
+      // Merging across accounts would credit one account with another's grant.
+      const h = makeHarness([
+        { status: 200, body: { access_token: "a1", refresh_token: "r1", expires_in: 3600, scope: `${IDENTITY} ${ADS}` } },
+        USERINFO_OK,
+        { status: 200, body: { access_token: "a2", refresh_token: "r2", expires_in: 3600, scope: IDENTITY } },
+        { status: 200, body: { email: "someone-else@example.com" } },
+      ]);
+
+      await connectWith(h);
+      await connectWith(h);
+
+      const other = h.connections.rows.find((r: any) => r.email === "someone-else@example.com");
+      expect(other, "the second account should have its own row").toBeTruthy();
+      expect(other!.scopes).not.toContain(ADS);
+    });
+
+    it("stores the newly granted Gmail scope so capabilities can change", async () => {
+      const h = makeHarness([
+        { status: 200, body: { access_token: "a", refresh_token: "r", expires_in: 3600, scope: `${IDENTITY} ${GMAIL_COMPOSE}` } },
+        USERINFO_OK,
+      ]);
+
+      const res = await connectWith(h);
+
+      expect(res.status).toBe(200);
+      expect(res.body.data.account.scopes).toContain(GMAIL_COMPOSE);
+      expect(h.connections.rows[0]!.scopes).toContain(GMAIL_COMPOSE);
+    });
   });
 });

@@ -45,6 +45,7 @@ import {
   GOOGLE_IDENTITY_SCOPES,
   scopesForConnect,
   scopesForWriteUpgrade,
+  GOOGLE_SERVICES,
   servicesFromGrantedScopes,
   isIntegrationId,
   type IntegrationAuditEntry,
@@ -954,7 +955,8 @@ export class IntegrationCommandService {
     if (id === "google") {
       const connection = await this.deps.googleConnections?.findByUser(userId);
       if (!connection) return [];
-      return connection.scopes.map((scope) => {
+
+      const granted: IntegrationPermission[] = connection.scopes.map((scope) => {
         const described = describeScope(scope);
         return {
           id: scope,
@@ -964,6 +966,32 @@ export class IntegrationCommandService {
           ...(described.service ? { service: described.service } : {}),
         };
       });
+
+      // WHAT IS NOT GRANTED IS ALSO A PERMISSION FACT.
+      //
+      // This used to return only the granted scopes, which reads as "this is
+      // everything" and hides the one thing a user with an Ads-only connection
+      // needs to see: that Gmail, Drive and Calendar writes are POSSIBLE and
+      // simply not authorized yet. The UI had nothing to render an upgrade
+      // control from, so "Gmail write permission is missing" was a dead end.
+      //
+      // Only services this build can actually write to are listed — an
+      // unimplemented one would be an offer that leads nowhere.
+      const held = new Set(connection.scopes);
+      const pending: IntegrationPermission[] = GOOGLE_SERVICES.filter(
+        (spec) =>
+          spec.implemented &&
+          spec.writeScopes.length > 0 &&
+          !spec.writeScopes.every((scope) => held.has(scope))
+      ).map((spec) => ({
+        id: spec.writeScopes[0]!,
+        label: `Modify ${spec.label} (approval-gated)`,
+        granted: false,
+        access: "write" as const,
+        service: spec.id,
+      }));
+
+      return [...granted, ...pending];
     }
 
     if (id === "meta") {

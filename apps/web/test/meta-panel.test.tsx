@@ -382,10 +382,41 @@ describe("write boundary", () => {
     const real = await vi.importActual<Record<string, unknown>>("../src/lib/api");
     const exported = Object.keys(real).filter((k) => typeof real[k] === "function");
 
-    const forbidden = exported.filter((name) =>
-      /execute|pause|resume|budget|createCampaign|updateCampaign/i.test(name)
+    // ALLOWLIST, not a loosened pattern.
+    //
+    // The rule this test protects is "the browser cannot trigger a Meta write
+    // or run a recommendation". It was written as "no export whose name
+    // contains `execute`", which was the same thing until Phase 13 added an
+    // approval-gated Google Workspace write path — `executeGoogleWrite` then
+    // tripped a Meta boundary check by name alone.
+    //
+    // Widening the regex would have quietly stopped guarding `executeX` for
+    // Meta too. Naming the one permitted export keeps the guard absolute for
+    // everything else: a new Meta write wrapper still fails this test, and so
+    // does a second Google one added without a deliberate edit here.
+    //
+    // What makes this export safe is not its name: it POSTs to
+    // /integrations/google/writes/:approvalId/execute, which spends a durable
+    // APPROVED approval the user created on this page. It cannot originate a
+    // write, and it carries no parameters — the payload is the approved plan.
+    const ALLOWED_WRITE_WRAPPERS = ["executeGoogleWrite"];
+
+    const forbidden = exported.filter(
+      (name) =>
+        /execute|pause|resume|budget|createCampaign|updateCampaign/i.test(name) &&
+        !ALLOWED_WRITE_WRAPPERS.includes(name)
     );
     expect(forbidden).toEqual([]);
+  });
+
+  it("has no Meta write wrapper hiding behind the Google allowance", async () => {
+    // The allowlist above is exact, so this pins the thing it must never
+    // become: a Meta write reachable from the browser.
+    const real = await vi.importActual<Record<string, unknown>>("../src/lib/api");
+    const metaWriteShaped = Object.keys(real).filter(
+      (k) => typeof real[k] === "function" && /^(execute|pause|resume|update|create).*meta/i.test(k)
+    );
+    expect(metaWriteShaped).toEqual([]);
   });
 
   it("tells the user where changes actually get approved", async () => {

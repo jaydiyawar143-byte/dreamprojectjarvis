@@ -21,6 +21,8 @@ export function MessageInput({ disabled }: Props) {
   const voiceBusy = useVoiceLocksComposer();
   const lastFailedMessage = useChatStore((s) => s.lastFailedMessage);
   const sending = useChatStore((s) => s.sending);
+  /** Blocks a second send before React has re-rendered. See `handleSend`. */
+  const sendingRef = useRef(false);
 
   useEffect(() => {
     if (lastFailedMessage && !sending) {
@@ -36,8 +38,29 @@ export function MessageInput({ disabled }: Props) {
   async function handleSend() {
     const text = value.trim();
     if (!text || disabled) return;
+
+    // SYNCHRONOUS duplicate guard.
+    //
+    // `disabled` is derived from store state, which does not change until
+    // React re-renders. Two Enter presses in the same tick — a key repeat, a
+    // double tap, an Enter landing on the same frame as a click — both read
+    // the old value and both send. The store's `sending` flag has the same
+    // problem for the same reason.
+    //
+    // A ref updates immediately, so the second attempt never becomes a
+    // request. This is a UX guard, not a correctness guarantee: the backend
+    // stays authoritative, and Google writes are idempotent on a key derived
+    // from the action and payload hash, so a duplicate that did get through
+    // could not produce a second draft.
+    if (sendingRef.current) return;
+    sendingRef.current = true;
+
     setValue("");
-    await sendMessage(text);
+    try {
+      await sendMessage(text);
+    } finally {
+      sendingRef.current = false;
+    }
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
     }

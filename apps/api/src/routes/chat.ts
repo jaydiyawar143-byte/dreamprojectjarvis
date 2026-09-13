@@ -8,6 +8,10 @@ import { createAuthMiddleware, type AuthenticatedRequest } from "../middleware/a
 import type { Container } from "../services/container.js";
 import { detectIntent } from "@jarvis/agents";
 import type { PendingAction } from "@jarvis/core";
+import {
+  executeApprovedGoogleWrite,
+  isGoogleWriteApprovalAction,
+} from "../services/google/execute-approved-action.js";
 
 export function createChatRouter(container: Container): Router {
   const router = Router();
@@ -129,17 +133,36 @@ export function createChatRouter(container: Container): Router {
         );
 
         if (confirmResult.success && confirmResult.pendingAction) {
-          // Execute the tool — the executor resolves sanitized names internally
-          const executionResult = await container.executor.execute({
-            toolId: pendingAction.toolId,
-            params: pendingAction.params,
-            userId: authContext.userId,
-            role: authContext.role,
-            conversationId,
-            traceId,
-            ipAddress: req.ip,
-            approvalId: pendingAction.approvalId,
-          });
+          // TWO EXECUTION PATHS, ONE APPROVAL CONCEPT.
+          //
+          // A Google write approval stores the ACTION as its tool id
+          // ("gmail.createDraft") because that is what makes a consume unable
+          // to cross actions. There is no registered tool by that name — the
+          // registered tool is the planner, `google.plan.gmail.createDraft`,
+          // and execution is a GoogleWriteService call. Sending it to the
+          // ToolExecutor produced "Tool not found" immediately after the user
+          // approved, which reads as a broken system when nothing was wrong.
+          //
+          // Both paths enforce approval; they just live in different places.
+          const executionResult = isGoogleWriteApprovalAction(pendingAction.action)
+            ? await executeApprovedGoogleWrite(container.googleWrites, {
+                approvalId: pendingAction.approvalId,
+                action: pendingAction.action,
+                userId: authContext.userId,
+                conversationId,
+                traceId,
+              })
+            : // The executor resolves sanitized names internally.
+              await container.executor.execute({
+                toolId: pendingAction.toolId,
+                params: pendingAction.params,
+                userId: authContext.userId,
+                role: authContext.role,
+                conversationId,
+                traceId,
+                ipAddress: req.ip,
+                approvalId: pendingAction.approvalId,
+              });
 
             let assistantMessage: string;
             if (executionResult.status === "completed" && executionResult.result?.success) {

@@ -330,7 +330,15 @@ describe("the ten tools exist and can only plan", () => {
     expect((result.data as { requiredAction: string }).requiredAction).toMatch(/connect/i);
   });
 
-  it("fails on a genuinely invalid request", async () => {
+  // INVERTED, deliberately.
+  //
+  // A bad address is something the USER fixes, so it must reach them as a
+  // sentence, not as a failed ToolResult. A failure here trips the
+  // Orchestrator's all-tools-failed guard, which is what turned "At least one
+  // recipient is required." into "Data retrieval failed." on a live run. The
+  // planner's own comment always said `invalid` was answerable; the condition
+  // beneath it just never included it.
+  it("returns a genuinely invalid request as an answerable result, not a failure", async () => {
     const port: GoogleWritePlanPort = {
       async plan() {
         return {
@@ -352,8 +360,14 @@ describe("the ten tools exist and can only plan", () => {
       { userId: "u1" }
     );
 
-    expect(result.success).toBe(false);
-    expect(result.error).toMatch(/not a valid email address/i);
+    // Successful lookup carrying bad news — the model can now say what is
+    // wrong instead of the user seeing an outage.
+    expect(result.success).toBe(true);
+
+    const data = result.data as Record<string, unknown>;
+    expect(data.planned).toBe(false);
+    expect(data.status).toBe("invalid");
+    expect(String(data.reason)).toMatch(/not a valid email address/i);
   });
 });
 

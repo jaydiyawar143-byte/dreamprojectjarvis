@@ -91,7 +91,20 @@ abstract class GoogleWritePlanTool extends BaseTool {
       const actionable =
         result.status === "not_connected" ||
         result.status === "needs_reauth" ||
-        result.status === "permission_missing";
+        result.status === "permission_missing" ||
+        // `invalid` was named in the comment above but left out of the
+        // condition, so the one case the comment calls out by example — "a bad
+        // address, a missing field" — took the failure path it was written to
+        // avoid. "At least one recipient is required." became "Data retrieval
+        // failed.", and the user was shown an outage where they should have
+        // been asked a question.
+        //
+        // Every `invalid` is something a person resolves: a missing recipient
+        // or empty body (they supply it), the plan throttle (they wait), an
+        // unsupported action (they ask for something else). None is retryable
+        // by the system, which is exactly what makes a failed ToolResult the
+        // wrong shape for it.
+        result.status === "invalid";
 
       const text = `${result.message}${result.requiredAction ? ` ${result.requiredAction}` : ""}`;
 
@@ -110,7 +123,10 @@ abstract class GoogleWritePlanTool extends BaseTool {
         );
       }
 
-      // A genuinely invalid request — a bad address, a missing field.
+      // Anything left is a genuine provider or internal failure, where a retry
+      // is the right suggestion and the all-tools-failed guard is right to
+      // fire. The Orchestrator now classifies it into a safe code rather than
+      // flattening it to one sentence.
       return this.failure(text);
     }
 

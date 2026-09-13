@@ -3,10 +3,14 @@ export {
   isGoogleConfigured,
   createGoogleOAuthConfig,
   isGoogleOAuthConfigured,
+  googleOAuthPresence,
   normalizeCustomerId,
   buildAdsBaseUrl,
   GOOGLE_ADS_SCOPE,
   GOOGLE_IDENTITY_SCOPES,
+  ACCOUNT_IDENTITY_SCOPES,
+  canonicalScope,
+  grantCovers,
   REQUIRED_SCOPES,
   GOOGLE_OAUTH_TOKEN_URL,
   GOOGLE_OAUTH_REVOKE_URL,
@@ -15,6 +19,7 @@ export {
   GOOGLE_ADS_DEFAULT_API_VERSION,
   type GoogleConfig,
   type GoogleConfigInput,
+  type GoogleOAuthPresence,
 } from "./config.js";
 
 export {
@@ -26,6 +31,7 @@ export {
   revokeToken,
   fetchUserInfo,
   hasRequiredScopes,
+  hasIdentityScopes,
   GoogleOAuthError,
   type GoogleTokenSet,
   type PkcePair,

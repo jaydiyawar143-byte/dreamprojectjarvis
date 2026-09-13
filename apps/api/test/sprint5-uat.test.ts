@@ -533,10 +533,21 @@ describe("UAT-1 Google: authentication, authorization, isolation, API behavior",
     expect(JSON.stringify(res.body)).not.toContain("secret-code");
   });
 
-  it("1.9 refuses a partial scope grant rather than storing a doomed connection", async () => {
+  it("1.9 refuses a grant that cannot identify the account", async () => {
+    // The floor is IDENTITY, not the Ads scope — see google-auth.ts. A grant
+    // with no openid/email cannot name the account for display or revocation,
+    // so the connection row would be unusable.
     const sys = makeSystem();
     sys.setGoogleFetch([
-      { status: 200, body: { access_token: "a", refresh_token: "r", expires_in: 3600, scope: "openid email" } },
+      {
+        status: 200,
+        body: {
+          access_token: "a",
+          refresh_token: "r",
+          expires_in: 3600,
+          scope: "https://www.googleapis.com/auth/gmail.readonly",
+        },
+      },
       GOOGLE_USERINFO_OK,
     ]);
     const start = await call(sys.googleRouter, "POST", "/connect", { token: TOKEN_ALICE });
@@ -545,6 +556,33 @@ describe("UAT-1 Google: authentication, authorization, isolation, API behavior",
     const res = await call(sys.googleRouter, "GET", `/callback?code=c&state=${state}`);
     expect(res.status).toBe(403);
     expect(sys.googleRows).toHaveLength(0);
+  });
+
+  it("1.9b stores a Workspace grant that carries no Ads scope", async () => {
+    // One callback serves every Google connection. Requiring `adwords` here
+    // rejected a complete Gmail/Drive/Calendar consent — and burned the
+    // single-use state on the way out, so the retry blamed replay protection.
+    const sys = makeSystem();
+    sys.setGoogleFetch([
+      {
+        status: 200,
+        body: {
+          access_token: "a",
+          refresh_token: "r",
+          expires_in: 3600,
+          scope:
+            "openid email profile https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/calendar.readonly",
+        },
+      },
+      GOOGLE_USERINFO_OK,
+    ]);
+    const start = await call(sys.googleRouter, "POST", "/connect", { token: TOKEN_ALICE });
+    const state = new URL(start.body.data.authUrl).searchParams.get("state")!;
+
+    const res = await call(sys.googleRouter, "GET", `/callback?code=c&state=${state}`);
+
+    expect(res.status).toBe(200);
+    expect(sys.googleRows).toHaveLength(1);
   });
 
   it("1.10 EXTERNAL API: read tools deny an unauthorized customer id", async () => {

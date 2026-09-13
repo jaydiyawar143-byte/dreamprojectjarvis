@@ -14,7 +14,7 @@
 // ---------------------------------------------------------------------------
 
 import { useState } from "react";
-import { Check, LayoutGrid, RotateCcw, Save, Sliders, X } from "lucide-react";
+import { Check, LayoutGrid, RotateCcw, Save, Sliders, Sparkles, X } from "lucide-react";
 import { CONSTRAINTS, type WidgetId, type WidgetPlacement } from "./layout";
 
 export const WIDGET_LABELS: Record<WidgetId, string> = {
@@ -37,6 +37,7 @@ export function CustomizeBar({
   onSetHidden,
   onSave,
   onReset,
+  onOptimize,
 }: {
   customizing: boolean;
   dirty: boolean;
@@ -46,6 +47,8 @@ export function CustomizeBar({
   onSetHidden: (id: WidgetId, hidden: boolean) => void;
   onSave: () => void;
   onReset: () => void;
+  /** Runs the analysis. Optional so the bar works without the optimizer. */
+  onOptimize?: () => void;
 }) {
   const [managing, setManaging] = useState(false);
 
@@ -94,6 +97,18 @@ export function CustomizeBar({
           Manage widgets
           {hidden.length > 0 && <span className="text-amber-300/90">· {hidden.length} hidden</span>}
         </button>
+
+        {onOptimize && (
+          <button
+            type="button"
+            data-testid="auto-optimize"
+            onClick={onOptimize}
+            className="sys-focus flex items-center gap-1.5 rounded-md border border-sys-line px-2 py-1 font-mono text-xs uppercase tracking-hud text-sys-dim transition-colors hover:text-white"
+          >
+            <Sparkles size={10} aria-hidden="true" />
+            Auto optimize
+          </button>
+        )}
 
         <button
           type="button"

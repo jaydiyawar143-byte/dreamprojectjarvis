@@ -82,6 +82,8 @@ export interface IntegrationCardProps {
   onManage: () => void;
   onConnect: () => void;
   onReconnect: () => void;
+  /** Requests the incremental WRITE upgrade for the named services. */
+  onGrantWrite?: (services: string[]) => void;
   onToggleEnabled: (enabled: boolean) => void;
 }
 
@@ -92,6 +94,7 @@ export function IntegrationCard({
   onManage,
   onConnect,
   onReconnect,
+  onGrantWrite,
   onToggleEnabled,
 }: IntegrationCardProps) {
   const health = HEALTH[integration.health];
@@ -102,6 +105,23 @@ export function IntegrationCard({
     integration.connection === "NEEDS_REAUTH" || integration.health === "NEEDS_REAUTH";
   const notSetUp =
     integration.connection === "NOT_CONNECTED" || integration.connection === "PARTIAL";
+
+  /**
+   * Write access this build supports and this connection has not authorized.
+   *
+   * Read straight from the server's permission list — the page never decides
+   * which scopes exist, only whether to offer what the server already reported
+   * as ungranted. Offered ONLY on a live connection: an upgrade is incremental
+   * consent on top of an existing grant, and showing it next to "Connect" would
+   * be two buttons for the same first step.
+   */
+  const pendingWrite = integration.permissions.filter(
+    (p) => p.access === "write" && !p.granted && Boolean(p.service)
+  );
+  const showGrantWrite = pendingWrite.length > 0 && integration.connection === "CONNECTED";
+  const pendingWriteLabel = pendingWrite
+    .map((p) => p.label.replace(/^Modify\s+/, "").replace(/\s*\(approval-gated\)$/, ""))
+    .join(", ");
 
   return (
     <Panel
@@ -229,6 +249,30 @@ export function IntegrationCard({
           {/* Re-authorization is the ONLY thing offered when the grant is gone:
               a Test button here would just fail again, and offering it invites
               the user to retry something that cannot succeed. */}
+          {/*
+            Grant write access.
+            ----------------------------------------------------------------
+            Rendered from the server's own permission list: any entry that is
+            `access: "write"` and not granted is a capability this build has
+            and this connection has not authorized. Before this existed, a user
+            whose connection carried only Ads scopes was told "Gmail write
+            permission is missing" with no control anywhere that could grant
+            it — the server had supported the upgrade since Phase 13 and
+            nothing could reach it.
+
+            Named after the services rather than "Upgrade", because consenting
+            to Gmail access is the thing the user is actually deciding.
+          */}
+          {showGrantWrite && onGrantWrite && (
+            <Button
+              data-testid={`integration-grant-write-${integration.id}`}
+              onClick={() => onGrantWrite(pendingWrite.map((p) => p.service!))}
+              disabled={busy}
+            >
+              Grant {pendingWriteLabel} access
+            </Button>
+          )}
+
           {needsReauth && can("reconnect") ? (
             <Button
               data-testid={`integration-reconnect-${integration.id}`}

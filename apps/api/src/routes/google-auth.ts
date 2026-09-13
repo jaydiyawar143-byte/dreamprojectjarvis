@@ -28,15 +28,17 @@ import { asyncHandler } from "../middleware/error-handler.js";
 import type { Container } from "../services/container.js";
 import type { IGoogleConnectionRepository, IOAuthStateRepository } from "@jarvis/core";
 import {
-  createGoogleConfig,
-  isGoogleConfigured,
+  createGoogleOAuthConfig,
+  isGoogleOAuthConfigured,
+  googleOAuthPresence,
   createPkcePair,
   createState,
   buildAuthUrl,
   exchangeCode,
   revokeToken,
   fetchUserInfo,
-  hasRequiredScopes,
+  grantCovers,
+  ACCOUNT_IDENTITY_SCOPES,
   GoogleOAuthError,
   type GoogleConfig,
 } from "@jarvis/google-ads";
@@ -49,6 +51,11 @@ export interface GoogleAuthDeps {
   oauthStates: IOAuthStateRepository;
   /** Injected in tests. Absent means "read from the environment". */
   config?: GoogleConfig;
+  /**
+   * Called after a connection is stored or updated, so cached health can be
+   * invalidated. Optional: the OAuth flow must not depend on health existing.
+   */
+  onConnectionChanged?: (userId: string) => void;
   fetchImpl?: typeof fetch;
   now?: () => Date;
 }
@@ -70,12 +77,31 @@ export function createGoogleAuthRouter(container: Container, deps: GoogleAuthDep
   const requireAuth = createAuthMiddleware(container.tokenService);
   const now = deps.now ?? (() => new Date());
 
-  /** Resolves config lazily so an unconfigured deployment still serves /status. */
+  /**
+   * Resolves config lazily so an unconfigured deployment still serves /status.
+   *
+   * OAUTH PREDICATE, NOT THE ADS ONE. This used to call `isGoogleConfigured()`,
+   * which additionally requires `GOOGLE_ADS_DEVELOPER_TOKEN` — a variable that
+   * only the Ads API needs and that nothing in this router touches (nothing
+   * here reads `developerToken` at all). The effect was that a deployment with
+   * a perfectly good OAuth client reported `configured: false` on /status and
+   * refused /connect, while the error text told the user to set the three
+   * variables they had already set. There was no way to act on that message.
+   *
+   * `build-write-service.ts` and the Workspace wiring in `container.ts` already
+   * made this correction for the same reason; the connection API itself was
+   * left behind. Gmail, Drive and Calendar need no developer token, and neither
+   * does the token exchange, which reads only clientId, clientSecret and
+   * redirectUri.
+   *
+   * An Ads-specific caller still goes through `createGoogleConfig`, which
+   * demands a real developer token, so nothing here weakens the Ads path.
+   */
   const resolveConfig = (): GoogleConfig | null => {
     if (deps.config) return deps.config;
-    if (!isGoogleConfigured()) return null;
+    if (!isGoogleOAuthConfigured()) return null;
     try {
-      return createGoogleConfig();
+      return createGoogleOAuthConfig();
     } catch {
       return null;
     }
@@ -93,6 +119,12 @@ export function createGoogleAuthRouter(container: Container, deps: GoogleAuthDep
     // Booleans and non-secret identifiers only.
     ok(res, {
       configured,
+      // Which OAuth variables the RUNNING PROCESS received. Booleans only —
+      // never a value, a length or a fragment. This is here because
+      // `configured: false` alone cannot distinguish "nothing is set" from
+      // "one of the three is missing" from "the process started before the
+      // file was saved", and those have completely different remedies.
+      ...googleOAuthPresence(),
       connected: connection !== null,
       account: connection
         ? {
@@ -180,29 +212,131 @@ export function createGoogleAuthRouter(container: Container, deps: GoogleAuthDep
         deps.fetchImpl as never
       );
 
-      // Google may grant fewer scopes than requested; refuse a partial grant
-      // rather than storing a connection whose Ads calls will 403 later.
-      if (!hasRequiredScopes(tokens.scopes)) {
+      // IDENTITY IS THE FLOOR — not the Ads scope.
+      //
+      // This used to call `hasRequiredScopes`, which demands `adwords`. One
+      // callback serves every Google connection, so a Workspace consent
+      // (openid email profile gmail.readonly drive.readonly calendar.readonly)
+      // was rejected with "Google did not grant the Google Ads scope" — a
+      // complete, correct grant refused for lacking a scope it was never asked
+      // for. Since the single-use state is consumed ABOVE this line, the
+      // rejection also burned it, so the user's next attempt reported "Invalid
+      // or already-used authorization state" and pointed at replay protection
+      // instead of at scopes.
+      //
+      // Identity is what the connection row cannot do without: it names the
+      // account for display and revocation. Everything else is gated per
+      // service where it is used — `resolveGoogleAccess` checks GRANTED scopes
+      // and returns `permission_missing` with a remedy, and `hasWriteAccess`
+      // does the same for writes. So a Workspace-only connection stored here
+      // cannot quietly attempt an Ads call; it is refused by the layer that can
+      // explain why.
+      // Callback diagnostics. Booleans and scope NAMES only — never the code,
+      // the tokens, or any profile field. Emitted BEFORE the gate so a refusal
+      // is explainable: "which of these five was false" is the whole question
+      // when a consent that looked fine is rejected.
+      const identityScopesRequested = grantCovers(tokens.scopes, ACCOUNT_IDENTITY_SCOPES);
+      const diagnostics = {
+        level: "info",
+        event: "google_callback_identity",
+        identityScopesRequested,
+        accessTokenReceived: typeof tokens.accessToken === "string" && tokens.accessToken.length > 0,
+        // Scope NAMES are not secrets and are the single most useful field
+        // here: it is how you see that Google returned `userinfo.email` where
+        // the code was looking for `email`.
+        grantedScopeCount: tokens.scopes.length,
+      };
+
+      if (!identityScopesRequested) {
+        console.log(JSON.stringify({
+          ...diagnostics,
+          level: "warn",
+          identityResponseReceived: false,
+          googleSubjectPresent: false,
+          emailPresent: false,
+          refusedBecause: "granted scopes do not cover openid + email",
+          grantedScopes: tokens.scopes,
+        }));
         return fail(
           res,
           403,
           "AUTHORIZATION_FAILED",
-          "Google did not grant the Google Ads scope required for this integration"
+          // Names what is missing instead of restating the category, so the
+          // remedy is visible from the message alone.
+          `Google did not grant the account permissions needed to identify the connection. Required: ${ACCOUNT_IDENTITY_SCOPES.join(", ")}. Granted: ${tokens.scopes.join(", ") || "nothing"}.`
         );
       }
 
-      const { email } = await fetchUserInfo(config, tokens.accessToken, deps.fetchImpl as never);
+      const { email, subjectPresent } = await fetchUserInfo(
+        config,
+        tokens.accessToken,
+        deps.fetchImpl as never
+      );
+
+      console.log(JSON.stringify({
+        ...diagnostics,
+        identityResponseReceived: true,
+        googleSubjectPresent: subjectPresent,
+        emailPresent: email.length > 0,
+      }));
+
+      // ---------------------------------------------------------------------
+      // INCREMENTAL CONSENT: union the scopes, do not replace them.
+      //
+      // The upgrade URL asks only for what is being ADDED — a Gmail upgrade
+      // sends `openid email profile gmail.readonly gmail.compose` and does not
+      // re-list `adwords`. Google carries the earlier grant forward because
+      // `include_granted_scopes=true` is set, so the token really does still
+      // cover Ads; but the token RESPONSE is not guaranteed to enumerate every
+      // previously granted scope. Writing `tokens.scopes` straight over the
+      // stored row therefore risks erasing `adwords` from our record while the
+      // token itself still holds it — and the capability layer reads the
+      // record, so Ads would silently disappear from the UI immediately after
+      // a successful Gmail upgrade.
+      //
+      // Merging is only ever additive for the SAME Google account, which is why
+      // it is guarded on the email matching. Connecting a different account
+      // starts from that account's own grant rather than inheriting the
+      // previous one's.
+      //
+      // The trade-off, stated honestly: if a scope is later revoked out-of-band
+      // at Google, the merged record over-claims until the next consent. That
+      // failure is self-correcting at the point of use — the provider returns
+      // 403/401 and `resolveGoogleAccess` reports needs_reauth or
+      // permission_missing — whereas under-claiming would break working
+      // functionality with no signal at all.
+      const existing = await deps.connections.findByUser(stateRecord.userId);
+      const mergedScopes =
+        existing && existing.googleAccountEmail === email && !existing.revokedAt
+          ? [...new Set([...existing.scopes, ...tokens.scopes])]
+          : tokens.scopes;
 
       await deps.connections.save({
         userId: stateRecord.userId,
         googleAccountEmail: email,
-        scopes: tokens.scopes,
+        scopes: mergedScopes,
         accessToken: tokens.accessToken,
         refreshToken: tokens.refreshToken,
         expiresAt: tokens.expiresAt,
       });
 
-      ok(res, { connected: true, account: { email, scopes: tokens.scopes } });
+      // Scope names only — no token, no code, no profile field.
+      console.log(JSON.stringify({
+        level: "info",
+        event: "google_connection_stored",
+        scopesGranted: tokens.scopes.length,
+        scopesStored: mergedScopes.length,
+        scopesCarriedForward: mergedScopes.length - tokens.scopes.length,
+        upgrade: Boolean(existing && existing.googleAccountEmail === email),
+      }));
+
+      // The grant just changed, so any cached health verdict is now stale —
+      // most importantly the `permission_missing` one this consent may have
+      // just resolved. Dropped rather than re-checked inline: the user is mid
+      // redirect and must not wait on a provider round trip.
+      deps.onConnectionChanged?.(stateRecord.userId);
+
+      ok(res, { connected: true, account: { email, scopes: mergedScopes } });
     } catch (err) {
       if (err instanceof GoogleOAuthError) {
         const status = err.classified.code === "AUTHENTICATION_REQUIRED" ? 401 : 502;

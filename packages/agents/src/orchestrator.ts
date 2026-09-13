@@ -31,7 +31,7 @@ import type {
   IPermissionChecker,
   RetrievedChunk,
 } from "@jarvis/core";
-import { JarvisError, decideSurface } from "@jarvis/core";
+import { JarvisError, decideSurface, classifyToolFailures } from "@jarvis/core";
 import type { SurfaceDecision } from "@jarvis/core";
 import type { AgentPolicy, AgentResolution } from "@jarvis/core";
 import type { AgentRegistry } from "./registry.js";
@@ -287,18 +287,44 @@ export class Orchestrator implements IOrchestrator {
             });
             await this.auditSurfaceDecision(context, failureSurface);
 
+            // -------------------------------------------------------------
+            // SAY WHAT ACTUALLY FAILED.
+            //
+            // This used to return one fixed sentence, "Data retrieval failed.",
+            // with the real cause in `details.reason` — which no client reads.
+            // A Gmail draft rejected for having no recipient, a Google account
+            // that was never connected, and a genuine outage all reached the
+            // user as the same four words, none of which say what to do.
+            //
+            // The fixed sentence was itself a fix for something worse (it used
+            // to blame Meta Ads on every path), and the lesson taken then was
+            // "say less" when it should have been "classify, then say". The
+            // classifier only recognises failures whose remedy is known and
+            // refuses to surface anything that does not look like prose
+            // written for a person, so an unrecognised failure still collapses
+            // to the old generic message rather than leaking a payload.
+            // -------------------------------------------------------------
+            const classified = classifyToolFailures(
+              toolSummary.executions
+                .filter((e) => !e.success)
+                .map((e) => ({
+                  toolId: e.toolId,
+                  ...(e.error ? { error: e.error } : {}),
+                  ...(e.status ? { status: String(e.status) } : {}),
+                }))
+            );
+
             return this.buildErrorResponse(
               new JarvisError(
                 "TOOL_EXECUTION_FAILED",
-                // Was "Meta Ads data could not be fetched", on a path every
-                // agent reaches. A maps lookup that failed for want of a
-                // location reported itself as a Meta Ads outage, which sent
-                // anyone reading it to entirely the wrong system. The tools
-                // that actually failed are named in `reason`.
-                "Data retrieval failed.",
+                classified.message,
                 {
                   toolExecution: toolSummary,
                   reason: failedTools,
+                  // The stable code a client may branch on, kept separate from
+                  // the prose so the wording can change without breaking it.
+                  failureCode: classified.code,
+                  actionable: classified.actionable,
                   ...(failureSurface.directive ? { surface: failureSurface.directive } : {}),
                 }
               ),

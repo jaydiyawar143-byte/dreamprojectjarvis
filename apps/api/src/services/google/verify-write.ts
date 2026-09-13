@@ -31,7 +31,40 @@ import type {
   GoogleWritePlan,
   WriteVerification,
 } from "@jarvis/core";
-import type { GoogleCalendarService, GoogleDriveService } from "@jarvis/google-workspace";
+import { createHash } from "node:crypto";
+import type {
+  GmailService,
+  GoogleCalendarService,
+  GoogleDriveService,
+} from "@jarvis/google-workspace";
+
+/**
+ * A stable digest of a message body.
+ *
+ * The body is compared but never carried: a verification detail is shown to the
+ * user and written to logs, and neither is a place for the contents of their
+ * email. Whitespace is normalized first because Gmail re-wraps lines and
+ * appends a trailing newline, and a draft that differs only in line breaks is
+ * the same draft.
+ */
+function bodyDigest(text: string): string {
+  const normalized = text
+    .replace(/\r\n/g, "\n")
+    .replace(/[ \t]+$/gm, "")
+    .trim();
+  return createHash("sha256").update(normalized).digest("hex").slice(0, 16);
+}
+
+/** `Name <a@b.com>` and ` A@B.com ` are the same recipient. */
+function normalizeAddress(value: string): string {
+  const angled = /<([^>]+)>/.exec(value);
+  return (angled ? angled[1]! : value).trim().toLowerCase();
+}
+
+function sameSet(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((v, i) => v === b[i]);
+}
 
 const GMAIL_READ_SCOPE = "https://www.googleapis.com/auth/gmail.readonly";
 
@@ -44,6 +77,13 @@ export interface VerifyDeps {
    */
   driveRead: GoogleDriveService;
   calendarRead: GoogleCalendarService;
+  /**
+   * Gmail READ client, for confirming a draft.
+   *
+   * Optional so a deployment without one degrades to
+   * `verification_unavailable` rather than failing a write that succeeded.
+   */
+  gmailRead?: GmailService;
 }
 
 export interface VerifyOutcome {
@@ -64,6 +104,9 @@ export async function verifyWrite(
   const params = plan.params ?? {};
   const str = (key: string): string =>
     typeof params[key] === "string" ? (params[key] as string) : "";
+  /** A string-array param, e.g. the approved `to` list. */
+  const arr = (key: string): string[] =>
+    Array.isArray(params[key]) ? (params[key] as unknown[]).filter((v): v is string => typeof v === "string") : [];
   const body = (providerResult ?? {}) as Record<string, unknown>;
 
   try {
@@ -175,17 +218,98 @@ export async function verifyWrite(
       }
 
       // --- Gmail drafts -----------------------------------------------------
+      //
+      // Re-read with `gmail.readonly` and compare against the APPROVED plan.
+      // Previously this always returned `verification_unavailable`, because the
+      // phase did not request a read scope; connections now hold one, so the
+      // draft can actually be confirmed rather than taken on trust.
+      //
+      // The read scope is checked FIRST. A connection with only `gmail.compose`
+      // can create the draft perfectly well and simply cannot read it back —
+      // that is `verification_unavailable`, not a failure, and calling the API
+      // anyway would spend a request to earn a 403 that means the same thing.
       case "gmail.createDraft":
       case "gmail.updateDraft": {
         const draftId = String(body.draftId ?? "");
         if (!draftId) {
+          // A draft write that produced no id did not produce a draft.
           return { verification: "verification_failed", detail: "no draft id was returned" };
         }
-        return {
-          verification: "verification_unavailable",
-          detail:
-            "the draft id was returned, but confirming it needs gmail.readonly, which this phase does not request",
-        };
+
+        if (!grantedScopes.includes(GMAIL_READ_SCOPE)) {
+          return {
+            verification: "verification_unavailable",
+            detail:
+              "the draft was created, but confirming it needs gmail.readonly, which this connection has not granted",
+          };
+        }
+
+        if (!deps.gmailRead) {
+          return {
+            verification: "verification_unavailable",
+            detail: "no Gmail read client is configured on this server",
+          };
+        }
+
+        const reread = await deps.gmailRead.getDraft(accessToken, draftId, signal);
+        if (!reread.ok) {
+          // Could not look — distinct from looked and disagreed.
+          return {
+            verification: "verification_unavailable",
+            detail: `the draft could not be re-read: ${reread.message}`,
+          };
+        }
+
+        // Identity first: a different draft id means we read something else.
+        if (reread.body.draftId && reread.body.draftId !== draftId) {
+          return {
+            verification: "verification_failed",
+            detail: "the draft that came back has a different id",
+          };
+        }
+
+        // Recipients. Compared as a SET of normalized addresses: Gmail
+        // reformats "A <a@x>" and may reorder, and neither is a discrepancy.
+        const expectedTo = arr("to").map(normalizeAddress).filter(Boolean).sort();
+        const actualTo = reread.body.to.map(normalizeAddress).filter(Boolean).sort();
+        if (expectedTo.length > 0 && !sameSet(expectedTo, actualTo)) {
+          // The count is safe to state; the addresses are not.
+          return {
+            verification: "verification_failed",
+            detail: `the draft's recipients do not match the ${expectedTo.length} approved`,
+          };
+        }
+
+        const expectedSubject = str("subject");
+        if (expectedSubject && reread.body.subject !== expectedSubject) {
+          return {
+            verification: "verification_failed",
+            // The subject was approved by the user and is already shown to
+            // them in the plan, so echoing it back reveals nothing new.
+            detail: `expected the subject "${expectedSubject}" but found something else`,
+          };
+        }
+
+        // BODY BY HASH, never by value. The comparison needs to be exact; the
+        // detail must never carry a fragment of the message.
+        const expectedBody = str("body");
+        if (expectedBody && bodyDigest(expectedBody) !== bodyDigest(reread.body.body)) {
+          return {
+            verification: "verification_failed",
+            detail: "the draft's body does not match what was approved",
+          };
+        }
+
+        // A draft that is already SENT is not a draft. This is the one that
+        // would matter most: it would mean a create somehow dispatched mail.
+        if (reread.body.labels.includes("SENT")) {
+          return {
+            verification: "verification_failed",
+            detail: "the message was sent rather than left as a draft",
+          };
+        }
+
+        return { verification: "verified", detail: "the draft was read back and matches" };
       }
 
       // --- Gmail send -------------------------------------------------------

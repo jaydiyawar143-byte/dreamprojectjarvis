@@ -20,6 +20,15 @@ import { createDashboardRouter } from "./routes/dashboard.js";
 import { createAgentsRouter } from "./routes/agents.js";
 import { createActivityRouter } from "./routes/activity.js";
 import { createGoogleAuthRouter } from "./routes/google-auth.js";
+import {
+  googleOAuthPresence,
+  isGoogleOAuthConfigured,
+  createGoogleOAuthConfig,
+} from "@jarvis/google-ads";
+import { resolveAccess } from "@jarvis/google-workspace";
+import { createAuthMiddleware } from "./middleware/auth.js";
+import { IntegrationHealthService } from "./services/health/health-service.js";
+import { checkGoogleHealth } from "./services/health/google-health-check.js";
 import { createWhatsAppRouter } from "./routes/whatsapp.js";
 import { createN8nRouter } from "./routes/n8n.js";
 import { createVoiceRouter } from "./routes/voice.js";
@@ -39,7 +48,12 @@ import { EncryptionService } from "@jarvis/security";
 import { prisma, PrismaGoogleConnectionRepository, PrismaOAuthStateRepository, PrismaWhatsAppRepository, PrismaN8nRepository, PrismaCredentialRepository, PrismaTaskRepository, PrismaPreferenceRepository, PrismaMapsUsageRepository } from "@jarvis/db";
 import { createWhatsAppConfig, isWhatsAppConfigured } from "@jarvis/whatsapp";
 import { createN8nConfig, isN8nConfigured } from "@jarvis/n8n";
-import { createVoiceConfig, describeVoiceConfigStatus, isVoiceConfigured } from "@jarvis/config";
+import {
+  createVoiceConfig,
+  describeVoiceConfigStatus,
+  isElevenLabsConfigured,
+  isVoiceConfigured,
+} from "@jarvis/config";
 import { createGoogleSignInConfig, describeGoogleSignInStatus } from "@jarvis/config";
 import { createGoogleSignInRouter } from "./routes/google-signin.js";
 import { createCredentialsRouter } from "./routes/credentials.js";
@@ -50,6 +64,7 @@ import { createGoogleWritesRouter } from "./routes/google-writes.js";
 import { createCommandCenterRouter } from "./routes/command-center.js";
 import { installSystemStream } from "./socket/system-stream.js";
 import { OpenAIVoiceProvider } from "@jarvis/ai-openai";
+import { CompositeVoiceProvider, ElevenLabsVoiceProvider } from "@jarvis/ai-elevenlabs";
 import {
   ShutdownLifecycle,
   type LifecycleState,
@@ -288,23 +303,45 @@ app.use("/api/v1/integrations/google/writes", createGoogleWritesRouter(container
 if (isVoiceConfigured()) {
   try {
     const voiceConfig = createVoiceConfig();
+    const openAIVoice = new OpenAIVoiceProvider({
+      sttModel: voiceConfig.sttModel,
+      ttsModel: voiceConfig.ttsModel,
+      defaultVoice: voiceConfig.ttsVoice,
+    });
+
+    // ---------------------------------------------------------------------
+    // ElevenLabs speaks; whisper-1 keeps listening.
+    //
+    // Only the TTS half is swapped. The recognizer was chosen by measurement —
+    // whisper-1 with a language hint rendered this operator's Hinglish in Latin
+    // script 18 times out of 18, where a faster model produced Devanagari on 10
+    // of 18 — and every intent rule downstream matches Latin text. Replacing it
+    // to change the voice would silently misroute requests.
+    //
+    // Absent an ElevenLabs key or voice id this is skipped entirely and the
+    // OpenAI voice stays. The upgrade is never a hard dependency.
+    // ---------------------------------------------------------------------
+    const useElevenLabs = isElevenLabsConfigured();
+    const voiceProvider = useElevenLabs
+      ? new CompositeVoiceProvider({
+          tts: new ElevenLabsVoiceProvider(),
+          stt: openAIVoice,
+        })
+      : openAIVoice;
+
     app.use(
       "/api/v1/voice",
-      createVoiceRouter(container, {
-        provider: new OpenAIVoiceProvider({
-          sttModel: voiceConfig.sttModel,
-          ttsModel: voiceConfig.ttsModel,
-          defaultVoice: voiceConfig.ttsVoice,
-        }),
-        config: voiceConfig,
-      })
+      createVoiceRouter(container, { provider: voiceProvider, config: voiceConfig })
     );
     console.log(JSON.stringify({
       level: "info",
       event: "voice_routes_enabled",
-      sttModel: voiceConfig.sttModel,
-      ttsModel: voiceConfig.ttsModel,
-      voice: voiceConfig.ttsVoice,
+      sttModel: voiceProvider.sttModel,
+      ttsModel: voiceProvider.ttsModel,
+      ttsProvider: useElevenLabs ? "elevenlabs" : "openai",
+      // The voice ID is a public identifier, not a secret. The API KEY is never
+      // read here at all — the provider takes it straight from the environment.
+      voice: voiceProvider.defaultVoice,
     }));
   } catch (err) {
     // A misconfigured optional feature must not take the API down; the routes
@@ -393,12 +430,118 @@ app.use(
   })
 );
 
+// ---------------------------------------------------------------------------
+// Automatic integration health.
+//
+// Constructed here because this is where the connection repository and the
+// OAuth configuration already exist — building it inside the container would
+// mean threading both somewhere they are not otherwise needed.
+//
+// READ-ONLY BY WIRING: the checker receives a connection reader and a token
+// probe. Nothing that could create a draft, a file or an event is in scope.
+// ---------------------------------------------------------------------------
+/** Shared auth guard for the health routes below. Same one every route uses. */
+const requireAuthMiddleware = createAuthMiddleware(container.tokenService);
+
+const healthConnections = process.env.JARVIS_ENCRYPTION_KEY
+  ? new PrismaGoogleConnectionRepository(prisma, EncryptionService.fromEnv())
+  : null;
+
+export const integrationHealth = new IntegrationHealthService({
+  checkers: {
+    google: (userId: string) =>
+      checkGoogleHealth(userId, {
+        isConfigured: () => isGoogleOAuthConfigured() && Boolean(process.env.JARVIS_ENCRYPTION_KEY),
+        connections: healthConnections,
+        // The ONLY provider call a health check can make: prove the stored
+        // authorization still yields a token. `resolveAccess` refreshes when
+        // the access token is stale, which is a read operation — it creates
+        // nothing and changes nothing the user would see.
+        probeToken: async (uid: string) => {
+          if (!healthConnections || !isGoogleOAuthConfigured()) {
+            return { ok: false as const, status: "not_connected" as const, message: "not configured" };
+          }
+          const outcome = await resolveAccess(uid, "gmail", {
+            connections: healthConnections,
+            config: createGoogleOAuthConfig(),
+          });
+          if (outcome.ok) return { ok: true as const };
+          return { ok: false as const, status: outcome.status, message: outcome.message };
+        },
+      }),
+  },
+});
+
+// ---------------------------------------------------------------------------
+// On-demand health, for troubleshooting.
+//
+//   GET  /api/v1/health/integrations          cached snapshots, no provider call
+//   POST /api/v1/health/integrations/check    re-run every check now
+//
+// Separate from the per-integration "Test Connection" verb, which stays exactly
+// as it was. This answers "what is the state of everything" in one request,
+// which is the question you have when something is broken and you do not yet
+// know where.
+// ---------------------------------------------------------------------------
+app.get("/api/v1/health/integrations", requireAuthMiddleware, async (req, res) => {
+  const userId = (req as { auth?: { userId: string } }).auth?.userId;
+  if (!userId) {
+    res.status(401).json({ success: false, error: { code: "AUTHENTICATION_REQUIRED", message: "Authentication required" } });
+    return;
+  }
+
+  // Cached only. A GET must not spend provider quota, or a dashboard that
+  // polls turns into a rate-limit incident.
+  res.status(200).json({
+    success: true,
+    data: { integrations: integrationHealth.all(userId) },
+    timestamp: new Date().toISOString(),
+  });
+});
+
+app.post("/api/v1/health/integrations/check", requireAuthMiddleware, async (req, res) => {
+  const userId = (req as { auth?: { userId: string } }).auth?.userId;
+  if (!userId) {
+    res.status(401).json({ success: false, error: { code: "AUTHENTICATION_REQUIRED", message: "Authentication required" } });
+    return;
+  }
+
+  const snapshots = await integrationHealth.checkAll(userId, "on_demand");
+  res.status(200).json({
+    success: true,
+    data: { integrations: snapshots },
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// Startup OAuth presence, booleans only.
+//
+// Printed unconditionally, before the mount decision, because the failure this
+// diagnoses is "the process does not have what the file has" — a credential
+// added to .env after boot is invisible until a restart, and from the outside
+// that looks exactly like a typo. One line at startup settles it.
+//
+// Never a value, a length or a prefix: two of these three are secrets.
+console.log(JSON.stringify({
+  level: "info",
+  event: "google_oauth_presence",
+  ...googleOAuthPresence(),
+  encryptionKeyPresent: Boolean(process.env.JARVIS_ENCRYPTION_KEY),
+  // The Ads API needs this; Gmail, Drive and Calendar do not. Reported so the
+  // distinction is visible rather than inferred.
+  adsDeveloperTokenPresent: Boolean(process.env.GOOGLE_ADS_DEVELOPER_TOKEN),
+}));
+
 if (process.env.JARVIS_ENCRYPTION_KEY) {
   app.use(
     "/api/v1/google",
     createGoogleAuthRouter(container, {
       connections: new PrismaGoogleConnectionRepository(prisma, EncryptionService.fromEnv()),
       oauthStates: new PrismaOAuthStateRepository(prisma),
+      // Connect, reconnect and permission upgrade all land here, so one hook
+      // covers every case in which the grant could have changed.
+      onConnectionChanged: (userId) =>
+        integrationHealth.invalidate(userId, "google", "oauth_connect"),
     })
   );
 } else {
@@ -470,6 +613,50 @@ httpServer.listen(env.PORT, () => {
   console.log(
     `JARVIS API running on port ${env.PORT} [${env.NODE_ENV}] state=${lifecycle.getState() satisfies LifecycleState}`
   );
+
+  // -------------------------------------------------------------------------
+  // Learn integration health at startup, for users who already have a
+  // connection stored.
+  //
+  // AFTER listen, never before: a provider that is slow or down must not delay
+  // the port opening. Health is a thing to know, not a precondition for
+  // serving — and a boot that hangs waiting on Google is a worse failure than
+  // an unknown status.
+  //
+  // Scoped to users who actually have a Google connection, so this is one
+  // cheap query on a fresh install and does nothing at all when nobody has
+  // connected anything.
+  // -------------------------------------------------------------------------
+  void (async () => {
+    if (!process.env.JARVIS_ENCRYPTION_KEY) return;
+    try {
+      const { prisma: db } = await import("@jarvis/db");
+      const rows = await db.googleConnection.findMany({
+        where: { revokedAt: null },
+        select: { userId: true },
+        distinct: ["userId"],
+        take: 50,
+      });
+
+      for (const row of rows) {
+        await integrationHealth.checkAll(row.userId, "startup");
+      }
+
+      console.log(JSON.stringify({
+        level: "info",
+        event: "integration_health_startup",
+        usersChecked: rows.length,
+      }));
+    } catch {
+      // Never fatal. Not knowing health at boot is the state this feature
+      // improves on, not a reason to fail the process.
+      console.log(JSON.stringify({
+        level: "warn",
+        event: "integration_health_startup",
+        completed: false,
+      }));
+    }
+  })();
 });
 
 export { app, io };

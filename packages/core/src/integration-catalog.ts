@@ -77,6 +77,37 @@ export interface GoogleServiceSpec {
  */
 export const GOOGLE_IDENTITY_SCOPES: readonly string[] = ["openid", "email", "profile"];
 
+/**
+ * Canonical spellings of the identity scopes, both forms.
+ *
+ * Google does not echo back what you sent: ask for `email` and `profile` and
+ * the grant comes back as `.../userinfo.email` and `.../userinfo.profile`,
+ * while `openid` stays verbatim. Anything comparing identity scopes has to
+ * accept both spellings or it will conclude that a perfectly good connection
+ * has no identity at all — which is exactly the bug that refused every real
+ * consent before the canonicalization fix.
+ */
+export const CANONICAL_IDENTITY_SCOPES: Readonly<Record<string, readonly string[]>> =
+  Object.freeze({
+    openid: ["openid"],
+    email: ["email", "https://www.googleapis.com/auth/userinfo.email"],
+    profile: ["profile", "https://www.googleapis.com/auth/userinfo.profile"],
+  });
+
+/**
+ * Whether a grant carries enough identity to name the account.
+ *
+ * `openid` + an email scope. `profile` is NOT required: nothing in this system
+ * reads a display name, and demanding it would invent a failure for a field
+ * that goes unused.
+ */
+export function canonicalIdentityHeld(granted: readonly string[]): boolean {
+  const held = new Set(granted);
+  const hasOpenId = CANONICAL_IDENTITY_SCOPES.openid!.some((s) => held.has(s));
+  const hasEmail = CANONICAL_IDENTITY_SCOPES.email!.some((s) => held.has(s));
+  return hasOpenId && hasEmail;
+}
+
 export const GOOGLE_SERVICES: readonly GoogleServiceSpec[] = [
   {
     id: "ads",
@@ -232,7 +263,19 @@ export function hasWriteAccess(service: GoogleServiceId, granted: readonly strin
 
 /** Plain-English label for a raw scope URL, for the permissions view. */
 export function describeScope(scope: string): { label: string; access: "read" | "write"; service?: string } {
-  if (scope === "openid" || scope === "email" || scope === "profile") {
+  // Both spellings. Google returns `email` and `profile` as
+  // `https://www.googleapis.com/auth/userinfo.{email,profile}`, so matching only
+  // the short forms sent them to the fallback at the bottom — which shows the
+  // raw URL and, because it has no ".readonly" suffix, labels identity as WRITE
+  // access. The permissions panel then told the user their connection could
+  // modify something, when all it can do is name the account.
+  if (
+    scope === "openid" ||
+    scope === "email" ||
+    scope === "profile" ||
+    scope === "https://www.googleapis.com/auth/userinfo.email" ||
+    scope === "https://www.googleapis.com/auth/userinfo.profile"
+  ) {
     return { label: "Identify the connected Google account", access: "read" };
   }
   for (const spec of GOOGLE_SERVICES) {

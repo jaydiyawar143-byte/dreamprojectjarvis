@@ -82,4 +82,7 @@ export * from "./types/google-write.js";
 export * from "./capability-catalog.js";
 export * from "./capability-presentation.js";
 export * from "./speech-preparation.js";
+export * from "./tool-failure-classifier.js";
+export * from "./integration-health-snapshot.js";
+export * from "./log-hash.js";
 export * from "./utils/mask-identifier.js";

@@ -1922,14 +1922,31 @@ export async function refreshIntegration(
 // never be: a check written in this file would be absent from the voice path.
 // ---------------------------------------------------------------------------
 
-/** Begins OAuth consent. Returns a URL for the browser to follow. */
+/**
+ * Begins OAuth consent. Returns a URL for the browser to follow.
+ *
+ * `accessLevel: "write"` requests the incremental WRITE upgrade for the named
+ * services. It has to be passed explicitly and it has to be possible to pass:
+ * the server has supported the upgrade since Phase 13, but this wrapper had no
+ * parameter for it, so there was no way to reach it from the browser at all —
+ * a user with an Ads-only connection could see "Gmail write permission is
+ * missing" and had no control anywhere in the UI that could fix it.
+ *
+ * The scope set is still decided entirely by the SERVER from these service
+ * names (`scopesForWriteUpgrade`). Nothing here names a scope, so the page
+ * cannot ask for more access than the server intends.
+ */
 export async function connectIntegration(
   id: string,
-  services?: string[]
-): Promise<ApiResponse<{ authUrl: string; services: string[]; message: string }>> {
+  services?: string[],
+  accessLevel?: "read" | "write"
+): Promise<ApiResponse<{ authUrl: string; services: string[]; message: string; accessLevel?: string }>> {
   return request(`/integrations/${id}/connect`, {
     method: "POST",
-    body: JSON.stringify(services ? { services } : {}),
+    body: JSON.stringify({
+      ...(services ? { services } : {}),
+      ...(accessLevel ? { accessLevel } : {}),
+    }),
   });
 }
 

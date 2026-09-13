@@ -30,7 +30,11 @@ import {
   PrismaIntegrationStateRepository,
   PrismaOAuthStateRepository,
 } from "@jarvis/db";
-import { createGoogleConfig, isGoogleConfigured, type GoogleConfig } from "@jarvis/google-ads";
+import {
+  createGoogleOAuthConfig,
+  isGoogleOAuthConfigured,
+  type GoogleConfig,
+} from "@jarvis/google-ads";
 import type { IToolExecutor, IntegrationUsage } from "@jarvis/core";
 import { DbBackedRateLimiter } from "../rate-limiter.js";
 import { getMapsUsageGuard } from "../maps-usage-guard.js";
@@ -101,9 +105,18 @@ export function buildIntegrationCommandService(
   };
 
   const googleConfig = (): GoogleConfig | null => {
-    if (!isGoogleConfigured()) return null;
+    // OAUTH PREDICATE, NOT THE ADS ONE.
+    //
+    // This feeds `googleOAuthMounted` on the Integration Center and gates the
+    // `connect` and `reconnect` commands — all three are OAuth operations, and
+    // none of them reads `developerToken`. It previously used
+    // `isGoogleConfigured()`, which also demands GOOGLE_ADS_DEVELOPER_TOKEN, so
+    // a deployment with a complete OAuth client showed "Google OAuth is not
+    // configured" and told the user to set the exact three variables already
+    // present. The message and the predicate disagreed; the message was right.
+    if (!isGoogleOAuthConfigured()) return null;
     try {
-      return createGoogleConfig();
+      return createGoogleOAuthConfig();
     } catch {
       // Misconfiguration must not take the API down. Google reports as
       // unconfigured and every Google verb explains what is missing.

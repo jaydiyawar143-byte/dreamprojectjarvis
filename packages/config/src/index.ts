@@ -91,6 +91,23 @@ const serverEnvSchema = baseEnvSchema.extend({
   // a malformed speed must not stop the API booting over a disabled feature.
   OPENAI_TTS_INSTRUCTIONS: z.string().optional(),
   OPENAI_TTS_SPEED: z.string().optional(),
+
+  // ElevenLabs speech synthesis. Strings, unvalidated here, for the same
+  // reason as the rest: a malformed optional value must not stop the API
+  // booting. The provider validates and clamps what it actually uses.
+  //
+  // ELEVENLABS_API_KEY is deliberately NOT read into any config object that a
+  // route could serialise — the provider reads it from the environment itself
+  // and keeps it on the instance. Nothing here can hand it to a response.
+  ELEVENLABS_API_KEY: z.string().optional(),
+  ELEVENLABS_VOICE_ID: z.string().optional(),
+  ELEVENLABS_MODEL_ID: z.string().optional(),
+  ELEVENLABS_OUTPUT_FORMAT: z.string().optional(),
+  ELEVENLABS_STABILITY: z.string().optional(),
+  ELEVENLABS_SIMILARITY_BOOST: z.string().optional(),
+  ELEVENLABS_STYLE: z.string().optional(),
+  ELEVENLABS_SPEAKER_BOOST: z.string().optional(),
+  ELEVENLABS_SPEED: z.string().optional(),
   VOICE_MAX_AUDIO_BYTES: z.string().optional(),
   VOICE_MAX_TTS_CHARS: z.string().optional(),
 });
@@ -420,6 +437,18 @@ export function describeVoiceConfigStatus(
  * The thrown message names FIELDS only, never values — the same discipline the
  * n8n config builder uses, so this stays safe if a secret is ever added here.
  */
+/**
+ * Whether ElevenLabs should be the speech-synthesis provider.
+ *
+ * Both a key and a voice id: a key with no voice cannot synthesize, and
+ * defaulting to some arbitrary ElevenLabs voice would change how JARVIS sounds
+ * without anyone choosing it. Absent either, the OpenAI voice stays in place —
+ * this is an upgrade, never a hard dependency.
+ */
+export function isElevenLabsConfigured(env: NodeJS.ProcessEnv = process.env): boolean {
+  return Boolean(env.ELEVENLABS_API_KEY && env.ELEVENLABS_VOICE_ID);
+}
+
 export function createVoiceConfig(
   input: VoiceConfigInput = {},
   env: NodeJS.ProcessEnv = process.env

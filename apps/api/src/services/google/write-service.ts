@@ -33,6 +33,7 @@
 // ---------------------------------------------------------------------------
 
 import { randomUUID } from "node:crypto";
+import { hashForLog } from "@jarvis/core";
 import {
   WRITE_ACTION_SERVICE,
   WRITE_RISK,
@@ -53,6 +54,7 @@ import {
   DriveWriteService,
   GmailWriteService,
   GoogleCalendarService,
+  GmailService,
   GoogleDriveService,
   resolveAccess,
   validateDraft,
@@ -161,6 +163,8 @@ export interface GoogleWriteDeps {
    */
   driveRead?: GoogleDriveService;
   calendarRead?: GoogleCalendarService;
+  /** Gmail READ client, used only to confirm a created draft. */
+  gmailRead?: GmailService;
   now?: () => Date;
 }
 
@@ -222,6 +226,7 @@ export class GoogleWriteService {
   private readonly calendar: CalendarWriteService;
   private readonly driveRead: GoogleDriveService;
   private readonly calendarRead: GoogleCalendarService;
+  private readonly gmailRead: GmailService;
   private readonly now: () => Date;
 
   constructor(private readonly deps: GoogleWriteDeps) {
@@ -230,6 +235,8 @@ export class GoogleWriteService {
     this.calendar = deps.calendar ?? new CalendarWriteService();
     this.driveRead = deps.driveRead ?? new GoogleDriveService();
     this.calendarRead = deps.calendarRead ?? new GoogleCalendarService();
+    // A READ client, deliberately distinct from `this.gmail`, which writes.
+    this.gmailRead = deps.gmailRead ?? new GmailService();
     this.now = deps.now ?? (() => new Date());
   }
 
@@ -311,6 +318,23 @@ export class GoogleWriteService {
       expiresAt: new Date(Date.parse(built.plan.expiresAt)),
       conversationId: context.conversationId ?? null,
     });
+
+    // Plan-time record of exactly what was written, hashed. Pairs with the
+    // `google_write_consume_attempt` line at execution: if the two approval
+    // hashes differ, the confirm path resolved the wrong row.
+    console.log(JSON.stringify({
+      level: "info",
+      event: "google_write_plan_created",
+      approvalIdHash: hashForLog(approval.id),
+      userIdHash: hashForLog(context.userId),
+      conversationIdHash: hashForLog(context.conversationId ?? null),
+      action,
+      // The row is created PENDING by definition — the whole point is that a
+      // human has not decided yet.
+      status: "PENDING",
+      expiresAt: built.plan.expiresAt,
+      payloadHash: hashForLog(built.plan.payloadHash),
+    }));
 
     await this.audit(action, context, "plan", "success", {
       requestId,
@@ -742,14 +766,38 @@ export class GoogleWriteService {
     // second attempt for the same planned write finds the row already claimed
     // and stops here — before the provider call, which is the only place that
     // ordering prevents a duplicate send.
-    const executionId = randomUUID();
+    // -----------------------------------------------------------------------
+    // THE JOURNAL OWNS THE EXECUTION ID.
+    //
+    // This used to generate a UUID here and then use it for the consume and
+    // every status update. The id never reached the database: the repository's
+    // `begin` takes no executionId — it creates the row with its own — so the
+    // suggested one was discarded and the row got a different id.
+    //
+    // Nothing failed at that point, which is why it was invisible. The damage
+    // landed one step later, inside `consumeForExecution`: that transaction
+    // flips the approval to CONSUMED and then claims the journal row
+    // `WHERE executionId = <the id we passed>`. No such row existed, the claim
+    // matched zero rows, the whole transaction rolled back, and the user was
+    // told "execution is not in a claimable state" — a sentence about the
+    // journal, wrapped in a message about approval, for a fresh and perfectly
+    // valid approval.
+    //
+    // The suggested id is still passed, because the port declares it and an
+    // implementation is free to honour it. What changed is that the id used
+    // afterwards is the one `begin` REPORTS, which is by definition the row
+    // that exists.
+    // -----------------------------------------------------------------------
+    const suggestedExecutionId = randomUUID();
     const claim = await this.deps.journal.begin({
       userId: context.userId,
       toolId: action,
       paramsHash: plan.payloadHash,
       idempotencyKey: plan.idempotencyKey,
-      executionId,
+      executionId: suggestedExecutionId,
     });
+
+    const executionId = claim.executionId || suggestedExecutionId;
 
     if (!claim.created) {
       await this.audit(action, context, "execute", "failure", {
@@ -778,6 +826,26 @@ export class GoogleWriteService {
     // THE GATE. One transaction verifies user + tool + payload hash + APPROVED
     // + not expired, and flips to CONSUMED. Everything Phase 13 requires about
     // approval integrity is enforced here, atomically.
+    // Immediately before the gate. Hashed ids only — enough to line this line
+    // up with the plan-time line and confirm the SAME approval and the SAME
+    // user reached execution, without putting either id in a log.
+    console.log(JSON.stringify({
+      level: "info",
+      event: "google_write_consume_attempt",
+      approvalIdHash: hashForLog(approvalId),
+      userIdHash: hashForLog(context.userId),
+      executionIdHash: hashForLog(executionId),
+      action,
+      payloadHash: hashForLog(plan.payloadHash),
+      // The distinction that mattered here: was the journal row created by
+      // this attempt, or found already existing?
+      journalCreated: claim.created,
+      journalStatus: claim.status,
+      // Whether the id we are about to consume with is the one the journal
+      // reported. False here is the exact defect this logging was added for.
+      executionIdFromJournal: claim.executionId === executionId,
+    }));
+
     const consumed = await this.deps.approvals.consumeForExecution({
       approvalId,
       userId: context.userId,
@@ -881,7 +949,7 @@ export class GoogleWriteService {
       plan,
       outcome.body,
       access.grantedScopes ?? [],
-      { driveRead: this.driveRead, calendarRead: this.calendarRead },
+      { driveRead: this.driveRead, calendarRead: this.calendarRead, gmailRead: this.gmailRead },
       context.signal
     );
 

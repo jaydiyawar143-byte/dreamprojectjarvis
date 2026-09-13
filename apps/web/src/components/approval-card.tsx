@@ -25,6 +25,7 @@ import {
   isGoogleWriteApproval,
   type WritePlanView,
 } from "@/components/google-write-plan-detail";
+import { GoogleWriteExecute } from "@/components/google-write-execute";
 import {
   approveApproval,
   rejectApproval,
@@ -240,6 +241,38 @@ export function ApprovalCard({
         >
           {message}
         </p>
+      )}
+
+      {/*
+        Execute, for an approved Google write and nothing else.
+        ----------------------------------------------------------------------
+        Approving records a decision; executing spends it. They are separate
+        clicks so an approval that is never executed simply expires instead of
+        firing later, and so the user sees exactly what is about to happen one
+        more time before it does.
+
+        THE GATE READS `approval.status`, THE SERVER'S VALUE — never the local
+        `ui`/`effectiveStatus`, which turns "approved" optimistically the moment
+        the approve request resolves. Executing off optimistic state would put
+        the button in front of the user before the durable row says APPROVED,
+        and the only honest source for "may this run" is the row the executor
+        will actually consult. The parent re-reads on `onChanged`, so the button
+        appears on the next render with the server's own answer.
+
+        This renders NOTHING for pending, rejected, expired, consumed or failed
+        approvals; `GoogleWriteExecute` itself explains those states rather than
+        showing a dead button. The server re-checks all of it regardless — this
+        is presentation, never the boundary.
+      */}
+      {isGoogleWriteApproval(approval.toolId) && approval.status === "approved" && (
+        <div className="rounded border border-sys-line/70 bg-black/20 p-2">
+          <GoogleWriteExecute
+            approvalId={approval.approvalId}
+            status={approval.status}
+            expiresAt={approval.expiresAt}
+            onExecuted={onChanged}
+          />
+        </div>
       )}
 
       {!decided && (

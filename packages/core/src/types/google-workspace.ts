@@ -101,6 +101,23 @@ export interface GmailMessageSummary {
 }
 
 /** A single message with its body. Returned only by `getMessage`. */
+/**
+ * A draft, read back for post-write verification.
+ *
+ * Deliberately narrow: the fields needed to confirm the draft matches what the
+ * user approved, and nothing else. `body` is carried so the verifier can HASH
+ * it — the hash is what travels onward, never the text.
+ */
+export interface GmailDraftDetail {
+  draftId: string;
+  /** The underlying message id. Empty when Gmail omits it. */
+  messageId: string;
+  to: string[];
+  subject: string;
+  body: string;
+  labels: string[];
+}
+
 export interface GmailMessageDetail extends GmailMessageSummary {
   /**
    * Plain-text body, decoded. HTML parts are preferred only when no text part

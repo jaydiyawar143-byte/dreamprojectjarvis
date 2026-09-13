@@ -26,8 +26,64 @@ export const GOOGLE_ADS_DEFAULT_API_VERSION = "v18";
 // ---------------------------------------------------------------------------
 
 export const GOOGLE_ADS_SCOPE = "https://www.googleapis.com/auth/adwords";
-export const GOOGLE_IDENTITY_SCOPES = ["openid", "email"] as const;
+
+/**
+ * The identity scopes REQUESTED at consent.
+ *
+ * `profile` is included so this matches `GOOGLE_IDENTITY_SCOPES` in
+ * @jarvis/core, which the Integration Center already sends. Two constants with
+ * the same name and different contents is its own trap — the Ads route was
+ * asking for `openid email` while the Workspace route asked for
+ * `openid email profile`, so the consent screen differed depending on which
+ * button the user pressed.
+ */
+export const GOOGLE_IDENTITY_SCOPES = ["openid", "email", "profile"] as const;
+
+/**
+ * The identity scopes REQUIRED back before a connection may be stored.
+ *
+ * Deliberately narrower than what is requested: account identification reads
+ * only `email` (see `fetchUserInfo`), so demanding `profile` would invent a
+ * failure mode for a field nothing uses. Request generously, require minimally.
+ */
+export const ACCOUNT_IDENTITY_SCOPES: readonly string[] = ["openid", "email"];
+
 export const REQUIRED_SCOPES: readonly string[] = [GOOGLE_ADS_SCOPE, ...GOOGLE_IDENTITY_SCOPES];
+
+/**
+ * Google does not echo back the scope strings you sent.
+ *
+ * THIS IS THE BUG THAT MADE EVERY REAL CONSENT FAIL. Ask for `email` and
+ * `profile` and the token response grants
+ * `https://www.googleapis.com/auth/userinfo.email` and
+ * `.../userinfo.profile` — the canonical forms. `openid` alone comes back
+ * verbatim. So a check written as `granted.includes("email")` is false against
+ * every real Google response, and the connection is refused for lacking a scope
+ * the user definitely granted.
+ *
+ * It survived because every test fixture in this repo hand-writes the SHORT
+ * form ("openid email"), so the mocks agreed with the code and both were wrong
+ * about Google. Comparisons therefore go through `canonicalScope` on BOTH
+ * sides, which makes the two spellings interchangeable and leaves fixtures and
+ * real responses equally valid.
+ */
+const SCOPE_ALIASES: Readonly<Record<string, string>> = Object.freeze({
+  email: "https://www.googleapis.com/auth/userinfo.email",
+  profile: "https://www.googleapis.com/auth/userinfo.profile",
+});
+
+export function canonicalScope(scope: string): string {
+  return SCOPE_ALIASES[scope] ?? scope;
+}
+
+/** True when `granted` covers every scope in `required`, in either spelling. */
+export function grantCovers(
+  granted: readonly string[],
+  required: readonly string[]
+): boolean {
+  const have = new Set(granted.map(canonicalScope));
+  return required.every((scope) => have.has(canonicalScope(scope)));
+}
 
 const googleConfigSchema = z.object({
   clientId: z.string().min(1, "GOOGLE_CLIENT_ID is required"),
@@ -106,6 +162,44 @@ export function isGoogleConfigured(env: NodeJS.ProcessEnv = process.env): boolea
 /** True when the OAuth client alone is configured. Ignores Ads requirements. */
 export function isGoogleOAuthConfigured(env: NodeJS.ProcessEnv = process.env): boolean {
   return Boolean(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET && env.GOOGLE_REDIRECT_URI);
+}
+
+/**
+ * Which OAuth variables the PROCESS actually received — booleans only.
+ *
+ * Exists because "the file has it" and "the running process has it" are
+ * different facts, and only the second one matters. Environment is read once at
+ * startup, so a credential added to .env after boot is invisible until a
+ * restart — and from the outside that is indistinguishable from a typo, a
+ * wrong filename, or the wrong working directory. Guessing between those cost
+ * a real debugging session on this deployment.
+ *
+ * PRESENCE ONLY. No value, no length, no prefix, no masked fragment. Two of
+ * these three are secrets, and a diagnostic that leaks a hint about a secret is
+ * a worse bug than the one it was added to find. A boolean answers the only
+ * question being asked.
+ *
+ * Whitespace-only counts as absent: a variable set to "" or " " in a .env file
+ * is a mistake, not a value, and reporting it as present would send the reader
+ * looking in the wrong place.
+ */
+export interface GoogleOAuthPresence {
+  googleClientIdPresent: boolean;
+  googleClientSecretPresent: boolean;
+  googleRedirectUriPresent: boolean;
+}
+
+export function googleOAuthPresence(
+  env: NodeJS.ProcessEnv = process.env
+): GoogleOAuthPresence {
+  const present = (value: string | undefined): boolean =>
+    typeof value === "string" && value.trim().length > 0;
+
+  return {
+    googleClientIdPresent: present(env.GOOGLE_CLIENT_ID),
+    googleClientSecretPresent: present(env.GOOGLE_CLIENT_SECRET),
+    googleRedirectUriPresent: present(env.GOOGLE_REDIRECT_URI),
+  };
 }
 
 const googleOAuthConfigSchema = googleConfigSchema.omit({ developerToken: true });

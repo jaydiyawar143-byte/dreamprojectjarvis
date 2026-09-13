@@ -25,7 +25,7 @@
 // from here, because the email may already be gone.
 // ---------------------------------------------------------------------------
 
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { AlertTriangle, CheckCircle2, HelpCircle, Loader2, Play, RefreshCw, ShieldAlert } from "lucide-react";
 import {
   executeGoogleWrite,
@@ -113,6 +113,20 @@ export function GoogleWriteExecute({
   const [result, setResult] = useState<GoogleWriteExecuteResult | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  /**
+   * Double-click guard, in a ref rather than in `phase`.
+   *
+   * `setPhase("executing")` does not take effect until React re-renders, so two
+   * clicks landing in the same tick both read `phase === "idle"` and both fire
+   * a request. The server would refuse the second — the approval is CONSUMED
+   * atomically — but "refused" is not the same as "not sent": for a Gmail send
+   * the user would watch a second attempt go out and get an error back, which
+   * is exactly the moment they should not have to wonder whether two emails
+   * were delivered. A ref updates synchronously, so the second click never
+   * becomes a request.
+   */
+  const inFlight = useRef(false);
+
   // Expiry is a fact about the clock, not about the row: an approval can be
   // APPROVED and out of time simultaneously, and offering Execute for it would
   // put the user in front of a button the server will refuse.
@@ -120,6 +134,9 @@ export function GoogleWriteExecute({
   const executable = status === "approved" && !expired && phase === "idle";
 
   const run = useCallback(async () => {
+    if (inFlight.current) return;
+    inFlight.current = true;
+
     setPhase("executing");
     setError(null);
 
@@ -206,6 +223,10 @@ export function GoogleWriteExecute({
             data-testid="write-execute-retry"
             variant="secondary"
             onClick={() => {
+              // Released here and only here: the guard must outlive the request
+              // itself, or a second click during the result render would fire
+              // again. A retry is a new, deliberate decision.
+              inFlight.current = false;
               setPhase("idle");
               setResult(null);
             }}
