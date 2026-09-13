@@ -150,7 +150,29 @@ describe("the fallback agent no longer claims a provider identity", () => {
   });
 
   it("requires unavailable capabilities to be reported as unavailable", () => {
-    expect(CONTAINER_SOURCE).toMatch(/never describe an unavailable or planned capability as available/i);
+    // The capability tool's field names changed when its output became a
+    // briefing rather than four flat id arrays, so the prompt names the new
+    // ones. The rule being pinned is unchanged: what cannot be done must never
+    // be offered as though it can.
+    expect(CONTAINER_SOURCE).toMatch(/notAvailableYet/);
+    expect(CONTAINER_SOURCE).toMatch(/plannedNotBuilt/);
+    expect(CONTAINER_SOURCE).toMatch(/things you CANNOT do/i);
+    expect(CONTAINER_SOURCE).toMatch(/never as available/i);
+  });
+
+  it("forbids reading the registry out as a list", () => {
+    // The actual reported defect: 34 bullet points, technical group names and
+    // seven raw tool ids. The prompt has to say so explicitly, because the
+    // model's default with any list is to enumerate it.
+    expect(CONTAINER_SOURCE).toMatch(/NEVER print tool names, registry ids/i);
+    expect(CONTAINER_SOURCE).toMatch(/NEVER say how many capabilities you have/i);
+  });
+
+  it("separates a specific task from a capability question", () => {
+    // "Mere Meta campaigns ke insights batao" must run the workflow, not
+    // return the catalogue.
+    expect(CONTAINER_SOURCE).toMatch(/A SPECIFIC REQUEST IS NOT A CAPABILITY QUESTION/i);
+    expect(CONTAINER_SOURCE).toMatch(/Do NOT call `capabilities\.list`/i);
   });
 
   it("forbids printing full identifiers", () => {

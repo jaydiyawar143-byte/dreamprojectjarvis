@@ -108,6 +108,29 @@ const LABEL_OVERRIDES: Record<string, string> = {
   "time.now": "Current date and time",
   "tasks.list": "List your tasks",
   "data.csv.analyze": "Analyse a CSV file",
+  // Integration management. These were the ids that leaked verbatim into
+  // "What can you do?" — every one of them fell through to `?? toolId`, so the
+  // answer literally read "integration.list, integration.status, …". They are
+  // real, ungated capabilities and always registered, so the fix is to give
+  // them the label they never had rather than to hide them.
+  "integration.list": "See what is connected",
+  "integration.status": "Check one integration's status",
+  "integration.health": "Run an integration health check",
+  "integration.permissions": "Review granted permissions",
+  "integration.audit": "Read the integration audit trail",
+  "integration.test": "Test an integration connection",
+  "integration.validate": "Validate integration credentials",
+  "integration.connect": "Connect an account",
+  "integration.configure": "Configure an integration",
+  "integration.reconnect": "Reconnect an expired integration",
+  "integration.enable": "Switch an integration on",
+  "integration.disable": "Switch an integration off",
+  "integration.disconnect": "Disconnect an account",
+  // Capability discovery itself.
+  "capabilities.list": "Report what I can currently do",
+  "capabilities.connected": "List connected integrations",
+  "capabilities.integration": "Describe one integration's capabilities",
+  "capabilities.permissions": "Summarise permissions",
   // Phase 12
   "gmail.listUnread": "List unread Gmail",
   "gmail.search": "Search Gmail",

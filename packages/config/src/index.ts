@@ -87,6 +87,10 @@ const serverEnvSchema = baseEnvSchema.extend({
   OPENAI_STT_MODEL: z.string().optional(),
   OPENAI_TTS_MODEL: z.string().optional(),
   OPENAI_TTS_VOICE: z.string().optional(),
+  // Delivery direction and rate. Strings here for the same reason as the rest:
+  // a malformed speed must not stop the API booting over a disabled feature.
+  OPENAI_TTS_INSTRUCTIONS: z.string().optional(),
+  OPENAI_TTS_SPEED: z.string().optional(),
   VOICE_MAX_AUDIO_BYTES: z.string().optional(),
   VOICE_MAX_TTS_CHARS: z.string().optional(),
 });
@@ -256,10 +260,11 @@ export function getServerEnv(): ServerEnv {
 /**
  * Defaults applied when a voice variable is absent.
  *
- * `ttsVoice` changed after listening to the alternatives: `alloy` is the
- * neutral house voice and reads factual answers tentatively, where `onyx` has
- * the weight an assistant's answers are supposed to carry. It is paired with
- * delivery instructions in the provider.
+ * `ttsVoice` is now `ash`. `alloy` reads factual answers tentatively; `onyx`
+ * has weight but, paired with the old "measured, unhurried" delivery direction,
+ * landed as sleepy — which is exactly what the operator reported. `ash` keeps
+ * the professional register with a brighter, more alert articulation. It is
+ * paired with the energetic delivery instructions in the provider.
  *
  * `sttModel` deliberately did NOT change. `gpt-4o-mini-transcribe` is faster,
  * but rendered this operator's Hinglish in Devanagari on most fixture runs; the
@@ -269,7 +274,13 @@ export function getServerEnv(): ServerEnv {
 export const VOICE_DEFAULTS = Object.freeze({
   sttModel: "whisper-1",
   ttsModel: "gpt-4o-mini-tts",
-  ttsVoice: "onyx",
+  ttsVoice: "ash",
+  /**
+   * Only ever sent to models that accept it (`tts-1`, `tts-1-hd`). The default
+   * `gpt-4o-mini-tts` rejects `speed`, so pace there comes from the delivery
+   * instructions instead.
+   */
+  ttsSpeed: 1.1,
   /** 4 MiB of decoded audio — minutes of Opus speech, far past push-to-talk. */
   maxAudioBytes: 4 * 1024 * 1024,
   maxTtsChars: 4000,
@@ -310,6 +321,12 @@ const voiceConfigSchema = z.object({
     .min(VOICE_MIN_AUDIO_BYTES)
     .max(VOICE_MAX_AUDIO_BYTES_CEILING),
   maxTtsChars: z.coerce.number().int().min(1).max(VOICE_MAX_TTS_CHARS_CEILING),
+  // Provider-documented bounds. Validated here so a nonsense value is caught
+  // at startup rather than as a 400 in front of a waiting user.
+  ttsSpeed: z.coerce.number().min(0.25).max(4).optional(),
+  // Free text, bounded. It is delivery direction, never content — the provider
+  // holds the default and this only replaces it wholesale.
+  ttsInstructions: z.string().min(1).max(2000).optional(),
 });
 
 export type VoiceConfig = z.infer<typeof voiceConfigSchema>;
@@ -319,6 +336,8 @@ export interface VoiceConfigInput {
   sttModel?: string;
   ttsModel?: string;
   ttsVoice?: string;
+  ttsSpeed?: number;
+  ttsInstructions?: string;
   maxAudioBytes?: number;
   maxTtsChars?: number;
 }
@@ -410,6 +429,10 @@ export function createVoiceConfig(
     sttModel: input.sttModel ?? env.OPENAI_STT_MODEL ?? VOICE_DEFAULTS.sttModel,
     ttsModel: input.ttsModel ?? env.OPENAI_TTS_MODEL ?? VOICE_DEFAULTS.ttsModel,
     ttsVoice: input.ttsVoice ?? env.OPENAI_TTS_VOICE ?? VOICE_DEFAULTS.ttsVoice,
+    ttsSpeed: input.ttsSpeed ?? env.OPENAI_TTS_SPEED ?? VOICE_DEFAULTS.ttsSpeed,
+    ...(input.ttsInstructions ?? env.OPENAI_TTS_INSTRUCTIONS
+      ? { ttsInstructions: input.ttsInstructions ?? env.OPENAI_TTS_INSTRUCTIONS }
+      : {}),
     maxAudioBytes:
       input.maxAudioBytes ?? env.VOICE_MAX_AUDIO_BYTES ?? VOICE_DEFAULTS.maxAudioBytes,
     maxTtsChars:

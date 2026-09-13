@@ -496,12 +496,23 @@ describe("MetaGetInsightsTool", () => {
     expect(result.success).toBe(false);
   });
 
-  it("requires startDate and endDate", async () => {
+  // This assertion is INVERTED from what it was, deliberately.
+  //
+  // It used to require both dates and expect a refusal without them, which is
+  // what forced the model to supply them — and the model, having no idea what
+  // day it is, supplied 2023. Omitting the dates is now the correct call: the
+  // server resolves the last 7 days from its own clock. An invalid date that
+  // WAS supplied is still rejected (see the test above), so nothing was
+  // loosened; the required-ness simply moved to where the answer is knowable.
+  it("defaults to the last 7 days when no dates are given, rather than refusing", async () => {
     const result = await tool.execute(
       { accountId: "act_111111111" },
       { userId: "user-1" }
     );
-    expect(result.success).toBe(false);
+
+    expect(result.success).toBe(true);
+    const data = result.data as Record<string, any>;
+    expect(data.dateRangeSource).toBe("default-last-7-days");
   });
 
   it("rejects unauthorized account", async () => {

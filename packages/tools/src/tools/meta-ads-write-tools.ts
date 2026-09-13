@@ -298,7 +298,7 @@ export class MetaPauseCampaignTool extends BaseMetaAdsWriteTool {
       "Pause Meta Campaign",
       "Pause an active Meta ad campaign. Requires human approval. Reversible action.",
       [
-        { name: "accountId", type: "string", description: "Meta ad account ID (e.g. act_123456789)", required: true },
+        { name: "accountId", type: "string", description: "Meta ad account ID. Use ONLY the account id supplied in your system context; never invent one and never copy an example id from documentation.", required: true },
         { name: "campaignId", type: "string", description: "Campaign ID to pause", required: true },
       ],
       provider,
@@ -409,7 +409,7 @@ export class MetaResumeCampaignTool extends BaseMetaAdsWriteTool {
       "Resume Meta Campaign",
       "Resume a paused Meta ad campaign. Requires human approval. Reversible action.",
       [
-        { name: "accountId", type: "string", description: "Meta ad account ID (e.g. act_123456789)", required: true },
+        { name: "accountId", type: "string", description: "Meta ad account ID. Use ONLY the account id supplied in your system context; never invent one and never copy an example id from documentation.", required: true },
         { name: "campaignId", type: "string", description: "Campaign ID to resume", required: true },
       ],
       provider,
@@ -520,7 +520,7 @@ export class MetaPauseAdSetTool extends BaseMetaAdsWriteTool {
       "Pause Meta Ad Set",
       "Pause an active Meta ad set. Requires human approval. Reversible action.",
       [
-        { name: "accountId", type: "string", description: "Meta ad account ID (e.g. act_123456789)", required: true },
+        { name: "accountId", type: "string", description: "Meta ad account ID. Use ONLY the account id supplied in your system context; never invent one and never copy an example id from documentation.", required: true },
         { name: "adSetId", type: "string", description: "Ad set ID to pause", required: true },
       ],
       provider,
@@ -631,7 +631,7 @@ export class MetaResumeAdSetTool extends BaseMetaAdsWriteTool {
       "Resume Meta Ad Set",
       "Resume a paused Meta ad set. Requires human approval. Reversible action.",
       [
-        { name: "accountId", type: "string", description: "Meta ad account ID (e.g. act_123456789)", required: true },
+        { name: "accountId", type: "string", description: "Meta ad account ID. Use ONLY the account id supplied in your system context; never invent one and never copy an example id from documentation.", required: true },
         { name: "adSetId", type: "string", description: "Ad set ID to resume", required: true },
       ],
       provider,
@@ -742,7 +742,7 @@ export class MetaPauseAdTool extends BaseMetaAdsWriteTool {
       "Pause Meta Ad",
       "Pause an active Meta ad. Requires human approval. Reversible action.",
       [
-        { name: "accountId", type: "string", description: "Meta ad account ID (e.g. act_123456789)", required: true },
+        { name: "accountId", type: "string", description: "Meta ad account ID. Use ONLY the account id supplied in your system context; never invent one and never copy an example id from documentation.", required: true },
         { name: "adId", type: "string", description: "Ad ID to pause", required: true },
       ],
       provider,
@@ -853,7 +853,7 @@ export class MetaResumeAdTool extends BaseMetaAdsWriteTool {
       "Resume Meta Ad",
       "Resume a paused Meta ad. Requires human approval. Reversible action.",
       [
-        { name: "accountId", type: "string", description: "Meta ad account ID (e.g. act_123456789)", required: true },
+        { name: "accountId", type: "string", description: "Meta ad account ID. Use ONLY the account id supplied in your system context; never invent one and never copy an example id from documentation.", required: true },
         { name: "adId", type: "string", description: "Ad ID to resume", required: true },
       ],
       provider,
@@ -1086,7 +1086,7 @@ export class MetaUpdateCampaignBudgetTool extends BaseMetaAdsBudgetTool {
       "Update Campaign Budget",
       "Update a Meta campaign's daily budget. Requires human approval. Server-enforced guardrails apply.",
       [
-        { name: "accountId", type: "string", description: "Meta ad account ID (e.g. act_123456789)", required: true },
+        { name: "accountId", type: "string", description: "Meta ad account ID. Use ONLY the account id supplied in your system context; never invent one and never copy an example id from documentation.", required: true },
         { name: "campaignId", type: "string", description: "Campaign ID to update budget for", required: true },
         { name: "requestedDailyBudget", type: "number", description: "New daily budget amount in account currency", required: true },
       ],
@@ -1269,7 +1269,7 @@ export class MetaUpdateAdSetBudgetTool extends BaseMetaAdsBudgetTool {
       "Update Ad Set Budget",
       "Update a Meta ad set's daily budget. Requires human approval. Server-enforced guardrails apply.",
       [
-        { name: "accountId", type: "string", description: "Meta ad account ID (e.g. act_123456789)", required: true },
+        { name: "accountId", type: "string", description: "Meta ad account ID. Use ONLY the account id supplied in your system context; never invent one and never copy an example id from documentation.", required: true },
         { name: "adSetId", type: "string", description: "Ad set ID to update budget for", required: true },
         { name: "requestedDailyBudget", type: "number", description: "New daily budget amount in account currency", required: true },
       ],
@@ -1688,7 +1688,7 @@ export class MetaCreateCampaignTool extends BaseMetaCampaignTool {
       "Create Meta Campaign",
       "Create a new Meta campaign from an AI-generated proposal. Requires human approval. Budget guardrails enforced. Campaigns start in PAUSED state by default.",
       [
-        { name: "accountId", type: "string", description: "Meta ad account ID (e.g. act_123456789)", required: true },
+        { name: "accountId", type: "string", description: "Meta ad account ID. Use ONLY the account id supplied in your system context; never invent one and never copy an example id from documentation.", required: true },
         { name: "proposal", type: "object", description: "AI-generated campaign proposal (see CampaignProposal schema)", required: true },
       ],
       provider,

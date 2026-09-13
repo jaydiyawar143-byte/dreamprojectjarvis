@@ -1,4 +1,5 @@
 import { BaseAgent } from "../base-agent.js";
+import { withCurrentDate } from "../temporal-context.js";
 import type {
   AgentInput,
   AgentOutput,
@@ -146,7 +147,9 @@ export class ConversationalAssistant extends BaseAgent {
     if (this.providerSystemPrompt) {
       messages.push({
         role: "system",
-        content: this.providerSystemPrompt,
+        // Dated per turn. Without this the model has no idea what "last 7
+        // days" means and reaches for a date out of its training era.
+        content: withCurrentDate(this.providerSystemPrompt),
       });
     }
 
@@ -178,7 +181,9 @@ export class ConversationalAssistant extends BaseAgent {
     if (this.providerSystemPrompt) {
       messages.push({
         role: "system",
-        content: this.providerSystemPrompt,
+        // Dated per turn. Without this the model has no idea what "last 7
+        // days" means and reaches for a date out of its training era.
+        content: withCurrentDate(this.providerSystemPrompt),
       });
     }
 

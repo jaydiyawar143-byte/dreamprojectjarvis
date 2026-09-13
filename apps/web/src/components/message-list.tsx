@@ -6,6 +6,7 @@ import { ToolExecutionCard } from "./tool-execution-card";
 import { InlineApprovalCard } from "./inline-approval-card";
 import { PendingActionCard, type PendingActionData } from "./pending-action-card";
 import { MessageActions } from "./message-actions";
+import { MessageText } from "./message-text";
 
 interface Props {
   messages: ConversationMessage[];
@@ -54,7 +55,10 @@ export function MessageList({ messages, loading, sending, onRetry, activeConvers
                     : "bg-gray-800 text-gray-100"
                 }`}
               >
-                <p className="whitespace-pre-wrap text-sm leading-relaxed">{msg.content}</p>
+                <MessageText
+                  content={msg.content}
+                  className="whitespace-pre-wrap text-sm leading-relaxed"
+                />
 
                 {msg.role === "assistant" && pendingAction && pendingAction.state === "WAITING_CONFIRMATION" && (
                   <PendingActionCard

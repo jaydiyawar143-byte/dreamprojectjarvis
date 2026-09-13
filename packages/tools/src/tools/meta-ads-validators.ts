@@ -24,6 +24,66 @@ export function validateEntityId(id: string): string | null {
   return null;
 }
 
+/** Days covered when the caller names no range. Inclusive of today. */
+export const DEFAULT_INSIGHTS_RANGE_DAYS = 7;
+
+export type DateRangeSource = "explicit" | "default-last-7-days";
+
+export interface ResolvedDateRange {
+  start: string;
+  end: string;
+  source: DateRangeSource;
+  /** Human phrasing, so the answer can state the window it actually used. */
+  label: string;
+}
+
+function toIsoDay(d: Date): string {
+  return d.toISOString().slice(0, 10);
+}
+
+/**
+ * The date range an insights call should actually use.
+ *
+ * THE BUG THIS FIXES. `startDate` and `endDate` were both `required: true` with
+ * no default, so the model had to supply them — and a language model has no
+ * reliable idea what today's date is. Asked "mere Meta campaigns ke insights
+ * batao" on 2026-09-13 it confidently produced 2023-10-01 to 2023-10-21, a
+ * window from its training era. Meta returned zero rows for a range three years
+ * gone, and the assistant reported "no insights available" as though that were
+ * a fact about the campaigns. The user was told their ads had no data; what had
+ * actually happened is that nobody knew what day it was.
+ *
+ * So the range is resolved HERE, from the server clock, and the model's guess
+ * is no longer needed for the default case. An explicit range still wins
+ * untouched — "respect it exactly" — and the `source` travels with the result
+ * so the answer can say which window it used and why.
+ *
+ * `now` is injectable so tests pin a date instead of racing the clock.
+ */
+export function resolveInsightsDateRange(
+  params: { startDate?: unknown; endDate?: unknown },
+  now: Date = new Date()
+): ResolvedDateRange {
+  const start = typeof params.startDate === "string" ? params.startDate.trim() : "";
+  const end = typeof params.endDate === "string" ? params.endDate.trim() : "";
+
+  if (start && end) {
+    return { start, end, source: "explicit", label: `${start} to ${end}` };
+  }
+
+  const endDate = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  const startDate = new Date(endDate);
+  // Inclusive: 7 days ending today spans today and the six before it.
+  startDate.setUTCDate(startDate.getUTCDate() - (DEFAULT_INSIGHTS_RANGE_DAYS - 1));
+
+  return {
+    start: toIsoDay(startDate),
+    end: toIsoDay(endDate),
+    source: "default-last-7-days",
+    label: `the last ${DEFAULT_INSIGHTS_RANGE_DAYS} days (${toIsoDay(startDate)} to ${toIsoDay(endDate)})`,
+  };
+}
+
 export interface DateRangeValidation {
   valid: boolean;
   error?: string;

@@ -80,4 +80,6 @@ export * from "./types/google-workspace.js";
 // Phase 13 — approval-gated Google write actions.
 export * from "./types/google-write.js";
 export * from "./capability-catalog.js";
+export * from "./capability-presentation.js";
+export * from "./speech-preparation.js";
 export * from "./utils/mask-identifier.js";

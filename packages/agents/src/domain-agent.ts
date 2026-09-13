@@ -23,6 +23,7 @@
 import { sanitizeToolResult } from "@jarvis/tools";
 
 import { BaseAgent } from "./base-agent.js";
+import { withCurrentDate } from "./temporal-context.js";
 import type {
   AgentContext,
   AgentInput,
@@ -137,7 +138,12 @@ export abstract class DomainAgent extends BaseAgent {
         | ToolExecutionResult[]
         | undefined;
 
-      const systemPrompt = await this.buildSystemPrompt(input, context);
+      // Dated HERE rather than inside `buildSystemPrompt`, because three
+      // subclasses override that hook and compose from `providerSystemPrompt`
+      // directly. Dating the hook would have silently skipped all of them, and
+      // silently skipped the next one written the same way. This is the one
+      // point every domain agent's prompt actually passes through.
+      const systemPrompt = withCurrentDate(await this.buildSystemPrompt(input, context));
 
       let messages: AIMessage[];
 

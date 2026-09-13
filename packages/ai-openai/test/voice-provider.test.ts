@@ -89,22 +89,56 @@ describe("transcription", () => {
 });
 
 describe("synthesis", () => {
-  it("uses a voice with presence by default", async () => {
+  it("uses a voice with presence but without the heaviness that read as tired", async () => {
     await provider().synthesize({ text: "The current time is 12:46." });
 
     const [params] = speechCreate.mock.calls[0] as [Record<string, unknown>];
-    expect(params.voice).toBe("onyx");
+    // Was `onyx`. Deep timbre plus the old "measured, unhurried" direction is
+    // acoustically what a sleepy person sounds like, which is exactly what was
+    // reported.
+    expect(params.voice).toBe("ash");
   });
 
-  it("directs the delivery rather than leaving it to the default reading", async () => {
+  it("directs an energetic, alert delivery rather than a measured one", async () => {
     await provider().synthesize({ text: "The current time is 12:46." });
 
     const [params] = speechCreate.mock.calls[0] as [Record<string, unknown>];
-    expect(String(params.instructions)).toMatch(/authority/i);
+    const instructions = String(params.instructions);
+
+    expect(instructions).toMatch(/energetic/i);
+    expect(instructions).toMatch(/alert/i);
+    expect(instructions).toMatch(/confident/i);
+
+    // The regression that matters: the direction must never again ASK for the
+    // delivery that was reported as sleepy.
+    expect(instructions).not.toMatch(/unhurried/i);
+    expect(instructions).toMatch(/avoid sounding sleepy/i);
   });
 
-  it("never sends speed, which the current TTS model rejects", async () => {
+  it("never sends speed on the default model, which rejects it", async () => {
     await provider().synthesize({ text: "hello" });
+
+    const [params] = speechCreate.mock.calls[0] as [Record<string, unknown>];
+    // gpt-4o-mini-tts 400s on `speed`. Sending it would fail every synthesis.
+    expect(params.speed).toBeUndefined();
+  });
+
+  it("does send speed on a model that accepts it", async () => {
+    await provider({ ttsModel: "tts-1", ttsSpeed: 1.2 }).synthesize({ text: "hello" });
+
+    const [params] = speechCreate.mock.calls[0] as [Record<string, unknown>];
+    expect(params.speed).toBe(1.2);
+  });
+
+  it("clamps an out-of-range speed instead of failing the request", async () => {
+    await provider({ ttsModel: "tts-1", ttsSpeed: 99 }).synthesize({ text: "hello" });
+
+    const [params] = speechCreate.mock.calls[0] as [Record<string, unknown>];
+    expect(params.speed).toBe(4);
+  });
+
+  it("still withholds a configured speed from a model that does not support it", async () => {
+    await provider({ ttsModel: "gpt-4o-mini-tts", ttsSpeed: 1.5 }).synthesize({ text: "hello" });
 
     const [params] = speechCreate.mock.calls[0] as [Record<string, unknown>];
     expect(params.speed).toBeUndefined();

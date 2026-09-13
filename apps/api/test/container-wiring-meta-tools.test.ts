@@ -264,7 +264,12 @@ describe("REGRESSION: All 5 Meta READ tools must be present", () => {
     expect(insights.id).toBe("meta.insights");
   });
 
-  it("meta.insights has required date parameters", async () => {
+  // INVERTED, deliberately. Requiring these is what forced the model to invent
+  // them, and a model has no reliable idea what today's date is — it produced a
+  // 2023 window on a 2026 server and the empty result came back as "your
+  // campaigns have no data". Account and dates are all now resolved server-side
+  // when absent, so the correct assertion is that none of them is required.
+  it("meta.insights requires no parameter the model would have to invent", async () => {
     const tools = await import("@jarvis/tools");
     const mockProvider = {
       getInsights: async () => ({ data: [], nextPage: undefined }),
@@ -275,9 +280,15 @@ describe("REGRESSION: All 5 Meta READ tools must be present", () => {
     const insights = new tools.MetaGetInsightsTool(mockProvider as any, mockProvider as any);
     const requiredParams = insights.parameters.filter((p) => p.required).map((p) => p.name);
 
-    expect(requiredParams).toContain("accountId");
-    expect(requiredParams).toContain("startDate");
-    expect(requiredParams).toContain("endDate");
+    expect(requiredParams).not.toContain("accountId");
+    expect(requiredParams).not.toContain("startDate");
+    expect(requiredParams).not.toContain("endDate");
+
+    // Still declared, so a caller that DOES know them can pass them.
+    const names = insights.parameters.map((p) => p.name);
+    expect(names).toContain("accountId");
+    expect(names).toContain("startDate");
+    expect(names).toContain("endDate");
   });
 });
 

@@ -14,6 +14,10 @@
       "types": "./dist/types/voice.d.ts",
       "import": "./dist/types/voice.js"
     },
+    "./speech": {
+      "types": "./dist/speech-preparation.d.ts",
+      "import": "./dist/speech-preparation.js"
+    },
     "./surface": {
       "types": "./dist/surface.d.ts",
       "import": "./dist/surface.js"

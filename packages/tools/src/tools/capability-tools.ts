@@ -24,6 +24,7 @@
 import { BaseTool } from "../base-tool.js";
 import type { ToolContext, ToolResult } from "@jarvis/core";
 import {
+  buildCapabilityBriefing,
   resolveIntegrationAlias,
   type CapabilityReport,
   type IntegrationCapabilityView,
@@ -47,52 +48,46 @@ export interface CapabilityPort {
 /**
  * Compresses a report into something a model can relay without inventing.
  *
- * The shape matters: executable and unavailable are SEPARATE arrays, and every
- * unavailable entry carries its own `reason` and `requiredAction`. A model
- * handed one flat list with a status field will flatten it back into "here is
- * what I can do" — which is the original bug. Two arrays make the distinction
- * impossible to lose.
+ * WHAT CHANGED, AND WHY. This used to return four flat arrays of
+ * `{id, label, group}`. The separation was right — executable and unavailable
+ * have to stay apart or a model flattens them back into "here is what I can
+ * do" — but a flat array of 34 ids is a registry listing, and the model read it
+ * out as one: technical buckets, raw tool ids, no examples, no sense of what
+ * any of it was FOR.
+ *
+ * So the honest separation is kept and the SHAPE is changed. `buildCapabilityBriefing`
+ * regroups the same derived truth by user goal and phrases it as requests; the
+ * counts still travel so nothing is overstated. No tool id reaches the model at
+ * all now, which removes the possibility of one being read aloud.
  */
 function summariseReport(report: CapabilityReport) {
+  const briefing = buildCapabilityBriefing(report);
+
   return {
-    summary: report.summary,
-    // The headline the model should lead with.
-    headline: `${report.summary.executable} capabilities are ready to use, ${report.summary.requiresConfirmation} need confirmation before running, ${report.summary.unavailable} are unavailable until something is connected or configured, and ${report.summary.planned} are planned but not built.`,
-    executableNow: report.capabilities
-      .filter((c) => c.availability === "EXECUTABLE")
-      .map((c) => ({ id: c.id, label: c.label, group: c.group })),
-    needsConfirmation: report.capabilities
-      .filter((c) => c.availability === "REQUIRES_CONFIRMATION")
-      .map((c) => ({ id: c.id, label: c.label, group: c.group })),
-    unavailable: report.capabilities
-      .filter(
-        (c) =>
-          c.availability !== "EXECUTABLE" &&
-          c.availability !== "REQUIRES_CONFIRMATION" &&
-          c.availability !== "PLANNED"
-      )
-      .map((c) => ({
-        id: c.id,
-        label: c.label,
-        status: c.availability,
-        reason: c.reason,
-        requiredAction: c.requiredAction,
-      })),
-    planned: report.capabilities
-      .filter((c) => c.availability === "PLANNED")
-      .map((c) => ({ id: c.id, label: c.label, reason: c.reason })),
-    integrations: report.integrations.map((i) => ({
-      integration: i.integration,
-      name: i.name,
-      connection: i.connection,
-      health: i.health,
-      // Already masked by the service.
-      account: i.account,
-      executableCount: i.executable.length,
-      unavailableCount: i.unavailable.length,
-      blockedReason: i.blockedReason,
-      requiredAction: i.requiredAction,
+    // The natural opening, already reflecting what is really connected.
+    intro: briefing.intro,
+
+    // Four to six user-oriented groups. Each carries its own phrasing, so the
+    // model composes rather than enumerates.
+    whatICanDo: briefing.groups.map((g) => ({
+      area: g.title,
+      summary: g.summary,
+      youCanAsk: g.youCanAsk,
+      ...(g.approvalCount > 0 ? { someNeedApproval: true } : {}),
     })),
+
+    // Things the user can say verbatim, every one backed by a usable tool.
+    tryAsking: briefing.examples,
+
+    // The approval boundary, in one sentence. Null when nothing is gated.
+    howApprovalWorks: briefing.approvalNote,
+
+    // Kept SEPARATE from everything above — this is the distinction that must
+    // never collapse.
+    notAvailableYet: briefing.unavailable,
+    plannedNotBuilt: briefing.planned,
+
+    counts: briefing.counts,
   };
 }
 
@@ -110,9 +105,10 @@ export class GetAvailableCapabilitiesTool extends BaseTool {
       [
         "Reports what JARVIS can ACTUALLY do right now, derived from the live tool registry and the user's real integration connection state.",
         "USE THIS for every generic capability question — 'what can you do', 'tum kya kar sakte ho', 'available tools batao', 'what are your features', 'mere available tools batao'.",
-        "Returns capabilities split into executableNow, needsConfirmation, unavailable (each with a reason and the required action) and planned.",
+        "Returns a ready-to-speak briefing: an intro, user-oriented capability areas each with natural phrasings, example commands, how approval works, and separate notAvailableYet / plannedNotBuilt lists.",
         "NEVER answer a capability question from memory or from your own prompt: only this tool knows what is registered and connected on this deployment.",
-        "Do NOT describe anything in 'unavailable' or 'planned' as something you can do.",
+        "Relay it as flowing prose grouped by area. Do NOT enumerate every item, do NOT print counts, and do NOT invent anything the briefing does not contain.",
+        "Do NOT describe anything in 'notAvailableYet' or 'plannedNotBuilt' as something you can do.",
       ].join(" "),
       "system",
       [],
@@ -126,11 +122,32 @@ export class GetAvailableCapabilitiesTool extends BaseTool {
     const report = await this.port.report(context.userId);
     const data = summariseReport(report);
 
+    // Phase — structured capability log. Counts and group ids only: no tool
+    // id, no account, no credential, nothing about WHAT the user asked. Enough
+    // to answer "did capability intent fire, and how much did it find" from the
+    // log alone, which is the question that gets asked when an answer looks
+    // wrong.
+    console.log(
+      JSON.stringify({
+        level: "info",
+        event: "capability_request",
+        conversationId: context.conversationId ?? null,
+        traceId: context.traceId ?? null,
+        capabilityIntentDetected: true,
+        capabilityGroupsGenerated: data.counts.groupsShown,
+        liveCapabilitiesCount: data.counts.usable,
+        approvalRequiredCount: data.counts.needsApproval,
+        unavailableCount: data.counts.unavailable,
+      })
+    );
+
     return this.success(data, {
-      message: data.headline,
+      // The opening line, not a count. A headline reading "34 capabilities are
+      // ready" invited the enumeration this whole change removes.
+      message: data.intro,
       // Restated in metadata because it is the instruction most easily lost
       // between a tool result and a rendered answer.
-      rule: "Report executableNow as things you can do. Report unavailable and planned with their reasons, never as available.",
+      rule: "Answer in natural prose grouped by area, using 'youCanAsk' phrasings and a few 'tryAsking' examples. Never list tool names, ids or counts. Report notAvailableYet and plannedNotBuilt with their reasons, never as available.",
     });
   }
 }

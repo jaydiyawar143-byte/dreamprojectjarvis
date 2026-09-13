@@ -35,6 +35,7 @@ import {
   VOICE_ERROR_STATUS,
   isSupportedAudioMimeType,
   normalizeAudioMimeType,
+  prepareForSpeech,
   type IVoiceProvider,
   type VoiceErrorCode,
 } from "@jarvis/core";
@@ -297,14 +298,51 @@ export function createVoiceRouter(container: Container, deps: VoiceRouterDeps): 
       );
     }
 
+    // -----------------------------------------------------------------------
+    // Spoken form, prepared HERE rather than by the caller.
+    //
+    // The web client already stripped markdown on its way in, which fixed the
+    // symptom for one caller and left the endpoint itself speaking whatever it
+    // was handed — raw tables, tool ids, error enums, approval tokens. Doing it
+    // at the route makes it a property of /speak: every caller gets it, and a
+    // future one cannot forget to.
+    //
+    // The length check above still runs against the ORIGINAL text, so a request
+    // that was too long is still refused rather than silently shrunk into range
+    // by preparation and half-spoken.
+    // -----------------------------------------------------------------------
+    const prepared = prepareForSpeech(text, deps.config.maxTtsChars);
+    const spokenText = prepared.text.length > 0 ? prepared.text : text;
+
     try {
       const started = Date.now();
       const result = await deps.provider.synthesize({
-        text,
+        text: spokenText,
         ...(voice ? { voice } : {}),
         ...(format ? { format } : {}),
       });
       const latencyMs = Date.now() - started;
+
+      // Structured voice log. No transcript, no text, no token — only which
+      // knobs were in effect and which transformations fired.
+      console.log(
+        JSON.stringify({
+          level: "info",
+          event: "voice_speak",
+          conversationId: conversationId ?? null,
+          traceId,
+          voiceEnabled: true,
+          ttsProvider: deps.provider.id ?? "unknown",
+          selectedVoice: result.voice,
+          ttsModel: result.model,
+          speakingRate: deps.config.ttsSpeed ?? null,
+          responsePreparationApplied: prepared.applied,
+          tableSummarised: prepared.tableSummarised,
+          originalChars: text.length,
+          spokenChars: spokenText.length,
+          latencyMs,
+        })
+      );
 
       await container.auditLogger.log({
         userId,
@@ -316,7 +354,7 @@ export function createVoiceRouter(container: Container, deps: VoiceRouterDeps): 
           model: result.model,
           voice: result.voice,
           format: result.format,
-          characterCount: text.length,
+          characterCount: spokenText.length,
           audioBytes: result.audio.length,
           ...(requestId ? { requestId } : {}),
           ...(conversationId ? { conversationId } : {}),
@@ -332,7 +370,7 @@ export function createVoiceRouter(container: Container, deps: VoiceRouterDeps): 
           model: result.model,
           voice: result.voice,
           format: result.format,
-          characterCount: text.length,
+          characterCount: spokenText.length,
           latencyMs,
           ...(requestId ? { requestId } : {}),
         },

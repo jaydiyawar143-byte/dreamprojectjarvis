@@ -218,6 +218,17 @@ describe("Sprint 2.2: MetaAdsAgent Domain Intelligence Tests", () => {
             },
           };
         }
+        if (ctx?.userId === "user-multi") {
+          return {
+            success: true,
+            data: {
+              accounts: [
+                { accountId: "act_300", name: "Client One", currency: "USD", timezoneName: "UTC", accountStatus: 1 },
+                { accountId: "act_400", name: "Client Two", currency: "INR", timezoneName: "Asia/Kolkata", accountStatus: 1 },
+              ],
+            },
+          };
+        }
         if (ctx?.userId === "user-no-config") {
           return {
             success: true,
@@ -1324,6 +1335,98 @@ describe("Sprint 2.2: MetaAdsAgent Domain Intelligence Tests", () => {
         await assertRoutedAgent("Meta campaign check karo", "meta-ads-agent");
         await assertRoutedAgent("Google Ads campaign check karo", "conversational-assistant");
       }
+    });
+  });
+  // -------------------------------------------------------------------------
+  // Ambiguity and time — the two things the agent used to resolve by guessing.
+  // -------------------------------------------------------------------------
+  describe("the agent does not guess what it has not been told", () => {
+    it("M1: refuses to pick an account when the user has more than one", async () => {
+      const metaAgent = new MetaAdsAgent({ provider: mockAI });
+      registry.register(metaAgent);
+      const orch = createOrchestrator();
+
+      await orch.process({ message: "Mere campaigns ke insights batao", conversationId: "c-multi" }, {
+        auth: { userId: "user-multi", role: "member", email: "multi@test.com" },
+        conversationId: "c-multi",
+        traceId: "t-multi",
+      });
+
+      const systemMsg = mockAI.getLastMessages().find((m) => m.role === "system")?.content ?? "";
+
+      // It used to take accounts[0] and call it "primary". Nothing made it
+      // primary except its position in the API response.
+      expect(systemMsg).toContain("NO ACCOUNT IS SELECTED");
+      expect(systemMsg).toContain("Client One");
+      expect(systemMsg).toContain("Client Two");
+      expect(systemMsg).not.toContain("locked to active account context");
+    });
+
+    it("M2: masks the account ids it offers for selection", async () => {
+      const metaAgent = new MetaAdsAgent({ provider: mockAI });
+      registry.register(metaAgent);
+      const orch = createOrchestrator();
+
+      await orch.process({ message: "Show performance", conversationId: "c-multi2" }, {
+        auth: { userId: "user-multi", role: "member", email: "multi@test.com" },
+        conversationId: "c-multi2",
+        traceId: "t-multi2",
+      });
+
+      const systemMsg = mockAI.getLastMessages().find((m) => m.role === "system")?.content ?? "";
+
+      expect(systemMsg).not.toContain("act_300");
+      expect(systemMsg).not.toContain("act_400");
+    });
+
+    it("M3: still pins the single account when there is only one", async () => {
+      const metaAgent = new MetaAdsAgent({ provider: mockAI });
+      registry.register(metaAgent);
+      const orch = createOrchestrator();
+
+      await orch.process({ message: "Show performance", conversationId: "c-single" }, {
+        auth: { userId: "user-alpha", role: "member", email: "alpha@test.com" },
+        conversationId: "c-single",
+        traceId: "t-single",
+      });
+
+      const systemMsg = mockAI.getLastMessages().find((m) => m.role === "system")?.content ?? "";
+      expect(systemMsg).toContain("locked to active account context (act_100)");
+    });
+
+    it("M4: is told today's date, so a relative window is not guessed from training data", async () => {
+      const metaAgent = new MetaAdsAgent({ provider: mockAI });
+      registry.register(metaAgent);
+      const orch = createOrchestrator();
+
+      await orch.process({ message: "Last 7 days ka performance batao", conversationId: "c-date" }, {
+        auth: { userId: "user-alpha", role: "member", email: "alpha@test.com" },
+        conversationId: "c-date",
+        traceId: "t-date",
+      });
+
+      const systemMsg = mockAI.getLastMessages().find((m) => m.role === "system")?.content ?? "";
+      const today = new Date().toISOString().slice(0, 10);
+
+      expect(systemMsg).toContain("TODAY'S DATE");
+      expect(systemMsg).toContain(today);
+      expect(systemMsg).toMatch(/never use a date from your training data/i);
+    });
+
+    it("M5: tells the model to omit the dates entirely when no window was named", async () => {
+      const metaAgent = new MetaAdsAgent({ provider: mockAI });
+      registry.register(metaAgent);
+      const orch = createOrchestrator();
+
+      await orch.process({ message: "Mere insights batao", conversationId: "c-date2" }, {
+        auth: { userId: "user-alpha", role: "member", email: "alpha@test.com" },
+        conversationId: "c-date2",
+        traceId: "t-date2",
+      });
+
+      const systemMsg = mockAI.getLastMessages().find((m) => m.role === "system")?.content ?? "";
+      expect(systemMsg).toMatch(/WITHOUT startDate or endDate/i);
+      expect(systemMsg).toMatch(/Never invent dates/i);
     });
   });
 });

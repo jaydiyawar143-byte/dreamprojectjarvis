@@ -27,6 +27,12 @@ export interface OpenAIVoiceConfig {
   defaultVoice?: string;
   /** Delivery direction for the voice. Ignored by the older tts-1 models. */
   ttsInstructions?: string;
+  /**
+   * Playback rate, 0.25–4.0. Applied ONLY on models that accept it — see
+   * `MODELS_SUPPORTING_SPEED`. On `gpt-4o-mini-tts` pace is steered through
+   * `ttsInstructions` instead, because the parameter is rejected there.
+   */
+  ttsSpeed?: number;
   /** Default BCP-47 hint. A per-request `language` still wins. */
   sttLanguage?: string;
   timeoutMs?: number;
@@ -50,12 +56,18 @@ const DEFAULT_TTS_MODEL = "gpt-4o-mini-tts";
 /**
  * Text-to-speech default.
  *
- * `alloy` is the neutral house voice: light, even, and conspicuously tentative
- * when it reads a factual answer. `onyx` is the deep, grounded one, and paired
- * with the delivery instructions below it reads as an assistant that is sure of
- * what it just said.
+ * WHY THIS CHANGED. `onyx` was chosen for gravitas, and it delivers gravitas —
+ * but paired with the old "measured, unhurried" instructions it read as tired.
+ * Deep timbre plus a slow directive plus a downward inflection on every clause
+ * is, acoustically, what a sleepy person sounds like. The operator's report was
+ * "sleepy, slow, monotone", and that is the combination that produced it.
+ *
+ * `ash` keeps the professional, grounded register without the heaviness: a
+ * brighter fundamental with clear articulation, which reads as alert rather
+ * than either drowsy or chirpy. Override with `OPENAI_TTS_VOICE` — this is a
+ * taste decision and an operator may disagree.
  */
-const DEFAULT_VOICE = "onyx";
+const DEFAULT_VOICE = "ash";
 
 /**
  * How the voice should carry, not what it should say.
@@ -64,12 +76,22 @@ const DEFAULT_VOICE = "onyx";
  * server-side. It is never assembled from a request, because it is text going
  * into a provider call and a caller-supplied one would be a way to put words
  * in JARVIS's mouth.
+ *
+ * THE TIRED VOICE WAS WRITTEN HERE. The previous direction opened "Speak with
+ * calm authority... Measured, unhurried pace" and closed "never chirpy". Every
+ * clause of it pushes the same way — slower, lower, flatter — and
+ * `gpt-4o-mini-tts` follows delivery direction closely, so it did exactly as it
+ * was told. Nothing was broken; the model was faithfully performing a
+ * description of someone winding down. An operator can still restore any
+ * delivery they prefer via `OPENAI_TTS_INSTRUCTIONS`.
  */
 const DEFAULT_TTS_INSTRUCTIONS =
-  "Speak with calm authority, in the manner of a trusted chief of staff giving a briefing. " +
-  "Measured, unhurried pace. Clear, fully-formed consonants. Land each statement with a " +
-  "confident downward inflection rather than an upward, questioning one. Warm but never " +
-  "chirpy, never breathy, never apologetic. Read numbers, times and names deliberately.";
+  "Speak with confident, energetic, alert delivery. Maintain a natural conversational rhythm " +
+  "with clear pronunciation and short intentional pauses. Sound like a highly capable personal " +
+  "AI assistant who is ready to help immediately. Avoid sounding sleepy, tired, sad, monotone, " +
+  "robotic, or overly dramatic. Keep a medium-fast pace — brisk and purposeful, never rushed " +
+  "and never dragging. Land statements with assurance. Read numbers, dates and names crisply " +
+  "and distinctly. Stay professional and engaged; do not shout and do not gush.";
 
 /**
  * Default language hint.
@@ -91,6 +113,38 @@ const DEFAULT_TTS_INSTRUCTIONS =
 const DEFAULT_STT_LANGUAGE = "en";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
+
+/**
+ * Which TTS models actually accept `speed`.
+ *
+ * `gpt-4o-mini-tts` — the default here — does NOT: OpenAI documents speed as
+ * not supported on it, and sending it earns a 400 that fails the whole
+ * synthesis. So this is a real provider limitation, not an oversight, and the
+ * parameter is gated rather than "supported everywhere" and silently breaking
+ * the default path. Pace on that model is a delivery instruction, which is why
+ * DEFAULT_TTS_INSTRUCTIONS names a medium-fast pace explicitly.
+ */
+const MODELS_SUPPORTING_SPEED: ReadonlySet<string> = new Set(["tts-1", "tts-1-hd"]);
+
+/** Provider-documented bounds. Anything outside is a 400 from the API. */
+const MIN_SPEED = 0.25;
+const MAX_SPEED = 4.0;
+
+/**
+ * Energetic but not comic. Only ever reaches a model that accepts it, so the
+ * default path (gpt-4o-mini-tts) is unaffected by this value.
+ */
+const DEFAULT_SPEED = 1.1;
+
+export function supportsSpeed(model: string): boolean {
+  return MODELS_SUPPORTING_SPEED.has(model);
+}
+
+/** Clamped rather than rejected: a bad env var should not disable speech. */
+function clampSpeed(value: number | undefined): number | undefined {
+  if (value === undefined || !Number.isFinite(value)) return undefined;
+  return Math.min(MAX_SPEED, Math.max(MIN_SPEED, value));
+}
 
 /**
  * Extension the upload is presented to the provider with.
@@ -154,6 +208,7 @@ export class OpenAIVoiceProvider implements IVoiceProvider {
 
   private readonly client: OpenAI;
   private readonly ttsInstructions: string;
+  private readonly ttsSpeed: number | undefined;
   private readonly sttLanguage: string;
 
   constructor(config: OpenAIVoiceConfig = {}) {
@@ -175,6 +230,11 @@ export class OpenAIVoiceProvider implements IVoiceProvider {
       DEFAULT_TTS_INSTRUCTIONS;
     this.sttLanguage =
       config.sttLanguage ?? process.env.OPENAI_STT_LANGUAGE ?? DEFAULT_STT_LANGUAGE;
+
+    const envSpeed = process.env.OPENAI_TTS_SPEED
+      ? Number(process.env.OPENAI_TTS_SPEED)
+      : undefined;
+    this.ttsSpeed = clampSpeed(config.ttsSpeed ?? envSpeed ?? DEFAULT_SPEED);
 
     this.client = new OpenAI({
       apiKey,
@@ -255,11 +315,20 @@ export class OpenAIVoiceProvider implements IVoiceProvider {
           voice,
           input: input.text,
           response_format: format,
+          // The two delivery controls are mutually exclusive by provider
+          // support, so each is sent only where it exists.
+          //
           // `instructions` is a gpt-4o-mini-tts capability; tts-1 and tts-1-hd
           // ignore it, so sending it costs an operator on an older model
-          // nothing. `speed` is deliberately NOT sent — it is the parameter the
-          // newer model does not accept.
+          // nothing.
+          //
+          // `speed` is the inverse: accepted by the tts-1 family, REJECTED with
+          // a 400 by gpt-4o-mini-tts. Gating it on the model is what lets an
+          // operator on tts-1 tune the rate without breaking the default.
           ...(this.ttsInstructions ? { instructions: this.ttsInstructions } : {}),
+          ...(this.ttsSpeed !== undefined && supportsSpeed(this.ttsModel)
+            ? { speed: this.ttsSpeed }
+            : {}),
         },
         { signal: input.signal }
       );

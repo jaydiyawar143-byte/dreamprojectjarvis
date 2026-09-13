@@ -1,4 +1,6 @@
+import { maskIdentifier } from "@jarvis/core";
 import { BaseAgent } from "../base-agent.js";
+import { withCurrentDate } from "../temporal-context.js";
 import type {
   AgentInput,
   AgentOutput,
@@ -93,6 +95,10 @@ export class MetaAdsAgent extends BaseAgent {
       "",
       "=== TIMEFRAME AWARENESS & DATA SUFFICIENCY ===",
       "Explicitly understand the analysis window (e.g. 'Last 7 days' must not silently become 'Today'). Compare current periods vs previous comparable periods.",
+      "DATE RANGE RULE: if the user names NO window, call meta.insights WITHOUT startDate or endDate — the server applies the last 7 days and tells you the range it used. Never invent dates to fill those parameters.",
+      "If the user DOES name a window, convert it using today's date given above and pass it exactly as asked.",
+      "ALWAYS state the date range you actually analysed, taking it from the tool's dateRangeLabel.",
+      "An EMPTY result (dataAvailability EMPTY_RESULT) means the tool succeeded and Meta returned no rows for that window — say exactly that. It is NOT a failure, and it is NOT evidence that the campaigns are inactive unless a status read says so.",
       "If insufficient data exists, do not fabricate conclusions. Say what is missing (e.g. 'Conversion data is insufficient to confidently diagnose CPA movement').",
       "",
       "=== HISTORICAL INTELLIGENCE & OPPORTUNITY SCORING ===",
@@ -154,8 +160,34 @@ export class MetaAdsAgent extends BaseAgent {
         const result = await accountsTool.execute({}, toolCtx);
         if (result.success && result.data && Array.isArray((result.data as any).accounts)) {
           const accounts = (result.data as any).accounts;
-          if (accounts.length > 0) {
-            // Select primary active account
+          if (accounts.length > 1) {
+            // ---------------------------------------------------------------
+            // MORE THAN ONE ACCOUNT: ask, do not guess.
+            //
+            // This used to take `accounts[0]` and call it "primary". Nothing
+            // made it primary except its position in an API response — so on a
+            // user with several ad accounts, "mere campaigns ke insights
+            // batao" silently reported on whichever account Meta happened to
+            // return first, and the answer looked authoritative. Reporting the
+            // wrong account's spend with no indication that a choice was made
+            // is worse than asking one short question.
+            //
+            // No account is pinned in this branch, so the model has nothing to
+            // pass to a tool even if it tried; the ids are shown MASKED, which
+            // is enough to choose between them and not enough to leak one.
+            // ---------------------------------------------------------------
+            const choices = accounts
+              .map((a: any) => `  - ${a.name || "Unnamed account"} (${maskIdentifier(a.accountId)})`)
+              .join("\n");
+
+            accountContextStr = [
+              `The user has ${accounts.length} Meta ad accounts connected:`,
+              choices,
+              "",
+              "NO ACCOUNT IS SELECTED. You must NOT choose one yourself and you must NOT call any Meta tool that needs an accountId.",
+              "Ask the user which account they mean, listing the names above. Do not report data from any account until they answer.",
+            ].join("\n");
+          } else if (accounts.length === 1) {
             const primary = accounts[0];
             activeAccountId = primary.accountId;
             
@@ -197,7 +229,10 @@ export class MetaAdsAgent extends BaseAgent {
 
       // Prepend account context to the system prompt or instructions
       const fullSystemPrompt = [
-        this.providerSystemPrompt || "You are the JARVIS Meta Ads Agent.",
+        // Dated first, so every relative window in the prompt below ("Last 7
+        // days must not silently become Today") has a real date to resolve
+        // against instead of a guess from the training era.
+        withCurrentDate(this.providerSystemPrompt || "You are the JARVIS Meta Ads Agent."),
         "",
         "=== SERVER-AUTHORITATIVE ACCOUNT CONTEXT ===",
         accountContextStr,

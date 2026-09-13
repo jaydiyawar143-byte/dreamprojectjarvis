@@ -29,6 +29,7 @@ import {
   canTransitionVoiceState,
   type VoiceState,
 } from "@jarvis/core/voice";
+import { prepareForSpeech } from "@jarvis/core/speech";
 import { getVoiceStatus, synthesizeSpeech, transcribeAudio } from "../api";
 import { useChatStore, type ChatTurnResult } from "../chat-store";
 import {
@@ -165,37 +166,22 @@ function hasPendingApproval(): boolean {
 // answer and no other. Nothing scans the array any more.
 
 /**
- * Strips the markdown a reply is written in.
+ * Prepares a reply to be spoken.
  *
- * Speaking raw markdown produces "star star Summary star star", which is worse
- * than useless. This is presentation, not content: the message shown on screen
- * is untouched.
+ * The logic moved to `prepareForSpeech` in @jarvis/core; this is now a thin
+ * delegation, kept because callers and tests here name it.
+ *
+ * WHY IT MOVED. This used to be the ONLY preparation anywhere: it stripped
+ * markdown for this one client, while `POST /voice/speak` spoke whatever any
+ * other caller handed it. It also only ever addressed markdown — a twelve-row
+ * metrics table was still read out cell by cell, and tool ids, status enums and
+ * approval tokens went straight to the speaker. The shared version handles
+ * those and runs in the route as well, so the endpoint is safe regardless of
+ * who calls it. Preparing here too is not redundant: it keeps this client's own
+ * character budget honest before the request goes out.
  */
 export function textForSpeech(markdown: string, limit = 4000): string {
-  const spoken = markdown
-    .replace(/```[\s\S]*?```/g, " (code block omitted) ")
-    .replace(/`([^`]+)`/g, "$1")
-    .replace(/!\[[^\]]*\]\([^)]*\)/g, "")
-    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
-    .replace(/^\s{0,3}#{1,6}\s+/gm, "")
-    .replace(/\*\*([^*]+)\*\*/g, "$1")
-    .replace(/(^|\W)\*([^*\n]+)\*(?=\W|$)/g, "$1$2")
-    .replace(/^\s*[-*+]\s+/gm, "")
-    .replace(/^\s*>\s?/gm, "")
-    .replace(/\|/g, " ")
-    .replace(/[ \t]{2,}/g, " ")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-
-  if (spoken.length <= limit) return spoken;
-  // Cut at a sentence boundary so the reply does not stop mid-word.
-  const truncated = spoken.slice(0, limit);
-  const lastStop = Math.max(
-    truncated.lastIndexOf(". "),
-    truncated.lastIndexOf("! "),
-    truncated.lastIndexOf("? ")
-  );
-  return lastStop > limit * 0.5 ? truncated.slice(0, lastStop + 1) : truncated;
+  return prepareForSpeech(markdown, limit).text;
 }
 
 // ---------------------------------------------------------------------------
