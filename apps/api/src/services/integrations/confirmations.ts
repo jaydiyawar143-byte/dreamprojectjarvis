@@ -25,8 +25,12 @@
 // confirmed anything.
 // ---------------------------------------------------------------------------
 
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import type { IntegrationConfirmation, IntegrationId } from "@jarvis/core";
+import { randomBytes, timingSafeEqual } from "node:crypto";
+import {
+  computeParamsHash,
+  type IntegrationConfirmation,
+  type IntegrationId,
+} from "@jarvis/core";
 
 /** Short enough that a stale confirmation cannot be used later. */
 const CONFIRMATION_TTL_MS = 2 * 60 * 1000;
@@ -45,19 +49,11 @@ interface PendingConfirmation {
 
 const pending = new Map<string, PendingConfirmation>();
 
-/**
- * Stable hash over parameters.
- *
- * Keys are sorted so that `{a:1,b:2}` and `{b:2,a:1}` — the same request
- * serialised differently by the UI and by the model — produce the same hash.
- * Without that, a confirmation issued on one path would never validate on the
- * other, and the two-path parity this system promises would break on exactly
- * the actions that matter most.
- */
-export function hashParams(params: Record<string, unknown>): string {
-  const canonical = JSON.stringify(params, Object.keys(params).sort());
-  return createHash("sha256").update(canonical).digest("hex");
-}
+// Parameters are bound with the same canonical hash the approval system uses:
+// `computeParamsHash` in @jarvis/core sorts keys at EVERY depth. The UI and the
+// model may serialise one request in different key orders and still match,
+// while a change to any nested value — a budget inside a campaign object —
+// produces a different hash and the token is refused.
 
 function sweep(now: number): void {
   for (const [token, record] of pending) {
@@ -93,7 +89,7 @@ export function issueConfirmation(input: IssueInput): IntegrationConfirmation {
     userId: input.userId,
     integration: input.integration,
     actionId: input.actionId,
-    paramsHash: hashParams(input.params),
+    paramsHash: computeParamsHash(input.params),
     summary: input.summary,
     irreversible: input.irreversible,
     expiresAt,
@@ -140,7 +136,7 @@ export function consumeConfirmation(input: {
   // Constant-time on the hash so a caller cannot learn the bound parameters by
   // measuring how long a rejection takes.
   const expected = Buffer.from(record.paramsHash, "hex");
-  const actual = Buffer.from(hashParams(input.params), "hex");
+  const actual = Buffer.from(computeParamsHash(input.params), "hex");
   const hashMatches =
     expected.length === actual.length && timingSafeEqual(expected, actual);
 
