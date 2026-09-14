@@ -102,12 +102,11 @@ Two gates stand in front of one execution authority.
 
 ## Deployment
 
-One Docker image (`node:20-alpine`, runs as the `node` user) serves both the API and the web app. `docker-compose.yml` runs PostgreSQL with pgvector, the API and the web app on ports 5433, 3101 and 3100, so a local development stack on 5432, 3001 and 3000 can run beside it with its own database. The API applies migrations when it starts. There is no CI pipeline.
+One Docker image (`node:20-alpine`, runs as the `node` user) serves both the API and the web app. `docker-compose.yml` runs PostgreSQL with pgvector, the API and the web app on ports 5433, 3101 and 3100, so a local development stack on 5432, 3001 and 3000 can run beside it with its own database. The API applies migrations when it starts. A CI workflow, `.github/workflows/ci.yml`, is defined but has not yet run on GitHub — see [DEVELOPMENT.md](./DEVELOPMENT.md).
 
 ## Known gaps
 
 - `@jarvis/ai-anthropic` is built and not wired.
 - `MemoryEngine` is tested and not used at runtime.
 - Five tool classes are tested but never registered — including `data.csv.analyze`, which two agents are granted. See [SKILLS.md](./SKILLS.md).
-- Six memory end-to-end tests fail — [CODEBASE_AUDIT.md](./CODEBASE_AUDIT.md), B-1.
-- No continuous integration.
+- CI has not run on GitHub yet, and it does not cover the Postgres-backed tests, `typecheck:tests` (ledger R-18), the other workspaces' tests, or secret scanning — [DEVELOPMENT.md](./DEVELOPMENT.md).

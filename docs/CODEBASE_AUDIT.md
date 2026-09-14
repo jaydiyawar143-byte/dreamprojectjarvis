@@ -395,6 +395,8 @@ Pending write confirmations and the per-IP rate limiter live in memory. For conf
 
 No pipeline runs tests, secret scanning or dependency audits. SEC-1 is exactly the kind of mistake an automated secret scan catches before it leaves a laptop.
 
+**Update 2026-09-14 — partly addressed, not yet run on GitHub.** `.github/workflows/ci.yml` runs lint, typecheck, build and the `@jarvis/api`, `@jarvis/memory`, `@jarvis/n8n` and `@jarvis/web` tests. It does not yet run the Postgres-backed tests, `typecheck:tests` (ledger R-18), the other workspaces' tests, secret scanning or dependency audits. SEC-7 stays open until the secret scan exists.
+
 ### SEC-8 — Lint carries no security rules · LOW
 
 The ESLint baseline is correctness-only by design (ledger R-14).
@@ -1384,7 +1386,7 @@ There is now exactly one memory runtime path, one database client, one JWT verif
 | Id | Issue | Severity | Owner action |
 |---|---|---|---|
 | SEC-1 / R-16 | Purged from local history and from GitHub `main` (`ec2e895` → `a0ed04f`, verified), but GitHub still serves the old commits through `refs/pull/1`–`3`, which no push can change | **High** — the repository is private | Send the GitHub Support purge request; reset the passwords of the 6 accounts and revoke their refresh tokens; re-clone any other copy |
-| SEC-7 | No CI, so no automated secret scanning | Medium | Add CI |
+| SEC-7 | No CI, so no automated secret scanning | Medium | Add CI. **Partly addressed 2026-09-14:** workflow written for lint, typecheck, build and four test suites; not yet run on GitHub; still no secret scan or dependency audit |
 | SEC-8 | Lint has no security rules | Low | Ratchet rules (R-14) |
 | SEC-5 | Real account identifiers in `apps/api/scripts/phase116b/state.json` | Informational | Mask if preferred |
 | SEC-6 | Per-process confirmation store and IP limiter | Informational, by design | Sticky sessions if ever scaled out |

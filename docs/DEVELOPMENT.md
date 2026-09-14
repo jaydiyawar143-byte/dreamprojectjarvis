@@ -8,7 +8,7 @@ Setup, configuration and the checks a change must pass. Verified on 2026-09-14.
 
 | Tool | Version | Why |
 |---|---|---|
-| Node.js | 20 or newer | `engines` in the root `package.json` |
+| Node.js | 24 (or 22.22.2+) | `engines` in the root `package.json` says 20+, but jsdom 30, used by the tests, requires `^22.22.2` or `^24.15.0`. The production image still runs Node 20 — ledger R-19 |
 | pnpm | 9 | the workspace package manager |
 | Docker | any recent | PostgreSQL **with pgvector** — a plain `postgres` image cannot run the migrations |
 | Chrome or Edge | installed | browser automation, and the `run-jarvis` driver |
@@ -89,7 +89,31 @@ On 2026-09-14 that command gave `6 passed | 7 skipped` in three consecutive runs
 
 **`@jarvis/db` tests** need the Postgres container running.
 
-There is no CI. These gates run only when someone runs them.
+**On a fresh Windows clone**, `apps/api/test/google-write-reachability.test.ts` fails because Git converts line endings to CRLF. It is a false failure — ledger R-20.
+
+## Continuous integration
+
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs on pushes to `main`, on pull requests, and on demand. It is one job on Ubuntu with Node 24. It does not use Node 20, the production image's version: the test toolchain (jsdom 30) requires Node `^22.22.2` or `^24.15.0`, and on Node 20 the web tests cannot start — ledger R-19.
+
+| Step | Command |
+|---|---|
+| Install | `pnpm install --frozen-lockfile` |
+| Prisma client | `pnpm --filter @jarvis/db exec prisma generate` |
+| Lint | `pnpm lint` |
+| Typecheck | `pnpm typecheck` |
+| Build | `pnpm build` |
+| Tests | `pnpm --filter <name> test` for `@jarvis/api`, `@jarvis/memory`, `@jarvis/n8n` and `@jarvis/web` |
+
+Any failure fails the run. Each test step runs once the build has passed, even if an earlier test step failed, so one run lists every failing suite.
+
+**Not covered yet:**
+
+- **Postgres-backed tests.** `@jarvis/db` and the API's real-PostgreSQL file stay separate until a pgvector service container is configured. Without a database that API file skips itself and the memory end-to-end test runs against its in-process store, so a green run proves nothing about the Postgres paths.
+- **`typecheck:tests`** in `apps/api` fails with 60 pre-existing errors — ledger R-18, still open. CI does not run it.
+- **The other workspaces' tests** — `@jarvis/agents`, `tools`, `security`, `core`, `config` and the provider packages. Run them locally with `pnpm test`.
+- **Secret scanning and dependency audits** — audit finding SEC-7.
+
+**Status:** as of 2026-09-14 the workflow has never run on GitHub. Its `run` steps were replayed locally, in order, in a clean checkout with LF line endings, no `.env`, no Turborepo cache, Node 24.16.0 and pnpm 9.0.0 — on Windows, not Ubuntu. Every step passed: lint 18/18, typecheck 33/33, build 18/18, `@jarvis/api` 1,159 passed and 8 skipped, `@jarvis/memory` 453/453, `@jarvis/n8n` 65/65, `@jarvis/web` 552/552. The three `uses:` actions — checkout, pnpm setup and Node setup — have not been exercised.
 
 ## Driving the real app
 
