@@ -483,6 +483,12 @@ JARVIS uses a structured error taxonomy:
 
 All environment variables are validated at startup using Zod schemas.
 
+### Correction (added 2026-09-14)
+
+Previous documentation listed `META_APP_ID`, `META_APP_SECRET`, `REDIS_URL` and `N8N_WEBHOOK_URL` as optional variables. This was incorrect: no code reads any of them. It also stated that every variable is validated through Zod; many are read directly from `process.env` by the package that uses them.
+The accurate, complete list of variable names is `.env.example` at the repository root.
+Evidence: `git grep` for each name finds no reader — see `docs/CODEBASE_AUDIT.md` §6.
+
 ---
 
 ## Sprint 1.1A — Persistent Memory Wiring (2026-08-27)
@@ -631,8 +637,8 @@ We created and integrated the dedicated `MetaAdsAgent` foundation to manage, ana
 For the authoritative READ-ONLY inventory used as the Sprint-2 start point, see:
 
 - **Mermaid diagram:** [`docs/diagrams/meta-ads-current-architecture.mmd`](./diagrams/meta-ads-current-architecture.mmd) — color-coded by entry point (user-accessible routes = green, standalone `phase116b/propose.ts` script = purple, implemented-but-unwired `OutcomeWorker`/diagnosis route = red, DB persist layer = orange).
-- **Change boundary:** [`SPRINT_2_META_ADS_CHANGE_BOUNDARY.md`](../SPRINT_2_META_ADS_CHANGE_BOUNDARY.md)
-- **Baseline audit:** [`SPRINT_2.0_META_ADS_BASELINE_AUDIT.md`](../SPRINT_2.0_META_ADS_BASELINE_AUDIT.md)
+- **Change boundary:** [`SPRINT_2_META_ADS_CHANGE_BOUNDARY.md`](./reports/SPRINT_2_META_ADS_CHANGE_BOUNDARY.md)
+- **Baseline audit:** [`SPRINT_2.0_META_ADS_BASELINE_AUDIT.md`](./reports/SPRINT_2.0_META_ADS_BASELINE_AUDIT.md)
 
 ### Key baseline facts (verified read-only)
 

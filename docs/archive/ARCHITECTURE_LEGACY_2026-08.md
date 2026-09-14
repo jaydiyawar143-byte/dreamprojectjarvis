@@ -308,7 +308,7 @@ Knowledge Chunks ─────────────────────
 > **Permanent rule:** every integration must support both JARVIS command control
 > and manual frontend control **through the same backend integration service**.
 
-Full reference: [docs/INTEGRATIONS.md](INTEGRATIONS.md).
+Full reference: [docs/INTEGRATIONS.md](../INTEGRATIONS.md).
 
 ### 9.1 The two-path contract
 

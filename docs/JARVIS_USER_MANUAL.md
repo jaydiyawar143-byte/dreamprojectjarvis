@@ -362,7 +362,7 @@ JARVIS clearly labels its responses:
 - **A/B test automatically.** Controlled experimentation is planned for a future phase.
 - **Manage multiple ad platforms.** Currently Meta (Facebook/Instagram) is the only supported advertising platform.
 - **Access landing page or website data.** JARVIS works with Meta advertising metrics only. Website analytics are not integrated.
-- **Run a dedicated Meta Ads agent.** Currently all Meta tool activity flows through the single `conversational-assistant`. A dedicated Meta Ads agent is the focus of **Sprint 2** (see the [baseline audit](../SPRINT_2.0_META_ADS_BASELINE_AUDIT.md) and [change boundary](../SPRINT_2_META_ADS_CHANGE_BOUNDARY.md)).
+- **Run a dedicated Meta Ads agent.** Currently all Meta tool activity flows through the single `conversational-assistant`. A dedicated Meta Ads agent is the focus of **Sprint 2** (see the [baseline audit](./reports/SPRINT_2.0_META_ADS_BASELINE_AUDIT.md) and [change boundary](./reports/SPRINT_2_META_ADS_CHANGE_BOUNDARY.md)).
 - **Automatically generate recommendations on demand.** JARVIS can *list*, *rank* (opportunity queue), and *execute* recommendations that exist in the database, but the end-to-end "analyze → generate" pipeline runs today only via a standalone CLI smoke script (`apps/api/scripts/phase116b/propose.ts`), not through the chat/API on demand.
 
 ---
