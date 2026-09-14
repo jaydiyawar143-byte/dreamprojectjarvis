@@ -2,16 +2,15 @@ import { config } from "dotenv";
 import { resolve } from "path";
 import { getServerEnv } from "@jarvis/config";
 
-const envFile =
-  process.env.NODE_ENV === "production"
-    ? ".env.production"
-    : process.env.NODE_ENV === "staging"
-      ? ".env.staging"
-      : ".env.development";
-
+// ONE environment file: `.env` at the repository root.
+//
+// It is resolved from the working directory, which is `apps/api` under
+// `pnpm dev` and `pnpm --filter`. When the process starts from the repository
+// root instead (`node apps/api/dist/index.js`, as the Dockerfile does),
+// `@jarvis/config` has already loaded `./.env` from there on import — so both
+// launch styles read the same file. In containers the values arrive through
+// compose `env_file`, and dotenv never overrides a variable that is already set.
 config({ path: resolve(process.cwd(), "../../.env") });
-config({ path: resolve(process.cwd(), envFile) });
-config({ path: resolve(process.cwd(), ".env.local") });
 
 export function loadEnvironment() {
   const env = getServerEnv();

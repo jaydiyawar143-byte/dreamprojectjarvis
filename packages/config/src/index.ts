@@ -49,10 +49,6 @@ const baseEnvSchema = z.object({
   WHATSAPP_VERIFY_TOKEN: z.string().optional(),
   WHATSAPP_API_VERSION: z.string().optional(),
 
-  GITHUB_TOKEN: z.string().optional(),
-
-  REDIS_URL: z.string().optional(),
-
   CORS_ORIGIN: z.string().default("http://localhost:3000"),
   API_PORT: z.coerce.number().default(3001),
 
