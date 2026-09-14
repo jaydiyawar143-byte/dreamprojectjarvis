@@ -1364,7 +1364,7 @@ JARVIS/
 
 | Id | What | Next step |
 |---|---|---|
-| B-1 | **Resolved 2026-09-14** on `fix/b1-memory-e2e`. A test-harness race, not a memory defect: fire-and-forget extraction shared the suite's mock AI provider and overwrote the chat request the assertions read. Fix: extraction gets a non-recording view of the mock; test file only. The six tests passed three consecutive runs (6 passed, 7 skipped each); API suite 1,159 passed, 8 skipped; in-process store, not Postgres | None — command in `docs/MEMORY.md` |
+| B-1 | **Resolved 2026-09-14** on `fix/b1-memory-e2e`. A test-harness race, not a production memory bug: fire-and-forget extraction shared the suite's mock AI provider and overwrote the chat request the assertions read. Fix: extraction gets a non-recording view of the mock; test file only. The six tests passed three consecutive runs (6 passed, 7 skipped each); API suite 1,159 passed, 8 skipped; in-process store. Not verified: the Postgres-backed tests and the full repository suite | None — command in `docs/MEMORY.md` |
 | B-3 | 8 `@jarvis/db` Postgres tests fail (inherited; not run) | Run with Postgres up, then diagnose |
 | B-4 | Live Google grant lacks the `adwords` scope | Re-grant |
 | I-29 | `data.csv.analyze` granted to two agents but never registered | D-6 |

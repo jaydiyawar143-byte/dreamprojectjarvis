@@ -129,9 +129,11 @@ pnpm build
 ```
 
 The six memory end-to-end tests that used to fail on every run (B-1 in
-`docs/CODEBASE_AUDIT.md`) pass since 2026-09-14. `@jarvis/db` tests need the
+`docs/CODEBASE_AUDIT.md`) pass since 2026-09-14. The cause was a race in the
+test harness, not a production memory bug. `@jarvis/db` tests need the
 Postgres container running; they were not re-run for that fix, and the ledger
-last recorded 8 of them failing (inherited, not re-verified).
+last recorded 8 of them failing (inherited, not re-verified). The full
+repository suite has not been run since the fix either.
 
 ---
 

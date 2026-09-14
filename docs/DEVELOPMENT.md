@@ -79,13 +79,13 @@ pnpm --filter @jarvis/api exec vitest run
 pnpm --filter @jarvis/api exec vitest run test/access-log.test.ts
 ```
 
-**B-1 is fixed.** The six memory end-to-end tests that failed on every run pass since 2026-09-14; [MEMORY.md](./MEMORY.md) has the root cause. To check them:
+**B-1 is fixed.** The six memory end-to-end tests that failed on every run pass since 2026-09-14. The cause was a race in the test harness, not a production memory bug; [MEMORY.md](./MEMORY.md) has the details. To check them:
 
 ```bash
 pnpm --filter @jarvis/api exec vitest run test/sprint-1.1d-memory-e2e.test.ts -t "TEST (A|B|C|G|N):|TEST E & TEST F:"
 ```
 
-On 2026-09-14 that command gave `6 passed | 7 skipped` in three consecutive runs, and the whole API suite passed 1,159 tests with 8 skipped. Both used the in-process memory store because Postgres was not running. Only the API and `@jarvis/memory` suites were re-run after the fix; no claim is made here about the other workspaces.
+On 2026-09-14 that command gave `6 passed | 7 skipped` in three consecutive runs, and the whole API suite passed 1,159 tests with 8 skipped. Both used the in-process memory store because Postgres was not running. Only the API and `@jarvis/memory` suites were re-run after the fix. The full repository suite and the Postgres-backed tests remain unverified.
 
 **`@jarvis/db` tests** need the Postgres container running.
 
