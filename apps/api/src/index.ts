@@ -2,7 +2,6 @@ import express, { type Express } from "express";
 import cors from "cors";
 import helmet from "helmet";
 import compression from "compression";
-import morgan from "morgan";
 import { createServer, type Server } from "http";
 import { Server as SocketIOServer } from "socket.io";
 import { loadEnvironment } from "./config/env.js";
@@ -39,6 +38,7 @@ import {
 } from "./socket/socket-auth.js";
 import { getContainer, getBrowserRuntime } from "./services/container.js";
 import { requestId } from "./middleware/request-id.js";
+import { accessLog } from "./middleware/access-log.js";
 import {
   errorHandler,
   notFoundHandler,
@@ -137,7 +137,7 @@ app.use(compression());
 // Sprint 9.2 — first, so every later middleware and every log line can name
 // the request, including the ones that fail before reaching a route.
 app.use(requestId());
-app.use(morgan("combined"));
+app.use(accessLog());
 // ---------------------------------------------------------------------------
 // Sprint 5.3 — WhatsApp webhook, mounted BEFORE the JSON body parser.
 //
