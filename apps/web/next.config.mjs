@@ -1,6 +1,6 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  transpilePackages: ["@jarvis/core", "@jarvis/security"],
+  transpilePackages: ["@jarvis/core"],
 };
 
 export default nextConfig;

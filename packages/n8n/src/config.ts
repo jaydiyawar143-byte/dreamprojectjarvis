@@ -95,7 +95,7 @@ export function validateWebhookPath(raw: unknown): string | null {
 
   const normalized = trimmed.replace(/^\/+/, "").replace(/\/+$/, "");
   if (normalized.length === 0) return null;
-  if (!/^[A-Za-z0-9._~\-\/]+$/.test(normalized)) return null;
+  if (!/^[A-Za-z0-9._~\-/]+$/.test(normalized)) return null;
   return normalized;
 }
 

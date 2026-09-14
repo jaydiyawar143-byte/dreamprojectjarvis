@@ -22,7 +22,6 @@
     "@jarvis/core": "workspace:*",
     "@jarvis/db": "workspace:*",
     "mammoth": "^1.12.2",
-    "openai": "^4.50.0",
     "pdf-parse": "^2.4.5"
   },
   "devDependencies": {

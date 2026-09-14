@@ -37,7 +37,7 @@ const SECRET_PATTERNS: RegExp[] = [
   /\bsk[_-][a-zA-Z0-9]{20,}/,
   /\b(?:password|passwd|pwd)\s*[:=]\s*\S+/i,
   /\b(?:secret|token|credential)\s*[:=]\s*\S+/i,
-  /\bbearer\s+[a-zA-Z0-9._\-]{20,}/i,
+  /\bbearer\s+[a-zA-Z0-9._-]{20,}/i,
   /-----BEGIN\s+(?:RSA\s+)?PRIVATE\s+KEY-----/,
   /\b(?:jwt|refresh[_-]?token)\s*[:=]\s*\S+/i,
   /\b(?:DATABASE_URL|DB_PASSWORD|DB_PASS)\s*[:=]\s*\S+/i,
