@@ -9,6 +9,8 @@
 
 > **Provenance note.** The task referred to a "supplied master audit document" as a starting structure. No such document was provided with the request and none existed in the repository. This file was therefore created from the section-12 specification in the task itself. Every status below is derived from commands run against this repository on the audit date; nothing was inherited from a prior document.
 
+> **Relocation note (2026-09-14).** This ledger moved from the repository root to `docs/`, and the phase and sprint reports it cites by file name moved to `docs/reports/`. File names are unchanged, so every citation below still identifies its report. See `docs/CODEBASE_AUDIT.md`.
+
 ---
 
 ## 1. Executive summary
@@ -57,7 +59,7 @@ The organising idea is that every capability is a **tool** behind an **allowlist
 | Dashboard visual system (WidgetCard, spacing, scrollbars) | **NOT IMPLEMENTED** |
 | Adaptive widget content (size modes) | **NOT IMPLEMENTED** |
 | ORB full-height layout | **NOT IMPLEMENTED** |
-| Lint | **NOT CONFIGURED** |
+| Lint | **COMPLETE** — flat config, 18/18 packages green |
 
 ---
 
@@ -395,7 +397,7 @@ All commands run 2026-09-13 from the repository root.
 | Auto-optimize flow | `node .claude/skills/run-jarvis/optimize-flow.mjs` | **ALL PASSED** | browser | — |
 | Viewport audit | `node .claude/skills/run-jarvis/viewport-audit.mjs` | 5/5 resolutions, no page scroll | browser | Reports internal scroll in 3 widgets |
 | ElevenLabs live | `POST /api/v1/voice/speak` | 48,527-byte MP3, ID3, 1,112 ms | live API | Requires network + quota |
-| Lint | `npx turbo lint` | **CANNOT RUN** | — | No ESLint config exists |
+| Lint | `npx turbo lint` | **18/18 tasks** | full | Baseline rule set only — see R-1 |
 
 ### 8.1 Flaky tests — disclosed, not hidden
 
@@ -405,6 +407,12 @@ All commands run 2026-09-13 from the repository root.
 | `apps/web/test/auth-session.test.tsx` | Failed twice under turbo; **552/552 isolated** | Parallel-load timing |
 | `packages/core` perf tests (×4) | Fail only while Chrome is running | Timing budgets vs CPU contention |
 | `apps/api/test/phase116a-bridge-pg.integration.test.ts` | Intermittent | Postgres row-lock concurrency |
+
+### Correction (added 2026-09-14)
+
+Previous documentation stated that `apps/api/test/sprint-1.1d-memory-e2e.test.ts` fails a different test on each parallel run and passes 13/13 in isolation. This was incorrect.
+The accurate information is: 6 of 13 tests fail deterministically, including when the file is run alone, with the same six failing on every run.
+Evidence: `pnpm --filter @jarvis/api exec vitest run test/sprint-1.1d-memory-e2e.test.ts` → 6 failed, 7 passed; reproduced three times on 2026-09-14, once with that branch's source edits reverted. Failing assertions at lines 617, 639, 660, 691, 710 and 813. Tracked as R-17.
 
 ### 8.2 Pre-existing failures — not caused by recent work
 
@@ -425,9 +433,12 @@ All commands run 2026-09-13 from the repository root.
 | S-3 | Google OAuth callback burned single-use state before a check that could fail | Medium | `google-auth.ts` | **MITIGATED** — check now passes for valid consents; ordering unchanged (correct: the code is spent) |
 | S-4 | Scope merge over-claims if a scope is revoked out-of-band | Low | `google-auth.ts` | **ACCEPTED** — self-corrects at point of use via 401/403 |
 | S-5 | `.env` contains 8 live secrets | Informational | `.env` | **CORRECT** — gitignored, never bundled; scan clean |
-| S-6 | No ESLint config → no static security linting | Low | repo-wide | **OPEN** — roadmap P1-3 |
+| S-6 | No ESLint config → no static security linting | Low | repo-wide | **PARTIALLY RESOLVED** — lint runs, but the baseline carries no security rules; see R-14 |
 | S-7 | Approval boundary | — | `approval-repository.ts` | **INTACT** — untouched all session |
 | S-8 | Optimizer cannot perform external actions | — | `optimizer.ts` | **STRUCTURALLY SAFE** — pure function, asserted |
+| S-9 | Database dump with real user rows — emails, password hashes, refresh-token hashes, IP addresses, chat history — committed in `7b35c4f` and pushed | **Critical** | `.claude/skills/run-jarvis/backups/` | **PARTIALLY RESOLVED** 2026-09-14 — untracked and ignored; still in git history. Purge and password resets await the owner (R-16) |
+| S-10 | Access log wrote OAuth `code` and `state`, and the WhatsApp `hub.verify_token` | Medium | `apps/api/src/index.ts` | **FIXED** 2026-09-14 — `middleware/access-log.ts` redacts them; 6 tests |
+| S-11 | Write-confirmation hash ignored nested values (`{campaign:{budget:10}}` equalled `{campaign:{budget:10000}}`) | Low, latent | `apps/api/src/services/integrations/confirmations.ts` | **FIXED** 2026-09-14 — uses canonical `computeParamsHash`; 4 tests |
 
 No secret value appears in any source file, document, config, or built bundle (1,655 files scanned).
 
@@ -493,7 +504,7 @@ No secret value appears in any source file, document, config, or built bundle (1
 
 | # | Risk | Severity | Evidence | Impact | Recommended action | Status |
 |---|---|---|---|---|---|---|
-| R-1 | Lint has never run | **High** | No ESLint config anywhere; every `lint` task errors | No static analysis; style/security drift | Add a scoped flat config | OPEN |
+| R-1 | Lint has never run | **High** | Root cause was **not** the missing config alone: 16 `lint` scripts read `eslint src/` with no `--ext`, so ESLint 8 looked for `.js` and found none of the 437 `.ts`/`.tsx` files | No static analysis; style/security drift | Flat config at the root, ESLint 9, baseline rule set kept green | **RESOLVED** — `turbo lint` 18/18. Rule set is correctness-only; widening it is R-14 |
 | R-2 | Capability matrix stale | **High** | 0 mentions of 4 weeks of work | Future work built on wrong assumptions | Regenerate from this ledger | OPEN |
 | R-3 | Dashboard visual system unbuilt | **Medium** | No `widget-card.tsx`; 3 widgets scroll internally | Repeated UX complaints | Roadmap P2 | OPEN |
 | R-4 | 8 DB integration tests failing | **Medium** | `188 passed / 8 failed` | Outcome-record paths unverified | Investigate | PRE-EXISTING |
@@ -506,6 +517,10 @@ No secret value appears in any source file, document, config, or built bundle (1
 | R-11 | Accessibility unaudited | Low | No audit performed | Unknown gaps | Run axe | **NOT VERIFIED** |
 | R-12 | Voice playback not re-verified with ElevenLabs in browser | Low | Only API-level proof | Playback assumed | Manual check | **PARTIALLY VERIFIED** |
 | R-13 | Commit `2c43bd1` message mislabelled | Informational | Contains unrelated work | History confusion | Leave; documented here | ACCEPTED |
+| R-14 | Lint baseline is correctness-only | Medium | `eslint.config.mjs` enables ~8 rules; no type-aware rules, no security rules, tests unlinted | Most of what a linter catches is still uncaught | Ratchet one rule at a time, fixing as you go | OPEN |
+| R-15 | `apps/web/tsconfig.tsbuildinfo` is tracked in git | Low | Build artifact appears in `git diff` after every `pnpm build` | Noisy diffs, spurious conflicts | Add to `.gitignore`, `git rm --cached` | **RESOLVED** 2026-09-14 — `*.tsbuildinfo` ignored; both tracked copies untracked |
+| R-16 | Database dump remains in git history on GitHub | **Critical** | Commit `7b35c4f`, reachable from `origin/main` | Password hashes and personal data readable by anyone with repository access | Purge history and force-push; reset the 6 real accounts; revoke refresh tokens issued on or before 2026-09-03 | **AWAITING OWNER DECISION** |
+| R-17 | Memory end-to-end suite fails deterministically | **High** | `apps/api/test/sprint-1.1d-memory-e2e.test.ts`: 6 of 13 fail, including in isolation | End-to-end memory behaviour is unverified | Root-cause before further memory work | OPEN |
 
 ---
 
@@ -515,7 +530,7 @@ No secret value appears in any source file, document, config, or built bundle (1
 | ID | Task | Priority | Acceptance | Status |
 |---|---|---|---|---|
 | P0-1 | This ledger | High | Evidence-based, all claims labelled | **DONE** |
-| P0-2 | Approve archive of 21 docs | High | User approves; move to `docs/archive/` | **BLOCKED — awaiting approval** |
+| P0-2 | Approve archive of 21 docs | High | User approves; move to `docs/archive/` | **DONE** 2026-09-14 — all 29 reports moved, none deleted, to `docs/reports/`; legacy `docs/ARCHITECTURE.md` archived to `docs/archive/` |
 | P0-3 | Regenerate capability matrix | High | Mentions all current capabilities | TODO |
 
 ### Phase 1 — Reliability and security
@@ -523,7 +538,7 @@ No secret value appears in any source file, document, config, or built bundle (1
 |---|---|---|---|---|---|
 | P1-1 | Fix 8 DB integration tests | High | — | `@jarvis/db` green | TODO |
 | P1-2 | Stabilise flaky suites | High | — | Full suite green 3× consecutively | TODO |
-| P1-3 | Add ESLint config | High | — | `turbo lint` runs and passes | TODO |
+| P1-3 | Add ESLint config | High | — | `turbo lint` runs and passes | **DONE** — 18/18, branch `feat/p1-3-eslint` |
 | P1-4 | Re-grant `adwords` | Medium | User action | Ads capability returns | TODO |
 
 ### Phase 2 — Dashboard foundation
@@ -586,14 +601,20 @@ A task is DONE only when **all** hold:
 |---|---|---|---|---|---|---|---|
 | 2026-09-13 | Session work (`66a8855`) | Gmail flow, health, voice, resize, optimizer | 66 (+7,468/−95) | typecheck 33/33; api 1157; web 552; browser 3 suites | 11 root causes fixed, 4 features shipped | Dashboard visual work not started | P0-2 |
 | 2026-09-13 | Repository audit (this file) | Evidence-based master record | 1 (this file) | typecheck, build, full suite, 4 browser scripts, security scan | Documented | Accessibility & browser voice playback unverified | Await archive approval |
+| 2026-09-14 | P1-3 — ESLint (`feat/p1-3-eslint`) | Close the only entirely absent quality gate | 10 (config, turbo.json, 6 manifests, 2 regexes, lockfile) | lint 18/18; typecheck 33/33; build 18/18; n8n 65/65; memory 453/453 | R-1 resolved; root cause was the missing `--ext`, not only the missing config | Baseline is correctness-only (R-14); tests still unlinted | P0-3 — regenerate the capability matrix |
+| 2026-09-14 | Foundation cleanup V1.0 (`feat/p1-3-eslint`, 8 commits, not pushed) | Audit the codebase; remove proven dead code, duplicates and data exposure; one env template; consolidate docs | 31 moved, 25 modified, 10 new, 7 deleted, 3 untracked | typecheck 33/33; lint 18/18; build 18/18; tests 4,619 passed, 6 failed (R-17), 8 skipped | S-10 and S-11 fixed; S-9 untracked; 29 reports moved; 5 accurate docs; see `docs/CODEBASE_AUDIT.md` | History purge (R-16) pending; API and web boot not run | D-1 history purge, then R-17 |
 
 ---
 
 ## 15. Recommended next task
 
-**P0-3 — regenerate `docs/JARVIS_CAPABILITY_MATRIX.md`**, then **P1-3 (ESLint)**.
+**Update 2026-09-14, after the foundation cleanup:** first **R-16** — purge the database dump from git history and reset the affected accounts — then **R-17**, the six deterministic memory e2e failures, then CI. The recommendation below predates the cleanup.
 
-Rationale: the capability matrix has 13 references and is four weeks stale, so every future decision that consults it starts from wrong information. It is cheap to fix and prevents compounding error. ESLint follows because it is the only entirely absent quality gate.
+**P0-3 — regenerate `docs/JARVIS_CAPABILITY_MATRIX.md`**, then **P1-1 / P1-2 (the failing and flaky suites)**.
+
+Rationale: the capability matrix has 13 references and is four weeks stale, so every future decision that consults it starts from wrong information. It is cheap to fix and prevents compounding error. P1-1 and P1-2 follow because they are the last two reliability items, and R-4 in particular has been carried as "pre-existing" without a diagnosis.
+
+P1-3 (ESLint) is **done** as of 2026-09-14. Widening its rule set is tracked separately as R-14 and should be taken one rule at a time rather than as a project.
 
 **Not recommended next:** more dashboard visual work. It has been attempted three times and repeatedly displaced; P2 should be taken as a single dedicated block after P0/P1.
 

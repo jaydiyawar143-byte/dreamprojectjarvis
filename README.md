@@ -1,123 +1,71 @@
-# JARVIS - Personal AI Operating System
+# JARVIS — Personal AI Operating System
 
-A modular, agent-based AI platform for digital marketers and team leaders.
+A conversational assistant for marketing and business work. You talk to it in plain language, in English, Hindi or Hinglish; it reads your ad accounts, mail, calendar and documents, remembers what matters about your work, and proposes changes that run only after you approve them.
 
-## Overview
+## What it is built from
 
-JARVIS is a personal AI operating system that combines conversational AI, marketing automation, knowledge management, and team operations into a single, secure platform. It is designed to be extremely simple to operate while maintaining production-grade architecture underneath.
+| Layer | Technology |
+|---|---|
+| Web app | Next.js 14 (App Router), React, Zustand, Tailwind |
+| API | Node.js, Express, Socket.IO |
+| Database | PostgreSQL with pgvector, through Prisma |
+| Models and voice | OpenAI (chat, embeddings, vision, speech-to-text, text-to-speech); ElevenLabs text-to-speech |
+| Integrations | Meta Ads, Google Ads, Gmail / Drive / Calendar, Google Maps, WhatsApp Business, n8n, browser automation |
+| Monorepo | pnpm workspaces and Turborepo |
 
-## Architecture
-
-- **Frontend**: Next.js 14+ with TypeScript and Tailwind CSS
-- **Backend**: Node.js with Express/Fastify and Socket.IO
-- **Database**: PostgreSQL with Prisma ORM and pgvector for embeddings
-- **AI**: OpenAI API (GPT-4, Embeddings, Whisper)
-- **Automation**: n8n integration
-- **Monorepo**: Turborepo with pnpm workspaces
-
-See `docs/ARCHITECTURE.md` for full architecture details.
-
-## Project Structure
+## Repository
 
 ```
-jarvis/
-├── apps/
-│   ├── web/          # Next.js frontend
-│   └── api/          # Backend API server
-├── packages/
-│   ├── core/         # Shared types, interfaces, utilities
-│   ├── db/           # Prisma schema, migrations, seed
-│   ├── agents/       # Agent system (registry, base, agents)
-│   ├── tools/        # Tool system (registry, base tools)
-│   ├── security/     # Auth, permissions, audit, approvals
-│   ├── memory/       # Long-term memory, knowledge base, RAG
-│   ├── integrations/ # Google, Meta, n8n, WhatsApp
-│   └── config/       # Environment validation
-├── docs/             # Documentation
-└── docker/           # Docker configuration
+apps/
+  api/                Express + Socket.IO API
+  web/                Next.js dashboard
+packages/
+  core/               shared types, Zod contracts, pure utilities
+  agents/             orchestrator, router, planner, agent policy, domain agents
+  tools/              tools, ToolExecutor, execution journal
+  memory/             memory extraction, document chunking, embedding, retrieval
+  db/                 Prisma schema, migrations, repositories
+  security/           passwords, JWT, encryption, permissions, approvals, audit
+  config/             environment schema
+  ai-openai/  ai-elevenlabs/  ai-anthropic/        model and voice providers
+  meta-graph/  google-ads/  google-workspace/
+  whatsapp/  n8n/  browser/                        provider clients
+docs/                 architecture, API, memory, capabilities, development
 ```
 
-## Getting Started
-
-### Prerequisites
-
-- Node.js 20+
-- pnpm 9+
-- PostgreSQL 16+
-- Docker (optional)
-
-### Installation
+## Quick start
 
 ```bash
-# Install dependencies
 pnpm install
-
-# Set up environment
-cp .env.example .env.local
-# Edit .env.local with your values
-
-# Generate Prisma client
-pnpm db:generate
-
-# Run migrations
-pnpm db:migrate
-
-# Seed database
-pnpm db:seed
-
-# Start development servers
-pnpm dev
+cp .env.example .env          # fill in DATABASE_URL, JWT_SECRET, OPENAI_API_KEY
 ```
 
-### Environment Variables
+Then follow [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md) for the database container, migrations and `pnpm dev`. The web app runs on http://localhost:3000 and the API on http://localhost:3001.
 
-Copy `.env.example` to `.env.local` and fill in the required values. See `.env.example` for the full list.
+## Documentation
 
-**Required:**
-- `DATABASE_URL` - PostgreSQL connection string
-- `JWT_SECRET` - Secret for JWT tokens (min 32 characters)
-- `OPENAI_API_KEY` - OpenAI API key
+| Read | For |
+|---|---|
+| [AGENTS.md](./AGENTS.md) | The rules for changing this codebase, and where new code goes |
+| [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) | How the system fits together |
+| [docs/API.md](./docs/API.md) | Every HTTP route |
+| [docs/SKILLS.md](./docs/SKILLS.md) | Agents, tools, and what JARVIS can do |
+| [docs/MEMORY.md](./docs/MEMORY.md) | Memory and document knowledge |
+| [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md) | Setup, environment variables, quality gates |
+| [docs/CODEBASE_AUDIT.md](./docs/CODEBASE_AUDIT.md) | The 2026-09-14 audit and cleanup |
+| [docs/JARVIS_USER_MANUAL.md](./docs/JARVIS_USER_MANUAL.md) | Using JARVIS |
 
-**Optional (for integrations):**
-- Google OAuth credentials
-- Meta API credentials
-- n8n connection details
-- WhatsApp Business API credentials
+## Safety model
 
-## Development
+- No secret is hardcoded; credentials live in `.env` or are stored encrypted with AES-256-GCM.
+- Anything that changes state outside JARVIS is planned, shown to you, confirmed or approved, executed once, journalled and audited.
+- Approvals are bound to the exact parameters you saw and expire; a voice session cannot approve a write.
+- Four roles control who can use which tools.
 
-```bash
-pnpm dev          # Start all services in dev mode
-pnpm build        # Build all packages
-pnpm lint         # Lint all packages
-pnpm typecheck    # Type-check all packages
-```
+## Status
 
-## Security
-
-- No API keys are hardcoded - all secrets stored in environment variables
-- Role-based access control (Owner, Admin, Member, Viewer)
-- Human approval required for high-impact actions
-- Complete audit logging for all actions
-- Environment validation at startup
-
-## Adding a New Agent
-
-1. Create a new file in `packages/agents/src/agents/`
-2. Extend `BaseAgent` from `packages/agents/src/base-agent.ts`
-3. Implement the `process` method
-4. Register the agent in `packages/agents/src/index.ts`
-5. Add required tools if needed
-
-No changes to the core system are required.
-
-## Adding a New Tool
-
-1. Create a new file in `packages/tools/src/tools/`
-2. Extend `BaseTool` from `packages/tools/src/base-tool.ts`
-3. Implement the `execute` method
-4. Register the tool in the tool registry
+Typecheck, lint and build pass across all 18 workspaces, and 4,619 tests pass. Six memory end-to-end tests fail and are being diagnosed. There is no continuous integration yet. Details: [docs/CODEBASE_AUDIT.md](./docs/CODEBASE_AUDIT.md).
 
 ## License
 
-Private - All rights reserved.
+Private — all rights reserved.

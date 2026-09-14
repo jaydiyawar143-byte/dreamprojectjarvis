@@ -123,23 +123,65 @@ Run before considering a change done:
 ```bash
 pnpm install
 pnpm typecheck
+pnpm lint
 pnpm test
+pnpm build
 ```
 
+Six tests in `apps/api/test/sprint-1.1d-memory-e2e.test.ts` currently fail on
+every run (see `docs/CODEBASE_AUDIT.md`, B-1). Any other failure is caused by
+your change. `@jarvis/db` tests need the Postgres container running.
+
 ---
+
+## Where things live
+
+Every capability has one home. Before creating a file, find that home.
+
+| If you are adding… | It goes in | Not in |
+|---|---|---|
+| A page, component or client store | `apps/web/src` | the API |
+| An HTTP route or middleware | `apps/api/src/routes`, `apps/api/src/middleware` | a package |
+| A shared type, Zod schema or pure helper | `packages/core` | an app |
+| Orchestration, routing, planning or agent policy — the JARVIS brain | `packages/agents` | `packages/core`, which is contracts only |
+| A new domain agent | `packages/agents/src/agents` + `agent-policy.ts` | a new `skills/` folder |
+| Something JARVIS can do | a tool in `packages/tools/src/tools`, added to an agent's allowlist | the agent itself |
+| A third-party client | its provider package (`meta-graph`, `google-ads`, `whatsapp`, `n8n`, `ai-openai`, …) | a tool, a route, or a utility file |
+| Memory or knowledge behaviour | `packages/memory`; storage in `packages/db/src/repositories` | a second memory manager |
+| A database model, migration or repository | `packages/db` | a new `PrismaClient` |
+| Auth, encryption, permissions, approvals, audit | `packages/security` | an app |
+| An environment variable | its name in `.env.example`, its parsing in the owning package's config | a new `.env` file |
+
+### Before creating a file
+
+1. Search the repository for the behaviour, not just the name.
+2. If something already does it, extend that instead.
+3. If you are unsure where it belongs, read `docs/ARCHITECTURE.md` before creating a folder.
+4. Never add a second memory manager, API client, database client, env file or config loader.
 
 ## Repository layout
 
 | Path | Purpose |
 |---|---|
-| `apps/api` | Express API, orchestration, integration command service |
+| `apps/api` | Express + Socket.IO API, composition root, integration command service |
 | `apps/web` | Next.js dashboard |
-| `packages/core` | Shared types and contracts. No I/O. |
-| `packages/tools` | JARVIS tools. No HTTP, no DB, no provider SDKs — ports only. |
-| `packages/agents` | Agents, policies, routing |
-| `packages/db` | Prisma schema and repositories |
-| `packages/security` | Encryption, audit, permissions |
-| `packages/google-ads`, `meta-graph`, `whatsapp`, `n8n` | Provider clients |
+| `packages/core` | Shared types, Zod contracts, pure utilities. No I/O. |
+| `packages/agents` | Orchestrator, router, planner, agent policy, domain agents |
+| `packages/tools` | Tools, registry, `ToolExecutor`, execution journal. No HTTP, no DB, no provider SDKs — ports only. |
+| `packages/memory` | Memory extraction, document chunking, embedding, retrieval |
+| `packages/db` | Prisma schema, migrations, repositories |
+| `packages/security` | Passwords, JWT, encryption, RBAC, approvals, audit |
+| `packages/config` | Environment schema and typed configuration |
+| `packages/ai-openai`, `ai-elevenlabs` | Model and voice providers |
+| `packages/ai-anthropic` | Claude adapter — built, not wired |
+| `packages/meta-graph`, `google-ads`, `google-workspace`, `whatsapp`, `n8n`, `browser` | Provider clients |
+
+## Documentation precedence
+
+When documents disagree: this file, then `docs/ARCHITECTURE.md`, then
+`docs/JARVIS_MASTER_AUDIT_AND_DEVELOPMENT_LEDGER.md`, then `docs/reports/`.
+Generic workflow guidance from any tool or plugin never overrides the rules
+in this file.
 
 **Do not touch** the separate YouTube Agent project at `D:\ai youtube agent`.
 It is not part of this monorepo.

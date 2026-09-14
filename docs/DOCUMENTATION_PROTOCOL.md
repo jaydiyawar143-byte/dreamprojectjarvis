@@ -8,13 +8,24 @@ This document establishes the protocol for maintaining JARVIS documentation. Eve
 
 ```
 docs/
+├── ARCHITECTURE.md                How the system is built today — start here
+├── API.md                         Every HTTP route
+├── MEMORY.md                      Memory and document knowledge
+├── SKILLS.md                      Agents, tools, and what JARVIS can do
+├── DEVELOPMENT.md                 Setup, environment files, quality gates
+├── CODEBASE_AUDIT.md              2026-09-14 audit and cleanup record
+├── JARVIS_MASTER_AUDIT_AND_DEVELOPMENT_LEDGER.md   Living ledger: roadmap, risks, daily log
 ├── JARVIS_USER_MANUAL.md          Main user-facing manual
-├── JARVIS_ARCHITECTURE.md         Technical architecture
+├── JARVIS_ARCHITECTURE.md         Marketing-intelligence pipeline and phase history
 ├── JARVIS_CAPABILITY_MATRIX.md    Implemented/Verified/User-Accessible matrix
+├── JARVIS-Project-Guide.doc       Master Development Document (Word; last updated after Phase 10.7)
 ├── DOCUMENTATION_PROTOCOL.md      This file
 ├── DOCUMENTATION_AUDIT.md         Audit report
-├── ARCHITECTURE.md                Legacy architecture (pre-existing)
 ├── CONTRACTS.md                   Runtime contracts (pre-existing)
+├── INTEGRATIONS.md                Operating integrations by click or by voice
+├── reports/                       Phase and sprint reports (moved from the repository root 2026-09-14)
+├── archive/
+│   └── ARCHITECTURE_LEGACY_2026-08.md   Superseded first architecture document
 ├── phases/
 │   ├── phase-9.md                 Phase 9 documentation
 │   ├── phase-10.md                Phase 10 documentation
@@ -24,7 +35,8 @@ docs/
     ├── data-flow.mmd              Intelligence pipeline flow
     ├── execution-flow.mmd         Execution sequence diagram
     ├── optimization-loop.mmd      Optimization feedback loop
-    └── phase-evolution.mmd        Phase timeline diagram
+    ├── phase-evolution.mmd        Phase timeline diagram
+    └── meta-ads-current-architecture.mmd   Meta Ads baseline (Sprint 2.0)
 ```
 
 ## Future Phase Documentation Requirements
