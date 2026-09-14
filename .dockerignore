@@ -10,3 +10,33 @@ dist
 coverage
 **/.next
 **/node_modules
+
+# --- Build-context security ------------------------------------------------
+# Nothing below is needed to build or run the image. Without these lines a
+# build from the repository root sends them to Docker, and `COPY . .` puts
+# them into image layers.
+
+# Every .env file holds live credentials.
+**/.env
+**/.env.*
+
+# Claude Code workspace: skills, local settings, and the run-jarvis driver's
+# logs, screenshots and database backups.
+.claude/
+
+# Database dumps and backups, wherever they land. The Prisma migrations are
+# the only SQL the image needs, so they are re-included explicitly.
+**/*.sql
+!packages/db/prisma/migrations/*/migration.sql
+**/*.dump
+**/*.sql.gz
+**/*.bak
+**/*.backup
+**/backups/
+**/*.bundle
+
+# Local logs can contain request data.
+**/*.log
+
+# The host's Turborepo cache (5 GB locally). The image builds from source.
+**/.turbo

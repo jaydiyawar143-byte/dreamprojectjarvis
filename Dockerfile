@@ -45,13 +45,14 @@ COPY apps/api/package.json ./apps/api/
 COPY apps/web/package.json ./apps/web/
 COPY packages/agents/package.json ./packages/agents/
 COPY packages/ai-anthropic/package.json ./packages/ai-anthropic/
+COPY packages/ai-elevenlabs/package.json ./packages/ai-elevenlabs/
 COPY packages/ai-openai/package.json ./packages/ai-openai/
 COPY packages/browser/package.json ./packages/browser/
 COPY packages/config/package.json ./packages/config/
 COPY packages/core/package.json ./packages/core/
 COPY packages/db/package.json ./packages/db/
 COPY packages/google-ads/package.json ./packages/google-ads/
-COPY packages/integrations/package.json ./packages/integrations/
+COPY packages/google-workspace/package.json ./packages/google-workspace/
 COPY packages/memory/package.json ./packages/memory/
 COPY packages/meta-graph/package.json ./packages/meta-graph/
 COPY packages/n8n/package.json ./packages/n8n/
