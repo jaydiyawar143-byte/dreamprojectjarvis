@@ -175,6 +175,11 @@ class MockAIProvider implements IAIProvider {
 
   async complete(request: AICompletionRequest): Promise<AICompletionResponse> {
     this.lastMessages = request.messages;
+    return this.respond();
+  }
+
+  /** The scripted reply, without recording the request. */
+  respond(): AICompletionResponse {
     return {
       message: { role: "assistant", content: this.completeResponse },
       finishReason: "stop",
@@ -189,6 +194,27 @@ class MockAIProvider implements IAIProvider {
   async isAvailable(): Promise<boolean> {
     return true;
   }
+}
+
+/**
+ * The memory extraction service gets its own view of the mock provider.
+ *
+ * It returns the same scripted reply, so each test still controls what
+ * extraction produces, but it does not record the request. The Orchestrator
+ * starts extraction fire-and-forget after the reply; when extraction called
+ * the shared `complete()`, it overwrote the chat request the assertions read
+ * whenever the memory store answered without I/O, as the in-process fallback
+ * always does. Postgres latency used to hide that ordering.
+ */
+function extractionView(ai: MockAIProvider): IAIProvider {
+  return {
+    id: "mock-ai-extraction",
+    name: "Mock AI (memory extraction)",
+    defaultModel: ai.defaultModel,
+    complete: async () => ai.respond(),
+    listModels: () => ai.listModels(),
+    isAvailable: () => ai.isAvailable(),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -472,7 +498,7 @@ describe("Sprint 1.1D: Full Memory E2E Validation Tests", () => {
     }
 
     extractionService = new MemoryExtractionService({
-      aiProvider: mockAI,
+      aiProvider: extractionView(mockAI),
       store: activeStore,
       embeddingProvider: fakeEmbedding,
     });

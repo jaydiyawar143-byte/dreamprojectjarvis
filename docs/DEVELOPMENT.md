@@ -69,7 +69,7 @@ Run all four before calling a change done.
 |---|---|---|
 | `pnpm typecheck` | every workspace compiles | 33/33 |
 | `pnpm lint` | the ESLint baseline holds (`eslint.config.mjs`) | 18/18 |
-| `pnpm test` | all suites, one workspace at a time | 6 known failures — see below |
+| `pnpm test` | all suites, one workspace at a time | see below |
 | `pnpm build` | production build of every workspace | 18/18 |
 
 **One workspace or one file:**
@@ -79,7 +79,13 @@ pnpm --filter @jarvis/api exec vitest run
 pnpm --filter @jarvis/api exec vitest run test/access-log.test.ts
 ```
 
-**Known failures.** Six tests in `apps/api/test/sprint-1.1d-memory-e2e.test.ts` fail on every run, including in isolation. They are a real regression, not flakiness — see [CODEBASE_AUDIT.md](./CODEBASE_AUDIT.md), B-1. Any other failure is yours.
+**B-1 is fixed.** The six memory end-to-end tests that failed on every run pass since 2026-09-14; [MEMORY.md](./MEMORY.md) has the root cause. To check them:
+
+```bash
+pnpm --filter @jarvis/api exec vitest run test/sprint-1.1d-memory-e2e.test.ts -t "TEST (A|B|C|G|N):|TEST E & TEST F:"
+```
+
+On 2026-09-14 that command gave `6 passed | 7 skipped` in three consecutive runs, and the whole API suite passed 1,159 tests with 8 skipped. Both used the in-process memory store because Postgres was not running. Only the API and `@jarvis/memory` suites were re-run after the fix; no claim is made here about the other workspaces.
 
 **`@jarvis/db` tests** need the Postgres container running.
 

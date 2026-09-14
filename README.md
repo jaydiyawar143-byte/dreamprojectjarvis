@@ -64,7 +64,7 @@ Then follow [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md) for the database contai
 
 ## Status
 
-Typecheck, lint and build pass across all 18 workspaces, and 4,619 tests pass. Six memory end-to-end tests fail and are being diagnosed. There is no continuous integration yet. Details: [docs/CODEBASE_AUDIT.md](./docs/CODEBASE_AUDIT.md).
+Typecheck, lint and build pass across all 18 workspaces. B-1 — six memory end-to-end tests that failed on every run — is fixed: they pass, and the API suite passes 1,159 tests with 8 skipped. After that fix only the API and `@jarvis/memory` suites were re-run, and `@jarvis/db` needs Postgres. There is no continuous integration yet. Details: [docs/CODEBASE_AUDIT.md](./docs/CODEBASE_AUDIT.md).
 
 ## License
 

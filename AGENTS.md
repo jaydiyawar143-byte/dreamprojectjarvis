@@ -128,9 +128,10 @@ pnpm test
 pnpm build
 ```
 
-Six tests in `apps/api/test/sprint-1.1d-memory-e2e.test.ts` currently fail on
-every run (see `docs/CODEBASE_AUDIT.md`, B-1). Any other failure is caused by
-your change. `@jarvis/db` tests need the Postgres container running.
+The six memory end-to-end tests that used to fail on every run (B-1 in
+`docs/CODEBASE_AUDIT.md`) pass since 2026-09-14. `@jarvis/db` tests need the
+Postgres container running; they were not re-run for that fix, and the ledger
+last recorded 8 of them failing (inherited, not re-verified).
 
 ---
 

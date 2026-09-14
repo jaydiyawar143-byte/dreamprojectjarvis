@@ -419,7 +419,7 @@ The ESLint baseline is correctness-only by design (ledger R-14).
 
 | Id | What | Status | Evidence | In this cleanup |
 |---|---|---|---|---|
-| B-1 | 6 of 13 tests in `apps/api/test/sprint-1.1d-memory-e2e.test.ts` fail: system-prompt content and memory injection. The ledger calls this suite "flaky, 13/13 in isolation"; it fails identically in isolation on every run. | 🔴 BROKEN | **RUN** ×3, including with this branch's source edits reverted | **Not fixed** — debugging, not cleanup. Ledger corrected. |
+| B-1 | 6 of 13 tests in `apps/api/test/sprint-1.1d-memory-e2e.test.ts` fail: system-prompt content and memory injection. The ledger calls this suite "flaky, 13/13 in isolation"; it fails identically in isolation on every run. | 🔴 BROKEN | **RUN** ×3, including with this branch's source edits reverted | **Not fixed during the cleanup** — debugging, not cleanup; ledger corrected. **Resolved 2026-09-14** on `fix/b1-memory-e2e`; see Part 3 §5. |
 | B-2 | Four scratch scripts in `apps/api/` do not compile (18 TypeScript errors) and are excluded from every tsconfig | 🔴 BROKEN | **RUN** | Removed — Task 2 |
 | B-3 | 8 Postgres integration tests fail in `@jarvis/db` | 🔴 BROKEN | **INHERITED** | Not in scope |
 | B-4 | The live Google grant lacks the `adwords` scope, so Google Ads cannot work | 🔴 BROKEN | **INHERITED** | Needs a re-grant by you |
@@ -1364,7 +1364,7 @@ JARVIS/
 
 | Id | What | Next step |
 |---|---|---|
-| B-1 | 6 memory end-to-end tests fail deterministically | Diagnose root cause — ledger R-17 |
+| B-1 | **Resolved 2026-09-14** on `fix/b1-memory-e2e`. A test-harness race, not a memory defect: fire-and-forget extraction shared the suite's mock AI provider and overwrote the chat request the assertions read. Fix: extraction gets a non-recording view of the mock; test file only. The six tests passed three consecutive runs (6 passed, 7 skipped each); API suite 1,159 passed, 8 skipped; in-process store, not Postgres | None — command in `docs/MEMORY.md` |
 | B-3 | 8 `@jarvis/db` Postgres tests fail (inherited; not run) | Run with Postgres up, then diagnose |
 | B-4 | Live Google grant lacks the `adwords` scope | Re-grant |
 | I-29 | `data.csv.analyze` granted to two agents but never registered | D-6 |
