@@ -1,5 +1,3 @@
-export { MemoryManager } from "./memory-manager.js";
-export { KnowledgeBase } from "./knowledge-base.js";
 export { MemoryEngine } from "./memory-engine.js";
 export type { MemoryEngineConfig } from "./memory-engine.js";
 export { MemoryExtractionService } from "./memory-extraction-service.js";

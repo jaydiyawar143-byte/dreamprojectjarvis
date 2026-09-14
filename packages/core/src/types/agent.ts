@@ -64,15 +64,6 @@ export const AgentOutputSchema = z.object({
 
 export type AgentOutput = z.infer<typeof AgentOutputSchema>;
 
-/**
- * @deprecated Use IMemoryStore from @jarvis/core instead.
- * Kept for backward compatibility during migration.
- */
-export interface MemoryManager {
-  store(conversationId: string, content: string, metadata?: Record<string, unknown>): Promise<void>;
-  recall(conversationId: string, query: string, limit?: number): Promise<string[]>;
-}
-
 export interface ToolRegistry {
   get(toolId: string): ITool | undefined;
   getAll(): ITool[];
