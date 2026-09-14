@@ -518,7 +518,7 @@ If `OPENAI_API_KEY` is absent:
 - `OpenAIEmbeddingProvider` constructor throws.
 - All three (`memoryStore`, `embeddingProvider`, `memoryExtractor`) are set to `null`.
 - Orchestrator receives no memory config → falls back to noop internally.
-- Application still starts and serves non-memory requests normally.
+- **Correction (2026-09-14):** the application does not start. `container.ts` also constructs the chat `OpenAIAdapter`, which throws without the key — see `JARVIS_MASTER_AUDIT_AND_DEVELOPMENT_LEDGER.md`, R-21.
 
 ### Noop Store (Retained)
 

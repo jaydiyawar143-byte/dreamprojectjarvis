@@ -8,7 +8,7 @@ Setup, configuration and the checks a change must pass. Verified on 2026-09-14.
 
 | Tool | Version | Why |
 |---|---|---|
-| Node.js | 24 (or 22.22.2+) | `engines` in the root `package.json` says 20+, but jsdom 30, used by the tests, requires `^22.22.2` or `^24.15.0`. The production image still runs Node 20 — ledger R-19 |
+| Node.js | 24 (or 22.22.2+) | `engines` in the root `package.json` says 20+, but jsdom 30, used by the tests, requires `^22.22.2` or `^24.15.0`. The production image still runs Node 20; a Node 24 image passed the same container checks — ledger R-19 |
 | pnpm | 9 | the workspace package manager |
 | Docker | any recent | PostgreSQL **with pgvector** — a plain `postgres` image cannot run the migrations |
 | Chrome or Edge | installed | browser automation, and the `run-jarvis` driver |
@@ -85,9 +85,9 @@ pnpm --filter @jarvis/api exec vitest run test/access-log.test.ts
 pnpm --filter @jarvis/api exec vitest run test/sprint-1.1d-memory-e2e.test.ts -t "TEST (A|B|C|G|N):|TEST E & TEST F:"
 ```
 
-On 2026-09-14 that command gave `6 passed | 7 skipped` in three consecutive runs, and the whole API suite passed 1,159 tests with 8 skipped. Both used the in-process memory store because Postgres was not running. Only the API and `@jarvis/memory` suites were re-run after the fix. The full repository suite and the Postgres-backed tests remain unverified.
+On 2026-09-14 that command gave `6 passed | 7 skipped` in three consecutive runs, and the whole API suite passed 1,159 tests with 8 skipped. Both used the in-process memory store because Postgres was not running. Only the API and `@jarvis/memory` suites were re-run after the fix; the file has since also passed 13/13 against Postgres. The full repository suite remains unverified.
 
-**`@jarvis/db` tests** need the Postgres container running.
+**`@jarvis/db` tests** need PostgreSQL with pgvector. Point `DATABASE_URL` at a separate test database, never the development one: the tests insert and delete rows. On 2026-09-14 they gave 188 passed / 8 failed. The 8 are known — 7 test bugs and 1 stale test, classified in the ledger (R-4). One more test, `phase102` crash recovery, failed once in seven runs; its cause is not established. A fresh database migrates cleanly since `39b190d` (R-22).
 
 **On a fresh Windows clone**, `apps/api/test/google-write-reachability.test.ts` fails because Git converts line endings to CRLF. It is a false failure — ledger R-20.
 

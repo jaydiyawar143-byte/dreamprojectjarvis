@@ -64,7 +64,7 @@ Then follow [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md) for the database contai
 
 ## Status
 
-Typecheck, lint and build pass across all 18 workspaces. B-1 — six memory end-to-end tests that failed on every run — is fixed. It was a test-harness race, not a production memory bug. The six tests pass, and the API suite passes 1,159 tests with 8 skipped. The full repository suite and the Postgres-backed tests have not been run since the fix. A CI workflow is defined (`.github/workflows/ci.yml`) but has not run on GitHub yet. Details: [docs/CODEBASE_AUDIT.md](./docs/CODEBASE_AUDIT.md).
+Typecheck, lint and build pass across all 18 workspaces. B-1 — six memory end-to-end tests that failed on every run — is fixed. It was a test-harness race, not a production memory bug. The six tests pass, and the API suite passes 1,159 tests with 8 skipped. Since then the Postgres-backed tests have run: `@jarvis/db` 188 passed / 8 failed, the 8 classified as 7 test bugs and 1 stale test (ledger R-4). The full repository suite has not been run. Since 2026-09-14 the production image builds and a fresh database migrates (ledger R-22, R-23). A CI workflow is defined (`.github/workflows/ci.yml`) but has not run on GitHub yet. Details: [docs/CODEBASE_AUDIT.md](./docs/CODEBASE_AUDIT.md).
 
 ## License
 

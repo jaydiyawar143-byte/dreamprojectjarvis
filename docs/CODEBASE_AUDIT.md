@@ -1366,11 +1366,11 @@ JARVIS/
 
 | Id | What | Next step |
 |---|---|---|
-| B-1 | **Resolved 2026-09-14** on `fix/b1-memory-e2e`. A test-harness race, not a production memory bug: fire-and-forget extraction shared the suite's mock AI provider and overwrote the chat request the assertions read. Fix: extraction gets a non-recording view of the mock; test file only. The six tests passed three consecutive runs (6 passed, 7 skipped each); API suite 1,159 passed, 8 skipped; in-process store. Not verified: the Postgres-backed tests and the full repository suite | None — command in `docs/MEMORY.md` |
-| B-3 | 8 `@jarvis/db` Postgres tests fail (inherited; not run) | Run with Postgres up, then diagnose |
+| B-1 | **Resolved 2026-09-14** on `fix/b1-memory-e2e`. A test-harness race, not a production memory bug: fire-and-forget extraction shared the suite's mock AI provider and overwrote the chat request the assertions read. Fix: extraction gets a non-recording view of the mock; test file only. The six tests passed three consecutive runs (6 passed, 7 skipped each); API suite 1,159 passed, 8 skipped; in-process store, and 13/13 against Postgres in three runs. Not verified: the full repository suite | None — command in `docs/MEMORY.md` |
+| B-3 | 8 `@jarvis/db` Postgres tests fail. **Classified 2026-09-14:** 7 test bugs, 1 stale test, no product bug — ledger §8.2, R-4 | Fix the tests |
 | B-4 | Live Google grant lacks the `adwords` scope | Re-grant |
 | I-29 | `data.csv.analyze` granted to two agents but never registered | D-6 |
-| — | API and web boot not verified in this session | Start Docker, then `node .claude/skills/run-jarvis/driver.mjs up` and `smoke` |
+| — | API and web boot not verified in this session. **Verified 2026-09-14 in containers** with a test environment and a placeholder OpenAI key (ledger R-19, R-23); not with the `run-jarvis` driver | The API needs `OPENAI_API_KEY` to start (R-21) |
 
 ## 6. Duplicate functionality
 
@@ -1392,6 +1392,8 @@ There is now exactly one memory runtime path, one database client, one JWT verif
 | SEC-6 | Per-process confirmation store and IP limiter | Informational, by design | Sticky sessions if ever scaled out |
 
 **Resolved in this cleanup:** SEC-2 (access log), SEC-3 (confirmation hash), SEC-4 (template), and SEC-1 in part — no longer tracked, purged from history and from GitHub `main`.
+
+**Resolved after the cleanup:** a Docker build from the repository root sent `.env` files and a database dump to Docker, and would have put two `.env` files into the runtime image (`a79a094`, ledger R-23).
 
 ## 8. Environment variables — names only
 

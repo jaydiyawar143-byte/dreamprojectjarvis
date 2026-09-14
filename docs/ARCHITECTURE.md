@@ -110,3 +110,4 @@ One Docker image (`node:20-alpine`, runs as the `node` user) serves both the API
 - `MemoryEngine` is tested and not used at runtime.
 - Five tool classes are tested but never registered — including `data.csv.analyze`, which two agents are granted. See [SKILLS.md](./SKILLS.md).
 - CI has not run on GitHub yet, and it does not cover the Postgres-backed tests, `typecheck:tests` (ledger R-18), the other workspaces' tests, or secret scanning — [DEVELOPMENT.md](./DEVELOPMENT.md).
+- The API does not start without `OPENAI_API_KEY`, although its memory code is written to run without it — ledger R-21.

@@ -58,7 +58,7 @@ All vector writes and searches use parameterised raw SQL, because Prisma cannot 
 
 ## When OpenAI is not configured
 
-Without `OPENAI_API_KEY` the container logs `memory_disabled`, no store or extractor is created, and the orchestrator runs with a no-op memory store. Chat still works; nothing is remembered.
+The memory wiring is written to run without `OPENAI_API_KEY`: no store or extractor is created, and the orchestrator gets a no-op memory store. **The API does not get that far.** `apps/api/src/services/container.ts` constructs the chat `OpenAIAdapter` unconditionally (line 761), its constructor throws `OpenAI API key is required`, and the process exits. Verified on 2026-09-14 in the production container on Node 20 and Node 24 — ledger R-21. Until that is decided, treat the key as required.
 
 ## Not part of the runtime
 
@@ -81,4 +81,4 @@ Six of the thirteen tests in `apps/api/test/sprint-1.1d-memory-e2e.test.ts` used
 pnpm --filter @jarvis/api exec vitest run test/sprint-1.1d-memory-e2e.test.ts -t "TEST (A|B|C|G|N):|TEST E & TEST F:"
 ```
 
-`6 passed | 7 skipped` in each of three consecutive runs. The whole file passed 13 of 13, the four API memory suites 58 of 58, and `@jarvis/memory` 453 of 453. **Not verified since the fix:** the Postgres-backed tests, and the full repository suite — only the API and `@jarvis/memory` suites were re-run.
+`6 passed | 7 skipped` in each of three consecutive runs. The whole file passed 13 of 13, the four API memory suites 58 of 58, and `@jarvis/memory` 453 of 453. On 2026-09-14 the file also passed 13 of 13 in three runs against Postgres, on a dedicated test database (`memory backend: prisma-memory`). **Not verified since the fix:** the full repository suite.
