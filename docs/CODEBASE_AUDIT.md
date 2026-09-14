@@ -1229,7 +1229,7 @@ Expected: no `BROKEN` lines; no credential-shaped strings.
 
 # Part 3 — Cleanup Results
 
-**Executed:** 2026-09-14, on `feat/p1-3-eslint`, inline in one session. Committed as eight commits on that branch after the owner approved committing; **not pushed**.
+**Executed:** 2026-09-14, on `feat/p1-3-eslint`, inline in one session. Committed as eight commits on that branch after the owner approved committing; the branch is **not pushed**. `main` was force-pushed once, only to purge the database dump (SEC-1).
 
 ## Verification after cleanup — RUN
 
@@ -1383,13 +1383,13 @@ There is now exactly one memory runtime path, one database client, one JWT verif
 
 | Id | Issue | Severity | Owner action |
 |---|---|---|---|
-| SEC-1 / R-16 | Database dump with password hashes and personal data still in git history on GitHub | **Critical** | D-1: purge history, force-push, reset the 6 real accounts, revoke refresh tokens; confirm repository visibility |
+| SEC-1 / R-16 | Purged from local history and from GitHub `main` (`ec2e895` → `a0ed04f`, verified), but GitHub still serves the old commits through `refs/pull/1`–`3`, which no push can change | **High** — the repository is private | Send the GitHub Support purge request; reset the passwords of the 6 accounts and revoke their refresh tokens; re-clone any other copy |
 | SEC-7 | No CI, so no automated secret scanning | Medium | Add CI |
 | SEC-8 | Lint has no security rules | Low | Ratchet rules (R-14) |
 | SEC-5 | Real account identifiers in `apps/api/scripts/phase116b/state.json` | Informational | Mask if preferred |
 | SEC-6 | Per-process confirmation store and IP limiter | Informational, by design | Sticky sessions if ever scaled out |
 
-**Resolved in this cleanup:** SEC-2 (access log), SEC-3 (confirmation hash), SEC-4 (template), SEC-1 partially (no longer tracked).
+**Resolved in this cleanup:** SEC-2 (access log), SEC-3 (confirmation hash), SEC-4 (template), and SEC-1 in part — no longer tracked, purged from history and from GitHub `main`.
 
 ## 8. Environment variables — names only
 
@@ -1433,9 +1433,9 @@ How **USER → UI → API → JARVIS CORE → SKILL → TOOL / INTEGRATION → R
 
 Not implemented. In order:
 
-1. **D-1 — purge the database dump** from git history and reset the six affected accounts. This outranks everything else.
+1. **Finish D-1.** History and GitHub `main` were purged on 2026-09-14. Still to do: the GitHub Support request for `refs/pull/1`–`3`, the six password resets, then deleting the local pre-purge bundle.
 2. **Review and merge** `feat/p1-3-eslint`. Its eight commits exist only locally.
-3. **Once D-1 is complete on GitHub**, delete any local backup that still contains the dump.
+3. **Re-clone any other copy** of this repository. Its history no longer matches GitHub and still contains the dump.
 4. **Diagnose B-1** — the six failing memory end-to-end tests — before any new memory work.
 5. **Add CI** running typecheck, lint, build, tests and a secret scan on every push.
 6. **Decide D-2, D-3, D-4 and D-6** — hero preview, Anthropic adapter, `MemoryEngine`, unregistered tools.
