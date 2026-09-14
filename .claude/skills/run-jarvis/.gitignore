@@ -4,3 +4,8 @@ screenshots/
 logs/
 .driver-state.json
 package-lock.json
+
+# Database dumps taken while driving the stack. They contain real user rows —
+# emails, password hashes, IP addresses, chat history — and must never be
+# committed. Keep them local.
+backups/
