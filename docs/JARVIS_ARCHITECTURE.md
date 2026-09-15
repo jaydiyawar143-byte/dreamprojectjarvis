@@ -489,6 +489,12 @@ Previous documentation listed `META_APP_ID`, `META_APP_SECRET`, `REDIS_URL` and 
 The accurate, complete list of variable names is `.env.example` at the repository root.
 Evidence: `git grep` for each name finds no reader — see `docs/CODEBASE_AUDIT.md` §6.
 
+### Correction (added 2026-09-15)
+
+Previous documentation listed `OPENAI_API_KEY` as required in every environment. This is no longer accurate.
+It is required in production: `checkProductionConfig` refuses to start a production process without it or with the `.env.example` placeholder. A development API starts without it, and chat answers 503 `AI_PROVIDER_NOT_CONFIGURED`.
+Evidence: `packages/config/src/index.ts` (`checkProductionConfig`, `isOpenAIConfigured`); `apps/api/src/services/container.ts`; ledger R-21.
+
 ---
 
 ## Sprint 1.1A — Persistent Memory Wiring (2026-08-27)
@@ -519,6 +525,7 @@ If `OPENAI_API_KEY` is absent:
 - All three (`memoryStore`, `embeddingProvider`, `memoryExtractor`) are set to `null`.
 - Orchestrator receives no memory config → falls back to noop internally.
 - **Correction (2026-09-14):** the application does not start. `container.ts` also constructs the chat `OpenAIAdapter`, which throws without the key — see `JARVIS_MASTER_AUDIT_AND_DEVELOPMENT_LEDGER.md`, R-21.
+- **Correction (added 2026-09-15):** R-21 is fixed. Without the key a development API now starts: the agents get `NotConfiguredAIProvider` and chat answers 503 `AI_PROVIDER_NOT_CONFIGURED`, with memory disabled as described above. A production process refuses to start without the key. Evidence: `apps/api/src/services/container.ts`, `apps/api/test/container-ai-provider.test.ts`.
 
 ### Noop Store (Retained)
 

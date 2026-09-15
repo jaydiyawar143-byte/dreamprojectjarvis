@@ -65,7 +65,13 @@ const baseEnvSchema = z.object({
 });
 
 const serverEnvSchema = baseEnvSchema.extend({
-  OPENAI_API_KEY: z.string().startsWith("sk-").optional(),
+  // R-21 — a blank or whitespace-only value means "not set". A `.env` line
+  // with nothing after the `=` used to fail the `sk-` check and stop the API
+  // from starting over a value that was simply absent.
+  OPENAI_API_KEY: z.preprocess(
+    (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
+    z.string().startsWith("sk-").optional()
+  ),
   OPENAI_DEFAULT_MODEL: z.string().default("gpt-4o"),
   OPENAI_EMBEDDING_MODEL: z.string().default("text-embedding-3-small"),
   OPENAI_TIMEOUT_MS: z.coerce.number().default(30000),
@@ -155,6 +161,14 @@ const PUBLISHED_SECRETS: readonly string[] = [
   "test",
 ];
 
+/**
+ * The OpenAI key placeholder committed in `.env.example`.
+ *
+ * It starts with "sk-", so the schema accepts it. A production process running
+ * on it would start cleanly and then fail every conversation at OpenAI.
+ */
+const PUBLISHED_OPENAI_KEYS: readonly string[] = ["sk-your-openai-api-key"];
+
 /** Rough entropy check: a long run of one repeated character is not a secret. */
 function looksLikePlaceholder(secret: string): boolean {
   const normalized = secret.trim().toLowerCase();
@@ -188,6 +202,21 @@ export function checkProductionConfig(
     problems.push({
       field: "JWT_SECRET",
       problem: "is a published placeholder or has too little entropy for production",
+    });
+  }
+
+  // R-21 — every conversation goes through OpenAI. Development may run without
+  // the key and answers chat with AI_PROVIDER_NOT_CONFIGURED; production must
+  // refuse to start instead, by name, before anything is wired.
+  if (!isOpenAIConfigured(env)) {
+    problems.push({
+      field: "OPENAI_API_KEY",
+      problem: "is required in production",
+    });
+  } else if (PUBLISHED_OPENAI_KEYS.includes(env.OPENAI_API_KEY!.trim())) {
+    problems.push({
+      field: "OPENAI_API_KEY",
+      problem: "is the placeholder from .env.example, not a real key",
     });
   }
 
@@ -228,6 +257,18 @@ export function checkProductionConfig(
   }
 
   return problems;
+}
+
+/**
+ * R-21 — whether the server has an OpenAI key at all.
+ *
+ * Blank and whitespace-only values count as unset, the same rule the schema
+ * applies. The composition root reads this to choose between the real chat
+ * adapter and the provider that explains chat is off; the production check
+ * above reads it to refuse to start.
+ */
+export function isOpenAIConfigured(env: NodeJS.ProcessEnv = process.env): boolean {
+  return Boolean(env.OPENAI_API_KEY?.trim());
 }
 
 export function getServerEnv(): ServerEnv {

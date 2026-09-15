@@ -314,7 +314,7 @@ Functionality was compared by behaviour, not by name.
 | Two `isWidgetId` | 🟢 not a duplicate | Different id sets. **RUN** | Keep |
 | Two `/capabilities` endpoints | 🟢 not a duplicate | Different purposes. **READ** | Keep; documented in `docs/API.md` |
 | `redactSensitiveInfo` in google-ads, n8n, whatsapp vs core `redactSecrets` | 🟢 not a duplicate | Provider-specific token patterns. **READ** | Keep |
-| `calculateRetryDelay` / `executeWithRetry` in ai-openai and ai-anthropic | 🟡 near-identical | Differ only in the error classifier and key pattern. **RUN** `diff` | Keep until D-3 decides `ai-anthropic` |
+| `calculateRetryDelay` / `executeWithRetry` in ai-openai and ai-anthropic | 🟡 near-identical | Differ only in the error classifier and key pattern. **RUN** `diff` | Keep until D-3 decides `ai-anthropic`. **Update 2026-09-15:** both now delegate to `runWithRetry` in `@jarvis/core` (ledger R-26); only the classifiers remain per package |
 | `buildBaseUrl` in meta-graph and whatsapp | 🟡 same three-line shape | Different hosts and config types. **READ** | Keep — sharing it would add a cross-package dependency for three lines |
 | `validateDateRange` in google-ads-tools and meta-ads-validators | 🟢 not a duplicate | Different signatures and contracts. **READ** | Keep |
 | Per-provider `toJarvisError`, `extractError`, `isSuccessResponse` | 🟢 pattern | One adapter per provider. **READ** | Keep |
@@ -1370,13 +1370,13 @@ JARVIS/
 | B-3 | 8 `@jarvis/db` Postgres tests fail. **Classified 2026-09-14:** 7 test bugs, 1 stale test, no product bug — ledger §8.2, R-4 | Fix the tests |
 | B-4 | Live Google grant lacks the `adwords` scope | Re-grant |
 | I-29 | `data.csv.analyze` granted to two agents but never registered | D-6 |
-| — | API and web boot not verified in this session. **Verified 2026-09-14 in containers** with a test environment and a placeholder OpenAI key (ledger R-19, R-23); not with the `run-jarvis` driver | The API needs `OPENAI_API_KEY` to start (R-21) |
+| — | API and web boot not verified in this session. **Verified 2026-09-14 in containers** with a test environment and a placeholder OpenAI key (ledger R-19, R-23); not with the `run-jarvis` driver | The API needs `OPENAI_API_KEY` to start (R-21). **Update 2026-09-15:** R-21 resolved — a development API starts without the key and chat answers 503; production refuses to start without it |
 
 ## 6. Duplicate functionality
 
 **Removed:** the weaker parameter hash; `motion` beside `framer-motion`.
 **Removed after approval:** the non-functional `MemoryManager` and `KnowledgeBase` stubs, with their two stray `new OpenAI()` clients, and the extra `PrismaClient`s in the scratch scripts.
-**Remaining by decision:** `MemoryEngine` alongside the runtime chain (D-4); near-identical retry helpers in `ai-openai` and `ai-anthropic` (tied to D-3); the three-line `buildBaseUrl` in `meta-graph` and `whatsapp` (sharing it would cost more than it saves).
+**Remaining by decision:** `MemoryEngine` alongside the runtime chain (D-4); near-identical retry helpers in `ai-openai` and `ai-anthropic` (tied to D-3; **updated 2026-09-15:** the retry logic now exists once, in `@jarvis/core`, and only the two classifiers remain); the three-line `buildBaseUrl` in `meta-graph` and `whatsapp` (sharing it would cost more than it saves).
 **Confirmed not duplicates:** the two `isWidgetId`, the two `/capabilities` endpoints, the two `.env` loaders, the provider-specific redactors.
 
 There is now exactly one memory runtime path, one database client, one JWT verifier, and no AI client outside its adapter package.
@@ -1399,7 +1399,7 @@ There is now exactly one memory runtime path, one database client, one JWT verif
 
 | Group | Names |
 |---|---|
-| **Required** | `DATABASE_URL`, `JWT_SECRET`, `OPENAI_API_KEY` |
+| **Required** | `DATABASE_URL`, `JWT_SECRET`, `OPENAI_API_KEY` (**updated 2026-09-15:** in production only; a development API starts without it — R-21) |
 | Application | `NODE_ENV`, `API_PORT`, `PORT`, `CORS_ORIGIN`, `OPENAI_EMBEDDING_MODEL` |
 | Google OAuth and Ads | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI`, `GOOGLE_ADS_DEVELOPER_TOKEN`, `GOOGLE_ADS_LOGIN_CUSTOMER_ID` |
 | Encryption at rest | `JARVIS_ENCRYPTION_KEY`, `JARVIS_ENCRYPTION_KEY_VERSION`, `JARVIS_ENCRYPTION_KEY_RETIRED` |

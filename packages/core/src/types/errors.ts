@@ -6,6 +6,10 @@ export const ErrorCodeSchema = z.enum([
   "INVALID_REQUEST",
   "AGENT_NOT_FOUND",
   "AGENT_ERROR",
+  "AI_PROVIDER_NOT_CONFIGURED",
+  "AI_PROVIDER_AUTH_FAILED",
+  "AI_PROVIDER_UNAVAILABLE",
+  "CONTEXT_LENGTH_EXCEEDED",
   "TOOL_NOT_FOUND",
   "TOOL_EXECUTION_FAILED",
   "TOOL_PLAN_INVALID",
@@ -39,6 +43,17 @@ const ERROR_STATUS_MAP: Record<ErrorCode, number> = {
   INVALID_REQUEST: 400,
   AGENT_NOT_FOUND: 404,
   AGENT_ERROR: 500,
+  // R-21 — the server has no key for the model provider. A deployment state,
+  // not a failed request: the fix is configuration and a restart.
+  AI_PROVIDER_NOT_CONFIGURED: 503,
+  // R-29 — the provider rejected the SERVER's key. Configuration, like the one
+  // above, and deliberately not 401: a 401 tells the browser the user's own
+  // session expired, and it refreshes and resends.
+  AI_PROVIDER_AUTH_FAILED: 503,
+  // R-27 — the adapter's circuit is open and the provider was not called.
+  AI_PROVIDER_UNAVAILABLE: 503,
+  // R-25 — this conversation no longer fits the model's context window.
+  CONTEXT_LENGTH_EXCEEDED: 413,
   TOOL_NOT_FOUND: 404,
   TOOL_EXECUTION_FAILED: 500,
   TOOL_PLAN_INVALID: 400,

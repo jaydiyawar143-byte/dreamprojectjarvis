@@ -58,7 +58,13 @@ All vector writes and searches use parameterised raw SQL, because Prisma cannot 
 
 ## When OpenAI is not configured
 
-The memory wiring is written to run without `OPENAI_API_KEY`: no store or extractor is created, and the orchestrator gets a no-op memory store. **The API does not get that far.** `apps/api/src/services/container.ts` constructs the chat `OpenAIAdapter` unconditionally (line 761), its constructor throws `OpenAI API key is required`, and the process exits. Verified on 2026-09-14 in the production container on Node 20 and Node 24 — ledger R-21. Until that is decided, treat the key as required.
+A missing, blank or whitespace-only `OPENAI_API_KEY` counts as not set.
+
+**Development:** the API starts. No memory store, embedding provider, extractor or knowledge retriever is created, and the orchestrator falls back to its no-op memory store. The agents receive `NotConfiguredAIProvider` (`packages/ai-openai/src/not-configured-provider.ts`) instead of `OpenAIAdapter`, so every chat message answers HTTP 503 with `AI_PROVIDER_NOT_CONFIGURED`, and startup logs `ai_provider_disabled`. Knowledge search and image understanding answer 503, as they already did.
+
+**Production:** `checkProductionConfig` (`packages/config/src/index.ts`) refuses to start a `NODE_ENV=production` process without the key, or with the `.env.example` placeholder.
+
+Until 2026-09-15 the API never reached the memory wiring without a key: `apps/api/src/services/container.ts` constructed the chat `OpenAIAdapter` unconditionally, its constructor threw, and the process exited (verified 2026-09-14 in the production container on Node 20 and Node 24). Fixed under ledger R-21.
 
 ## Not part of the runtime
 

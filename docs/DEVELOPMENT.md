@@ -36,7 +36,9 @@ Nothing reads `.env.local`, `.env.development` or `.env.production` at the root 
 pnpm install
 
 cp .env.example .env
-# Fill in DATABASE_URL, JWT_SECRET (32+ characters) and OPENAI_API_KEY.
+# Fill in DATABASE_URL and JWT_SECRET (32+ characters). Add OPENAI_API_KEY for
+# chat, memory and document search: without it the API still starts, but chat
+# answers 503 AI_PROVIDER_NOT_CONFIGURED. Production refuses to start without it.
 # Then create packages/db/.env containing the same DATABASE_URL.
 
 docker run -d --name jarvis-postgres \

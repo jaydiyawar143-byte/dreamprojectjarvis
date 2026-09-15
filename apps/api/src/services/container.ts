@@ -1,4 +1,4 @@
-import type { IOrchestrator, IToolExecutor, ITool, AIToolDefinition, ShutdownLifecycle, IMemoryStore, IEmbeddingProvider, IKnowledgeRetriever } from "@jarvis/core";
+import type { IOrchestrator, IToolExecutor, ITool, AIToolDefinition, ShutdownLifecycle, IMemoryStore, IEmbeddingProvider, IKnowledgeRetriever, IAIProvider } from "@jarvis/core";
 import type { TokenService } from "@jarvis/security";
 import type { IMemoryExtractor } from "@jarvis/core";
 import {
@@ -26,7 +26,8 @@ import {
   createWeatherPort,
 } from "./ambient-adapter.js";
 import { MapsUsageGuard, resolveMonthlyLimit, setMapsUsageGuard } from "./maps-usage-guard.js";
-import { OpenAIAdapter, OpenAIEmbeddingProvider } from "@jarvis/ai-openai";
+import { OpenAIAdapter, OpenAIEmbeddingProvider, NotConfiguredAIProvider } from "@jarvis/ai-openai";
+import { isOpenAIConfigured } from "@jarvis/config";
 import {
   ToolExecutor,
   ToolRegistry,
@@ -758,7 +759,22 @@ export function getContainer(options?: {
   );
   registryRef.current = toolRegistry;
 
-  const adapter = new OpenAIAdapter();
+  // R-21 — the adapter's constructor throws without a key, and this line used
+  // to run unconditionally, so a server without one never opened its port. The
+  // stand-in answers every conversation with AI_PROVIDER_NOT_CONFIGURED
+  // instead. Production cannot get here without a key: `checkProductionConfig`
+  // refuses to start it.
+  const openAIConfigured = isOpenAIConfigured();
+  const adapter: IAIProvider = openAIConfigured
+    ? new OpenAIAdapter()
+    : new NotConfiguredAIProvider();
+  if (!openAIConfigured) {
+    console.log(JSON.stringify({
+      level: "warn",
+      event: "ai_provider_disabled",
+      reason: "OPENAI_API_KEY is not set",
+    }));
+  }
 
   const { definitions: agentTools, sanitizedToOriginal } = convertToolsToAIToolDefinitions(toolRegistry.getAll());
 
@@ -1034,8 +1050,9 @@ export function getContainer(options?: {
   // ---------------------------------------------------------------------------
   // Sprint 1.1A — Persistent Memory Store Wiring
   // Wire PrismaMemoryRepository → MemoryExtractionService → Orchestrator.
-  // Graceful degradation: if OPENAI_API_KEY is absent, memory is disabled but
-  // the application still starts (matches the existing Meta credentials pattern).
+  // Graceful degradation: without OPENAI_API_KEY memory is disabled and the
+  // application still starts. That was not true until R-21: the chat adapter
+  // above threw first, so the process exited before reaching this block.
   // ---------------------------------------------------------------------------
 
   let memoryStore: IMemoryStore | null = null;
@@ -1043,6 +1060,13 @@ export function getContainer(options?: {
   let memoryExtractor: IMemoryExtractor | null = null;
 
   try {
+    // A whitespace-only key would still construct the embedding provider
+    // below, and every recall would then fail at OpenAI. It counts as absent,
+    // the same rule the chat provider above follows.
+    if (!openAIConfigured) {
+      throw new Error("OPENAI_API_KEY is not set");
+    }
+
     // PrismaMemoryRepository is always safe to instantiate — no API key needed.
     memoryStore = new PrismaMemoryRepository(prisma);
 

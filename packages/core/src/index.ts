@@ -12,6 +12,9 @@ export * from "./surface-registry.js";
 export * from "./surface-intent.js";
 export * from "./surface-decision.js";
 export * from "./types/errors.js";
+// R-26 / R-27 — shared by the model-provider adapters.
+export * from "./provider-retry.js";
+export * from "./provider-circuit-breaker.js";
 export * from "./types/streaming.js";
 export * from "./types/execution.js";
 export * from "./types/orchestrator.js";

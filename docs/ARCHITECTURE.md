@@ -110,4 +110,8 @@ One Docker image (`node:20-alpine`, runs as the `node` user) serves both the API
 - `MemoryEngine` is tested and not used at runtime.
 - Five tool classes are tested but never registered — including `data.csv.analyze`, which two agents are granted. See [SKILLS.md](./SKILLS.md).
 - CI has not run on GitHub yet, and it does not cover the Postgres-backed tests, `typecheck:tests` (ledger R-18), the other workspaces' tests, or secret scanning — [DEVELOPMENT.md](./DEVELOPMENT.md).
-- The API does not start without `OPENAI_API_KEY`, although its memory code is written to run without it — ledger R-21.
+- Without `OPENAI_API_KEY` a development API runs with chat switched off: every message answers 503 `AI_PROVIDER_NOT_CONFIGURED`, while `GET /api/v1/agents` still lists the agents. Production refuses to start without the key — ledger R-21.
+- An agent stays in service after a missing key, a timeout, a rate limit, a 5xx, an open provider circuit, an exceeded context window or a cancelled call. An invalid key, a key without access, a rejected model or request, and any unexpected error still leave it in `error`, and the orchestrator does not select it again until the process restarts — ledger R-24, R-25.
+- The OpenAI adapter retries transient failures within a bounded policy (`packages/core/src/provider-retry.ts`) and refuses calls for 30 seconds after 5 consecutive transient failures (`provider-circuit-breaker.ts`). The circuit is in memory, one per adapter, so one per process and shared by every user — ledger R-26, R-27.
+- The conversation history sent to the model is never trimmed or summarised. A conversation that outgrows the context window answers 413 `CONTEXT_LENGTH_EXCEEDED` until the user starts a new one — ledger R-25.
+- `@jarvis/ai-anthropic` classifies its failures under the same contract and has adapter-level tests, but is still not wired (D-3) — ledger R-28.

@@ -214,6 +214,111 @@ describe("API Client", () => {
     });
   });
 
+  // -------------------------------------------------------------------------
+  // R-29 — when the client refreshes the session and resends.
+  //
+  // The API answers 401 only from its authentication middleware, before any
+  // handler runs, so a single resend after a successful refresh cannot repeat
+  // a side effect. Every other failure — including a provider key the server
+  // got wrong, which is now 503 AI_PROVIDER_AUTH_FAILED — is returned as-is,
+  // sent exactly once.
+  // -------------------------------------------------------------------------
+  describe("R-29 — authentication retry", () => {
+    const respond = (status: number, body: ApiResponse) => ({
+      ok: status < 400,
+      status,
+      json: async () => body,
+    });
+    const urls = () => mockFetch.mock.calls.map((call) => String(call[0]));
+    const chatCalls = () => urls().filter((url) => url.endsWith("/chat")).length;
+    const refreshCalls = () => urls().filter((url) => url.includes("/auth/refresh")).length;
+
+    it("an expired session is refreshed once and the request resent once", async () => {
+      setAccessToken("expired-token");
+      mockFetch
+        .mockResolvedValueOnce(respond(401, mockError("AUTHENTICATION_REQUIRED", "Invalid or expired token")))
+        .mockResolvedValueOnce(respond(200, mockSuccess({ accessToken: "fresh-token" })))
+        .mockResolvedValueOnce(respond(200, mockSuccess({ message: "Hello", conversationId: "c1" })));
+
+      const res = await sendChatMessage("hello");
+
+      expect(res.success).toBe(true);
+      expect(refreshCalls()).toBe(1);
+      expect(chatCalls()).toBe(2);
+      const retryHeaders = mockFetch.mock.calls[2]![1]?.headers as Record<string, string>;
+      expect(retryHeaders.Authorization).toBe("Bearer fresh-token");
+    });
+
+    it("a second 401 after the refresh is returned, not refreshed again", async () => {
+      setAccessToken("expired-token");
+      mockFetch
+        .mockResolvedValueOnce(respond(401, mockError("AUTHENTICATION_REQUIRED", "Invalid or expired token")))
+        .mockResolvedValueOnce(respond(200, mockSuccess({ accessToken: "fresh-token" })))
+        .mockResolvedValueOnce(respond(401, mockError("AUTHENTICATION_REQUIRED", "Invalid or expired token")));
+
+      const res = await sendChatMessage("hello");
+
+      expect(res.success).toBe(false);
+      expect(mockFetch).toHaveBeenCalledTimes(3);
+      expect(refreshCalls()).toBe(1);
+      expect(chatCalls()).toBe(2);
+    });
+
+    it.each([
+      [
+        "a provider that rejects the server's API key",
+        503,
+        "AI_PROVIDER_AUTH_FAILED",
+        "The AI provider rejected this server's API key. An administrator needs to check the OpenAI API key and restart the API.",
+      ],
+      [
+        "a server with no provider configured",
+        503,
+        "AI_PROVIDER_NOT_CONFIGURED",
+        "AI chat is not configured on this server. An administrator needs to set the OpenAI API key and restart the API.",
+      ],
+      ["a provider that is temporarily unavailable", 503, "AI_PROVIDER_UNAVAILABLE", "The AI service is temporarily unavailable."],
+      ["a conversation too long for the model", 413, "CONTEXT_LENGTH_EXCEEDED", "This conversation is too long for the AI model."],
+      ["a permission failure", 403, "AUTHORIZATION_FAILED", "Your role is not permitted to use this agent"],
+    ])("%s: sent once, no session refresh, the application error returned as-is", async (_label, status, code, message) => {
+      setAccessToken("valid-token");
+      mockFetch.mockResolvedValueOnce(respond(status, mockError(code, message)));
+
+      const res = await sendChatMessage("hello");
+
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      expect(res.error).toEqual({ code, message });
+      expect(getAccessToken()).toBe("valid-token");
+    });
+
+    it("a network failure is reported once, without a session refresh", async () => {
+      setAccessToken("valid-token");
+      mockFetch.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+
+      const res = await sendChatMessage("hello");
+
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      expect(res.error?.code).toBe("NETWORK_ERROR");
+      expect(getAccessToken()).toBe("valid-token");
+    });
+
+    it("each new request gets its own single refresh", async () => {
+      setAccessToken("expired-token");
+
+      for (const turn of [1, 2]) {
+        mockFetch
+          .mockResolvedValueOnce(respond(401, mockError("AUTHENTICATION_REQUIRED", "Invalid or expired token")))
+          .mockResolvedValueOnce(respond(200, mockSuccess({ accessToken: `fresh-${turn}` })))
+          .mockResolvedValueOnce(respond(200, mockSuccess({ message: "ok", conversationId: "c1" })));
+
+        expect((await sendChatMessage(`turn ${turn}`)).success).toBe(true);
+      }
+
+      expect(refreshCalls()).toBe(2);
+      expect(chatCalls()).toBe(4);
+    });
+  });
+
   describe("Logout", () => {
     it("13. Logout revokes server-side and clears tokens", async () => {
       setAccessToken("token");

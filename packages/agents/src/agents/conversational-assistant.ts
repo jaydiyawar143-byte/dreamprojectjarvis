@@ -136,7 +136,7 @@ export class ConversationalAssistant extends BaseAgent {
         },
       };
     } catch (error) {
-      this.status = "error";
+      this.status = this.statusAfterFailure(error);
       throw error;
     }
   }

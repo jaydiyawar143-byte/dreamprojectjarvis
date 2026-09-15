@@ -395,6 +395,15 @@ function mapErrorCode(code?: string): number {
     case "CONVERSATION_NOT_FOUND": return 404;
     case "RATE_LIMITED": return 429;
     case "AGENT_ERROR": return 500;
+    // R-21 — no OpenAI key on this server: unavailable, not broken.
+    case "AI_PROVIDER_NOT_CONFIGURED": return 503;
+    // R-29 — the provider rejected the SERVER's key. Never 401: the browser
+    // would take it for an expired session, refresh and resend the message.
+    case "AI_PROVIDER_AUTH_FAILED": return 503;
+    // R-27 — the provider circuit is open.
+    case "AI_PROVIDER_UNAVAILABLE": return 503;
+    // R-25 — this conversation no longer fits the model's context window.
+    case "CONTEXT_LENGTH_EXCEEDED": return 413;
     default: return 500;
   }
 }

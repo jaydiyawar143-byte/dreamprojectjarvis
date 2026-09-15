@@ -618,10 +618,12 @@ describe("Claude Adapter Message Converter", () => {
 // ===========================================================================
 
 describe("Claude Error Handler", () => {
-  it("classifies 401 as authentication error", async () => {
+  it("classifies 401 as the provider rejecting the server's key", async () => {
     const { classifyClaudeError } = await import("../../ai-anthropic/src/error-handler.js");
     const result = classifyClaudeError({ status: 401, message: "Unauthorized" });
-    expect(result.code).toBe("AUTHENTICATION_REQUIRED");
+    // R-28 / R-29 — not AUTHENTICATION_REQUIRED: that code means the user's own
+    // session, and the browser answers it by refreshing and resending.
+    expect(result.code).toBe("AI_PROVIDER_AUTH_FAILED");
     expect(result.retryable).toBe(false);
   });
 

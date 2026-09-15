@@ -22,6 +22,7 @@ const SAFE: NodeJS.ProcessEnv = {
   JWT_SECRET: "Zk4pQ7vR2mX9tL6wB3nH8sD5gY1jF0cA",
   CORS_ORIGIN: "https://app.jarvis.example",
   DATABASE_URL: "postgresql://user:pass@db.internal:5432/jarvis",
+  OPENAI_API_KEY: "sk-test-r21-not-a-real-key",
 };
 
 const fieldsIn = (env: NodeJS.ProcessEnv) =>
@@ -166,6 +167,53 @@ describe("Sprint 9.12 — encryption key when Google OAuth is on", () => {
   });
 });
 
+describe("R-21 — OPENAI_API_KEY in production", () => {
+  it.each([
+    ["missing", undefined],
+    ["blank", ""],
+    ["whitespace only", "   "],
+  ])("REFUSES a %s key", (_label, key) => {
+    // Without it every chat request fails. In production that must stop the
+    // deployment at startup, not surface later as a broken assistant.
+    expect(fieldsIn({ ...SAFE, OPENAI_API_KEY: key } as NodeJS.ProcessEnv)).toContain(
+      "OPENAI_API_KEY"
+    );
+  });
+
+  it("REFUSES the exact placeholder committed in .env.example", () => {
+    // Read from the file rather than retyped, like the JWT_SECRET check. The
+    // placeholder starts with "sk-", so the schema alone lets it through.
+    const example = readFileSync(resolve(__dirname, "../../../.env.example"), "utf8");
+    const match = /^OPENAI_API_KEY="?([^"\n]+)"?$/m.exec(example);
+    expect(match, ".env.example should still declare OPENAI_API_KEY").toBeTruthy();
+
+    expect(fieldsIn({ ...SAFE, OPENAI_API_KEY: match![1] })).toContain("OPENAI_API_KEY");
+  });
+
+  it("accepts a key that is not the placeholder", () => {
+    expect(fieldsIn(SAFE)).not.toContain("OPENAI_API_KEY");
+  });
+
+  it.each([
+    ["development", "development"],
+    ["staging", "staging"],
+    ["test", "test"],
+    ["unset", undefined],
+  ])("does not demand the key in %s", (_label, nodeEnv) => {
+    expect(
+      fieldsIn({ ...SAFE, NODE_ENV: nodeEnv, OPENAI_API_KEY: undefined } as NodeJS.ProcessEnv)
+    ).not.toContain("OPENAI_API_KEY");
+  });
+
+  it("never repeats the key back in the problem text", () => {
+    const key = "sk-your-openai-api-key";
+    for (const problem of checkProductionConfig({ ...SAFE, OPENAI_API_KEY: key })) {
+      expect(problem.problem).not.toContain(key);
+      expect(problem.field).not.toContain(key);
+    }
+  });
+});
+
 describe("Sprint 9.12 — problems are reported together", () => {
   it("reports every failing field at once rather than one per boot", () => {
     const problems = checkProductionConfig({
@@ -180,6 +228,7 @@ describe("Sprint 9.12 — problems are reported together", () => {
       "CORS_ORIGIN",
       "JARVIS_ENCRYPTION_KEY",
       "JWT_SECRET",
+      "OPENAI_API_KEY",
     ]);
   });
 });

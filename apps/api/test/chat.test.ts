@@ -715,3 +715,201 @@ describe("POST /api/v1/chat", () => {
     expect(lastRequest.conversationHistory!.length).toBe(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// R-21 — chat on a server with no OpenAI key.
+//
+// Real Orchestrator, real ConversationalAssistant and the real not-configured
+// provider, so the whole path a message takes is exercised: the provider
+// refuses, the agent rethrows, the orchestrator reports the code, the route
+// picks the status. Only authentication and persistence are doubles.
+// ---------------------------------------------------------------------------
+
+/** Resolves when the route answers, not after a fixed delay. */
+function postChat(
+  router: ReturnType<typeof createChatRouter>,
+  token: string,
+  message: string
+): Promise<{ status: number; body: any }> {
+  return new Promise((resolve) => {
+    const headers: Record<string, string> = { authorization: `Bearer ${token}` };
+    const req = {
+      method: "POST",
+      path: "/",
+      url: "/",
+      headers,
+      body: { message },
+      params: {},
+      query: {},
+      ip: "127.0.0.1",
+      get: (name: string) => headers[name.toLowerCase()],
+    } as any;
+    const res = {
+      statusCode: 200,
+      status(code: number) {
+        this.statusCode = code;
+        return this;
+      },
+      json(body: unknown) {
+        resolve({ status: this.statusCode, body });
+        return this;
+      },
+      setHeader() {
+        return this;
+      },
+    } as any;
+
+    const layer = (router as any).stack.find(
+      (l: any) => l.route?.path === "/" && l.route.methods.post
+    );
+    const handlers = layer.route.stack.map((s: any) => s.handle);
+    let index = 0;
+    const next = () => {
+      if (index < handlers.length) handlers[index++](req, res, next);
+    };
+    next();
+  });
+}
+
+describe("R-21 — POST /api/v1/chat without an OpenAI key", () => {
+  async function buildRouter() {
+    const { Orchestrator, AgentRegistry, ConversationalAssistant } = await import("@jarvis/agents");
+    const { NotConfiguredAIProvider } = await import("@jarvis/ai-openai");
+
+    const registry = new AgentRegistry();
+    registry.register(
+      new ConversationalAssistant({
+        provider: new NotConfiguredAIProvider(),
+        systemPrompt: "You are JARVIS.",
+      })
+    );
+
+    const auditLogger = createMockAuditLogger();
+    const executor = {
+      execute: async () => {
+        throw new Error("no tool may run when the model cannot be reached");
+      },
+    };
+    const orchestrator = new Orchestrator(registry, executor as any, auditLogger as any, {});
+
+    const tokenService = createMockTokenService();
+    const router = createChatRouter({
+      tokenService,
+      orchestrator,
+      conversationRepo: createMockConversationRepo() as any,
+      auditLogger: auditLogger as any,
+    } as any);
+    const token = tokenService.generateAccessToken({
+      userId: "user-1",
+      role: "member",
+      email: "test@example.com",
+    });
+
+    return { router, token };
+  }
+
+  it("answers 503 AI_PROVIDER_NOT_CONFIGURED with a message the user can act on", async () => {
+    const { router, token } = await buildRouter();
+
+    const res = await postChat(router, token, "Hello JARVIS");
+
+    expect(res.status).toBe(503);
+    expect(res.body.success).toBe(false);
+    expect(res.body.error.code).toBe("AI_PROVIDER_NOT_CONFIGURED");
+    expect(res.body.error.message).toMatch(/not configured/i);
+  });
+
+  it("keeps answering 503 on every later message, not only the first", async () => {
+    // A provider refusal must not leave the assistant unselectable: the
+    // second message has to get the same actionable answer as the first.
+    const { router, token } = await buildRouter();
+
+    const first = await postChat(router, token, "Hello JARVIS");
+    const second = await postChat(router, token, "Are you there?");
+    const third = await postChat(router, token, "Hello again");
+
+    expect([first.status, second.status, third.status]).toEqual([503, 503, 503]);
+    expect(third.body.error.code).toBe("AI_PROVIDER_NOT_CONFIGURED");
+  });
+
+  it("leaks no variable name, key, secret or stack trace", async () => {
+    const { router, token } = await buildRouter();
+
+    const res = await postChat(router, token, "Hello JARVIS");
+    const bodyStr = JSON.stringify(res.body);
+
+    expect(bodyStr).not.toContain("OPENAI_API_KEY");
+    expect(bodyStr).not.toContain("sk-");
+    expect(bodyStr).not.toContain("DATABASE_URL");
+    expect(bodyStr).not.toContain("JWT_SECRET");
+    expect(bodyStr).not.toMatch(/\bat .+:\d+:\d+/);
+    expect(res.body.error).not.toHaveProperty("stack");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R-25 / R-27 / R-29 — the HTTP status a provider failure reaches the browser
+// with. A 401 would make the web client refresh the session and resend the
+// message, so no provider failure may use it.
+// ---------------------------------------------------------------------------
+
+describe("R-25 / R-27 / R-29 — provider failures reach the browser with the right status", () => {
+  async function routerThatFailsWith(failure: unknown) {
+    const { Orchestrator, AgentRegistry, ConversationalAssistant } = await import("@jarvis/agents");
+
+    const registry = new AgentRegistry();
+    registry.register(
+      new ConversationalAssistant({
+        provider: {
+          id: "test-provider",
+          name: "Test provider",
+          defaultModel: "test-model",
+          complete: async () => {
+            throw failure;
+          },
+          listModels: async () => [],
+          isAvailable: async () => false,
+        },
+        systemPrompt: "You are JARVIS.",
+      })
+    );
+
+    const auditLogger = createMockAuditLogger();
+    const executor = {
+      execute: async () => {
+        throw new Error("no tool may run when the model cannot be reached");
+      },
+    };
+    const orchestrator = new Orchestrator(registry, executor as any, auditLogger as any, {});
+    const tokenService = createMockTokenService();
+    const router = createChatRouter({
+      tokenService,
+      orchestrator,
+      conversationRepo: createMockConversationRepo() as any,
+      auditLogger: auditLogger as any,
+    } as any);
+    const token = tokenService.generateAccessToken({
+      userId: "user-1",
+      role: "member",
+      email: "test@example.com",
+    });
+
+    return { router, token };
+  }
+
+  it.each([
+    ["an exceeded context window", 413, "CONTEXT_LENGTH_EXCEEDED", undefined],
+    ["an open provider circuit", 503, "AI_PROVIDER_UNAVAILABLE", { transient: true }],
+    ["a provider that rejects the server's API key", 503, "AI_PROVIDER_AUTH_FAILED", undefined],
+  ])("answers %s with HTTP %i, never 401", async (_label, status, code, details) => {
+    const { JarvisError } = await import("@jarvis/core");
+    const { router, token } = await routerThatFailsWith(
+      new JarvisError(code as any, "A safe message.", details as any)
+    );
+
+    const res = await postChat(router, token, "Hello JARVIS");
+
+    expect(res.status).toBe(status);
+    expect(res.body.error.code).toBe(code);
+  });
+});

@@ -230,7 +230,7 @@ export abstract class DomainAgent extends BaseAgent {
         },
       };
     } catch (error) {
-      this.status = "error";
+      this.status = this.statusAfterFailure(error);
       throw error;
     } finally {
       this.activeContexts.delete(conversationId);

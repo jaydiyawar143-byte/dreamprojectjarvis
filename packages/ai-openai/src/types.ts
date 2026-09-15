@@ -1,8 +1,14 @@
+import type { CircuitBreakerOptions, RetryPolicy } from "@jarvis/core";
+
 export interface OpenAIAdapterConfig {
   apiKey?: string;
   defaultModel?: string;
   timeoutMs?: number;
   maxRetries?: number;
+  /** R-26 — backoff bounds. `maxRetries` above still sets the retry count. */
+  retryPolicy?: Partial<Omit<RetryPolicy, "maxRetries">>;
+  /** R-27 — the circuit breaker this adapter instance owns. */
+  circuitBreaker?: Partial<CircuitBreakerOptions>;
 }
 
 export interface OpenAIMessage {
