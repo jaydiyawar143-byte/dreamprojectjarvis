@@ -48,7 +48,6 @@ describe("R-28 — permanent Anthropic failures", () => {
   it.each([
     ["a key without permission (403)", httpFailure(403, "permission_error", "Your API key does not have permission"), "AUTHORIZATION_FAILED"],
     ["an invalid request (400)", httpFailure(400, "invalid_request_error", "max_tokens: Field required"), "INVALID_REQUEST"],
-    ["an unknown model (404)", httpFailure(404, "not_found_error", "model: claude-unknown"), "INVALID_REQUEST"],
     ["a programming error", new TypeError("Cannot read properties of undefined"), "INTERNAL_ERROR"],
   ])("%s is not transient", (_label, failure, code) => {
     const error = toJarvisError(failure);
@@ -66,6 +65,15 @@ describe("R-28 — permanent Anthropic failures", () => {
     expect(error.message).toMatch(/administrator/i);
     expect(error.message).not.toContain(FAKE_KEY);
     expect(error.message).not.toContain("x-api-key");
+  });
+});
+
+describe("R-30 — an unknown Anthropic model", () => {
+  it("is INVALID_REQUEST, marked with scope provider so the chain can fall back", () => {
+    const error = toJarvisError(httpFailure(404, "not_found_error", "model: claude-unknown"));
+
+    expect(error.code).toBe("INVALID_REQUEST");
+    expect(error.details).toEqual({ scope: "provider" });
   });
 });
 

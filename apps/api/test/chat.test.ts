@@ -913,3 +913,63 @@ describe("R-25 / R-27 / R-29 — provider failures reach the browser with the ri
     expect(res.body.error.code).toBe(code);
   });
 });
+
+// ---------------------------------------------------------------------------
+// R-30 — no usable provider, through the real route and the real chain.
+// ---------------------------------------------------------------------------
+
+describe("R-30 — POST /api/v1/chat when no provider is usable", () => {
+  it("answers 503 with a recovery message and the cause code, and leaks no provider detail", async () => {
+    const { Orchestrator, AgentRegistry, ConversationalAssistant } = await import("@jarvis/agents");
+    const { FallbackAIProvider, JarvisError } = await import("@jarvis/core");
+
+    const failingProvider = (id: string, failure: unknown) => ({
+      id,
+      name: id,
+      defaultModel: `${id}-model`,
+      complete: async () => {
+        throw failure;
+      },
+      listModels: async () => [],
+      isAvailable: async () => false,
+    });
+    const chain = new FallbackAIProvider([
+      failingProvider("primary", new JarvisError("AI_PROVIDER_AUTH_FAILED" as any, "Incorrect API key provided: sk-test-r30-leak")),
+      failingProvider(
+        "fallback",
+        new JarvisError("INTERNAL_ERROR", "502 from https://internal.provider.example/v1", { transient: true })
+      ),
+    ]);
+
+    const registry = new AgentRegistry();
+    registry.register(new ConversationalAssistant({ provider: chain, systemPrompt: "You are JARVIS." }));
+    const auditLogger = createMockAuditLogger();
+    const orchestrator = new Orchestrator(
+      registry,
+      { execute: async () => { throw new Error("no tool may run"); } } as any,
+      auditLogger as any,
+      {}
+    );
+    const tokenService = createMockTokenService();
+    const router = createChatRouter({
+      tokenService,
+      orchestrator,
+      conversationRepo: createMockConversationRepo() as any,
+      auditLogger: auditLogger as any,
+    } as any);
+    const token = tokenService.generateAccessToken({ userId: "user-1", role: "member", email: "test@example.com" });
+
+    const res = await postChat(router, token, "Hello JARVIS");
+    const bodyStr = JSON.stringify(res.body);
+
+    expect(res.status).toBe(503);
+    expect(res.body.error.code).toBe("AI_PROVIDER_UNAVAILABLE");
+    expect(res.body.error.details).toEqual({ transient: true, cause: "AI_PROVIDER_AUTH_FAILED" });
+    expect(res.body.error.message).toMatch(/temporarily unavailable/i);
+    expect(res.body.error.message).toMatch(/recover/i);
+    expect(bodyStr).not.toContain("sk-test-r30-leak");
+    expect(bodyStr).not.toContain("Incorrect API key");
+    expect(bodyStr).not.toContain("internal.provider.example");
+    expect(bodyStr).not.toMatch(/\bat .+:\d+:\d+/);
+  });
+});

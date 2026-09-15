@@ -63,15 +63,6 @@ describe("R-24 — permanent and unexpected failures are not", () => {
       "AUTHORIZATION_FAILED",
     ],
     [
-      "an unknown model (404)",
-      httpFailure(404, {
-        message: "The model `gpt-unknown` does not exist",
-        type: "invalid_request_error",
-        code: "model_not_found",
-      }),
-      "INVALID_REQUEST",
-    ],
-    [
       "a rejected request (400)",
       httpFailure(400, { message: "Invalid value for 'temperature'", type: "invalid_request_error" }),
       "INVALID_REQUEST",
@@ -91,6 +82,21 @@ describe("R-24 — permanent and unexpected failures are not", () => {
 
     expect(error.code).toBe(code);
     expect(error.details).toBeUndefined();
+  });
+});
+
+describe("R-30 — an unknown model concerns the provider, not the request", () => {
+  it("is INVALID_REQUEST, marked with scope provider so the chain can fall back", () => {
+    const error = toJarvisError(
+      httpFailure(404, {
+        message: "The model `gpt-unknown` does not exist",
+        type: "invalid_request_error",
+        code: "model_not_found",
+      })
+    );
+
+    expect(error.code).toBe("INVALID_REQUEST");
+    expect(error.details).toEqual({ scope: "provider" });
   });
 });
 

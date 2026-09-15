@@ -867,6 +867,14 @@ export class Orchestrator implements IOrchestrator {
       };
     }
 
+    // R-30 — the router named agents that ARE registered, and none of them can
+    // serve this request (the general assistant is always among them). Taking
+    // whichever other agent happens to be ready here answered plain requests
+    // with the Meta Ads agent, its prompt and its tools, and told nobody.
+    if (candidates.some((candidate) => this.agentRegistry.get(candidate.agentId))) {
+      throw new JarvisError("AGENT_ERROR", "No available agents");
+    }
+
     // Nothing the router named is registered. This is the Sprint 1-5 path and
     // the path any registry built without the standard agent ids takes.
     const available = this.agentRegistry

@@ -10,6 +10,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { OpenAIAdapter } from "@jarvis/ai-openai";
+import { FallbackAIProvider } from "@jarvis/core";
 import { getContainer, resetContainer } from "../src/services/container.js";
 
 const JWT_SECRET = "Zk4pQ7vR2mX9tL6wB3nH8sD5gY1jF0cA";
@@ -96,13 +97,16 @@ describe("R-21 — no OpenAI key in development", () => {
 });
 
 describe("R-21 — a key is set (behaviour unchanged)", () => {
-  it("wires the real OpenAIAdapter and the memory stack", () => {
+  it("wires the real OpenAIAdapter, inside the provider chain, and the memory stack", () => {
     useEnvironment(FAKE_KEY);
 
     const provider = (generalAssistant() as unknown as { provider: unknown }).provider;
     const container = getContainer();
 
-    expect(provider).toBeInstanceOf(OpenAIAdapter);
+    // R-30 — one provider in the chain until a fallback is chosen (D-3).
+    expect(provider).toBeInstanceOf(FallbackAIProvider);
+    expect((provider as FallbackAIProvider).providers).toHaveLength(1);
+    expect((provider as FallbackAIProvider).providers[0]).toBeInstanceOf(OpenAIAdapter);
     expect(container.memoryExtractor).not.toBeNull();
     expect(container.embeddingProvider).not.toBeNull();
   });

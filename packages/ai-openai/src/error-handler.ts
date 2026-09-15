@@ -52,6 +52,12 @@ export interface ClassifiedOpenAIError {
   transient: boolean;
   /** R-26 — the caller cancelled. Not a provider failure at all. */
   aborted: boolean;
+  /**
+   * R-30 — the failure concerns the provider's configuration (an unknown or
+   * inaccessible model), so every request would fail the same way. The
+   * provider chain falls back and disables the provider for a cooldown.
+   */
+  providerScoped: boolean;
   message: string;
 }
 
@@ -91,7 +97,7 @@ export function classifyOpenAIError(error: unknown): ClassifiedOpenAIError {
     transient: boolean,
     message: string = safeMessage,
     aborted = false
-  ): ClassifiedOpenAIError => ({ code, retryable: transient, transient, aborted, message });
+  ): ClassifiedOpenAIError => ({ code, retryable: transient, transient, aborted, providerScoped: false, message });
 
   if (error instanceof APIUserAbortError) {
     return result("INTERNAL_ERROR", false, ABORTED_MESSAGE, true);
@@ -107,6 +113,11 @@ export function classifyOpenAIError(error: unknown): ClassifiedOpenAIError {
 
   if (isContextLengthError(err.code, status, openaiType, rawMessage)) {
     return result("CONTEXT_LENGTH_EXCEEDED", false, CONTEXT_LENGTH_MESSAGE);
+  }
+
+  // R-30 — an unknown or inaccessible model fails every request alike.
+  if (status === 404 || err.code === "model_not_found") {
+    return { ...result("INVALID_REQUEST", false), providerScoped: true };
   }
 
   if (status === 400 || openaiType === "invalid_request_error") {
@@ -150,7 +161,9 @@ export function toJarvisError(error: unknown): JarvisError {
     ? { aborted: true }
     : classified.transient
       ? { transient: true }
-      : undefined;
+      : classified.providerScoped
+        ? { scope: "provider" }
+        : undefined;
   return new JarvisError(classified.code, classified.message, details);
 }
 

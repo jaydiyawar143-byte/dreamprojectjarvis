@@ -116,7 +116,7 @@ import { GoogleWriteService } from "./google/write-service.js";
 import { buildGoogleWriteService } from "./google/build-write-service.js";
 import { DbBackedRateLimiter } from "./rate-limiter.js";
 import { CapabilityService } from "./capabilities/capability-service.js";
-import { INTEGRATION_CATALOG } from "@jarvis/core";
+import { FallbackAIProvider, INTEGRATION_CATALOG, type ProviderChainEvent } from "@jarvis/core";
 import { buildIntegrationCommandService } from "./integrations/build.js";
 
 export interface Container {
@@ -254,6 +254,18 @@ function convertToolsToAIToolDefinitions(
       };
     });
   return { definitions, sanitizedToOriginal };
+}
+
+/** R-30 — one JSON line per provider-chain event: a provider id and a code only. */
+function logProviderChainEvent(event: ProviderChainEvent): void {
+  const warn = event.event === "provider_failed_permanently" || event.event === "providers_exhausted";
+  console.log(JSON.stringify({
+    level: warn ? "warn" : "info",
+    event: "ai_provider_chain",
+    outcome: event.event,
+    provider: event.provider,
+    ...(event.cause ? { cause: event.cause } : {}),
+  }));
 }
 
 let _container: Container | null = null;
@@ -765,8 +777,14 @@ export function getContainer(options?: {
   // instead. Production cannot get here without a key: `checkProductionConfig`
   // refuses to start it.
   const openAIConfigured = isOpenAIConfigured();
+  //
+  // R-30 — every agent gets the provider CHAIN, not the adapter. It holds one
+  // provider until a fallback is chosen (decision D-3). A provider that fails
+  // permanently is skipped for a cooldown and then probed; a request with no
+  // usable provider gets AI_PROVIDER_UNAVAILABLE, and no agent is taken out of
+  // service for it.
   const adapter: IAIProvider = openAIConfigured
-    ? new OpenAIAdapter()
+    ? new FallbackAIProvider([new OpenAIAdapter()], {}, { onEvent: logProviderChainEvent })
     : new NotConfiguredAIProvider();
   if (!openAIConfigured) {
     console.log(JSON.stringify({

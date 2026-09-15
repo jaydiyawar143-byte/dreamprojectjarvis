@@ -1,22 +1,22 @@
 // ---------------------------------------------------------------------------
-// R-21 / R-24 — an agent's status after a turn fails.
+// R-21 / R-24 / R-25 / R-30 — an agent's status after a turn fails.
 //
 // The orchestrator never selects an agent whose status is "error", and nothing
 // resets that status. So the status an agent takes after a failure decides
 // whether it serves the next request or stays out of service until restart:
 //
-//   AI_PROVIDER_NOT_CONFIGURED   ready   R-21 — a deployment state; every request
-//                                        gets the same 503
-//   transient provider failure   ready   R-24 — timeout, rate limit, 5xx: the next
-//                                        request may well succeed
-//   permanent provider failure   error   invalid key, no access, bad model or
-//                                        request — unchanged
-//   anything else                error   unchanged
+//   any classified provider failure   ready   the provider's health is tracked
+//   (not configured, transient,               by the provider chain (R-30) and
+//   rejected key, no access, unknown          the adapter's breaker (R-27), not
+//   model, invalid request, context           by the agent
+//   length, circuit open, abort)
+//   anything else                     error   unchanged
+//
+// Before R-30 a rejected key, missing access or an invalid model marked the
+// agent "error", which is how a plain request ended up with the Meta Ads agent.
 //
 // All three classes that call a provider are covered, because each has its own
-// catch block. The failures are built the way `@jarvis/ai-openai` builds them;
-// apps/api/test/agent-recovery-after-provider-failure.test.ts proves that
-// against the real SDK.
+// catch block. The failures are built the way the provider adapters build them.
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from "vitest";
@@ -58,10 +58,10 @@ const STAYS_READY: Array<[string, () => unknown]> = [
     "the provider answers with a temporary 5xx",
     () => new JarvisError("INTERNAL_ERROR", "503 The server is overloaded", { transient: true }),
   ],
-  // R-27 — the adapter's circuit is open; the provider was not even called.
+  // R-27 / R-30 — the circuit is open, or no provider in the chain is usable.
   [
-    "the provider circuit is open",
-    () => new JarvisError("AI_PROVIDER_UNAVAILABLE", "The AI service is temporarily unavailable.", { transient: true }),
+    "no provider is usable right now",
+    () => new JarvisError("AI_PROVIDER_UNAVAILABLE", "The AI provider is temporarily unavailable.", { transient: true }),
   ],
   // R-25 — a property of one conversation, not of the agent.
   [
@@ -70,18 +70,23 @@ const STAYS_READY: Array<[string, () => unknown]> = [
   ],
   // R-26 — the caller cancelled.
   ["the request was aborted", () => new JarvisError("INTERNAL_ERROR", "Request was aborted", { aborted: true })],
-];
-
-const MARKS_ERROR: Array<[string, () => unknown]> = [
-  ["the API key is invalid", () => new JarvisError("AUTHENTICATION_REQUIRED", "401 Incorrect API key provided")],
-  // R-29 — how `@jarvis/ai-openai` now reports a rejected key.
+  // R-30 — permanent provider failures: the chain disables the provider for a
+  // cooldown, and the agent stays in service.
   [
     "the provider rejects the server's API key",
     () => new JarvisError("AI_PROVIDER_AUTH_FAILED", "The AI provider rejected this server's API key."),
   ],
+  ["an authentication failure is reported the older way", () => new JarvisError("AUTHENTICATION_REQUIRED", "401 Incorrect API key provided")],
   ["the key has no access", () => new JarvisError("AUTHORIZATION_FAILED", "403 Project does not have access")],
-  ["the model or request is invalid", () => new JarvisError("INVALID_REQUEST", "404 The model does not exist")],
-  ["an internal error carries no transient marker", () => new JarvisError("INTERNAL_ERROR", "upstream 500")],
+  [
+    "the model is unknown",
+    () => new JarvisError("INVALID_REQUEST", "404 The model does not exist", { scope: "provider" }),
+  ],
+  ["the request is invalid", () => new JarvisError("INVALID_REQUEST", "Invalid value for 'temperature'")],
+];
+
+const MARKS_ERROR: Array<[string, () => unknown]> = [
+  ["an internal error carries no marker", () => new JarvisError("INTERNAL_ERROR", "upstream 500")],
   ["the failure is not a JarvisError at all", () => new TypeError("Cannot read properties of undefined")],
 ];
 

@@ -42,6 +42,8 @@ export interface ClassifiedClaudeError {
   retryable: boolean;
   transient: boolean;
   aborted: boolean;
+  /** R-30 — an unknown model: every request would fail alike. */
+  providerScoped: boolean;
   message: string;
 }
 
@@ -79,7 +81,7 @@ export function classifyClaudeError(error: unknown): ClassifiedClaudeError {
     transient: boolean,
     message: string = safeMessage,
     aborted = false
-  ): ClassifiedClaudeError => ({ code, retryable: transient, transient, aborted, message });
+  ): ClassifiedClaudeError => ({ code, retryable: transient, transient, aborted, providerScoped: false, message });
 
   if (error instanceof APIUserAbortError) {
     return result("INTERNAL_ERROR", false, ABORTED_MESSAGE, true);
@@ -97,8 +99,12 @@ export function classifyClaudeError(error: unknown): ClassifiedClaudeError {
     return result("CONTEXT_LENGTH_EXCEEDED", false, CONTEXT_LENGTH_MESSAGE);
   }
 
-  // 404 is an unknown model: the request can never succeed as sent.
-  if (status === 400 || status === 404 || claudeType === "invalid_request_error" || claudeType === "not_found_error") {
+  // 404 is an unknown model: no request can succeed with it (R-30).
+  if (status === 404 || claudeType === "not_found_error") {
+    return { ...result("INVALID_REQUEST", false), providerScoped: true };
+  }
+
+  if (status === 400 || claudeType === "invalid_request_error") {
     return result("INVALID_REQUEST", false);
   }
 
@@ -133,7 +139,9 @@ export function toJarvisError(error: unknown): JarvisError {
     ? { aborted: true }
     : classified.transient
       ? { transient: true }
-      : undefined;
+      : classified.providerScoped
+        ? { scope: "provider" }
+        : undefined;
   return new JarvisError(classified.code, classified.message, details);
 }
 

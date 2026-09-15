@@ -14,6 +14,8 @@ import { describe, it, expect, vi, beforeAll, afterAll, afterEach } from "vitest
 import { createServer, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import type {
+  AICompletionRequest,
+  AICompletionResponse,
   AuditLogger,
   Conversation,
   ConversationMessage,
@@ -22,6 +24,7 @@ import type {
   JarvisResponse,
   SessionContext,
 } from "@jarvis/core";
+import { FallbackAIProvider, JarvisError } from "@jarvis/core";
 import { Orchestrator, AgentRegistry, ConversationalAssistant } from "@jarvis/agents";
 import { OpenAIAdapter, NotConfiguredAIProvider, type OpenAIAdapterConfig } from "@jarvis/ai-openai";
 import { createChatRouter } from "../src/routes/chat.js";
@@ -196,33 +199,27 @@ describe("R-24 — a missing provider is unchanged (R-21)", () => {
   });
 });
 
-describe("R-24 / R-29 — permanent and unexpected failures keep today's behaviour", () => {
-  it("an invalid API key stays permanent: the next request is refused without calling OpenAI", async () => {
-    const orchestrator = buildOrchestrator(realAdapter(FAST_RETRIES));
-    script = [REPLY.invalidKey, REPLY.success];
+describe("R-24 / R-29 / R-30 — permanent and unexpected failures", () => {
+  it.each([
+    ["a rejected key", REPLY.invalidKey, "AI_PROVIDER_AUTH_FAILED"],
+    ["an unknown model", REPLY.invalidModel, "INVALID_REQUEST"],
+  ])(
+    "%s disables the provider for its cooldown; the assistant stays in service and the next request is refused without calling OpenAI",
+    async (_label, failure, cause) => {
+      // Wired the way the container wires it: the adapter inside the chain.
+      const orchestrator = buildOrchestrator(new FallbackAIProvider([realAdapter(FAST_RETRIES)]));
+      script = [failure, REPLY.success];
 
-    const first = await send(orchestrator, "Hello JARVIS");
-    const second = await send(orchestrator, "Hello again");
+      const first = await send(orchestrator, "Hello JARVIS");
+      const second = await send(orchestrator, "Hello again");
 
-    // R-29: reported as the server's configuration failure, not the user's 401.
-    expect(first.error?.code).toBe("AI_PROVIDER_AUTH_FAILED");
-    expect(JSON.stringify(first)).not.toContain(FAKE_KEY);
-    expect(second.success).toBe(false);
-    expect(second.error?.code).toBe("AGENT_ERROR");
-    expect(upstreamCalls).toBe(1);
-  });
-
-  it("an invalid model stays permanent: the next request is refused without calling OpenAI", async () => {
-    const orchestrator = buildOrchestrator(realAdapter(FAST_RETRIES));
-    script = [REPLY.invalidModel, REPLY.success];
-
-    const first = await send(orchestrator, "Hello JARVIS");
-    const second = await send(orchestrator, "Hello again");
-
-    expect(first.error?.code).toBe("INVALID_REQUEST");
-    expect(second.error?.code).toBe("AGENT_ERROR");
-    expect(upstreamCalls).toBe(1);
-  });
+      expect(first.error?.code).toBe("AI_PROVIDER_UNAVAILABLE");
+      expect(first.error?.details).toEqual({ transient: true, cause });
+      expect(JSON.stringify(first)).not.toContain(FAKE_KEY);
+      expect(second.error?.code).toBe("AI_PROVIDER_UNAVAILABLE");
+      expect(upstreamCalls).toBe(1);
+    }
+  );
 
   it("an unexpected fatal error (a malformed 200 response) leaves the assistant errored, as before", async () => {
     const orchestrator = buildOrchestrator(realAdapter());
@@ -447,6 +444,111 @@ describe("R-27 — the provider circuit breaker", () => {
       expect.objectContaining({ event: "ai_provider_circuit", provider: "openai", from: "closed", to: "open", consecutiveFailures: 2 }),
     ]);
     expect(lines.join("\n")).not.toContain(FAKE_KEY);
+  });
+});
+
+describe("R-30 — explicit provider fallback", () => {
+  /** A second provider that answers, recording what it was asked. */
+  function answeringFallback(content = "answered by the fallback") {
+    const requests: AICompletionRequest[] = [];
+    const provider: IAIProvider = {
+      id: "fallback-test",
+      name: "Fallback test provider",
+      defaultModel: "fallback-model",
+      async complete(request): Promise<AICompletionResponse> {
+        requests.push(request);
+        return { message: { role: "assistant", content }, finishReason: "stop", model: "fallback-model" };
+      },
+      async listModels() {
+        return [];
+      },
+      async isAvailable() {
+        return true;
+      },
+    };
+    return { provider, requests };
+  }
+
+  it("answers from the fallback in the same request when the primary fails permanently", async () => {
+    const fallback = answeringFallback();
+    const orchestrator = buildOrchestrator(new FallbackAIProvider([realAdapter(FAST_RETRIES), fallback.provider]));
+    script = [REPLY.invalidKey];
+
+    const response = await send(orchestrator, "Hello JARVIS");
+
+    expect(response.success).toBe(true);
+    expect(response.data?.message).toBe("answered by the fallback");
+    expect(fallback.requests).toHaveLength(1);
+    expect(upstreamCalls).toBe(1);
+  });
+
+  it("skips a primary whose circuit is open, without calling it", async () => {
+    const fallback = answeringFallback();
+    const primary = realAdapter({ maxRetries: 0, circuitBreaker: { failureThreshold: 2, openDurationMs: 60_000 } });
+    const orchestrator = buildOrchestrator(new FallbackAIProvider([primary, fallback.provider]));
+    script = [REPLY.serverError(503), REPLY.serverError(503), REPLY.success];
+
+    const responses = [
+      await send(orchestrator, "one"),
+      await send(orchestrator, "two"),
+      await send(orchestrator, "three"),
+    ];
+
+    expect(responses.map((r) => r.data?.message)).toEqual([
+      "answered by the fallback",
+      "answered by the fallback",
+      "answered by the fallback",
+    ]);
+    expect(upstreamCalls).toBe(2);
+  });
+
+  it("returns to the primary after its cooldown", async () => {
+    const fallback = answeringFallback();
+    const orchestrator = buildOrchestrator(
+      new FallbackAIProvider([realAdapter(FAST_RETRIES), fallback.provider], { permanentCooldownMs: 50 })
+    );
+    script = [REPLY.invalidKey, REPLY.success];
+
+    await send(orchestrator, "one");
+    const duringCooldown = await send(orchestrator, "two");
+    await pause(80);
+    const afterCooldown = await send(orchestrator, "three");
+
+    expect(duringCooldown.data?.message).toBe("answered by the fallback");
+    expect(afterCooldown.data?.message).toBe("recovered");
+    expect(upstreamCalls).toBe(2);
+  });
+
+  it("answers a structured error with no provider detail when the fallback fails too", async () => {
+    const failingFallback: IAIProvider = {
+      id: "fallback-test",
+      name: "Failing fallback",
+      defaultModel: "fallback-model",
+      async complete(): Promise<AICompletionResponse> {
+        throw new JarvisError("INTERNAL_ERROR", "502 upstream https://internal.example/v1 rejected sk-test-r30-not-a-real-key", {
+          transient: true,
+        });
+      },
+      async listModels() {
+        return [];
+      },
+      async isAvailable() {
+        return false;
+      },
+    };
+    const orchestrator = buildOrchestrator(new FallbackAIProvider([realAdapter(FAST_RETRIES), failingFallback]));
+    script = [REPLY.invalidKey];
+
+    const response = await send(orchestrator, "Hello JARVIS");
+    const body = JSON.stringify(response);
+
+    expect(response.error?.code).toBe("AI_PROVIDER_UNAVAILABLE");
+    expect(response.error?.details).toEqual({ transient: true, cause: "AI_PROVIDER_AUTH_FAILED" });
+    expect(response.error?.message).toMatch(/temporarily unavailable/i);
+    expect(body).not.toContain("internal.example");
+    expect(body).not.toContain("sk-test-r30");
+    expect(body).not.toContain(FAKE_KEY);
+    expect(body).not.toContain("Incorrect API key");
   });
 });
 
