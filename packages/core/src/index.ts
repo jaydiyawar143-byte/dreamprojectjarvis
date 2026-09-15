@@ -17,6 +17,8 @@ export * from "./provider-retry.js";
 export * from "./provider-circuit-breaker.js";
 // R-30 — the explicit provider chain the API wires every agent to.
 export * from "./provider-fallback.js";
+// R-31 — provider failures: fixed messages out, the provider's account logged.
+export * from "./provider-error-safety.js";
 export * from "./types/streaming.js";
 export * from "./types/execution.js";
 export * from "./types/orchestrator.js";

@@ -1,19 +1,26 @@
 import {
   JarvisError,
   DEFAULT_RETRY_POLICY,
+  PROVIDER_ERROR_MESSAGES,
   RetryAbortedError,
+  attachProviderDiagnostic,
   computeRetryDelayMs,
   parseRetryAfterMs,
+  redactProviderText,
   runWithRetry,
+  type ProviderErrorDiagnostic,
   type RetryPolicy,
 } from "@jarvis/core";
-import { APIConnectionError, APIUserAbortError } from "@anthropic-ai/sdk";
+import { APIConnectionError, APIConnectionTimeoutError, APIUserAbortError } from "@anthropic-ai/sdk";
 
 // ---------------------------------------------------------------------------
 // R-28 — Anthropic failures under the contract `@jarvis/ai-openai` uses:
 // the same codes, `details.transient` for failures that say nothing about the
 // next request, `details.aborted` for a cancelled call, and the shared retry
 // policy from @jarvis/core. This adapter is not wired into the runtime (D-3).
+//
+// R-31 — and the same messages: fixed for each category, with the provider's
+// own account kept as a diagnostic for the server log.
 // ---------------------------------------------------------------------------
 
 const RETRYABLE_ERROR_TYPES = new Set([
@@ -44,7 +51,10 @@ export interface ClassifiedClaudeError {
   aborted: boolean;
   /** R-30 — an unknown model: every request would fail alike. */
   providerScoped: boolean;
+  /** R-31 — fixed for the category. Never the provider's text. */
   message: string;
+  /** R-31 — the provider's own account of the failure, for the server log. */
+  diagnostic: ProviderErrorDiagnostic;
 }
 
 /**
@@ -56,6 +66,19 @@ function isContextLengthError(status: number, claudeType: string, rawMessage: st
     (status === 400 || claudeType === "invalid_request_error") &&
     /prompt is too long|exceed context limit/i.test(rawMessage)
   );
+}
+
+/** R-31 — status, type, request id and the provider's redacted text. */
+function describeFailure(error: unknown, status: number, claudeType: string, rawMessage: string): ProviderErrorDiagnostic {
+  const { request_id: requestId } = (error ?? {}) as { request_id?: unknown };
+  // A failure that is not a provider response has no type; its class says what it was.
+  const type = claudeType || (error instanceof Error && error.name !== "Error" ? error.name : "");
+  return {
+    ...(status ? { status } : {}),
+    ...(type ? { type } : {}),
+    ...(typeof requestId === "string" ? { providerRequestId: requestId } : {}),
+    message: redactProviderText(sanitizeErrorMessage(rawMessage)),
+  };
 }
 
 export function classifyClaudeError(error: unknown): ClassifiedClaudeError {
@@ -73,15 +96,14 @@ export function classifyClaudeError(error: unknown): ClassifiedClaudeError {
   const body = err.error?.error ?? err.error;
   const claudeType = body?.type ?? "";
   const rawMessage = body?.message ?? err.message ?? "Unknown AI provider error";
-
-  const safeMessage = sanitizeErrorMessage(rawMessage);
+  const diagnostic = describeFailure(error, status, claudeType, rawMessage);
 
   const result = (
     code: ClassifiedClaudeError["code"],
     transient: boolean,
-    message: string = safeMessage,
+    message: string,
     aborted = false
-  ): ClassifiedClaudeError => ({ code, retryable: transient, transient, aborted, providerScoped: false, message });
+  ): ClassifiedClaudeError => ({ code, retryable: transient, transient, aborted, providerScoped: false, message, diagnostic });
 
   if (error instanceof APIUserAbortError) {
     return result("INTERNAL_ERROR", false, ABORTED_MESSAGE, true);
@@ -92,7 +114,7 @@ export function classifyClaudeError(error: unknown): ClassifiedClaudeError {
   }
 
   if (status === 403 || claudeType === "permission_error") {
-    return result("AUTHORIZATION_FAILED", false);
+    return result("AUTHORIZATION_FAILED", false, PROVIDER_ERROR_MESSAGES.accessDenied);
   }
 
   if (isContextLengthError(status, claudeType, rawMessage)) {
@@ -101,28 +123,33 @@ export function classifyClaudeError(error: unknown): ClassifiedClaudeError {
 
   // 404 is an unknown model: no request can succeed with it (R-30).
   if (status === 404 || claudeType === "not_found_error") {
-    return { ...result("INVALID_REQUEST", false), providerScoped: true };
+    return { ...result("INVALID_REQUEST", false, PROVIDER_ERROR_MESSAGES.modelUnavailable), providerScoped: true };
   }
 
   if (status === 400 || claudeType === "invalid_request_error") {
-    return result("INVALID_REQUEST", false);
+    return result("INVALID_REQUEST", false, PROVIDER_ERROR_MESSAGES.invalidRequest);
   }
 
   if (status === 429 || claudeType === "rate_limit_error") {
-    return result("RATE_LIMITED", true);
+    return result("RATE_LIMITED", true, PROVIDER_ERROR_MESSAGES.rateLimited);
   }
 
-  // 529 "overloaded" is a 5xx; a timeout or dropped connection has no status.
+  // A timeout carries no status. The SDK's timeout error is also a connection
+  // error, so it is matched first.
+  if (status === 408 || error instanceof APIConnectionTimeoutError) {
+    return result("INTERNAL_ERROR", true, PROVIDER_ERROR_MESSAGES.timeout);
+  }
+
+  // 529 "overloaded" is a 5xx; a dropped connection has no status.
   if (
-    status === 408 ||
     status >= 500 ||
     RETRYABLE_ERROR_TYPES.has(claudeType) ||
     error instanceof APIConnectionError
   ) {
-    return result("INTERNAL_ERROR", true);
+    return result("INTERNAL_ERROR", true, PROVIDER_ERROR_MESSAGES.unavailable);
   }
 
-  return result("INTERNAL_ERROR", false);
+  return result("INTERNAL_ERROR", false, PROVIDER_ERROR_MESSAGES.unknown);
 }
 
 /** The wait before retry `attempt` under the default policy. */
@@ -142,7 +169,9 @@ export function toJarvisError(error: unknown): JarvisError {
       : classified.providerScoped
         ? { scope: "provider" }
         : undefined;
-  return new JarvisError(classified.code, classified.message, details);
+  // R-31 — the diagnostic rides on the error where nothing serialises it; the
+  // adapter logs it.
+  return attachProviderDiagnostic(new JarvisError(classified.code, classified.message, details), classified.diagnostic);
 }
 
 function sanitizeErrorMessage(message: string): string {

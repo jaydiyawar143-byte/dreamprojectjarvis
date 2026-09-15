@@ -31,7 +31,7 @@ import type {
   IPermissionChecker,
   RetrievedChunk,
 } from "@jarvis/core";
-import { JarvisError, decideSurface, classifyToolFailures } from "@jarvis/core";
+import { JarvisError, decideSurface, classifyToolFailures, toClientErrorDetails } from "@jarvis/core";
 import type { SurfaceDecision } from "@jarvis/core";
 import type { AgentPolicy, AgentResolution } from "@jarvis/core";
 import type { AgentRegistry } from "./registry.js";
@@ -1285,7 +1285,8 @@ export class Orchestrator implements IOrchestrator {
       error: {
         code: error.code,
         message: error.message,
-        details: error.details,
+        // R-31 — `details.cause` goes to the browser only as an error code.
+        details: toClientErrorDetails(error.details),
       },
       traceId,
       timestamp: new Date().toISOString(),

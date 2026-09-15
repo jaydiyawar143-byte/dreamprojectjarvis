@@ -4,7 +4,13 @@ import type {
   AICompletionRequest,
   AICompletionResponse,
 } from "@jarvis/core";
-import { CircuitBreaker, JarvisError, type CircuitTransition, type RetryPolicy } from "@jarvis/core";
+import {
+  CircuitBreaker,
+  JarvisError,
+  providerFailureLogRecord,
+  type CircuitTransition,
+  type RetryPolicy,
+} from "@jarvis/core";
 import type { OpenAIAdapterConfig } from "./types.js";
 import {
   convertMessages,
@@ -115,6 +121,10 @@ export class OpenAIAdapter implements IAIProvider {
       } else {
         this.breaker.recordNeutral(permit);
       }
+      // R-31 — the response carries a fixed message; the provider's own
+      // account of the failure goes to the log, once, after the retries.
+      const record = providerFailureLogRecord(this.id, error);
+      if (record) console.log(JSON.stringify(record));
       throw error;
     }
     this.breaker.recordSuccess(permit);

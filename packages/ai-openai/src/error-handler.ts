@@ -1,15 +1,19 @@
 import {
   JarvisError,
   DEFAULT_RETRY_POLICY,
+  PROVIDER_ERROR_MESSAGES,
   RetryAbortedError,
+  attachProviderDiagnostic,
   computeRetryDelayMs,
   parseRetryAfterMs,
+  redactProviderText,
   runWithRetry,
+  type ProviderErrorDiagnostic,
   type RetryPolicy,
 } from "@jarvis/core";
 // From the subpath, not the package root: the SDK's error classes live in this
 // module either way, and tests that mock "openai" leave it untouched.
-import { APIConnectionError, APIUserAbortError } from "openai/error";
+import { APIConnectionError, APIConnectionTimeoutError, APIUserAbortError } from "openai/error";
 
 const RETRYABLE_ERROR_TYPES = new Set([
   "rate_limit",
@@ -58,7 +62,10 @@ export interface ClassifiedOpenAIError {
    * provider chain falls back and disables the provider for a cooldown.
    */
   providerScoped: boolean;
+  /** R-31 — fixed for the category. Never the provider's text. */
   message: string;
+  /** R-31 — the provider's own account of the failure, for the server log. */
+  diagnostic: ProviderErrorDiagnostic;
 }
 
 /**
@@ -77,6 +84,20 @@ function isContextLengthError(code: unknown, status: number, openaiType: string,
   );
 }
 
+/** R-31 — status, type, code, request id and the provider's redacted text. */
+function describeFailure(error: unknown, status: number, openaiType: string, rawMessage: string): ProviderErrorDiagnostic {
+  const { code, request_id: requestId } = (error ?? {}) as { code?: unknown; request_id?: unknown };
+  // A failure that is not a provider response has no type; its class says what it was.
+  const type = openaiType || (error instanceof Error && error.name !== "Error" ? error.name : "");
+  return {
+    ...(status ? { status } : {}),
+    ...(type ? { type } : {}),
+    ...(typeof code === "string" ? { providerCode: code } : {}),
+    ...(typeof requestId === "string" ? { providerRequestId: requestId } : {}),
+    message: redactProviderText(sanitizeErrorMessage(rawMessage)),
+  };
+}
+
 export function classifyOpenAIError(error: unknown): ClassifiedOpenAIError {
   const err = error as {
     status?: number;
@@ -89,15 +110,14 @@ export function classifyOpenAIError(error: unknown): ClassifiedOpenAIError {
   const status = err.status ?? 0;
   const openaiType = err.error?.type ?? err.type ?? "";
   const rawMessage = err.error?.message ?? err.message ?? "Unknown AI provider error";
-
-  const safeMessage = sanitizeErrorMessage(rawMessage);
+  const diagnostic = describeFailure(error, status, openaiType, rawMessage);
 
   const result = (
     code: ClassifiedOpenAIError["code"],
     transient: boolean,
-    message: string = safeMessage,
+    message: string,
     aborted = false
-  ): ClassifiedOpenAIError => ({ code, retryable: transient, transient, aborted, providerScoped: false, message });
+  ): ClassifiedOpenAIError => ({ code, retryable: transient, transient, aborted, providerScoped: false, message, diagnostic });
 
   if (error instanceof APIUserAbortError) {
     return result("INTERNAL_ERROR", false, ABORTED_MESSAGE, true);
@@ -108,7 +128,7 @@ export function classifyOpenAIError(error: unknown): ClassifiedOpenAIError {
   }
 
   if (status === 403 || openaiType === "permission_error") {
-    return result("AUTHORIZATION_FAILED", false);
+    return result("AUTHORIZATION_FAILED", false, PROVIDER_ERROR_MESSAGES.accessDenied);
   }
 
   if (isContextLengthError(err.code, status, openaiType, rawMessage)) {
@@ -117,32 +137,36 @@ export function classifyOpenAIError(error: unknown): ClassifiedOpenAIError {
 
   // R-30 — an unknown or inaccessible model fails every request alike.
   if (status === 404 || err.code === "model_not_found") {
-    return { ...result("INVALID_REQUEST", false), providerScoped: true };
+    return { ...result("INVALID_REQUEST", false, PROVIDER_ERROR_MESSAGES.modelUnavailable), providerScoped: true };
   }
 
   if (status === 400 || openaiType === "invalid_request_error") {
-    return result("INVALID_REQUEST", false);
+    return result("INVALID_REQUEST", false, PROVIDER_ERROR_MESSAGES.invalidRequest);
   }
 
   if (status === 429 || openaiType === "rate_limit") {
-    return result("RATE_LIMITED", true);
+    return result("RATE_LIMITED", true, PROVIDER_ERROR_MESSAGES.rateLimited);
   }
 
-  // A timeout or dropped connection carries no status and no type; a 504 is a
-  // 5xx like any other.
+  // A timeout carries no status. The SDK's timeout error is also a connection
+  // error, so it is matched first.
+  if (status === 408 || openaiType === "timeout" || error instanceof APIConnectionTimeoutError) {
+    return result("INTERNAL_ERROR", true, PROVIDER_ERROR_MESSAGES.timeout);
+  }
+
+  // A dropped connection carries no status and no type; a 504 is a 5xx like
+  // any other.
   if (
-    status === 408 ||
     status >= 500 ||
-    openaiType === "timeout" ||
     openaiType === "server_error" ||
     openaiType === "api_connection_error" ||
     RETRYABLE_ERROR_TYPES.has(openaiType) ||
     error instanceof APIConnectionError
   ) {
-    return result("INTERNAL_ERROR", true);
+    return result("INTERNAL_ERROR", true, PROVIDER_ERROR_MESSAGES.unavailable);
   }
 
-  return result("INTERNAL_ERROR", false);
+  return result("INTERNAL_ERROR", false, PROVIDER_ERROR_MESSAGES.unknown);
 }
 
 /** The wait before retry `attempt` under the default policy. */
@@ -164,7 +188,9 @@ export function toJarvisError(error: unknown): JarvisError {
       : classified.providerScoped
         ? { scope: "provider" }
         : undefined;
-  return new JarvisError(classified.code, classified.message, details);
+  // R-31 — the diagnostic rides on the error where nothing serialises it; the
+  // adapter logs it.
+  return attachProviderDiagnostic(new JarvisError(classified.code, classified.message, details), classified.diagnostic);
 }
 
 function sanitizeErrorMessage(message: string): string {

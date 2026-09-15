@@ -4,7 +4,7 @@ import type {
   AICompletionRequest,
   AICompletionResponse,
 } from "@jarvis/core";
-import { JarvisError } from "@jarvis/core";
+import { JarvisError, providerFailureLogRecord } from "@jarvis/core";
 import type { ClaudeAdapterConfig } from "./types.js";
 import {
   convertMessages,
@@ -77,7 +77,13 @@ export class ClaudeAdapter implements IAIProvider {
       },
       this.maxRetries,
       request.signal ?? undefined
-    );
+    ).catch((error: unknown) => {
+      // R-31 — the response carries a fixed message; the provider's own
+      // account of the failure goes to the log, once, after the retries.
+      const record = providerFailureLogRecord(this.id, error);
+      if (record) console.log(JSON.stringify(record));
+      throw error;
+    });
 
     return convertResponse(response as unknown as import("./types.js").ClaudeCompletionResponse, request.requestId);
   }

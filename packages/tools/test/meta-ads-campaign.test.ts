@@ -648,11 +648,14 @@ describe("Claude Error Handler", () => {
     expect(result.retryable).toBe(false);
   });
 
-  it("redacts API keys from error messages", async () => {
+  it("keeps API keys, and the provider's text, out of error messages", async () => {
     const { classifyClaudeError } = await import("../../ai-anthropic/src/error-handler.js");
     const result = classifyClaudeError({ status: 500, message: "Error with sk-ant-api-key12345" });
     expect(result.message).not.toContain("sk-ant-api-key12345");
-    expect(result.message).toContain("[REDACTED]");
+    // R-31 — the message is fixed for the category; the provider's text, with
+    // the key redacted, is kept for the server log only.
+    expect(result.message).not.toContain("Error with");
+    expect(result.diagnostic.message).not.toContain("sk-ant-api-key12345");
   });
 });
 
