@@ -1012,6 +1012,59 @@ describe("27 — canonical KPI reuse", () => {
     expect(engineResult.cvr).toBe(directResult.cvr);
   });
 
+  // -------------------------------------------------------------------------
+  // R-32 — the diagnosis category survives measurement.
+  //
+  // `OutcomeRecordSchema` declares the field, the repository persists it, and
+  // `findFinalizedOutcomes` filters on that column — but the engine never
+  // copied it onto the record it builds, so every stored row held null and
+  // category-based historical matching could not match anything.
+  // -------------------------------------------------------------------------
+  it("carries diagnosisCategory from the measurement input onto the record", () => {
+    const baseline = captureBaselineSnapshot(makeSummary(), {
+      fetchedAt: "2026-08-22T12:00:00.000Z",
+    });
+
+    const result = measureOutcome({
+      recommendationId: "rec_r32",
+      executionId: "exec_r32",
+      accountId: "act_test123",
+      entityType: "CAMPAIGN",
+      entityId: "cmp_abc",
+      actionType: "PAUSE_CAMPAIGN",
+      primaryMetric: "CPA",
+      baseline,
+      executedAtIso: "2026-08-22T12:00:00.000Z",
+      diagnosisCategory: "CREATIVE_FATIGUE",
+      userId: "user_r32",
+    });
+
+    expect(result.outcomeRecord.diagnosisCategory).toBe("CREATIVE_FATIGUE");
+  });
+
+  it("stores null, not undefined, when no diagnosis category is supplied", () => {
+    const baseline = captureBaselineSnapshot(makeSummary(), {
+      fetchedAt: "2026-08-22T12:00:00.000Z",
+    });
+
+    const result = measureOutcome({
+      recommendationId: "rec_r32_none",
+      executionId: "exec_r32_none",
+      accountId: "act_test123",
+      entityType: "CAMPAIGN",
+      entityId: "cmp_abc",
+      actionType: "PAUSE_CAMPAIGN",
+      primaryMetric: "CPA",
+      baseline,
+      executedAtIso: "2026-08-22T12:00:00.000Z",
+      userId: "user_r32",
+    });
+
+    // The column is nullable; null is what the repository writes and what a
+    // category filter can reason about. `undefined` would be neither.
+    expect(result.outcomeRecord.diagnosisCategory).toBeNull();
+  });
+
   it("baseline KPIs match calculateCanonicalKPIs for same inputs", () => {
     const summary = makeSummary({
       kpis: calculateCanonicalKPIs({ spend: 750, impressions: 75000, clicks: 1500, reach: 60000, conversions: 30, revenue: 3000 }),

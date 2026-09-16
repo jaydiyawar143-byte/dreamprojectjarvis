@@ -62,6 +62,18 @@ const baseEnvSchema = z.object({
     .positive()
     .max(600000)
     .default(30000),
+
+  // Phase 11.7B runtime — how often the outcome measurement worker scans for
+  // records whose measurement window has opened. 0 disables the background
+  // sweep entirely (tests, or deployments that drive the worker elsewhere).
+  // Coerced with a safe default so a typo cannot stop the API booting over an
+  // operational tuning knob; the scheduler validates the parsed value itself.
+  JARVIS_OUTCOME_WORKER_INTERVAL_MS: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(3600000)
+    .default(300000),
 });
 
 const serverEnvSchema = baseEnvSchema.extend({

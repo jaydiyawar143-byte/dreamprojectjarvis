@@ -184,8 +184,8 @@ Browsing is never inferred from "a browser is installed". Where it may navigate 
 | Recommendation generation | Partially implemented | Reachable through a standalone script; no user-facing route generates recommendations |
 | Reading and executing a recommendation | Implemented, approval required | |
 | Opportunity prioritisation and queue | Implemented | |
-| Outcome measurement engine | Partially implemented | The engine and its worker are complete and tested, but no runtime path creates an outcome record and the worker is not scheduled — ledger R-32 |
-| Historical outcome intelligence | Partially implemented | Matching relies on outcome records that nothing currently creates |
+| Outcome measurement engine | Implemented | Engine, worker and the runtime record-creation path (`RecommendationExecutionService` baseline) are complete and tested; the worker is scheduled in the API process on `JARVIS_OUTCOME_WORKER_INTERVAL_MS` with an overlap guard and a clean drain — ledger R-32 |
+| Historical outcome intelligence | Partially implemented | Matching relies on outcome records, which `RecommendationExecutionService` now creates at runtime for executed recommendation writes; category-based matching is covered by a product-level test |
 | A/B experimentation | Planned / not implemented | |
 | Automated bidding | Planned / not implemented | |
 | Website or conversion analytics | Planned / not implemented | No landing-page or conversion data source |

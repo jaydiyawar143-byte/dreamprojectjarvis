@@ -24,7 +24,7 @@ import {
   type RecommendationRecord,
   type RecommendationRisk,
 } from "./types/recommendation.js";
-import type { OutcomeRecord } from "./types/outcome.js";
+import type { OutcomeRecord, PrimaryMetric } from "./types/outcome.js";
 import {
   evaluateHistoricalEvidenceForContext,
   type HistoricalEvaluationContext,
@@ -214,13 +214,19 @@ const KNOWN_OUTCOME_METRICS: ReadonlySet<string> = new Set([
   "SPEND", "IMPRESSIONS", "CLICKS", "CPM", "FREQUENCY",
 ]);
 
-function derivePrimaryMetric(evidence: EvidencePackage): string {
+export function derivePrimaryMetric(evidence: EvidencePackage): PrimaryMetric {
   const severityRank = (s: string) => (s === "CRITICAL" ? 2 : s === "WARNING" ? 1 : 0);
   const ordered = [...significantNegativeAnomalies(evidence)].sort(
     (a, b) => severityRank(b.severity) - severityRank(a.severity)
   );
   const candidate = ordered[0]?.metric;
-  return candidate !== undefined && KNOWN_OUTCOME_METRICS.has(candidate) ? candidate : "SPEND";
+  // R-32 — exported and narrowed to PrimaryMetric so the outcome-creation path
+  // picks the measured metric the same way the recommendation engine does,
+  // instead of keeping a second copy of this rule. The set above holds exactly
+  // the PrimaryMetric members, so the cast cannot widen the type in practice.
+  return candidate !== undefined && KNOWN_OUTCOME_METRICS.has(candidate)
+    ? (candidate as PrimaryMetric)
+    : "SPEND";
 }
 
 function stepUp(r: RecommendationRisk): RecommendationRisk {

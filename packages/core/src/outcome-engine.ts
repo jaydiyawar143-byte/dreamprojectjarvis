@@ -22,6 +22,7 @@ import { calculateCanonicalKPIs, parseNumericValue } from "./kpi-engine.js";
 import { calculateMetricComparison } from "./performance-aggregator.js";
 import type { PerformanceSummary } from "./types/performance-aggregation.js";
 import type { RecommendationAction } from "./types/recommendation.js";
+import type { DiagnosisCategory } from "./types/diagnosis.js";
 import {
   AGGREGATION_ENGINE_VERSION,
   ATTRIBUTION_WINDOW_MS,
@@ -613,6 +614,16 @@ export interface MeasureOutcomeInput {
   recommendationId: string;
   executionId: string;
   accountId: string;
+  /**
+   * R-32 — the diagnosis category the recommendation answered.
+   *
+   * `OutcomeRecordSchema` has always declared this field, the repository
+   * persists it and `findFinalizedOutcomes` filters on that column, but the
+   * engine never carried it, so every stored row held null and category-based
+   * historical matching could not match. Optional, so every existing caller
+   * keeps compiling, and null when unknown.
+   */
+  diagnosisCategory?: DiagnosisCategory | null;
   entityType: OutcomeRecord["entityType"];
   entityId: string;
   actionType: RecommendationAction;
@@ -725,6 +736,9 @@ export function measureOutcome(input: MeasureOutcomeInput): OutcomeMeasurementRe
     recommendationId: input.recommendationId,
     executionId: input.executionId,
     accountId: input.accountId,
+    // R-32 — null, never undefined: the column is nullable and a category
+    // filter can reason about null.
+    diagnosisCategory: input.diagnosisCategory ?? null,
     entityType: input.entityType,
     entityId: input.entityId,
     actionType: input.actionType,

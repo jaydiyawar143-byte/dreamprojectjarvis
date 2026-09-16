@@ -4,6 +4,7 @@ import {
   aggregatePerformanceRecords,
   formatDateInTimezone,
 } from "./performance-aggregator.js";
+import { normalizeInsightRows } from "./insight-rows.js";
 import {
   measureOutcome,
   checkMeasurementState,
@@ -186,32 +187,16 @@ export class OutcomeWorker {
               const entityId = record.entityId;
               const entityType = record.entityType;
 
-              const filteredRows = rawRows
-                .filter((r) => {
-                  const rowDate = String(r.dateStart || r.dateStop || "");
-                  if (rowDate < recStartStr || rowDate > recEndStr) return false;
-
-                  if (entityType === "CAMPAIGN") return String(r.campaignId ?? "") === entityId;
-                  if (entityType === "AD_SET") return String(r.adsetId ?? "") === entityId;
-                  if (entityType === "AD") return String(r.adId ?? "") === entityId;
-                  return true; // ACCOUNT level includes all rows in account
-                })
-                .map((r) => ({
-                  accountId: record.accountId,
-                  campaignId: r.campaignId ? String(r.campaignId) : undefined,
-                  adSetId: r.adsetId ? String(r.adsetId) : undefined,
-                  adId: r.adId ? String(r.adId) : undefined,
-                  date: String(r.dateStart || r.dateStop || ""),
-                  spend: parseFloat(String(r.spend ?? "0")) || 0,
-                  impressions: parseInt(String(r.impressions ?? "0"), 10) || 0,
-                  clicks: parseInt(String(r.clicks ?? "0"), 10) || 0,
-                  reach: parseInt(String(r.reach ?? "0"), 10) || 0,
-                  conversions: parseFloat(String(r.conversions ?? "0")) || 0,
-                  revenue: (parseFloat(String(r.roas ?? "0")) || 0) * (parseFloat(String(r.spend ?? "0")) || 0),
-                  currency,
-                  timezone,
-                }))
-                .sort((a, b) => a.date.localeCompare(b.date));
+              // R-32 — the filter/map rule now lives in one place.
+              const filteredRows = normalizeInsightRows(rawRows, {
+                accountId: record.accountId,
+                entityType,
+                entityId,
+                startDate: recStartStr,
+                endDate: recEndStr,
+                currency,
+                timezone,
+              });
 
               const daysWithData = new Set(filteredRows.map((r) => r.date)).size;
               const mostRecentDataPointAt = filteredRows[filteredRows.length - 1]?.date
@@ -250,6 +235,9 @@ export class OutcomeWorker {
               // Run the deterministic outcome engine measurement pipeline
               const measurementResult = measureOutcome({
                 outcomeId: record.outcomeId,
+                // R-32 — a re-measure must not strip the category the record
+                // was created with.
+                diagnosisCategory: record.diagnosisCategory,
                 recommendationId: record.recommendationId,
                 executionId: record.executionId,
                 accountId: record.accountId,
@@ -407,6 +395,8 @@ export class OutcomeWorker {
 
             const measurementResult = measureOutcome({
               outcomeId: record.outcomeId,
+              // R-32 — same on the revision path.
+              diagnosisCategory: record.diagnosisCategory,
               recommendationId: record.recommendationId,
               executionId: record.executionId,
               accountId: record.accountId,

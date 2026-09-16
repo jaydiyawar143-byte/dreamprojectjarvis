@@ -19,6 +19,8 @@ export * from "./provider-circuit-breaker.js";
 export * from "./provider-fallback.js";
 // R-31 — provider failures: fixed messages out, the provider's account logged.
 export * from "./provider-error-safety.js";
+// R-32 — raw provider insight rows -> normalised performance records.
+export * from "./insight-rows.js";
 export * from "./types/streaming.js";
 export * from "./types/execution.js";
 export * from "./types/orchestrator.js";
