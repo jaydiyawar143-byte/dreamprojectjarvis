@@ -854,7 +854,15 @@ describe("Phase 11.5 — Scale & determinism (spec §26)", () => {
     }
     expect(entities.length).toBe(2600);
 
-    const t0 = Date.now();
+    // P1-2: CPU time, not wall clock.
+    //
+    // This file is one of 22 that vitest runs in parallel threads, and on a
+    // four-core machine the loop below competes with its siblings for cores. The
+    // wall-clock bound therefore measured the scheduler as much as the engine:
+    // ~1s running this file alone, 10.1s against a 10s bound inside a full
+    // suite. CPU time is unaffected by that contention, so the performance
+    // guarantee stays real and stops depending on what else happens to run.
+    const cpu0 = process.cpuUsage();
     let created = 0;
     for (const fx of entities) {
       h.state.set(fx.evidence.accountId, "CAMPAIGN", fx.evidence.entityId, activeCampaignState(100));
@@ -862,9 +870,10 @@ describe("Phase 11.5 — Scale & determinism (spec §26)", () => {
       if (out.status === "CREATED") created += 1;
       else if (out.status !== "DUPLICATE") throw new Error(`unexpected ${out.status}`);
     }
-    const elapsed = Date.now() - t0;
+    const cpu = process.cpuUsage(cpu0);
+    const cpuMs = (cpu.user + cpu.system) / 1000;
     expect(created).toBe(2600);
-    expect(elapsed).toBeLessThan(10_000); // generous CI bound; local ~1s
+    expect(cpuMs).toBeLessThan(10_000); // generous bound; local ~1s of CPU
     // Exactly one live-state lookup per candidate entity — no N+1 amplification.
     expect(h.state.loadCalls).toBe(2600);
 

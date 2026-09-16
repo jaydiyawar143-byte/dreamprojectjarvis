@@ -163,6 +163,30 @@ function send(orchestrator: Orchestrator, message: string, conversationId = "con
 
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/**
+ * Wait until the fake upstream has actually RECEIVED `n` requests.
+ *
+ * P1-2: the scripted reply is chosen in the server's `end` handler, but a
+ * hanging request ends client-side when the adapter's 300ms timeout fires. On a
+ * loaded machine the server's event loop can be starved past that, so the first
+ * request consumed no script entry and the SECOND request took the `hang` reply
+ * meant for the first — the next request then timed out too, and a test about
+ * recovery failed for a reason that had nothing to do with recovery.
+ *
+ * Waiting on the upstream's own counter is the completion signal that was
+ * missing. It is bounded, and it does not relax a single assertion: the call
+ * count is still asserted exactly at the end of each test.
+ */
+async function upstreamReceived(n: number, timeoutMs = 5000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (upstreamCalls < n) {
+    if (Date.now() > deadline) {
+      throw new Error(`fake upstream received ${upstreamCalls} of ${n} requests within ${timeoutMs}ms`);
+    }
+    await pause(10);
+  }
+}
+
 describe("R-24 — a transient provider failure does not take the assistant out of service", () => {
   it.each([
     ["a timeout", REPLY.hang, "INTERNAL_ERROR"],
@@ -175,6 +199,11 @@ describe("R-24 — a transient provider failure does not take the assistant out 
     script = [failure, REPLY.success];
 
     const first = await send(orchestrator, "Hello JARVIS");
+    // The first request must have REACHED the upstream before the next one is
+    // sent, or the second would take the reply scripted for the first. A
+    // hanging request ends on the client's timeout, which can outrun the
+    // server's own handler when the machine is busy.
+    await upstreamReceived(1);
     const second = await send(orchestrator, "Hello again");
 
     expect(first.success).toBe(false);

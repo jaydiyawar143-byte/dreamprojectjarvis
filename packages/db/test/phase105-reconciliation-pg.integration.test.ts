@@ -224,9 +224,19 @@ describe.skipIf(!dbUp)("PHASE 10.5 — reconciliation persistence", () => {
       data: { leaseUntil: new Date(Date.now() - 1000) },
     });
 
-    const recovered = await repo.recoverStaleReconciliations({});
-    const mine = recovered.recovered.find((r) => r.executionId === id);
-    expect(mine).toBeDefined();
+    await repo.recoverStaleReconciliations({});
+
+    // P1-2: assert the ROW, not this call's return value. Recovery is global —
+    // `findStaleReconciliations` matches every stale RECONCILING row in the
+    // database, with no owner or user scoping — and the sibling file
+    // phase106-shutdown-recovery-pg runs in a parallel thread against the same
+    // database, calling `runStartupRecovery` (which performs the same sweep)
+    // six times. Either sweep may legitimately recover this row first, which
+    // emptied THIS batch about one run in three. The guarantee under test is
+    // the outcome, and that is what is asserted here: UNKNOWN, never FAILED,
+    // with the lease reason recorded.
+    const mine = await repo.getById(id);
+    expect(mine).not.toBeNull();
     expect(mine!.status).toBe("UNKNOWN");
     expect(mine!.errorCode).toBe("RECONCILIATION_LEASE_EXPIRED");
 

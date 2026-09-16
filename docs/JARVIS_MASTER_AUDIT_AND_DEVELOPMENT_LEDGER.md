@@ -403,10 +403,16 @@ All commands run 2026-09-13 from the repository root.
 
 | Test | Behaviour | Cause |
 |---|---|---|
-| `apps/api/test/sprint-1.1d-memory-e2e.test.ts` | Different test fails each parallel run; **13/13 in isolation** | DB-dependent; documented in the run-jarvis skill |
-| `apps/web/test/auth-session.test.tsx` | Failed twice under turbo; **552/552 isolated** | Parallel-load timing |
-| `packages/core` perf tests (×4) | Fail only while Chrome is running | Timing budgets vs CPU contention |
-| `apps/api/test/phase116a-bridge-pg.integration.test.ts` | Intermittent | Postgres row-lock concurrency |
+Re-examined 2026-09-16 under P1-2. Each entry now records what was actually reproduced and what was done about it.
+
+| Test | Behaviour | Cause | Status 2026-09-16 |
+|---|---|---|---|
+| `apps/api/test/sprint-1.1d-memory-e2e.test.ts` | Six tests failed deterministically, not flakily | A race in the test harness, not the product | **Fixed** 2026-09-14 (R-17). The "flaky, 13/13 in isolation" description was wrong and is corrected below |
+| `apps/web/test/auth-session.test.tsx` | Failed twice under turbo | Parallel-load timing | **Not reproduced** 2026-09-16: 15/15 in five consecutive runs. Left alone rather than changed on a guess |
+| `packages/core` timing-budget tests | Failed under concurrent load | The 2,600-entity scale test bounded WALL-CLOCK time, but its file is one of 22 that vitest runs in parallel threads, and this machine has four cores — so the bound measured the scheduler as much as the engine: ~1s running the file alone, 11.9s during R-19 beside a Docker image build, 10.1s against the 10s bound inside the full suite on 2026-09-16 | **Fixed** 2026-09-16, test-only, on the owner's decision: the bound is now on CPU time (`process.cpuUsage()`), which sibling files cannot inflate. Nothing was relaxed — the deterministic assertions in the same test are untouched: 2,600 created, 2,600 state lookups (the no-N+1 guarantee), 2,600 duplicates on replay, 2,600 stored rows, zero LLM calls. 625/625 in three consecutive package-level runs, which is the contention case that produced the failure |
+| `apps/api/test/phase116a-bridge-pg.integration.test.ts` | Intermittent, ~1 run in 3 | The loser of the single-winner race can legitimately return `APPROVAL_PENDING` — the bridge branch for it states "Nothing consumed, nothing written" — and the allowed-status list omitted it | **Fixed** 2026-09-16, test-only: the third legal outcome is accepted; the invariants (one EXECUTED, one provider write, one SUCCEEDED journal row) are unchanged. 8/8 in five consecutive runs |
+| `packages/db/test/phase105-reconciliation-pg.integration.test.ts` | Intermittent, ~1 run in 3. **Found 2026-09-16**, not previously recorded | `findStaleReconciliations` matches every stale `RECONCILING` row with no owner or user scoping, and the sibling file `phase106` calls `runStartupRecovery` six times in a parallel thread against the same database. Either sweep may recover the row first, emptying this call's batch | **Fixed** 2026-09-16, test-only: asserts the row's persisted state (`UNKNOWN`, lease reason recorded, still re-claimable) instead of this invocation's return value. 196/196 in five consecutive runs |
+| `apps/api/test/agent-recovery-after-provider-failure.test.ts` | Failed in the full suite, passed alone. **Found 2026-09-16** | The fake upstream picks its scripted reply inside the server's `end` handler, but a hanging request ends on the adapter's 300 ms client timeout. Under load the first request consumed no script entry, so the second took the `hang` reply meant for the first | **Fixed** 2026-09-16, test-only: the test waits for the upstream to have received the first request before sending the second. Bounded, and no assertion relaxed — the call count is still asserted exactly. 31/31 in five consecutive runs |
 
 ### Correction (added 2026-09-14)
 
@@ -509,7 +515,7 @@ No secret value appears in any source file, document, config, or built bundle (1
 
 ### 10.4 Stale documentation — action required
 
-`docs/JARVIS_CAPABILITY_MATRIX.md` (13 references) contains **zero** mentions of ElevenLabs, Gmail draft flow, auto-optimization or health checks. It is the most-cited capability document and is four weeks out of date. **Status: OUTDATED — CONTRADICTED BY REPOSITORY EVIDENCE.**
+`docs/JARVIS_CAPABILITY_MATRIX.md` was four weeks out of date and contradicted by the repository: version 2.0 (2026-09-02) described the Meta-era pipeline only, with zero mentions of voice, Gmail, Drive, Calendar, Maps, browser control, the Command Center or health checks, while listing document chunking, upload and RAG retrieval as "NOT IMPLEMENTED" when all three ship. **Status: REGENERATED 2026-09-16 (P0-3)** as version 3.0, verified against the source, with every capability marked implemented, partially implemented, approval required, not connected, or planned.
 
 ---
 
@@ -559,7 +565,7 @@ No secret value appears in any source file, document, config, or built bundle (1
 |---|---|---|---|---|
 | P0-1 | This ledger | High | Evidence-based, all claims labelled | **DONE** |
 | P0-2 | Approve archive of 21 docs | High | User approves; move to `docs/archive/` | **DONE** 2026-09-14 — all 29 reports moved, none deleted, to `docs/reports/`; legacy `docs/ARCHITECTURE.md` archived to `docs/archive/` |
-| P0-3 | Regenerate capability matrix | High | Mentions all current capabilities | TODO |
+| P0-3 | Regenerate capability matrix | High | Mentions all current capabilities | **DONE** 2026-09-16 — `docs/JARVIS_CAPABILITY_MATRIX.md` rewritten as version 3.0 against the source: nine agents with their registration conditions, advertising, Google Workspace reads and the ten approval-gated write planners, maps, browser, voice, memory, the knowledge and RAG stack, the Command Center, integration management and capability discovery, the marketing-intelligence pipeline with its real limits, the five tool classes that exist but are never registered, and a planned/not-implemented list. Capabilities are described in user-facing language; internal tool ids stay in `SKILLS.md`. Documentation only — no product code touched |
 
 ### Phase 1 — Reliability and security
 | ID | Task | Priority | Dependencies | Acceptance | Status |

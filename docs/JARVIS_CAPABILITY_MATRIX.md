@@ -1,207 +1,220 @@
 # JARVIS Capability Matrix
 
-## Status Definitions
+What JARVIS can actually do, as of the code in this repository. Verified against the source on 2026-09-16 (ledger P0-3).
 
-Every capability is classified across three independent dimensions:
+Nothing is listed as implemented without a code path behind it. Where a capability is limited, the limit is written down rather than softened. Capabilities are described the way a person would ask for them; the internal tool identifiers live in [SKILLS.md](./SKILLS.md), which is the companion document for developers.
 
-| Status | Definition |
-|--------|-----------|
-| **IMPLEMENTED** | Code exists in the repository and is structurally complete |
-| **VERIFIED** | Covered by automated tests that pass |
-| **USER-ACCESSIBLE** | A user can actually reach this capability through the current interface |
-
-These three statuses are **not the same thing.** A capability may be implemented and verified but not user-accessible if the conversational agent cannot currently invoke it.
+**Sources:** `packages/agents/src/agent-policy.ts` (who may call what), `apps/api/src/services/container.ts` (what is actually registered at startup), `apps/api/src/index.ts` (which routes mount), `packages/core/src/capability-catalog.ts` (the user-facing wording), and the risk register in [JARVIS_MASTER_AUDIT_AND_DEVELOPMENT_LEDGER.md](./JARVIS_MASTER_AUDIT_AND_DEVELOPMENT_LEDGER.md).
 
 ---
 
-## Capability Matrix
+## How to read the status column
 
-### Meta Integration
+| Status | Meaning |
+|---|---|
+| **Implemented** | Wired into the running system and reachable by a user today |
+| **Partially implemented** | Present and working, with a stated limit |
+| **Approval required** | Implemented, but every run stops for a human decision before anything outside JARVIS changes |
+| **Not connected** | The code ships and registers itself only when the matching credentials or an explicit opt-in exist. Without them the capability is absent, and JARVIS says so instead of guessing |
+| **Planned / not implemented** | Not in this repository |
 
-| Capability | Implemented | Verified | User-Accessible | Phase | Evidence | Limitations |
-|-----------|-------------|----------|----------------|-------|----------|-------------|
-| Meta Graph API client | YES | YES | YES | 9.3-R | `packages/meta-graph/src/client.ts`, 103 tests | Requires valid META_ACCESS_TOKEN |
-| Meta account authorization | YES | YES | YES | 9.3-R | `packages/meta-graph/test/meta-authorization.test.ts` | Token must be manually provisioned |
-| Meta READ (insights) | YES | YES | YES | 9.3-R | Meta insights tool + provider integration | Account must have active campaigns |
-| Meta READ (campaigns) | YES | YES | YES | 9.3-R | Meta campaigns tool | — |
-| Meta READ (ad sets) | YES | YES | YES | 9.3-R | Meta ad-sets tool | — |
-| Meta READ (ads) | YES | YES | YES | 9.3-R | Meta ads tool | — |
-| Meta WRITE (pause/resume) | YES | YES | YES* | 9.3, 11.6B | `meta-ads-write-tools.ts`, approval-gated | *Requires human approval |
-| Meta WRITE (budget update) | YES | YES | YES* | 9.3, 11.6B | `meta-ads-write-tools.ts`, approval-gated | Max $10,000, 25% increase cap, 50% decrease cap |
-| Meta WRITE (create campaign) | YES | YES | YES* | 9.3, 11.6B | `MetaCreateCampaignTool` | Requires approval; mock-verified only |
-| Meta response validation | YES | YES | YES | 9.3-R | `packages/meta-graph/src/response-validator.ts` | — |
-| Meta error classification | YES | YES | YES | 9.3-R | `packages/meta-graph/src/error-handler.ts` | — |
-| Meta secret redaction | YES | YES | YES | 9.3-R | Token patterns redacted in all output | — |
+"Approval required" is not a weaker form of implemented. It is the design: the allowlist decides who may *propose* an action, and the approval gate decides whether it *runs*.
 
-### Security & Approval
+---
 
-| Capability | Implemented | Verified | User-Accessible | Phase | Evidence | Limitations |
-|-----------|-------------|----------|----------------|-------|----------|-------------|
-| User authentication (JWT) | YES | YES | YES | 10.7 | `packages/security/src/auth.ts` | — |
-| Password hashing (scrypt) | YES | YES | YES | — | `packages/security/src/password.ts` | Per-user salt, timing-safe |
-| Refresh token rotation | YES | YES | YES | — | `packages/security/src/tokens.ts` | Reuse detection |
-| RBAC (Owner/Admin/Member/Viewer) | YES | YES | YES | — | `packages/security/src/permissions.ts` | 4-level hierarchy |
-| Approval creation | YES | YES | YES | 10.3 | `packages/security/src/approval.ts`, DB integration | — |
-| Approval paramsHash binding | YES | YES | YES | 10.3 | `packages/core/src/utils/params-hash.ts`, SHA-256 | Canonical serialization |
-| Approval consumption | YES | YES | YES | 10.3 | `packages/db/test/phase103-approval-consumption.test.ts` | Atomic one-time use |
-| Approval expiry | YES | YES | YES | 10.7 | DB integration + API route | Time-limited |
-| Approval IDOR protection | YES | YES | YES | 10.7 | Integration tests | Account + user isolation |
-| Audit logging | YES | YES | YES | — | `packages/security/src/audit.ts` | Every request logged |
-
-### Execution Journal & Idempotency
-
-| Capability | Implemented | Verified | User-Accessible | Phase | Evidence | Limitations |
-|-----------|-------------|----------|----------------|-------|----------|-------------|
-| Durable execution journal | YES | YES | YES | 10.1 | `packages/tools/src/execution-journal.ts`, DB-backed | — |
-| Idempotency (UNIQUE constraint) | YES | YES | YES | 10.2 | `packages/db/test/phase102-concurrency-pg.integration.test.ts` | DB-enforced |
-| Lease-based claims | YES | YES | YES | 10.2 | `phase102-concurrency-tools.test.ts` | Single-winner guaranteed |
-| Crash recovery | YES | YES | YES | 10.2 | `phase102-lease-recovery.test.ts` | Stale → UNKNOWN (never FAILED) |
-| Timeout/AbortSignal safety | YES | YES | YES | 10.4 | `phase104-timeout-classification-pg.integration.test.ts` | Cancellation propagates |
-| Reconciliation | YES | YES | YES | 10.5 | `packages/tools/src/reconciliation.ts`, `packages/meta-graph/src/reconciler.ts` | FOUND/NOT_FOUND/UNCERTAIN |
-| Shutdown lifecycle | YES | YES | YES | 10.6 | `phase106-shutdown-lifecycle.test.ts` | Forward-only state machine |
-| Unknown outcome handling | YES | YES | YES | 10.5 | Reconciliation service | Never auto-retried |
-
-### KPI & Analytics
-
-| Capability | Implemented | Verified | User-Accessible | Phase | Evidence | Limitations |
-|-----------|-------------|----------|----------------|-------|----------|-------------|
-| KPI calculation (CTR, CPC, CPM, CPA, ROAS, CVR, Frequency) | YES | YES | YES | 11.1 | `packages/core/src/kpi-engine.ts`, 80+ tests | — |
-| Performance aggregation | YES | YES | YES | 11.2 | `packages/core/src/performance-aggregator.ts` | — |
-| Period-over-period comparison | YES | YES | YES | 11.2 | Metric comparison functions | — |
-| Time window calculation | YES | YES | YES | 11.2 | `computeDateWindowRange` | 9 preset windows + custom |
-| Data quality assessment | YES | YES | YES | 11.2 | COMPLETE/PARTIAL/UNAVAILABLE | — |
-
-### Anomaly Detection
-
-| Capability | Implemented | Verified | User-Accessible | Phase | Evidence | Limitations |
-|-----------|-------------|----------|----------------|-------|----------|-------------|
-| Statistical anomaly detection | YES | YES | YES | 11.3 | `packages/core/src/anomaly-engine.ts`, 40+ tests | Median/MAD method |
-| Directional semantics | YES | YES | YES | 11.3 | CPA higher = bad, CTR lower = bad | — |
-| Severity classification | YES | YES | YES | 11.3 | WARNING/CRITICAL thresholds | z-score based |
-| Deterministic anomaly IDs | YES | YES | YES | 11.3 | Content-based hashing | — |
-
-### AI Diagnosis
-
-| Capability | Implemented | Verified | User-Accessible | Phase | Evidence | Limitations |
-|-----------|-------------|----------|----------------|-------|----------|-------------|
-| Evidence packaging | YES | YES | YES | 11.4 | `packages/core/src/evidence-builder.ts` | Strict Zod validation |
-| AI-powered diagnosis | YES | YES | YES | 11.4 | `packages/core/src/diagnosis-engine.ts` | Only LLM-dependent step |
-| Fact/inference separation | YES | YES | YES | 11.4 | Structured output labels | — |
-| Prompt injection defense | YES | YES | YES | 11.4 | `packages/core/src/diagnosis-prompt.ts` | — |
-| Deterministic parsing | YES | YES | YES | 11.4 | Zod-validated LLM output | Fallback to generic on parse failure |
-
-### Recommendations
-
-| Capability | Implemented | Verified | User-Accessible | Phase | Evidence | Limitations |
-|-----------|-------------|----------|----------------|-------|----------|-------------|
-| Deterministic recommendation generation | YES | YES | YES | 11.5 | `packages/core/src/recommendation-engine.ts` | No LLM dependency |
-| Action catalog (14 categories) | YES | YES | YES | 11.5 | PAUSE/RESUME + budget actions | — |
-| Budget guardrails | YES | YES | YES | 11.5 | Max $10,000, 25%/50% caps | — |
-| Conflict detection | YES | YES | YES | 11.5 | Per-entity conflict rules | — |
-| State hash verification | YES | YES | YES | 11.5 | Stale-state protection | — |
-| Execution bridge | YES | YES | YES | 11.6A | `packages/tools/src/recommendation-bridge.ts` | — |
-| Recommendation confidence | YES | YES | YES | 11.8B | `packages/core/src/recommendation-confidence.ts` | Deterministic, no LLM |
-| Historical evidence integration | YES | YES | YES | 11.8B | 48 tests, 15 checkpoints | — |
-| Priority scoring | YES | YES | YES | 11.8B | Additive score ≠ confidence | — |
-
-### Outcome Measurement
-
-| Capability | Implemented | Verified | User-Accessible | Phase | Evidence | Limitations |
-|-----------|-------------|----------|----------------|-------|----------|-------------|
-| Outcome recording | YES | YES | YES | 11.7A | `packages/core/src/outcome-engine.ts` | — |
-| Baseline capture | YES | YES | YES | 11.7A | Immutable at execution time | — |
-| Materiality thresholds | YES | YES | YES | 11.7A | 5% default threshold | — |
-| Confounder detection | YES | YES | YES | 11.7A | 6 confounder types | — |
-| Outcome worker (batch) | YES | YES | YES | 11.7B | `packages/core/src/outcome-worker.ts` | Idempotent, crash-recoverable |
-| DB persistence | YES | YES | YES | 11.7A | OutcomeRecord + OutcomeRevision tables | Migrations pending |
-
-### Historical Intelligence
-
-| Capability | Implemented | Verified | User-Accessible | Phase | Evidence | Limitations |
-|-----------|-------------|----------|----------------|-------|----------|-------------|
-| Historical outcome matching | YES | YES | YES | 11.8A | `packages/core/src/historical-outcome-engine.ts` | — |
-| Consistency assessment | YES | YES | YES | 11.8B | CONSISTENT_POSITIVE/MIXED/CONSISTENT_NEGATIVE | — |
-| Recency decay | YES | YES | YES | 11.8B | Time-weighted relevance | — |
-| Evidence traceability | YES | YES | YES | 11.8B | Linked to source outcomes | — |
-| No causal claims | YES | YES | YES | 11.8B | By design | — |
-
-### Opportunity Prioritization
-
-| Capability | Implemented | Verified | User-Accessible | Phase | Evidence | Limitations |
-|-----------|-------------|----------|----------------|-------|----------|-------------|
-| Opportunity scoring | YES | YES | YES | 11.9A | `packages/core/src/opportunity-scoring.ts` | — |
-| Weighted formula | YES | YES | YES | 11.9A | severity(.25) + impact(.20) + urgency(.15) + confidence(.15) + historical(.10) + reversibility(.05) | — |
-| Priority bands | YES | YES | YES | 11.9A | CRITICAL(≥80)/HIGH(≥60)/MEDIUM(≥40)/LOW(≥20)/IGNORE | — |
-| Eligibility gates | YES | YES | YES | 11.9A | PROPOSED/APPROVED only | — |
-| Conflict detection | YES | YES | YES | 11.9A | Per-entity exclusivity | — |
-| Explainability | YES | YES | YES | 11.9A | Score breakdown provided | — |
-| Opportunity queue API | YES | YES | YES | 11.9B | `apps/api/src/routes/opportunities.ts`, 30 tests | Read-only, no mutations |
-| Opportunity queue web UI | YES | YES | YES | 11.9B | `apps/web/src/app/opportunities/page.tsx`, detail page | — |
-| Opportunity detail review | YES | YES | YES | 11.9B | Score breakdown, evidence, action preview | — |
-| Approval handoff | YES | YES | YES | 11.9B | Routes through existing Phase 10 approval flow | — |
-| IDOR protection (queue) | YES | YES | YES | 11.9B | Server-computed scores, accountId from env | — |
-
-### Dedicated Meta Ads Agent (Sprint 2 Scope)
-
-| Capability | Implemented | Verified | User-Accessible | Phase | Evidence | Limitations |
-|-----------|-------------|----------|----------------|-------|----------|-------------|
-| Dedicated Meta Ads agent (Sprint 2.1) | YES | YES | YES | Sprint 2.1 | `packages/agents/src/agents/meta-ads-agent.ts`, `packages/agents/test/meta-ads-agent.test.ts` (44 tests) | Specialized Meta reasoning |
-| Auto-namespace intent-based routing (Sprint 2.4 Hardened) | YES | YES | YES | Sprint 2.4 | `packages/agents/src/orchestrator.ts` (priority platform overrides + context checks) | Fallback to default ConversationalAssistant, generic keywords depend on history context |
-| Meta Ads domain reasoning (Sprint 2.2) | YES | YES | YES | Sprint 2.2 | Campaign hierarchy, objective-aware KPIs, relationships, creative fatigue, delivery states | Reuses existing engines, no duplicate engines |
-| Authoritative context & preloading (Sprint 2.3) | YES | YES | YES | Sprint 2.3 | `meta-ads-agent.ts`, request-scoped concurrent isolation, preloaded campaigns count, error handling | No credentials exposure, no fabrication |
-| Meta agent write execution | YES | YES | YES | Sprint 2.1 | Writes handled via existing Tools & Approval Service | Bounded by human approval |
-| Real Meta write via new agent | 0 | N/A | N/A | Sprint 2.1 | audit requirement | **Must stay 0** |
-
-### Conversational Access
-
-| Capability | Implemented | Verified | User-Accessible | Phase | Evidence | Limitations |
-|-----------|-------------|----------|----------------|-------|----------|-------------|
-| Chat interface | YES | YES | YES | — | `apps/web/src/app/chat/`, `apps/api/src/routes/chat.ts` | — |
-| WebSocket streaming | YES | YES | YES | — | Socket.IO integration | — |
-| Conversation persistence | YES | YES | YES | — | Prisma Conversation + Message models | — |
-| Conversation isolation | YES | YES | YES | — | Repository-level ownership checks | — |
-| Agent selection | YES | YES | YES | — | Agent registry | 1 agent currently registered |
-
-### Memory & Knowledge
-
-| Capability | Implemented | Verified | User-Accessible | Phase | Evidence | Limitations |
-|-----------|-------------|----------|----------------|-------|----------|-------------|
-| Persistent memory wiring (Sprint 1.1A) | YES | YES | YES | Sprint 1.1A | `apps/api/src/services/container.ts` L319–357, `packages/db/src/repositories/memory-repository.ts`, `apps/api/test/sprint-1.1a-memory-wiring.test.ts` (24 tests) | Production container wired |
-| Memory store (PrismaMemoryRepository) | YES | YES | YES | Sprint 1.1A | `packages/db/src/repositories/memory-repository.ts`, Memory table in PostgreSQL w/ pgvector | Only reachable with live DB |
-| MemoryEngine | YES | YES | YES | Sprint 1.1A | `packages/memory/src/memory-engine.ts` | Requires persistent store + embedding provider |
-| Memory extraction service (Sprint 1.1B) | YES | YES | YES | Sprint 1.1B | `packages/memory/src/memory-extraction-service.ts`, `apps/api/test/sprint-1.1b-memory-extraction.test.ts` (11 tests) | Runs in background post-conversation |
-| Embedding generation | YES | YES | YES | Sprint 1.1A | `packages/ai-openai/src/openai-embedding-provider.ts` | Requires OPENAI_API_KEY; graceful degradation if absent |
-| Knowledge base (RAG) | PARTIAL | YES | NO | Sprint 3.1 | Knowledge base schema and `PrismaKnowledgeRepository` in [knowledge-repository.ts](file:///d:/dreamprojectjarvis/dreamprojectjarvis/packages/db/src/repositories/knowledge-repository.ts), 20 tests | RAG query pipeline and UI upload not yet implemented (persistence layer only) |
-| Document text extraction — PDF/DOCX/TXT/MD (Sprint 3.2) | YES | YES | NO | Sprint 3.2 | `packages/memory/src/extraction/`, `DocumentExtractionService`, 179 tests | Extraction only — no chunking, embeddings, or upload route, so not yet reachable by a user |
-| File/MIME/size validation (Sprint 3.2) | YES | YES | NO | Sprint 3.2 | `document-validator.ts` — extension allowlist, MIME/extension agreement, magic-byte signatures, configurable size cap | Rejects path separators outright; extractor takes a file name, never a path |
-| Deterministic text normalization (Sprint 3.2) | YES | YES | NO | Sprint 3.2 | `text-normalizer.ts` — BOM, NFC, line endings, exotic spaces, control characters; idempotent | Shared by every format so identical text hashes identically |
-| PDF page metadata (Sprint 3.2) | YES | YES | NO | Sprint 3.2 | Per-page offsets into the normalized text; `pdf-parse` v2 backend | Pages with no text layer are recorded with a zero-length range |
-| Document section metadata (Sprint 3.2) | YES | YES | NO | Sprint 3.2 | Markdown ATX headings; DOCX headings via `mammoth` HTML conversion | DOCX `docProps/core.xml` properties are not read; title falls back to the first heading |
-| Memory recall in conversation (Sprint 1.1C) | YES | YES | YES | Sprint 1.1C | `packages/agents/src/orchestrator.ts` L122, `apps/api/test/sprint-1.1c-memory-recall.test.ts` (10 tests) | Active context retrieval; scoped by userId |
-| Full memory E2E lifecycle (Sprint 1.1D) | YES | YES | YES | Sprint 1.1D | `apps/api/test/sprint-1.1d-memory-e2e.test.ts` (12 tests) | Complete extract → persist → recall behavioral verification |
-
-### What Is NOT Implemented
+## Conversation and agents
 
 | Capability | Status | Notes |
-|-----------|--------|-------|
-| Document Chunking | NOT IMPLEMENTED | Text splitting and overlap logic not implemented (Sprint 3.3). Extraction itself landed in Sprint 3.2 |
-| Document Upload Route | NOT IMPLEMENTED | No `POST /api/v1/knowledge/upload` route or file storage, so extraction is not reachable from the UI (Sprint 3.5) |
-| RAG Semantic Vector Retrieval | NOT IMPLEMENTED | Similarity vector search query logic not implemented |
-| User-triggered recommendation generation (HTTP) | NOT IMPLEMENTED | Pipeline generation exists only via `apps/api/scripts/phase116b/propose.ts` (standalone CLI, not a route/worker) |
-| Outcome worker automation | NOT IMPLEMENTED | `OutcomeWorker` implemented + tested but never wired to a scheduler/cron/route |
-| Autonomous optimization | NOT IMPLEMENTED | By design — every write requires human approval |
-| A/B experimentation | NOT IMPLEMENTED | Explicitly deferred to Phase 12 |
-| Multi-platform advertising | NOT IMPLEMENTED | Only Meta (Facebook/Instagram) supported |
-| Website analytics integration | NOT IMPLEMENTED | No landing page or conversion tracking data |
-| Automated bidding | NOT IMPLEMENTED | No programmatic bid management |
-| Self-modifying prompts | NOT IMPLEMENTED | Prompts are static and auditable |
-| Reinforcement learning | NOT IMPLEMENTED | No self-improving model optimization |
-| Multi-user collaboration | PARTIAL | RBAC exists but no real-time collaboration |
-| n8n automation integration | PARTIAL | Wrapper exists, no active workflows |
-| WhatsApp integration | PARTIAL | Wrapper exists, not wired to agents |
+|---|---|---|
+| Conversational assistant | Implemented | The general assistant; every request that no domain owns lands here |
+| Meta Ads specialist | Implemented | Owns advertising questions about Meta |
+| Analytics specialist | Implemented | Reads advertising performance; holds no write capability |
+| Knowledge specialist | Implemented | Answers from your documents; the retrieval happens before the agent runs |
+| Google Ads specialist | Not connected | Registers only when Google Ads is configured |
+| Automation specialist | Not connected | Registers only when n8n is configured |
+| Messaging specialist | Not connected | Registers only when WhatsApp is configured |
+| Browser specialist | Not connected | Registers only when browsing is switched on and a Chrome exists |
+| Location specialist | Implemented | Maps capabilities register unconditionally, so this agent is effectively always present |
+
+Nine agents in total. When an agent is not registered, the request falls through to the general assistant rather than failing silently.
 
 ---
 
-*Document version: 2.0*
-*Last updated: 2026-09-02*
-*Sprint 3.2 complete: Deterministic document text extraction for PDF, DOCX, TXT and MD, with secure validation and page/section metadata. Not yet user-accessible — no upload route exists.*
+## Advertising
+
+| Capability | Status | Notes |
+|---|---|---|
+| Read Meta ad accounts, campaigns, ad sets, ads | Implemented | |
+| Read Meta performance insights | Implemented | |
+| Pause or resume a Meta campaign, ad set or ad | Approval required | |
+| Change a Meta campaign or ad set budget | Approval required | Bounded: maximum value, and caps on how far a single change may move it |
+| Create a Meta campaign | Approval required | Verified against mocks only; not exercised against a live account |
+| Read Google Ads accounts, campaigns and insights | Not connected | Needs Google configured **and** an encryption key, because credentials are stored encrypted per user |
+| Change anything in Google Ads | Planned / not implemented | No Google Ads write capability exists |
+| Advertising beyond Meta and Google | Planned / not implemented | |
+
+---
+
+## Google Workspace
+
+Registered whenever a Google connection is *possible*, so an unconnected user is told to connect rather than being handed an agent with nothing to offer.
+
+| Capability | Status | Notes |
+|---|---|---|
+| List unread Gmail, search Gmail, read a message or thread | Implemented | Read-only. Requires the Gmail scope specifically — connecting Google for Ads alone is not enough |
+| Search Drive, list recent files, read file details | Implemented | Read-only, Drive scope |
+| List upcoming calendar events, read an event | Implemented | Read-only, Calendar scope |
+| Prepare a Gmail draft, or a draft update | Approval required | JARVIS prepares; a person approves; only then does the write run |
+| Request sending an email | Approval required | |
+| Prepare a Drive folder, upload, move or rename | Approval required | |
+| Prepare a calendar event, a change, or a deletion | Approval required | |
+
+Ten write planners exist and no write executors: the tools handed to the model can only *plan*. Execution happens after approval, outside the model's reach.
+
+---
+
+## Maps and location
+
+| Capability | Status | Notes |
+|---|---|---|
+| Search places, find places nearby, look up place details | Implemented | |
+| Resolve an address to coordinates, and coordinates to an address | Implemented | |
+| Compute a route, distance and travel time | Implemented | |
+| Read your current location | Implemented | Location is supplied by you; it is not inferred |
+| Monthly usage guard | Implemented | A spend guard caps map usage per month |
+
+---
+
+## Browser and computer control
+
+| Capability | Status | Notes |
+|---|---|---|
+| Navigate, inspect, extract, screenshot | Not connected | Read-only browsing; mounts only when browsing is explicitly switched on and a Chrome is present |
+| Click, type, select, submit, download, upload | Not connected, approval required | Each action stops for approval when browsing is enabled |
+
+Browsing is never inferred from "a browser is installed". Where it may navigate is decided below the tool layer, so no prompt can widen it.
+
+---
+
+## Voice
+
+| Capability | Status | Notes |
+|---|---|---|
+| Speak to JARVIS (speech to text) | Implemented | Mounts when voice is configured |
+| JARVIS speaks back (text to speech) | Implemented | ElevenLabs when configured, otherwise the OpenAI voice |
+| Voice status report | Implemented | |
+| Approving a write by voice | Planned / not implemented | Deliberate: a voice session cannot confirm a write |
+
+---
+
+## Memory and knowledge
+
+| Capability | Status | Notes |
+|---|---|---|
+| Long-term memory across conversations | Implemented | Needs an embedding provider; without one, memory switches off rather than degrading silently |
+| Automatic memory extraction after a turn | Implemented | Runs after the reply, never blocking it |
+| Upload a document | Implemented | PDF, DOCX, TXT and Markdown |
+| Document text extraction, chunking and embedding | Implemented | |
+| List, read and delete your documents | Implemented | |
+| Semantic search across your documents | Implemented | |
+| Answers grounded in your documents (RAG) | Implemented | Enabled only when an embedding provider exists; otherwise retrieval is off and JARVIS does not pretend to have read anything |
+| Image understanding on upload | Implemented | An uploaded image is described and stored as searchable text |
+
+---
+
+## Dashboard and Command Center
+
+| Capability | Status | Notes |
+|---|---|---|
+| Customisable widget grid | Implemented | Drag, resize, hide and restore; layout is saved |
+| Weather | Implemented | |
+| Market and crypto prices | Implemented | |
+| Map, route and place widgets | Implemented | |
+| This machine's telemetry | Implemented | |
+| Current date and time, task list | Implemented | |
+| Undo of a layout change surviving a refresh | Planned / not implemented | Layout history is in memory only |
+
+---
+
+## Integrations and self-knowledge
+
+| Capability | Status | Notes |
+|---|---|---|
+| See what is connected | Implemented | |
+| Check an integration's status, run a health check, test a connection | Implemented | |
+| Review granted permissions, read the integration audit trail | Implemented | |
+| Connect, configure, reconnect, enable or disable an account | Implemented | These write only to JARVIS's own encrypted store |
+| Disconnect an account | Approval required | |
+| Report what JARVIS can currently do | Implemented | Answered from the live tool registry, not from a written list |
+| Mistake detection and self-diagnosis | Partially implemented | JARVIS classifies its own failures and says what failed; there is no self-repair |
+
+---
+
+## Automation and messaging
+
+| Capability | Status | Notes |
+|---|---|---|
+| Trigger an n8n workflow | Not connected, approval required | Needs base URL, API key and callback secret. A workflow can do anything its author wired, so it is approval-gated |
+| Send a WhatsApp message | Not connected, approval required | Needs the WhatsApp secrets; recipients must be authorised |
+| Scheduled or recurring automation inside JARVIS | Planned / not implemented | Scheduling lives in n8n, not here |
+
+---
+
+## Safety, permissions and auditability
+
+| Capability | Status | Notes |
+|---|---|---|
+| Human approval before anything outside JARVIS changes | Implemented | One execution authority; approvals are consumed atomically |
+| Role-based permissions per agent and tool | Implemented | |
+| Execution journal and idempotency | Implemented | A crash or timeout never reports success |
+| Audit trail | Implemented | Every tool execution recorded |
+| Secrets kept out of responses, logs and bundles | Implemented | Including provider error text, which is replaced by fixed messages |
+| Account identifiers masked in replies | Implemented | |
+| Autonomous action without approval | Planned / not implemented | By design, and not a roadmap item |
+
+---
+
+## Marketing intelligence pipeline
+
+| Capability | Status | Notes |
+|---|---|---|
+| KPI calculation and performance aggregation | Implemented | |
+| Anomaly detection | Implemented | |
+| AI diagnosis of a performance problem | Implemented | Structured, schema-validated output |
+| Recommendation generation | Partially implemented | Reachable through a standalone script; no user-facing route generates recommendations |
+| Reading and executing a recommendation | Implemented, approval required | |
+| Opportunity prioritisation and queue | Implemented | |
+| Outcome measurement engine | Partially implemented | The engine and its worker are complete and tested, but no runtime path creates an outcome record and the worker is not scheduled — ledger R-32 |
+| Historical outcome intelligence | Partially implemented | Matching relies on outcome records that nothing currently creates |
+| A/B experimentation | Planned / not implemented | |
+| Automated bidding | Planned / not implemented | |
+| Website or conversion analytics | Planned / not implemented | No landing-page or conversion data source |
+
+---
+
+## Present in the code, not reachable
+
+Five tool classes are written and tested but never registered, so no agent can call them at runtime: CSV analysis, document analysis, PDF generation, web research, and a system echo used for diagnostics. CSV analysis is additionally *granted* to two agents by policy, so the grant currently points at something that is not registered. Wiring any of them in is a capability decision — see `CODEBASE_AUDIT.md`, D-6.
+
+---
+
+## Planned / not implemented
+
+Listed because they are commonly assumed. None of these exist in this repository, and none is claimed anywhere in the product.
+
+| Capability | Status |
+|---|---|
+| Sales CRM, lead pipelines, deal tracking | Planned / not implemented — JARVIS is not a sales CRM |
+| Workspace or project-management integrations (task boards, sprints, tickets) | Planned / not implemented |
+| Social media content publishing or scheduling | Planned / not implemented |
+| SEO research | Planned / not implemented |
+| Competitor research | Planned / not implemented |
+| Integrations beyond Meta, Google (Ads, Gmail, Drive, Calendar, Maps), WhatsApp and n8n | Planned / not implemented |
+| Real-time multi-user collaboration | Planned / not implemented — roles exist, shared live editing does not |
+| Self-improving or self-modifying prompts | Planned / not implemented — prompts are static and auditable |
+
+---
+
+*Document version: 3.0 — regenerated for ledger P0-3.*
+*Verified against the repository on 2026-09-16.*
+*Previous version (2.0, 2026-09-02) described the Meta-era pipeline only and predated Google Workspace, Maps, browser control, voice, the knowledge stack and the Command Center.*

@@ -336,7 +336,19 @@ describe.skipIf(!dbUp)("PHASE 11.6A — recommendation bridge on real PostgreSQL
     expect(results.filter((r) => r.status === "EXECUTED")).toHaveLength(1);
     for (const r of results) {
       if (r.status !== "EXECUTED") {
-        expect(["DUPLICATE_EXECUTION_BLOCKED", "APPROVAL_ALREADY_CONSUMED"]).toContain(r.status);
+        // P1-2: three outcomes are legal for the LOSER of this race, and which
+        // one appears depends on how far it got before the winner consumed the
+        // approval. `APPROVAL_PENDING` is the case where it got far enough to
+        // find no live approval and ask for a new one — the bridge's own branch
+        // for it states "Nothing consumed, nothing written", and the invariants
+        // below still prove that: one EXECUTED, one provider write, one
+        // SUCCEEDED journal row. Listing only the first two made a safe,
+        // expected interleaving look like a failure roughly one run in three.
+        expect([
+          "DUPLICATE_EXECUTION_BLOCKED",
+          "APPROVAL_ALREADY_CONSUMED",
+          "APPROVAL_PENDING",
+        ]).toContain(r.status);
       }
     }
     expect(h.budgetWrites).toHaveLength(1); // exactly ONE provider mutation
