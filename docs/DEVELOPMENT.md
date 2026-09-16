@@ -8,7 +8,7 @@ Setup, configuration and the checks a change must pass. Verified on 2026-09-14.
 
 | Tool | Version | Why |
 |---|---|---|
-| Node.js | 24 (or 22.22.2+) | `engines` in the root `package.json` says 20+, but jsdom 30, used by the tests, requires `^22.22.2` or `^24.15.0`. The production image still runs Node 20; a Node 24 image passed the same container checks — ledger R-19 |
+| Node.js | 24 | One runtime everywhere: the production image (`node:24-alpine`), CI and local development. Node 20 reached end of life on 2026-04-30, and the test toolchain refuses it — jsdom 30 requires `^22.22.2` or `^24.15.0`, undici 8 requires `>=22.19.0`. The root `engines` says `>=24.15.0`; there is no `engine-strict`, so an older Node warns rather than fails — ledger R-19 |
 | pnpm | 9 | the workspace package manager |
 | Docker | any recent | PostgreSQL **with pgvector** — a plain `postgres` image cannot run the migrations |
 | Chrome or Edge | installed | browser automation, and the `run-jarvis` driver |
@@ -95,7 +95,7 @@ On 2026-09-14 that command gave `6 passed | 7 skipped` in three consecutive runs
 
 ## Continuous integration
 
-[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs on pushes to `main`, on pull requests, and on demand. It is one job on Ubuntu with Node 24. It does not use Node 20, the production image's version: the test toolchain (jsdom 30) requires Node `^22.22.2` or `^24.15.0`, and on Node 20 the web tests cannot start — ledger R-19.
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs on pushes to `main`, on pull requests, and on demand. It is one job on Ubuntu with Node 24 — the same major the production image runs since R-19, so CI now exercises the production runtime. Node 20 could not run the web tests at all: the test toolchain (jsdom 30) requires Node `^22.22.2` or `^24.15.0`.
 
 | Step | Command |
 |---|---|

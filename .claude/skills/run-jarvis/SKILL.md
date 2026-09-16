@@ -18,7 +18,8 @@ Windows 11 (PowerShell + Git Bash, Node 24.16.0, pnpm 9.15.9).
 
 ## Prerequisites
 
-Node 20+, pnpm 9, Docker Desktop, and a Chromium-family browser (the driver
+Node 24 (the repository's runtime — ledger R-19), pnpm 9, Docker Desktop, and
+a Chromium-family browser (the driver
 uses the **system Chrome** — it never downloads one).
 
 **Docker Desktop must be running.** The `docker` CLI is on PATH even when the

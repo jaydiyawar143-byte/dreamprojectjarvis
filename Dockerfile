@@ -22,7 +22,11 @@
 #   and cannot resolve `api`.
 # ---------------------------------------------------------------------------
 
-FROM node:20-alpine AS base
+# Node 24 (R-19). Node 20 reached end of life on 2026-04-30, and the test
+# toolchain — jsdom 30, undici 8 — cannot start on it, so CI had to run a
+# different major from the one production ran. Both are Node 24 now.
+# `node:24-alpine` still ships Corepack, so the pnpm pin below is unchanged.
+FROM node:24-alpine AS base
 # openssl is not optional: Prisma probes for libssl to pick a query engine and,
 # without it, warns and falls back to an openssl-1.1.x engine that Alpine does
 # not have. libc6-compat covers the glibc-linked binaries some tools ship.
