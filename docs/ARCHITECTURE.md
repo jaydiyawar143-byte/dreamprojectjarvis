@@ -102,7 +102,7 @@ Two gates stand in front of one execution authority.
 
 ## Deployment
 
-One Docker image (`node:24-alpine`, runs as the `node` user) serves both the API and the web app. `docker-compose.yml` runs PostgreSQL with pgvector, the API and the web app on ports 5433, 3101 and 3100, so a local development stack on 5432, 3001 and 3000 can run beside it with its own database. The API applies migrations when it starts. A CI workflow, `.github/workflows/ci.yml`, is defined but has not yet run on GitHub — see [DEVELOPMENT.md](./DEVELOPMENT.md).
+One Docker image (`node:24-alpine`, runs as the `node` user) serves both the API and the web app. `docker-compose.yml` runs PostgreSQL with pgvector, the API and the web app on ports 5433, 3101 and 3100, so a local development stack on 5432, 3001 and 3000 can run beside it with its own database. The API applies migrations when it starts. A CI workflow, `.github/workflows/ci.yml`, is defined but has not yet run on GitHub — see [DEVELOPMENT.md](./DEVELOPMENT.md). Every tracked text file is stored and checked out with LF (`.gitattributes`), so a source snippet spanning a line break and a Prisma migration checksum mean the same thing on every platform — ledger R-20.
 
 ## Known gaps
 

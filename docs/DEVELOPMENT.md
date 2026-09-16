@@ -91,7 +91,7 @@ On 2026-09-14 that command gave `6 passed | 7 skipped` in three consecutive runs
 
 **`@jarvis/db` tests** need PostgreSQL with pgvector. Point `DATABASE_URL` at a separate test database, never the development one: the tests insert and delete rows. On 2026-09-14 they gave 188 passed / 8 failed. The 8 are known — 7 test bugs and 1 stale test, classified in the ledger (R-4). One more test, `phase102` crash recovery, failed once in seven runs; its cause is not established. A fresh database migrates cleanly since `39b190d` (R-22).
 
-**On a fresh Windows clone**, `apps/api/test/google-write-reachability.test.ts` fails because Git converts line endings to CRLF. It is a false failure — ledger R-20.
+**Line endings.** The root `.gitattributes` (`* text=auto eol=lf`) makes every platform check text files out as LF, so `apps/api/test/google-write-reachability.test.ts` — which asserts a source snippet spanning a line break — no longer fails on a fresh Windows clone, and a `migration.sql` hashes to the same Prisma checksum everywhere. Git already stored every tracked file with LF, so nothing committed was rewritten. **A clone made before this** keeps its CRLF files on disk until it checks them out again or is renormalized (`git add --renormalize .`); in such a checkout that test still reports a false failure, and `prisma migrate` still reports a checksum mismatch on the three migrations that are CRLF there — ledger R-20.
 
 ## Continuous integration
 

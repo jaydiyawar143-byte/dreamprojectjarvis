@@ -1,0 +1,31 @@
+# ---------------------------------------------------------------------------
+# R-20 — one line ending, everywhere.
+#
+# Git ALREADY stores every tracked text file with LF: this file changes nothing
+# that is committed and rewrites no history. What it adds is the CHECKOUT rule.
+# Git for Windows installs with `core.autocrlf=true`, so a clone on Windows
+# writes CRLF to disk, and two things quietly depended on that:
+#
+#   `apps/api/test/google-write-reachability.test.ts` asserts a source snippet
+#   that spans a line break, so it fails on a CRLF checkout and passes on LF —
+#   a false failure that says nothing about the code under test.
+#
+#   Prisma stores a checksum of each `migration.sql` in `_prisma_migrations`.
+#   A CRLF copy hashes differently from the LF copy a database recorded, so
+#   `prisma migrate` reports a mismatch that is only line endings. Three
+#   migrations are CRLF in a Windows checkout today.
+#
+# With `eol=lf` every platform checks the same bytes out, so both stop being
+# platform-specific.
+# ---------------------------------------------------------------------------
+
+# Everything Git detects as text: normalised to LF in the repository, and
+# written out as LF on every platform, whatever `core.autocrlf` says locally.
+* text=auto eol=lf
+
+# Stated explicitly because a checksum is computed over exactly these bytes.
+*.sql text eol=lf
+
+# Binary: never inspected for text, never converted.
+*.doc binary
+*.thmx binary
