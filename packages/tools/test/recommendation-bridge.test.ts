@@ -27,6 +27,7 @@ import {
   type ExternalEntityState,
   type IApprovalManager,
   type IPermissionChecker,
+  type OutcomeRecord,
   type RecommendationAction,
   type RecommendationRecord,
   type RecommendationStatus,
@@ -245,7 +246,11 @@ function trackingAudit(): { logger: AuditLogger; entries: Record<string, unknown
 // to the live mock state (ACTIVE, dailyBudget 100).
 // ---------------------------------------------------------------------------
 
-function makeEvidence(accountId = ACCOUNT, entityId = CAMPAIGN_ID): EvidencePackage {
+function makeEvidence(
+  accountId = ACCOUNT,
+  entityId = CAMPAIGN_ID,
+  currentMetrics: Record<string, number | null> = {}
+): EvidencePackage {
   return {
     schemaVersion: 1,
     accountId,
@@ -254,7 +259,7 @@ function makeEvidence(accountId = ACCOUNT, entityId = CAMPAIGN_ID): EvidencePack
     currency: "USD",
     timezone: "UTC",
     performanceWindow: { startDate: "2026-08-16", endDate: "2026-08-22" },
-    currentMetrics: {},
+    currentMetrics,
     metricDetails: [],
     anomalies: [],
     dataQuality: "COMPLETE",
@@ -275,6 +280,8 @@ interface RecordOverrides {
   userId?: string;
   accountId?: string;
   entityId?: string;
+  currentMetrics?: Record<string, number | null>;
+  diagnosisCategory?: string | null;
 }
 
 function makeRecord(o: RecordOverrides = {}): RecommendationRecord {
@@ -319,7 +326,7 @@ function makeRecord(o: RecordOverrides = {}): RecommendationRecord {
       ? { dailyBudget: requested }
       : { status: "PAUSED" },
     reason: "unit test fixture",
-    evidence: makeEvidence(accountId, entityId),
+    evidence: makeEvidence(accountId, entityId, o.currentMetrics),
     expectedImpact: {
       metric: "SPEND",
       direction: "INCREASE",
@@ -332,6 +339,7 @@ function makeRecord(o: RecordOverrides = {}): RecommendationRecord {
     paramsHash: computeParamsHash(params),
     stateHash: computeExternalStateHash(accountId, entityId, state),
     identityHash: "i".repeat(32),
+    diagnosisCategory: o.diagnosisCategory ?? null,
     status: o.status ?? "PROPOSED",
     requiresApproval: true,
     createdAt: new Date(nowMs).toISOString(),
@@ -356,6 +364,7 @@ async function buildHarness(opts: {
     maxDecreasePercent: number;
     maxDecreaseAbsolute: number;
   };
+  outcomes?: { create: (record: OutcomeRecord) => Promise<void> };
 } = {}) {
   clearExecutionStore();
   const provider = createMockMetaProvider();
@@ -428,6 +437,7 @@ async function buildHarness(opts: {
     stateOf,
     authorizer,
     audit: audit.logger,
+    outcomes: opts.outcomes,
   });
 
   return {
@@ -1089,5 +1099,161 @@ describe("audit linkage", () => {
     // Raw provider response fields must NOT be duplicated into the audit trail.
     expect(serialized).not.toContain("BRAND_AWARENESS");
     expect(serialized).not.toContain("campaignName");
+  });
+});
+
+// ===========================================================================
+// 8. R-32 — outcome record creation on the write path
+//
+// After an advertising write has SUCCEEDED, the bridge persists an outcome
+// record whose baseline is the recommendation's OWN evidence snapshot. Its
+// job is to never change the caller's result: a missing baseline or a failed
+// persistence is audited and swallowed, never surfaced as anything but
+// EXECUTED.
+// ===========================================================================
+
+describe("R-32 outcome record creation", () => {
+  const completeMetrics: Record<string, number | null> = {
+    spend: 500,
+    impressions: 50000,
+    clicks: 1000,
+    reach: 25000,
+    conversions: 50,
+    revenue: 2500,
+    ctr: 2,
+    cpc: 0.5,
+    cpm: 10,
+    cpa: 10,
+    roas: 5,
+    cvr: 5,
+    frequency: 2,
+  };
+
+  function captureOutcomes() {
+    const created: OutcomeRecord[] = [];
+    const create = vi.fn(async (record: OutcomeRecord) => {
+      created.push(record);
+    });
+    return { create, created };
+  }
+
+  async function driveToExecuted(h: Harness, rec: RecommendationRecord) {
+    const first = await h.service.execute({
+      recommendationId: rec.recommendationId,
+      userId: USER,
+      role: ROLE,
+    });
+    h.approve((first as { approvalId?: string }).approvalId!);
+    return h.service.execute({
+      recommendationId: rec.recommendationId,
+      userId: USER,
+      role: ROLE,
+    });
+  }
+
+  it("persists an outcome record baseline from the recommendation's own evidence", async () => {
+    const outcomes = captureOutcomes();
+    const h = await buildHarness({ outcomes });
+    const rec = makeRecord({
+      currentMetrics: completeMetrics,
+      diagnosisCategory: "CREATIVE_FATIGUE",
+    });
+    await h.addRecord(rec);
+
+    const result = await driveToExecuted(h, rec);
+    expect(result.status).toBe("EXECUTED");
+
+    const created = outcomes.created;
+    expect(created).toHaveLength(1);
+    const record = created[0];
+    expect(record.recommendationId).toBe(rec.recommendationId);
+    expect(record.entityType).toBe("CAMPAIGN");
+    expect(record.entityId).toBe(CAMPAIGN_ID);
+    expect(record.accountId).toBe(ACCOUNT);
+    expect(record.actionType).toBe("INCREASE_BUDGET");
+    expect(record.userId).toBe(USER);
+    // The category survives from the recommendation onto the outcome record.
+    expect(record.diagnosisCategory).toBe("CREATIVE_FATIGUE");
+    // The baseline is the evidence snapshot, verbatim — not a provider call.
+    expect(record.baseline.source).toBe("recommendation-evidence");
+    expect(record.baseline.kpis.spend).toBe(500);
+    expect(record.baseline.kpis.impressions).toBe(50000);
+    expect(record.baseline.kpis.clicks).toBe(1000);
+    expect(record.baseline.kpis.conversions).toBe(50);
+    expect(record.baseline.kpis.revenue).toBe(2500);
+    expect(record.baseline.kpis.cpa).toBe(10);
+
+    // The primary metric is derived the same way the recommendation engine
+    // derives it (no anomalies -> SPEND).
+    expect(record.primaryMetric).toBe("SPEND");
+
+    const bridgeEntries = h.auditEntries.filter(
+      (e) => e["toolId"] === "recommendation.execute"
+    );
+    expect(JSON.stringify(bridgeEntries)).toContain("OUTCOME_RECORD_CREATED");
+  });
+
+  it("reports EXECUTED even when the outcome persistence itself fails", async () => {
+    const outcomes = captureOutcomes();
+    outcomes.create.mockRejectedValueOnce(new Error("db down"));
+    const h = await buildHarness({ outcomes });
+    const rec = makeRecord({ currentMetrics: completeMetrics });
+    await h.addRecord(rec);
+
+    const result = await driveToExecuted(h, rec);
+    expect(result.status).toBe("EXECUTED");
+    expect(outcomes.created).toHaveLength(0);
+
+    const serialized = JSON.stringify(h.auditEntries);
+    expect(serialized).toContain("OUTCOME_RECORD_PERSIST_FAILED");
+    expect(serialized).toContain("EXECUTED");
+  });
+
+  it("skips outcome creation (with an audit row) when the evidence baseline is incomplete", async () => {
+    const outcomes = captureOutcomes();
+    const h = await buildHarness({ outcomes });
+    // Conversions missing entirely — no zero-fill, no fabricated baseline.
+    const incomplete = { ...completeMetrics, conversions: null };
+    const rec = makeRecord({ currentMetrics: incomplete });
+    await h.addRecord(rec);
+
+    const result = await driveToExecuted(h, rec);
+    expect(result.status).toBe("EXECUTED");
+    expect(outcomes.create).not.toHaveBeenCalled();
+
+    // The skip is visible in the same audit trail as the execution.
+    const serialized = JSON.stringify(h.auditEntries);
+    expect(serialized).toContain("OUTCOME_RECORD_SKIPPED_INCOMPLETE_BASELINE");
+    expect(serialized).toContain("EXECUTED");
+  });
+
+  it("creates no outcome record when no outcomes port is wired", async () => {
+    const h = await buildHarness(); // no outcomes dep
+    const rec = makeRecord({ currentMetrics: completeMetrics });
+    await h.addRecord(rec);
+
+    const result = await driveToExecuted(h, rec);
+    expect(result.status).toBe("EXECUTED");
+
+    const serialized = JSON.stringify(h.auditEntries);
+    expect(serialized).toContain("EXECUTED");
+    expect(serialized).not.toContain("OUTCOME_RECORD");
+  });
+
+  it("does not create an outcome record on a blocked or failed execution", async () => {
+    const outcomes = captureOutcomes();
+    const h = await buildHarness({ outcomes });
+    const hidden = makeRecord({ currentMetrics: completeMetrics });
+    await h.addRecord(hidden);
+
+    // Parasite hash makes the first attempt deterministically reject.
+    hidden.paramsHash = "tampered-" + hidden.paramsHash;
+    const blocked = await h.service.execute({
+      recommendationId: hidden.recommendationId,
+      userId: USER,
+      role: ROLE,
+    });
+    expect(blocked.status).toBe("PARAMS_HASH_MISMATCH");
+    expect(outcomes.create).not.toHaveBeenCalled();
   });
 });

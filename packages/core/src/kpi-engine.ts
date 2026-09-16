@@ -101,3 +101,79 @@ export function calculateCanonicalKPIs(inputs: RawMetricInputs): CalculatedKPIs 
     },
   };
 }
+
+// ---------------------------------------------------------------------------
+// R-32 — evidence-based baseline for outcome creation
+// ---------------------------------------------------------------------------
+// Turns a recommendation's own `evidence.currentMetrics` snapshot (a loose
+// record of `number | null`) into the `CalculatedKPIs` the outcome baseline
+// needs. Deliberately NOT `calculateCanonicalKPIs`: it never coerces a missing
+// counter to zero. A day with no spend is zero; a recommendation whose
+// evidence lacks spend at all is NOT an opportunity to fabricate a baseline.
+// The required counters must be present and finite or the whole baseline is
+// refused (null) — the caller then skips outcome creation. Derived KPIs simply
+// pass through whatever the evidence says, null included, because
+// `BaselineKPIValues` already allows them to be null.
+// ---------------------------------------------------------------------------
+
+const REQUIRED_BASELINE_COUNTERS = [
+  "spend",
+  "impressions",
+  "clicks",
+  "reach",
+  "conversions",
+  "revenue",
+] as const;
+
+const DERIVED_BASELINE_KPIS = [
+  "ctr",
+  "cpc",
+  "cpm",
+  "cpa",
+  "roas",
+  "cvr",
+  "frequency",
+] as const;
+
+export function baselineKpisFromEvidence(
+  currentMetrics: Readonly<Record<string, number | null> | undefined>
+): CalculatedKPIs | null {
+  if (!currentMetrics) return null;
+
+  const required: Record<string, number> = {};
+  for (const key of REQUIRED_BASELINE_COUNTERS) {
+    const value = currentMetrics[key];
+    if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return null;
+    required[key] = value;
+  }
+
+  const derivedValue = (key: (typeof DERIVED_BASELINE_KPIS)[number]): number | null => {
+    const value = currentMetrics[key];
+    return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+  };
+
+  return {
+    spend: required["spend"],
+    impressions: required["impressions"],
+    clicks: required["clicks"],
+    reach: required["reach"],
+    conversions: required["conversions"],
+    revenue: required["revenue"],
+    ctr: derivedValue("ctr"),
+    cpc: derivedValue("cpc"),
+    cpm: derivedValue("cpm"),
+    cpa: derivedValue("cpa"),
+    roas: derivedValue("roas"),
+    cvr: derivedValue("cvr"),
+    frequency: derivedValue("frequency"),
+    isDefined: {
+      ctr: derivedValue("ctr") !== null,
+      cpc: derivedValue("cpc") !== null,
+      cpm: derivedValue("cpm") !== null,
+      cpa: derivedValue("cpa") !== null,
+      roas: derivedValue("roas") !== null,
+      cvr: derivedValue("cvr") !== null,
+      frequency: derivedValue("frequency") !== null,
+    },
+  };
+}

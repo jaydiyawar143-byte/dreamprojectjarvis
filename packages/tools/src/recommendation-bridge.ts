@@ -3,16 +3,23 @@ import type {
   IApprovalManager,
   IToolExecutor,
   ExternalEntityState,
+  OutcomeStorePort,
+  PerformanceSummary,
   RecommendationAction,
   RecommendationRecord,
   RecommendationStatus,
   Role,
 } from "@jarvis/core";
 import {
+  DiagnosisCategorySchema,
   RecommendationRecordSchema,
   SERVICE_SHUTTING_DOWN_ERROR,
+  baselineKpisFromEvidence,
   buildExecutableParams,
+  captureBaselineSnapshot,
   computeParamsHash,
+  derivePrimaryMetric,
+  measureOutcome,
   redactSecrets,
   verifyRecommendationFreshness,
 } from "@jarvis/core";
@@ -178,6 +185,17 @@ export interface RecommendationExecutionDeps {
   authorizer?: Pick<MetaAccountAuthorizer, "isAuthorized">;
   /** Bridge-level linkage audit; executor/tool/approval audits stay intact. */
   audit?: AuditLogger;
+  /**
+   * R-32 — where an executed recommendation's outcome record is persisted.
+   *
+   * Optional, so every existing caller keeps working unchanged and a
+   * deployment without it simply creates no outcome records. Creation runs
+   * AFTER the advertising write has already succeeded and can never fail it:
+   * a missing baseline or a failed write to this port is audited and
+   * swallowed, because the external change has already happened and must not
+   * be reported as anything but EXECUTED.
+   */
+  outcomes?: Pick<OutcomeStorePort, "create">;
   nowFn?: () => Date;
 }
 
@@ -606,6 +624,15 @@ export class RecommendationExecutionService {
         );
       }
       await this.auditAttempt(input, record, at, "EXECUTED", "success");
+      // R-32 — the write succeeded; record what it is measured against.
+      // Deliberately AFTER the audit above and outside the success path's
+      // control flow: whatever happens here, this execution is EXECUTED.
+      await this.createOutcomeRecord(
+        input,
+        record,
+        at,
+        journalExecutionId ?? execution.executionId
+      );
       return {
         status: "EXECUTED",
         recommendationId: rid,
@@ -718,6 +745,104 @@ export class RecommendationExecutionService {
       recommendationId: record.recommendationId,
       reasons: verdict.reasons,
     };
+  }
+
+  /**
+   * R-32 — create the outcome record for a write that has already succeeded.
+   *
+   * The baseline is the recommendation's OWN evidence snapshot: the metrics
+   * that were true before the action, captured when the recommendation was
+   * generated. That is a genuine pre-action baseline and costs no provider
+   * call, which matters because this runs on the write path, after money has
+   * already moved.
+   *
+   * Three things this deliberately does NOT do:
+   *
+   *   - It never invents a KPI. `currentMetrics` is a loose record and every
+   *     value in it may be null, so when a required counter is missing the
+   *     record is NOT created. Zero-filling would fabricate a baseline and
+   *     every later comparison against it would be wrong.
+   *   - It never changes the caller's result. A skip or a failed write is
+   *     audited and swallowed; the advertising write already happened and
+   *     reporting it as anything but EXECUTED would be a lie.
+   *   - It never throws.
+   *
+   * Every path here leaves an audit row, so a skipped outcome is visible in
+   * the same trail as the execution rather than being silent.
+   */
+  private async createOutcomeRecord(
+    input: RecommendationExecutionInput,
+    record: RecommendationRecord,
+    at: string,
+    executionId: string
+  ): Promise<void> {
+    const outcomes = this.deps.outcomes;
+    if (!outcomes) return;
+
+    try {
+      const evidence = record.evidence;
+      const kpis = baselineKpisFromEvidence(evidence.currentMetrics);
+
+      if (!kpis) {
+        await this.auditAttempt(
+          input,
+          record,
+          at,
+          "OUTCOME_RECORD_SKIPPED_INCOMPLETE_BASELINE",
+          "pending"
+        );
+        return;
+      }
+
+      const summary: PerformanceSummary = {
+        accountId: record.accountId,
+        level: record.entityLevel,
+        entityId: record.entityId,
+        currency: evidence.currency,
+        timezone: evidence.timezone,
+        window: {
+          type: "custom",
+          startDate: evidence.performanceWindow.startDate,
+          endDate: evidence.performanceWindow.endDate,
+        },
+        // The evidence snapshot is one aggregated window, not a row per day.
+        recordCount: 1,
+        kpis,
+        quality: evidence.dataQuality,
+        // The baseline was true as of the evidence, but it is FETCHED now, at
+        // execution time — that is what the measurement window counts from.
+        fetchedAt: at,
+        source: "recommendation-evidence",
+      };
+
+      // The recommendation's category is a loose string; the outcome's is the
+      // enum. Narrow rather than cast, so a legacy or malformed value becomes
+      // null instead of an invalid category nothing can filter on.
+      const parsedCategory = DiagnosisCategorySchema.safeParse(record.diagnosisCategory);
+
+      const measured = measureOutcome({
+        recommendationId: record.recommendationId,
+        executionId,
+        accountId: record.accountId,
+        diagnosisCategory: parsedCategory.success ? parsedCategory.data : null,
+        entityType: record.entityLevel,
+        entityId: record.entityId,
+        actionType: record.actionType,
+        objective: evidence.objective ?? null,
+        primaryMetric: derivePrimaryMetric(evidence),
+        baseline: captureBaselineSnapshot(summary, { fetchedAt: at }),
+        executedAtIso: at,
+        userId: input.userId,
+      });
+
+      await outcomes.create(measured.outcomeRecord);
+      await this.auditAttempt(input, record, at, "OUTCOME_RECORD_CREATED", "success");
+    } catch {
+      // Includes the duplicate-outcome case: one recommendation carries one
+      // outcome, so a retried execution finding an existing row is correct
+      // behaviour, not a failure of this execution.
+      await this.auditAttempt(input, record, at, "OUTCOME_RECORD_PERSIST_FAILED", "failure");
+    }
   }
 
   private async auditAttempt(

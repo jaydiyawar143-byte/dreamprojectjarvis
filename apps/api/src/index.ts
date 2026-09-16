@@ -45,7 +45,7 @@ import {
   installProcessErrorHandlers,
 } from "./middleware/error-handler.js";
 import { EncryptionService } from "@jarvis/security";
-import { prisma, PrismaGoogleConnectionRepository, PrismaOAuthStateRepository, PrismaWhatsAppRepository, PrismaN8nRepository, PrismaCredentialRepository, PrismaTaskRepository, PrismaPreferenceRepository, PrismaMapsUsageRepository } from "@jarvis/db";
+import { prisma, PrismaGoogleConnectionRepository, PrismaOAuthStateRepository, PrismaWhatsAppRepository, PrismaN8nRepository, PrismaCredentialRepository, PrismaTaskRepository, PrismaPreferenceRepository, PrismaMapsUsageRepository, PrismaOutcomeRepository } from "@jarvis/db";
 import { createWhatsAppConfig, isWhatsAppConfigured } from "@jarvis/whatsapp";
 import { createN8nConfig, isN8nConfigured } from "@jarvis/n8n";
 import {
@@ -74,6 +74,8 @@ import {
   createShutdownController,
   installSignalHandlers,
 } from "./shutdown.js";
+import { OutcomeWorker } from "@jarvis/core";
+import { startOutcomeWorkerSweep } from "./services/outcome-worker-scheduler.js";
 
 const env = loadEnvironment();
 
@@ -613,6 +615,29 @@ httpServer.listen(env.PORT, () => {
   console.log(
     `JARVIS API running on port ${env.PORT} [${env.NODE_ENV}] state=${lifecycle.getState() satisfies LifecycleState}`
   );
+
+  // -------------------------------------------------------------------------
+  // Phase 11.7B at runtime — the outcome measurement sweep.
+  //
+  // AFTER listen, never before, for the same reason as the health check:
+  // a provider that is slow or unavailable must not delay the port opening.
+  //
+  // The worker is constructed here, at the composition point, from the same
+  // executor every other path goes through (so permission checks, the journal
+  // and audit apply) and the outcome repository the routes already use. The
+  // scheduler itself is transport only: interval, overlap guard and lifecycle
+  // awareness. It is gated on JARVIS_OUTCOME_WORKER_INTERVAL_MS (0 disables;
+  // the scheduler logs the disabled state), on by default so the closed
+  // learning loop actually runs in any deployment that executes actions.
+  // -------------------------------------------------------------------------
+  const outcomeIntervalMs = env.OUTCOME_WORKER_INTERVAL_MS;
+  if (outcomeIntervalMs > 0) {
+    startOutcomeWorkerSweep({
+      worker: new OutcomeWorker(container.executor, new PrismaOutcomeRepository(prisma)),
+      lifecycle,
+      intervalMs: outcomeIntervalMs,
+    });
+  }
 
   // -------------------------------------------------------------------------
   // Learn integration health at startup, for users who already have a

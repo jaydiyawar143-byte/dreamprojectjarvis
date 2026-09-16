@@ -91,11 +91,11 @@ function makeMockOutcomeRecord(overrides: Partial<OutcomeRecord>): OutcomeRecord
     ...overrides,
   });
 
-  // R-4 — `measureOutcome` does not copy diagnosisCategory onto the record it
-  // builds, and the repository stores and filters the record's own column, so
-  // the fixture sets it. Passing it as measurement input alone left the stored
-  // row null, and a query filtered on the category could never match.
-  return { ...rec.outcomeRecord, diagnosisCategory: overrides.diagnosisCategory ?? null };
+  // R-32 removed the workaround that used to sit here: the category was set on
+  // the record after the fact, because `measureOutcome` dropped it. The engine
+  // now carries it from the input this helper already spreads in, so the
+  // fixture exercises the real path.
+  return rec.outcomeRecord;
 }
 
 beforeAll(async () => {

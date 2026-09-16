@@ -22,6 +22,7 @@ import {
   createExecutorBackedExternalStatePort,
 } from "@jarvis/tools";
 import {
+  PrismaOutcomeRepository,
   PrismaRecommendationRepository,
   prisma,
 } from "@jarvis/db";
@@ -48,6 +49,10 @@ export function createRecommendationsRouter(container: Container): Router {
   const router = Router();
   const requireAuth = createAuthMiddleware(container.tokenService);
   const recommendationRepo = new PrismaRecommendationRepository(prisma);
+  // R-32 — where an executed recommendation's outcome record is persisted.
+  // Creation happens inside RecommendationExecutionService, after the
+  // advertising write has already succeeded, and can never fail the write.
+  const outcomeRepo = new PrismaOutcomeRepository(prisma);
 
   // GET /api/v1/recommendations — list own recommendations
   router.get("/", requireAuth, async (req: AuthenticatedRequest, res: Response) => {
@@ -115,6 +120,8 @@ export function createRecommendationsRouter(container: Container): Router {
       journal: container.executionJournal,
       stateOf,
       audit: container.auditLogger,
+      // R-32 — outcome records are created here, on the real execution path.
+      outcomes: outcomeRepo,
     });
 
     try {
