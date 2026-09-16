@@ -91,7 +91,11 @@ function makeMockOutcomeRecord(overrides: Partial<OutcomeRecord>): OutcomeRecord
     ...overrides,
   });
 
-  return rec.outcomeRecord;
+  // R-4 — `measureOutcome` does not copy diagnosisCategory onto the record it
+  // builds, and the repository stores and filters the record's own column, so
+  // the fixture sets it. Passing it as measurement input alone left the stored
+  // row null, and a query filtered on the category could never match.
+  return { ...rec.outcomeRecord, diagnosisCategory: overrides.diagnosisCategory ?? null };
 }
 
 beforeAll(async () => {
@@ -190,8 +194,16 @@ beforeAll(async () => {
 afterAll(async () => {
   if (!dbUp || !userAId) return;
 
+  const userIds = [userAId, userBId!].filter(Boolean);
+
+  // R-4 — the repository writes an audit row for every outcome it creates or
+  // finalizes, and `AuditLog.userId` is ON DELETE RESTRICT, so the cascade
+  // below never reaches those rows. They go first, or the user delete fails
+  // with a foreign key violation and leaves the test data behind.
+  await prisma.auditLog.deleteMany({ where: { userId: { in: userIds } } });
+
   await prisma.user.deleteMany({
-    where: { id: { in: [userAId, userBId!].filter(Boolean) } },
+    where: { id: { in: userIds } },
   });
 
   await prisma.$disconnect();
@@ -209,6 +221,18 @@ describe.runIf(dbUp)("Phase 11.8A — Database Query & Security Integration Test
     });
 
     await repo.create(outcomeA);
+
+    // R-4 — `create` stores WAITING_FOR_DATA with isFinal false by design,
+    // whatever the record it is handed says, so the outcome has to be
+    // finalized through the repository before a finalized query can see it.
+    const finalized = await repo.finalize(
+      outcomeA.outcomeId,
+      userAId!,
+      "POSITIVE",
+      0.85,
+      new Date().toISOString()
+    );
+    expect(finalized).toBe(true);
 
     // Filter matches
     const results = await repo.findFinalizedOutcomes(userAId!, {

@@ -7,6 +7,11 @@
  *  3. Immutability validation (trigger blocks updates to finalized outcome records)
  *  4. Learning history queries (getLearningHistory)
  *  5. Concurrency / lease claiming (claimOutcome / releaseOutcome)
+ *
+ * R-4: each test that stores an outcome owns its recommendation, and the
+ * states the repository controls — FINALIZED, SCHEDULED — are reached through
+ * the repository instead of being asserted into the record. Before that, every
+ * test after the first died on the unique `recommendation_id`.
  */
 
 import { config } from "dotenv";
@@ -89,6 +94,43 @@ function makeTestOutcomeRecord(overrides?: Partial<OutcomeRecord>): OutcomeRecor
   return rec.outcomeRecord;
 }
 
+/**
+ * R-4 — a recommendation this test alone owns.
+ *
+ * `OutcomeRecord.recommendation_id` is unique: one recommendation carries one
+ * outcome. Sharing the suite's recommendation made every later `create` throw
+ * `DuplicateOutcomeError` before the test reached what it was written to check.
+ */
+async function createRecommendation(label: string): Promise<string> {
+  const unique = `${label}_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
+  const rec = await prisma.performanceRecommendation.create({
+    data: {
+      userId: testUserId!,
+      accountId: ACCOUNT_ID,
+      targetLevel: "CAMPAIGN",
+      targetId: "cmp_pg_test_117b",
+      actionType: "PAUSE_CAMPAIGN",
+      status: "EXECUTED",
+      reason: `Phase 11.7B test recommendation (${label})`,
+      evidence: { schemaVersion: 1 },
+      expectedImpact: JSON.stringify({
+        metric: "SPEND",
+        direction: "DECREASE",
+        estimatedRange: "NOT_ESTIMATED",
+        rationale: "Test",
+      }),
+      confidence: 0.9,
+      riskLevel: "HIGH",
+      proposedChange: {},
+      paramsHash: `test_hash_117b_${unique}`,
+      identityHash: `id_hash_117b_${unique}`,
+      stateHash: `state_hash_117b_${unique}`,
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+    },
+  });
+  return rec.id;
+}
+
 beforeAll(async () => {
   if (!dbUp) return;
 
@@ -115,37 +157,18 @@ beforeAll(async () => {
     },
   });
 
-  // Create recommendation
-  const rec = await prisma.performanceRecommendation.create({
-    data: {
-      userId: testUserId,
-      accountId: ACCOUNT_ID,
-      targetLevel: "CAMPAIGN",
-      targetId: "cmp_pg_test_117b",
-      actionType: "PAUSE_CAMPAIGN",
-      status: "EXECUTED",
-      reason: "Phase 11.7B test recommendation",
-      evidence: { schemaVersion: 1 },
-      expectedImpact: JSON.stringify({
-        metric: "SPEND",
-        direction: "DECREASE",
-        estimatedRange: "NOT_ESTIMATED",
-        rationale: "Test",
-      }),
-      confidence: 0.9,
-      riskLevel: "HIGH",
-      proposedChange: {},
-      paramsHash: `test_hash_117b_${Date.now()}`,
-      identityHash: `id_hash_117b_${Date.now()}`,
-      stateHash: `state_hash_117b_${Date.now()}`,
-      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
-    },
-  });
-  recId = rec.id;
+  // The recommendation the first test's outcome is linked to
+  recId = await createRecommendation("suite");
 });
 
 afterAll(async () => {
   if (!dbUp || !testUserId) return;
+
+  // R-4 — the repository writes an audit row for every outcome it creates,
+  // finalizes or revises, and `AuditLog.userId` is ON DELETE RESTRICT, so the
+  // cascade below never reaches them. They go first, or the user delete fails
+  // with a foreign key violation and the test data is left behind.
+  await prisma.auditLog.deleteMany({ where: { userId: testUserId } });
 
   // Cleanup will cascade and delete marketing accounts, recommendations, outcome records, and revisions
   await prisma.user.deleteMany({
@@ -192,7 +215,9 @@ describe.runIf(dbUp)("Phase 11.7B — Outcome Database Integration Tests", () =>
   });
 
   it("should enforce pagination on revision history", async () => {
-    const outcome = makeTestOutcomeRecord();
+    const outcome = makeTestOutcomeRecord({
+      recommendationId: await createRecommendation("pagination"),
+    });
     await repo.create(outcome);
 
     // Create 3 revisions
@@ -235,12 +260,21 @@ describe.runIf(dbUp)("Phase 11.7B — Outcome Database Integration Tests", () =>
 
   it("should enforce database level immutability via check_outcome_record_immutability trigger", async () => {
     const outcome = makeTestOutcomeRecord({
-      measurementState: "FINALIZED",
-      isFinal: true,
-      outcome: "POSITIVE",
-      measuredAt: new Date().toISOString(),
+      recommendationId: await createRecommendation("immutability"),
     });
     await repo.create(outcome);
+
+    // R-4 — the trigger fires only when the stored row is already final, and
+    // `create` always stores WAITING_FOR_DATA, so the row is finalized through
+    // the repository first. Asserting FINALIZED into the record changed nothing.
+    const finalized = await repo.finalize(
+      outcome.outcomeId,
+      testUserId!,
+      "POSITIVE",
+      0.9,
+      new Date().toISOString()
+    );
+    expect(finalized).toBe(true);
 
     // Attempting to direct UPDATE a finalized record via prisma should throw an error
     await expect(
@@ -254,14 +288,12 @@ describe.runIf(dbUp)("Phase 11.7B — Outcome Database Integration Tests", () =>
   });
 
   it("should retrieve learning history of finalized outcomes", async () => {
+    const measuredAt1 = new Date().toISOString();
     const outcome1 = makeTestOutcomeRecord({
-      measurementState: "FINALIZED",
-      isFinal: true,
-      outcome: "POSITIVE",
-      confidence: 0.95,
-      measuredAt: new Date().toISOString(),
+      recommendationId: await createRecommendation("learning_final"),
     });
     const outcome2 = makeTestOutcomeRecord({
+      recommendationId: await createRecommendation("learning_open"),
       measurementState: "READY",
       isFinal: false,
       outcome: null,
@@ -272,24 +304,38 @@ describe.runIf(dbUp)("Phase 11.7B — Outcome Database Integration Tests", () =>
     await repo.create(outcome1);
     await repo.create(outcome2);
 
+    // R-4 — learning history reads FINALIZED rows, and only `finalize` writes
+    // that state; `create` stores WAITING_FOR_DATA for every record it is given.
+    expect(
+      await repo.finalize(outcome1.outcomeId, testUserId!, "POSITIVE", 0.95, measuredAt1)
+    ).toBe(true);
+
     const history = await repo.getLearningHistory(ACCOUNT_ID, testUserId!);
     expect(history.length).toBeGreaterThanOrEqual(1);
-    
+
     // Only the finalized one is in learning history
-    const found = history.find((h) => h.measuredAt === outcome1.measuredAt);
+    const found = history.find((h) => h.measuredAt === measuredAt1);
     expect(found).toBeDefined();
     expect(found?.outcome).toBe("POSITIVE");
-    
+
     const notFound = history.find((h) => h.measuredAt === outcome2.measuredAt);
     expect(notFound).toBeUndefined();
   });
 
   it("should handle concurrency leases correctly", async () => {
     const outcome = makeTestOutcomeRecord({
+      recommendationId: await createRecommendation("lease"),
       measurementState: "SCHEDULED",
       isFinal: false,
     });
     await repo.create(outcome);
+
+    // R-4 — only a SCHEDULED or READY row can be claimed, and `create` stores
+    // WAITING_FOR_DATA whatever the record says. The worker moves the row with
+    // this same call; the test does not write the column itself.
+    expect(
+      await repo.updateMeasurementState(outcome.outcomeId, testUserId!, "SCHEDULED")
+    ).toBe(true);
 
     const expiredLeaseTime = new Date(Date.now() - 5 * 60 * 1000).toISOString();
 

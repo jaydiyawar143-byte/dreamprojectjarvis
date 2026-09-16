@@ -302,9 +302,14 @@ describe.skipIf(!dbUp)("PHASE 11.5 — real PostgreSQL recommendation store", ()
         entityId: "cmp_budget_old",
         createdAt: new Date(Date.now() - 48 * 3600 * 1000).toISOString(),
       });
+      // R-4 — relative to the real clock. The shared fixture's `createdAt` is
+      // the fixed `NOW_ISO` (2026-08-23), and the query counts the last 24
+      // hours against the real clock, so this row stopped being "recent" on
+      // 2026-08-24 and the count has been 0 ever since.
       const recent = makeRecord({
         accountId: budgetAccount,
         diagnosisId: "diag_budget_new",
+        createdAt: new Date().toISOString(),
       });
       await repo.save(old);
       await repo.save(recent);

@@ -12,6 +12,11 @@
  *
  * Uses mock Meta data only. NO real Meta writes. NO AI. NO workers.
  * Uses a dedicated test user + account removed in afterAll (FK cascade).
+ *
+ * R-4: the file now reports honestly. Without a database the whole suite is
+ * skipped rather than reported as passed, and a test whose precondition is
+ * missing skips instead of returning early — a green tick used to mean
+ * "nothing ran" as often as "this works".
  */
 
 import { config } from "dotenv";
@@ -108,6 +113,44 @@ function makeTestOutcomeRecord(overrides?: Partial<OutcomeRecord>): OutcomeRecor
   return rec.outcomeRecord;
 }
 
+/**
+ * R-4 — a recommendation this test alone owns.
+ *
+ * `OutcomeRecord.recommendation_id` is unique, so one recommendation can carry
+ * exactly one outcome. Tests that share the suite's recommendation therefore
+ * fail on `create` with `DuplicateOutcomeError`, never reaching the isolation
+ * rule they exist to check.
+ */
+async function createRecommendation(label: string): Promise<string> {
+  const unique = `${label}_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
+  const rec = await prisma.performanceRecommendation.create({
+    data: {
+      userId: testUserId!,
+      accountId: ACCOUNT_ID,
+      targetLevel: "CAMPAIGN",
+      targetId: "cmp_pg_test",
+      actionType: "PAUSE_CAMPAIGN",
+      status: "EXECUTED",
+      reason: `Phase 11.7A test recommendation (${label})`,
+      evidence: { schemaVersion: 1 },
+      expectedImpact: JSON.stringify({
+        metric: "SPEND",
+        direction: "DECREASE",
+        estimatedRange: "NOT_ESTIMATED",
+        rationale: "Test",
+      }),
+      confidence: 0.9,
+      riskLevel: "HIGH",
+      proposedChange: {},
+      paramsHash: `test_hash_${unique}`,
+      identityHash: `id_hash_${unique}`,
+      stateHash: `state_hash_${unique}`,
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+    },
+  });
+  return rec.id;
+}
+
 // ---------------------------------------------------------------------------
 // Before / After
 // ---------------------------------------------------------------------------
@@ -157,42 +200,25 @@ beforeAll(async () => {
     },
   });
 
-  // Create a PerformanceRecommendation to link outcomes to
-  const rec = await prisma.performanceRecommendation.create({
-    data: {
-      userId: testUserId,
-      accountId: ACCOUNT_ID,
-      targetLevel: "CAMPAIGN",
-      targetId: "cmp_pg_test",
-      actionType: "PAUSE_CAMPAIGN",
-      status: "EXECUTED",
-      reason: "Phase 11.7A test recommendation",
-      evidence: { schemaVersion: 1 },
-      expectedImpact: JSON.stringify({
-        metric: "SPEND",
-        direction: "DECREASE",
-        estimatedRange: "NOT_ESTIMATED",
-        rationale: "Test",
-      }),
-      confidence: 0.9,
-      riskLevel: "HIGH",
-      proposedChange: {},
-      paramsHash: `test_hash_${Date.now()}`,
-      identityHash: `id_hash_${Date.now()}`,
-      stateHash: `state_hash_${Date.now()}`,
-      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
-    },
-  });
-  recId = rec.id;
+  // The recommendation the suite's own outcome is linked to (tests 1, 4-7)
+  recId = await createRecommendation("suite");
 });
 
 afterAll(async () => {
   if (!dbUp || !testUserId) return;
 
+  const userIds = [testUserId, otherUserId!].filter(Boolean);
+
+  // R-4 — the repository writes an audit row for every outcome it creates or
+  // finalizes, and `AuditLog.userId` is ON DELETE RESTRICT, so those rows are
+  // not swept by the cascade below. They have to go first, or deleting the
+  // user fails with a foreign key violation and the test data is left behind.
+  await prisma.auditLog.deleteMany({ where: { userId: { in: userIds } } });
+
   // FK cascade removes all related records
   await prisma.user.deleteMany({
     where: {
-      id: { in: [testUserId, otherUserId!].filter(Boolean) },
+      id: { in: userIds },
     },
   });
 
@@ -203,15 +229,13 @@ afterAll(async () => {
 // Tests
 // ---------------------------------------------------------------------------
 
-describe("Phase 11.7A — OutcomeRecord PostgreSQL integration", () => {
+describe.runIf(dbUp)("Phase 11.7A — OutcomeRecord PostgreSQL integration", () => {
   // -------------------------------------------------------------------------
   // 1. Create + retrieve
   // -------------------------------------------------------------------------
   it(
     "1 — creates and retrieves an outcome record",
     async () => {
-      if (!dbUp) return;
-
       const record = makeTestOutcomeRecord();
       await repo.create(record);
 
@@ -232,9 +256,9 @@ describe("Phase 11.7A — OutcomeRecord PostgreSQL integration", () => {
   it(
     "2 — cross-account read returns null (account isolation)",
     async () => {
-      if (!dbUp) return;
-
-      const record = makeTestOutcomeRecord();
+      const record = makeTestOutcomeRecord({
+        recommendationId: await createRecommendation("account_isolation"),
+      });
       await repo.create(record);
 
       // otherUserId belongs to OTHER_ACCOUNT_ID, not ACCOUNT_ID
@@ -250,9 +274,9 @@ describe("Phase 11.7A — OutcomeRecord PostgreSQL integration", () => {
   it(
     "3 — cross-user read returns null (user isolation)",
     async () => {
-      if (!dbUp) return;
-
-      const record = makeTestOutcomeRecord();
+      const record = makeTestOutcomeRecord({
+        recommendationId: await createRecommendation("user_isolation"),
+      });
       await repo.create(record);
 
       const fetched = await repo.getByRecommendation(record.recommendationId, otherUserId!);
@@ -266,12 +290,14 @@ describe("Phase 11.7A — OutcomeRecord PostgreSQL integration", () => {
   // -------------------------------------------------------------------------
   it(
     "4 — duplicate create throws DuplicateOutcomeError (idempotency)",
-    async () => {
-      if (!dbUp) return;
-
+    async (ctx) => {
       // Get existing record for recId from previous tests
       const existing = await repo.getByRecommendation(recId!, testUserId!);
-      if (!existing) return; // Skip if prior tests failed
+      if (!existing) {
+        // R-4 — the precondition is missing, which is not the same as passing.
+        ctx.skip();
+        return;
+      }
 
       const duplicate = makeTestOutcomeRecord();
       duplicate.recommendationId = recId!; // same recommendation → unique violation
@@ -286,11 +312,12 @@ describe("Phase 11.7A — OutcomeRecord PostgreSQL integration", () => {
   // -------------------------------------------------------------------------
   it(
     "5 — second finalize is no-op; finalized row is immutable",
-    async () => {
-      if (!dbUp) return;
-
+    async (ctx) => {
       const existing = await repo.getByRecommendation(recId!, testUserId!);
-      if (!existing) return;
+      if (!existing) {
+        ctx.skip();
+        return;
+      }
 
       const measuredAt = new Date().toISOString();
 
@@ -327,8 +354,6 @@ describe("Phase 11.7A — OutcomeRecord PostgreSQL integration", () => {
   it(
     "6 — outcome is linked to recommendation via FK",
     async () => {
-      if (!dbUp) return;
-
       const existing = await repo.getByRecommendation(recId!, testUserId!);
       expect(existing).not.toBeNull();
       expect(existing!.recommendationId).toBe(recId);
@@ -341,11 +366,12 @@ describe("Phase 11.7A — OutcomeRecord PostgreSQL integration", () => {
   // -------------------------------------------------------------------------
   it(
     "7 — baseline snapshot round-trips through JSON without data loss",
-    async () => {
-      if (!dbUp) return;
-
+    async (ctx) => {
       const existing = await repo.getByRecommendation(recId!, testUserId!);
-      if (!existing) return;
+      if (!existing) {
+        ctx.skip();
+        return;
+      }
 
       const baseline = existing.baseline;
 
