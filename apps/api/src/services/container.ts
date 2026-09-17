@@ -31,6 +31,8 @@ import { isOpenAIConfigured } from "@jarvis/config";
 import {
   ToolExecutor,
   ToolRegistry,
+  AnalysisGenerator,
+  MetaAnalyzeTool,
   MetaGetAccountsTool,
   MetaGetCampaignsTool,
   MetaGetAdSetsTool,
@@ -196,6 +198,20 @@ export interface Container {
    * PHASE 11.6B — durable recommendation store for the execution route.
    */
   recommendationRepo: PrismaRecommendationRepository;
+  /**
+   * PHASE 11.10 — the shared analysis / recommendation-generation service.
+   *
+   * One instance reached by BOTH the `meta.analyze` JARVIS tool and
+   * `POST /api/v1/analysis`, after the same object-graph argument the
+   * integration command service makes: a dashboard button and a spoken request
+   * cannot disagree because there is no second implementation to disagree.
+   *
+   * Null when Meta is not configured or no AI provider is configured: analysis
+   * needs both a token it can read through and a provider that can diagnose,
+   * so the route reports ACCOUNT_NOT_CONFIGURED / AI_PROVIDER_NOT_CONFIGURED
+   * instead of pointing both paths at a service that could only fail.
+   */
+  analysisService: AnalysisGenerator | null;
   /** Lifecycle gate consulted before approving side-effecting actions. */
   lifecycle?: ShutdownLifecycle;
   /** PHASE 11.9 — pending action service for write-tool confirmation flow. */
@@ -1166,6 +1182,38 @@ export function getContainer(options?: {
   // does not execute them.
   integrationCommands?.setExecutor(toolExecutor);
 
+  // ---------------------------------------------------------------------------
+  // PHASE 11.10 — the shared analysis/recommendation-generation service.
+  //
+  // One instance, built now that the executor, the provider chain and the
+  // durable recommendation store all exist, and shared by the `meta.analyze`
+  // JARVIS tool AND the POST /api/v1/analysis route — the same object-graph
+  // guarantee the integration command service makes for its two paths.
+  //
+  // Gated on Meta credentials AND an AI provider: analysis must read the
+  // account through the executor and produce a diagnosis through the provider,
+  // so without either the service stays null and the route reports a 503 with
+  // the precise missing piece instead of pointing at a service that can only
+  // fail. The tool is registered only alongside the service, so an agent can
+  // never be offered an analysis it cannot actually perform.
+  // ---------------------------------------------------------------------------
+  const metaAccessTokenConfigured = process.env.META_ACCESS_TOKEN;
+  const metaAccountIdConfigured = process.env.META_AD_ACCOUNT_ID;
+  const analysisService =
+    metaAccessTokenConfigured && metaAccountIdConfigured && openAIConfigured
+      ? new AnalysisGenerator({
+          executor: toolExecutor,
+          provider: adapter,
+          store: recommendationRepo,
+          audit: auditLogger,
+          config: { defaultAccountId: metaAccountIdConfigured },
+        })
+      : null;
+
+  if (analysisService) {
+    toolRegistry.register(new MetaAnalyzeTool(analysisService, metaAccountIdConfigured));
+  }
+
   _container = {
     tokenService,
     authService,
@@ -1182,6 +1230,7 @@ export function getContainer(options?: {
     googleWrites: googleWriteService,
     executor: toolExecutor,
     recommendationRepo,
+    analysisService,
     lifecycle: options?.lifecycle,
     pendingActionService,
     // Sprint 1.1A — expose memory stack for diagnostics and tests

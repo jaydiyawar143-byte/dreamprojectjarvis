@@ -79,6 +79,7 @@ graph TD
 | 11.8B | Recommendation Confidence | COMPLETE |
 | 11.9A | Opportunity Scoring | COMPLETE |
 | 11.9B | Opportunity Queue + Human Decision UI | COMPLETE |
+| 11.10 | On-Demand Account Analysis (service + voice + button) | COMPLETE |
 
 ---
 
@@ -807,6 +808,55 @@ No autonomous execution. No Meta writes. Full human control.
 
 ---
 
+## Phase 11.10 — On-Demand Account Analysis (service + voice + button)
+
+### 1. Problem Before This Phase
+
+The marketing-intelligence pipeline (anomaly detection, diagnosis, recommendation generation) was complete but only reachable through a standalone script — there was no way to trigger an account analysis from the web dashboard or by voice, no shared runtime entry point, and the script path carried none of the runtime checks (authorization, safety caps, in-flight guarding, audit, persistence) that everything else in JARVIS depends on.
+
+### 2. Objective
+
+Promote the script-only pipeline into ONE shared production service (`AnalysisGenerator`) reached by BOTH the JARVIS `meta.analyze` tool and a new `POST /api/v1/analysis` route, following the IntegrationCommandService pattern: a single instance, one place where authorization, safety caps, in-flight guarding, dry-run and persistence live, and a parity test that proves both arms arrive at it. Fail closed, hold no secrets, create only PROPOSED recommendations that still require human approval.
+
+### 3. What Changed
+
+**Shared service** (`packages/tools/src/analysis-generator.ts`): a ports-only `AnalysisGenerator` that executes the existing READ_ONLY Meta tools through the shared `ToolExecutor`, aggregates daily performance, detects critical negative anomalies, packages evidence, runs the existing DiagnosisEngine + RecommendationEngine, and persists a PROPOSED recommendation through the `RecommendationStorePort`. No provider SDK, no DB, no env reads. Deterministic target selection, bounded reads (`maxInsightRows`, `maxEntitiesScanned`), a per-(user, account) in-flight guard, and a `dryRun` boundary that stops exactly before persistence.
+
+**JARVIS tool** (`packages/tools/src/tools/meta-analysis-tool.ts`): a pure forwarder (`meta.analyze`, READ_ONLY) translating a sentence into the same `AnalysisInput`/caller the route uses. COMPLETED / DRY_RUN_OK / NO_SAFE_TARGET / INSUFFICIENT_DATA are successful verdicts; READ_FAILED / ACCOUNT_UNAUTHORIZED / DIAGNOSIS_UNAVAILABLE / PERSIST_FAILED / INVALID_INPUT / ALREADY_RUNNING are failures. Granted to the marketing agent via `META_READ_TOOLS` in `agent-policy.ts` (test mirrors updated). Registered in `container.ts` only when Meta credentials AND an AI provider are configured.
+
+**Route** (`apps/api/src/routes/analysis.ts`): `POST /api/v1/analysis`, auth-required, honoring only `{ dryRun }`. The ad account is ALWAYS the server-configured `META_AD_ACCOUNT_ID`; a client-supplied accountId is never read, so a client cannot redirect analysis. Deterministic NO_ANALYSIS → HTTP mapping (400 INVALID_INPUT, 403 ACCOUNT_UNAUTHORIZED, 409 ANALYSIS_ALREADY_RUNNING, 502 META_READ_FAILED, 503 AI_PROVIDER_UNAVAILABLE, 500 RECOMMENDATION_PERSIST_FAILED); NO_SAFE_TARGET / INSUFFICIENT_DATA are 200 answers. Unexpected throws become a static 500 with no internals.
+
+**Web UI** (`apps/web`): an "Analyze account" control on the Opportunities page calling `analyzeAccount()` (`lib/api.ts`); the outcome is reported inline, nothing is executed or approved by the button.
+
+### 4. Integration Rule
+
+The integration rule spans the whole feature: the tool and the button are two callers of the SAME `container.analysisService` instance. `apps/api/test/analysis-parity.test.ts` instruments one real `AnalysisGenerator` and proves both arms arrive at it — the JARVIS arm through `MetaAnalyzeTool`, the frontend arm through the route — with the same checks and no capability either arm has alone.
+
+### 5. Safety Properties
+
+- Read-only end to end: only `meta.accounts / campaigns / adsets / ads / insights` are executed, by the calling user's own token, at the `meta.analyze` tool's READ_ONLY risk.
+- Per-(user, account) in-flight guard returns `ALREADY_RUNNING` instead of stacking runs.
+- `dryRun` stops exactly at the generate boundary; no durable row is created.
+- Secrets never leave: no token, provider key or account move is echoed in outcomes, audit rows or HTTP responses (leaky-row test included).
+- Fail-closed: a persistence failure returns `PERSIST_FAILED` with a fixed message, never the store's exception text; an unexpected throw becomes a static 500.
+- The account targeted is the server-configured one, never one a client supplies.
+
+### 6. Files Changed
+
+`packages/tools/src/analysis-generator.ts`, `packages/tools/src/tools/meta-analysis-tool.ts`, `packages/tools/src/index.ts`, `packages/tools/test/analysis-generator.test.ts`, `packages/tools/test/meta-analysis-tool.test.ts`, `apps/api/src/services/container.ts`, `apps/api/src/routes/analysis.ts`, `apps/api/src/index.ts`, `apps/api/test/analysis.test.ts`, `apps/api/test/analysis-parity.test.ts`, `packages/agents/src/agent-policy.ts`, `packages/agents/test/helpers/sprint6-harness.ts`, `apps/api/test/sprint6-agent-wiring.test.ts`, `apps/web/src/lib/api.ts`, `apps/web/src/app/opportunities/page.tsx`.
+
+### 7. User Story
+
+"Analyze the account" on the dashboard, or "JARVIS, analyze the account performance" by voice, runs the identical pipeline: live reads → anomaly detection → AI diagnosis → a single PROPOSED recommendation left in the queue for human review. If nothing actionable exists, the answer is "nothing to do", not a fabricated action.
+
+*(Example data — synthetic)*
+
+### 8. Phase Verdict
+
+**PASS**
+
+---
+
 ## Phase 11 Summary
 
 | Sub-phase | Name | Verdict | Tests |
@@ -824,10 +874,14 @@ No autonomous execution. No Meta writes. Full human control.
 | 11.8B | Recommendation Confidence | PASS | 48 |
 | 11.9A | Opportunity Scoring | PASS | 33 |
 | 11.9B | Opportunity Queue + Human Decision UI | PASS | 30 |
+| 11.10 | On-Demand Account Analysis | PASS | 57 |
 
 ### Final Test Count
 
-**1,327 tests executed, 0 failed** across all packages.
+**1,327 tests executed, 0 failed** across all packages (up to Phase 11.9B).
+Phase 11.10 adds 57 more (`@jarvis/tools` generator + tool suites, `apps/api`
+route + parity suites), all green; the repository-wide tools/api/agents suites
+passed at 774 / 1,250 (8 skipped) / 552.
 
 ### What the User Gained
 
@@ -841,6 +895,9 @@ After Phase 11, users can:
 7. Approve or reject opportunities via the existing approval flow.
 8. Measure whether executed actions actually worked.
 9. Build historical evidence for future decisions.
+10. Start a fresh account analysis from the dashboard button or by voice, and
+    get the same answer either way — the same service behind both, with the
+    same authorization, caps and audit.
 
 ### Known Limitations
 
@@ -852,5 +909,5 @@ After Phase 11, users can:
 
 ---
 
-*Document version: 1.0*
-*Last updated: 2026-08-26*
+*Document version: 1.1*
+*Last updated: 2026-09-17*

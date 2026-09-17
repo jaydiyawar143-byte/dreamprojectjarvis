@@ -16,7 +16,9 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import {
+  analyzeAccount,
   listOpportunities,
+  type AnalysisOutcomeView,
   type OpportunityQueueItem,
   type OpportunityPriority,
   type NoOpportunityExplanation,
@@ -49,6 +51,28 @@ export default function OpportunitiesPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [noOpportunity, setNoOpportunity] = useState<NoOpportunityExplanation | null>(null);
+
+  // Phase 11.10 — on-demand analysis control. `analyzeAccount` posts only
+  // { dryRun }; the account is the server-configured one, always.
+  const [analyzing, setAnalyzing] = useState(false);
+  const [analysis, setAnalysis] = useState<{
+    outcome?: AnalysisOutcomeView;
+    error?: string;
+  } | null>(null);
+
+  async function handleAnalyze() {
+    setAnalyzing(true);
+    setAnalysis(null);
+    const res = await analyzeAccount(false);
+    setAnalyzing(false);
+    if (res.success && res.data?.analysis) {
+      setAnalysis({ outcome: res.data.analysis });
+    } else {
+      setAnalysis({
+        error: res.error?.message ?? "Analysis failed unexpectedly",
+      });
+    }
+  }
 
   const load = useCallback(
     async (priority: OpportunityPriority | "ALL", cursor?: string) => {
@@ -104,6 +128,30 @@ export default function OpportunitiesPage() {
 
   const currentPage = cursors.length + 1;
 
+  // A short, human phrasing of an analysis outcome. COMPLETED and the two
+  // legit negatives are treated as answers; the rest are problems reported as
+  // errors below, not dressed up.
+  function analysisOutcomeLine(outcome: AnalysisOutcomeView): string {
+    if (outcome.status === "COMPLETED") {
+      const target = outcome.target?.id ?? "a target";
+      return `Analysis complete: ${target} deviates from baseline. A PROPOSED recommendation was created${
+        outcome.recommendationId ? ` (${outcome.recommendationId})` : ""
+      } — it is waiting for your review above, not executing anything.`;
+    }
+    if (outcome.status === "DRY_RUN_OK") {
+      return `Dry run complete. ${
+        outcome.target?.id ?? "No target"
+      } was the top finding; nothing was created.`;
+    }
+    if (outcome.reason === "NO_SAFE_TARGET") {
+      return "Nothing actionable right now — no entity deviated safely from its baseline.";
+    }
+    if (outcome.reason === "INSUFFICIENT_DATA") {
+      return "Not enough fresh performance data in the window to analyze yet.";
+    }
+    return outcome.message ?? "Analysis could not be completed.";
+  }
+
   return (
     <main className="mx-auto max-w-3xl space-y-6 p-6">
       {/* Page header */}
@@ -117,6 +165,59 @@ export default function OpportunitiesPage() {
           <strong className="text-gray-300">you decide</strong> whether any action
           should proceed. Reviewing an opportunity does not approve it.
         </p>
+      </div>
+
+      {/* Analyze control (Phase 11.10) */}
+      <div
+        data-testid="analyze-control"
+        className="rounded-xl bg-white/5 border border-white/10 px-5 py-4"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="space-y-0.5">
+            <p className="text-sm font-semibold text-gray-200">Run account analysis</p>
+            <p className="text-xs text-gray-400 max-w-lg">
+              Reads live performance, diagnoses deviations and creates a PROPOSED
+              recommendation for your review. Nothing is executed or approved by
+              clicking this.
+            </p>
+          </div>
+          <button
+            data-testid="analyze-button"
+            onClick={() => void handleAnalyze()}
+            disabled={analyzing}
+            className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white shadow-lg shadow-indigo-500/20 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          >
+            {analyzing ? "Analyzing…" : "Analyze account"}
+          </button>
+        </div>
+
+        {analyzing && (
+          <div
+            data-testid="analyzing"
+            className="mt-3 flex items-center gap-2 text-xs text-gray-400"
+          >
+            <div className="h-4 w-4 animate-spin rounded-full border-2 border-indigo-400 border-t-transparent" />
+            <span>Reading the configured account, detecting anomalies, diagnosing…</span>
+          </div>
+        )}
+
+        {analysis && !analyzing && (
+          <div
+            data-testid="analysis-result"
+            role="status"
+            className={`mt-3 rounded-lg border px-4 py-3 text-sm ${
+              analysis.error
+                ? "border-red-500/30 bg-red-500/10 text-red-300"
+                : "border-emerald-500/20 bg-emerald-500/5 text-emerald-200"
+            }`}
+          >
+            {analysis.error
+              ? `Analysis failed: ${analysis.error}`
+              : analysis.outcome
+                ? analysisOutcomeLine(analysis.outcome)
+                : ""}
+          </div>
+        )}
       </div>
 
       {/* Stats bar */}

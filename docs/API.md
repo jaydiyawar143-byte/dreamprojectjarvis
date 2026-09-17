@@ -1,6 +1,6 @@
 # JARVIS HTTP API
 
-Everything below is served by `apps/api` under `/api/v1`. Verified against the code on 2026-09-14.
+Everything below is served by `apps/api` under `/api/v1`. Verified against the code on 2026-09-17.
 
 - **Mounts:** `apps/api/src/index.ts` · **Handlers:** `apps/api/src/routes/*.ts`
 - **Authentication:** unless a table says otherwise, send `Authorization: Bearer <access token>`. Data is always scoped to that token's user; a user id in a body or path is ignored.
@@ -49,7 +49,10 @@ Everything below is served by `apps/api` under `/api/v1`. Verified against the c
 | `recommendations.ts` | `/api/v1/recommendations` | `GET /`, `GET /:id`, `POST /:id/execute` |
 | `outcomes.ts` | `/api/v1` | `GET /recommendations/:id/outcome`, `GET /outcomes/:id` |
 | `opportunities.ts` | `/api/v1/opportunities` | `GET /`, `GET /:id` |
+| `analysis.ts` | `/api/v1/analysis` | `POST /` (`{ dryRun }`) — runs the shared on-demand account analysis (service + voice + button, parity-tested) |
 | `google-writes.ts` | `/api/v1/integrations/google/writes` | `POST /plan`, `GET /:approvalId`, `POST /:approvalId/execute` |
+
+`analysis.ts` accepts only `{ dryRun }`. The ad account is ALWAYS the server-configured `META_AD_ACCOUNT_ID`; a client-supplied account id is never read.
 
 `outcomes.ts` is mounted at the `/api/v1` root, so one `/recommendations/*` path is served by a different router from the rest. No path collides.
 

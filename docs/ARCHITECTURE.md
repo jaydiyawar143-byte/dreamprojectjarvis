@@ -1,6 +1,6 @@
 # JARVIS Architecture
 
-How the system is built today. Verified against the code on 2026-09-14.
+How the system is built today. Verified against the code on 2026-09-17.
 
 - For the marketing-intelligence pipeline (analysis → recommendation → approval → outcome) and its phase-by-phase history, see [JARVIS_ARCHITECTURE.md](./JARVIS_ARCHITECTURE.md).
 - The superseded first architecture document is kept at [archive/ARCHITECTURE_LEGACY_2026-08.md](./archive/ARCHITECTURE_LEGACY_2026-08.md). It describes Fastify and Redis; neither is used.
@@ -16,12 +16,12 @@ JARVIS is a pnpm + Turborepo monorepo of 18 workspaces. A Next.js dashboard (`ap
 | Concept | Home | Notes |
 |---|---|---|
 | Web UI | `apps/web` | Next.js 14 App Router, 21 pages, Zustand stores, customisable widget grid |
-| HTTP and realtime API | `apps/api` | 24 routers under `/api/v1` ([API.md](./API.md)); Socket.IO; wiring in `src/services/container.ts` |
+| HTTP and realtime API | `apps/api` | 25 routers under `/api/v1` ([API.md](./API.md)); Socket.IO; wiring in `src/services/container.ts` |
 | Contracts | `packages/core` | Types, Zod schemas and pure utilities. No I/O. Named "core", but it is **not** the brain |
 | The brain | `packages/agents` | `orchestrator.ts`, `agent-router.ts`, `tool-planner.ts`, `intent-detector.ts`, `agent-policy.ts`, `agents/` |
 | What JARVIS can do | agents + tool allowlists | [SKILLS.md](./SKILLS.md) |
 | Memory and documents | `packages/memory`; storage in `packages/db/src/repositories` | [MEMORY.md](./MEMORY.md) |
-| Tools | `packages/tools` | Registry, `ToolExecutor`, execution journal, output sanitiser |
+| Tools | `packages/tools` | Registry, `ToolExecutor`, execution journal, output sanitiser, `AnalysisGenerator` — the shared on-demand account analysis service behind both `POST /api/v1/analysis` and the `meta.analyze` tool |
 | Provider integrations | `packages/ai-openai`, `ai-elevenlabs`, `meta-graph`, `google-ads`, `google-workspace`, `whatsapp`, `n8n`, `browser` | One package per provider. `ai-anthropic` exists but is not wired |
 | Widget data | `apps/api/src/services/providers` | Weather, markets, geo, system monitor — used only by the API |
 | Database | `packages/db` | Prisma schema, 23 migrations, repositories, the single `PrismaClient` |

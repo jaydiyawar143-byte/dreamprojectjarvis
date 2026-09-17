@@ -24,6 +24,7 @@ flowchart TB
         WriteTools["WRITE tools (approval-bound):\nmeta.campaign.pause/resume\nmeta.adset.pause/resume\nmeta.ad.pause/resume\nmeta.campaign/adset.budget.update\nmeta.create-campaign"]
         BudgetG["Budget Guardrails\n(max $10k, +25%/-50%, abs caps)"]
         ValidT["meta-ads validators"]
+        Anz["meta.analyze READ tool (11.10)\nforwards a command to the shared AnalysisGenerator"]
         Registry["ToolRegistry (by tool.id)\n+ resolvingRegistry wrapper (sanitizeToolName)"]
         Exec["ToolExecutor\n(approval + paramsHash + timeout 30s + ShutdownLifecycle)"]
         EJournal["ExecutionJournal"]
@@ -49,6 +50,7 @@ flowchart TB
         Hist["Historical Outcome Engine (11.8A)"]
         Score["Opportunity Scoring (11.9A)"]
         Queue["Opportunity Queue Service (11.9B)"]
+        Analysis["Analysis Generator (11.10)\nshared on-demand service: voice + button"]
         OEng["Outcome Engine (11.7A)"]
         OWork["Outcome Worker (11.7B)"]
     end
@@ -59,6 +61,7 @@ flowchart TB
         R7["GET /recommendations/:id/outcome\nGET /outcomes/:id (read-only)"]
         R8["GET /api/v1/pending-actions\nPOST /:id/confirm|reject|modify"]
         R9["GET/POST /api/v1/approvals\nPOST /:id/approve|reject"]
+        R10["POST /api/v1/analysis\n{dryRun} - read-only; account always server-configured"]
         Chat["POST /api/v1/chat"]
     end
 
@@ -103,6 +106,11 @@ flowchart TB
     Bridge --> PAS
 
     ReadTools --> Rec
+    ReadTools --> Analysis
+    Anz --> Analysis
+    R10 --> Analysis
+    Analysis --> Rec
+    Analysis --> PRec
     Rec --> Conf --> Hist
     Diag --> Rec
     Anom --> Evid --> Diag
@@ -128,8 +136,6 @@ flowchart TB
     Bridge --> DRec
 
     %% ---- NOT WIRED IN PRODUCTION (RED) ----
-    OWork -. "no scheduler/cron/route invokes" .-> X_OW_X["Outcome Worker: implemented + tested only"]
-    Diag -. "only via script" .-> X_D_X["Diagnosis: no production trigger in routes"]
     Hist -. "internal to Rec" .-> X_H_X["Historical: internal only"]
 
     classDef green fill:#1f7a3d,color:#fff,stroke:#0f4d24
@@ -139,9 +145,9 @@ flowchart TB
     classDef blue fill:#2563eb,color:#fff,stroke:#163d91
     classDef grey fill:#374151,color:#fff,stroke:#1f2937
 
-    class R6,R5,R7,R8,R9,Chat green
+    class R6,R5,R7,R8,R9,Chat,R10 green
     class Propose,Execute,MockLife purple
-    class OWork,X_OW_X,X_D_X,X_H_X red
+    class X_H_X red
     class TTool,PRec,ORec,Appr,Mkt,MSnap,DRec orange
     class MG,MGrapher blue
     class Prov,Auth,Reconcile,VResp,ErrH,MG blue

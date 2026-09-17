@@ -14,6 +14,7 @@ import { createPendingActionsRouter } from "./routes/pending-actions.js";
 import { createRecommendationsRouter } from "./routes/recommendations.js";
 import { createOutcomesRouter } from "./routes/outcomes.js";
 import { createOpportunitiesRouter } from "./routes/opportunities.js";
+import { createAnalysisRouter } from "./routes/analysis.js";
 import { createKnowledgeRouter } from "./routes/knowledge.js";
 import { createDashboardRouter } from "./routes/dashboard.js";
 import { createAgentsRouter } from "./routes/agents.js";
@@ -235,6 +236,7 @@ app.use("/api/v1/pending-actions", createPendingActionsRouter(container));
 app.use("/api/v1/recommendations", createRecommendationsRouter(container));
 app.use("/api/v1", createOutcomesRouter(container));
 app.use("/api/v1/opportunities", createOpportunitiesRouter(container));
+app.use("/api/v1/analysis", createAnalysisRouter(container));
 app.use("/api/v1/knowledge", createKnowledgeRouter(container));
 app.use("/api/v1/dashboard", createDashboardRouter(container));
 // UI V2 — read-only windows on data the server already owns. Both are

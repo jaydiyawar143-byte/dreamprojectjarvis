@@ -44,6 +44,11 @@ export const META_READ_TOOLS = [
   "meta.adsets",
   "meta.ads",
   "meta.insights",
+  // Phase 11.10 — the on-demand analysis tool. READ_ONLY on the surface, but
+  // it forwards through the shared AnalysisGenerator which itself executes the
+  // reads above (same authorization) and only ever PERSISTS a bounded PROPOSED
+  // recommendation. It is granted with the reads, never with the writes.
+  "meta.analyze",
 ] as const;
 
 /**

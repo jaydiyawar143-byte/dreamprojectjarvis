@@ -638,6 +638,64 @@ export async function getOpportunity(
 }
 
 // ---------------------------------------------------------------------------
+// PHASE 11.10 — On-demand account analysis
+//
+// POST /api/v1/analysis runs the SAME shared AnalysisGenerator the JARVIS
+// `meta.analyze` tool uses. `dryRun` is the only accepted field; the account is
+// the server-configured one and NO accountId from this file could ever be
+// honoured — which is why this helper takes no account id.
+// ---------------------------------------------------------------------------
+
+export type AnalysisStatus =
+  | "COMPLETED"
+  | "DRY_RUN_OK"
+  | "NO_ANALYSIS";
+
+export interface AnalysisTarget {
+  id: string;
+  entityLevel: string;
+  name?: string;
+  criticalCount?: number;
+  warningCount?: number;
+  maxDeviation?: number;
+}
+
+export interface AnalysisScanSummary {
+  level: string;
+  inventory: Record<string, number>;
+  insightRowCount: number;
+  candidateCount: number;
+  scannedCount: number;
+  eligibleCount: number;
+  criticalCount: number;
+  anomalyCount: number;
+  topTarget?: AnalysisTarget;
+}
+
+export interface AnalysisOutcomeView {
+  status: AnalysisStatus;
+  accountId?: string;
+  traceId?: string;
+  reason?: string;
+  message?: string;
+  detail?: string;
+  target?: AnalysisTarget;
+  scanSummary?: AnalysisScanSummary;
+  recommendationId?: string;
+}
+
+export type AnalysisResponse = ApiResponse<{ analysis: AnalysisOutcomeView }>;
+
+export async function analyzeAccount(
+  dryRun = false
+): Promise<AnalysisResponse> {
+  return request("/analysis", {
+    method: "POST",
+    body: JSON.stringify({ dryRun }),
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Sprint 4.3 — Dashboard API
 //
 // Thin wrappers over /api/v1/dashboard. Every figure originates in an existing

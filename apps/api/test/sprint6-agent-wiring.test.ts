@@ -66,6 +66,7 @@ const ALL_REGISTERED_TOOLS = [
   "meta.adsets",
   "meta.ads",
   "meta.insights",
+  "meta.analyze",
   "meta.campaign.pause",
   "meta.campaign.resume",
   "meta.adset.pause",

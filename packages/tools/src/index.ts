@@ -23,6 +23,22 @@ export {
   MetaGetInsightsTool,
 } from "./tools/meta-ads-tools.js";
 export {
+  AnalysisGenerator,
+  DEFAULT_MAX_ENTITIES_SCANNED,
+  DEFAULT_MAX_INSIGHT_ROWS,
+  DEFAULT_LOOKBACK_DAYS,
+  type AnalysisCaller,
+  type AnalysisConfig,
+  type AnalysisExplanation,
+  type AnalysisGeneratorDeps,
+  type AnalysisInput,
+  type AnalysisOutcome,
+  type AnalysisScanSummary,
+  type AnalysisTargetInfo,
+  type AnalysisNoAnalysisReason,
+} from "./analysis-generator.js";
+export { MetaAnalyzeTool, type MetaAnalyzePort } from "./tools/meta-analysis-tool.js";
+export {
   MetaPauseCampaignTool,
   MetaResumeCampaignTool,
   MetaPauseAdSetTool,

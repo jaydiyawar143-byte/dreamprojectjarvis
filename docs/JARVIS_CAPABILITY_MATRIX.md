@@ -181,7 +181,8 @@ Browsing is never inferred from "a browser is installed". Where it may navigate 
 | KPI calculation and performance aggregation | Implemented | |
 | Anomaly detection | Implemented | |
 | AI diagnosis of a performance problem | Implemented | Structured, schema-validated output |
-| Recommendation generation | Partially implemented | Reachable through a standalone script; no user-facing route generates recommendations |
+| Recommendation generation | Implemented | Now reachable at runtime through the shared on-demand analysis service: the dashboard "Analyze account" button and the JARVIS `meta.analyze` tool both generate a single PROPOSED recommendation via `AnalysisGenerator` (ledger R-33) |
+| On-demand account analysis | Implemented | `POST /api/v1/analysis` + `meta.analyze` tool drive ONE shared `AnalysisGenerator` (service, voice and button — parity-tested). Read-only, dry-run boundary, per-user+account in-flight guard, PROPOSED-only persistence |
 | Reading and executing a recommendation | Implemented, approval required | |
 | Opportunity prioritisation and queue | Implemented | |
 | Outcome measurement engine | Implemented | Engine, worker and the runtime record-creation path (`RecommendationExecutionService` baseline) are complete and tested; the worker is scheduled in the API process on `JARVIS_OUTCOME_WORKER_INTERVAL_MS` with an overlap guard and a clean drain — ledger R-32 |
@@ -215,6 +216,6 @@ Listed because they are commonly assumed. None of these exist in this repository
 
 ---
 
-*Document version: 3.0 — regenerated for ledger P0-3.*
-*Verified against the repository on 2026-09-16.*
+*Document version: 3.1 — regenerated for ledger P0-3, with R-33 (on-demand account analysis).*
+*Verified against the repository on 2026-09-17.*
 *Previous version (2.0, 2026-09-02) described the Meta-era pipeline only and predated Google Workspace, Maps, browser control, voice, the knowledge stack and the Command Center.*

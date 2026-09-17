@@ -154,6 +154,7 @@ export function productionLikeTools(): ITool[] {
     read("meta.adsets"),
     read("meta.ads"),
     read("meta.insights"),
+    read("meta.analyze"),
     write("meta.campaign.pause"),
     write("meta.campaign.resume"),
     write("meta.adset.pause"),

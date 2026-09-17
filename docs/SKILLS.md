@@ -9,7 +9,7 @@ Both are defined in `packages/agents/src/agent-policy.ts`. Adding a capability m
 
 > **Not the same thing:** `.claude/skills/` holds skills for Claude Code — the `run-jarvis` driver and design guidance. They help people *build* JARVIS. JARVIS never loads them.
 
-Verified against the code on 2026-09-14.
+Verified against the code on 2026-09-17.
 
 ---
 
@@ -19,7 +19,7 @@ Named groups keep each policy readable as a capability rather than a list of str
 
 | Group | Tool ids | Risk |
 |---|---|---|
-| `META_READ_TOOLS` | `meta.accounts`, `meta.campaigns`, `meta.adsets`, `meta.ads`, `meta.insights` | read-only |
+| `META_READ_TOOLS` | `meta.accounts`, `meta.campaigns`, `meta.adsets`, `meta.ads`, `meta.insights`, `meta.analyze` | read-only |
 | `META_WRITE_TOOLS` | `meta.campaign.pause`, `meta.campaign.resume`, `meta.adset.pause`, `meta.adset.resume`, `meta.ad.pause`, `meta.ad.resume`, `meta.campaign.budget.update`, `meta.adset.budget.update`, `meta.campaign.create` | every one approval-gated |
 | `GOOGLE_READ_TOOLS` | `google.accounts`, `google.campaigns`, `google.insights` | read-only; no Google Ads write tool exists |
 | `GOOGLE_WORKSPACE_TOOLS` | `gmail.listUnread`, `gmail.search`, `gmail.getMessage`, `gmail.getThread`, `drive.searchFiles`, `drive.listRecentFiles`, `drive.getFileMetadata`, `calendar.listUpcomingEvents`, `calendar.getEvent` | read-only |
