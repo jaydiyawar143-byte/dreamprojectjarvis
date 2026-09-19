@@ -1,17 +1,21 @@
 # Continuous integration for the JARVIS monorepo.
 #
 # Gated here; any genuine failure fails the run:
-#   lint, typecheck and build for every workspace, and the test suites of
-#   @jarvis/api, @jarvis/memory, @jarvis/n8n and @jarvis/web.
+#   lint, typecheck and build for every workspace, the TEST-FILE typecheck of
+#   @jarvis/api, and the test suites of @jarvis/api, @jarvis/memory,
+#   @jarvis/n8n and @jarvis/web.
 #
 # Deliberately not gated yet (docs/DEVELOPMENT.md, "Continuous integration"):
 #   - Postgres-backed tests: @jarvis/db, and the API's real-PostgreSQL file.
 #     They stay separate until a pgvector service container is configured.
 #     Without a database that API file skips itself, and the memory end-to-end
 #     test runs against its in-process store.
-#   - `pnpm --filter @jarvis/api run typecheck:tests`. It fails today with 60
-#     pre-existing errors: ledger risk R-18, still OPEN. This workflow does not
-#     run it, so a green run says nothing about it.
+#   - Test files OUTSIDE @jarvis/api. `typecheck:tests` exists only in that
+#     workspace, and every other package's tsconfig covers `src/**` alone, so
+#     a green run says nothing about their test files. `apps/web` is the one
+#     exception: its tsconfig already includes tests, so `Typecheck` covers it.
+#     The task is defined in turbo.json rather than inlined here, so adding the
+#     script to another workspace gates it automatically.
 #   - The tests of the other workspaces, secret scanning and dependency audits
 #     (audit finding SEC-7).
 
@@ -69,6 +73,13 @@ jobs:
 
       - name: Typecheck
         run: pnpm typecheck
+
+      # Test files are compiled by nothing else: each workspace's `typecheck`
+      # covers `src/**` only. This is the gate that keeps R-18 closed — it was
+      # brought to 0 errors before being switched on here, so it has never been
+      # allowed to land red.
+      - name: Typecheck test files
+        run: pnpm typecheck:tests
 
       - name: Build
         id: build

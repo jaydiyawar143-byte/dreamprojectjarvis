@@ -6,6 +6,7 @@ import type {
   IToolExecutor,
   AuditLogger,
   AICompletionRequest,
+  AIMessage,
   AICompletionResponse,
   EmbeddingRequest,
   EmbeddingResponse,
@@ -19,7 +20,6 @@ import type {
   MemoryListResult,
   JarvisRequest,
   SessionContext,
-  MemoryType,
 } from "@jarvis/core";
 import { Orchestrator, AgentRegistry, ConversationalAssistant } from "@jarvis/agents";
 
@@ -35,7 +35,7 @@ class MockAIProvider implements IAIProvider {
   private responseFn: ((req: AICompletionRequest) => AICompletionResponse) | null = null;
   private shouldFail = false;
   private callCount = 0;
-  private lastMessages: any[] = [];
+  private lastMessages: AIMessage[] = [];
 
   setResponse(fn: (req: AICompletionRequest) => AICompletionResponse) {
     this.responseFn = fn;
@@ -49,7 +49,7 @@ class MockAIProvider implements IAIProvider {
     return this.callCount;
   }
 
-  getLastMessages(): any[] {
+  getLastMessages(): AIMessage[] {
     return this.lastMessages;
   }
 
@@ -173,7 +173,7 @@ class InMemoryStore implements IMemoryStore {
     return results;
   }
 
-  async storeWithEmbedding(request: MemoryStoreRequest, embeddings: number[][]): Promise<MemoryRecord[]> {
+  async storeWithEmbedding(request: MemoryStoreRequest, _embeddings: number[][]): Promise<MemoryRecord[]> {
     return this.store(request);
   }
 
@@ -242,7 +242,7 @@ class InMemoryStore implements IMemoryStore {
     return m;
   }
 
-  async findSimilar(userId: string, embedding: number[], threshold = 0.5, limit = 10): Promise<MemoryRecord[]> {
+  async findSimilar(_userId: string, _embedding: number[], _threshold = 0.5, _limit = 10): Promise<MemoryRecord[]> {
     return [];
   }
 

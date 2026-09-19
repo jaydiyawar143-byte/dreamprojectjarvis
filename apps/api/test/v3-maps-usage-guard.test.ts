@@ -20,7 +20,7 @@
 // No test in this file makes a network call.
 // ---------------------------------------------------------------------------
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 import {
   DEFAULT_MONTHLY_LIMIT,
   LIMIT_REACHED_MESSAGE,

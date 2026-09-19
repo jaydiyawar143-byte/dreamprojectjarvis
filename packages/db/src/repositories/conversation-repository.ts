@@ -1,22 +1,17 @@
 import type { PrismaClient } from "@prisma/client";
 import { Prisma } from "@prisma/client";
 import type {
+  AddMessageInput,
   Conversation,
   ConversationMessage,
+  ConversationStorePort,
+  CreateConversationInput,
 } from "@jarvis/core";
 
-export interface CreateConversationInput {
-  userId: string;
-  title?: string;
-  agentId?: string;
-}
-
-export interface AddMessageInput {
-  conversationId: string;
-  role: string;
-  content: string;
-  metadata?: Record<string, unknown>;
-}
+// The input shapes now live beside `Conversation` in core, so the port and the
+// implementation cannot drift apart. Re-exported here because `@jarvis/db`
+// has always exported these names and nothing about that should change.
+export type { CreateConversationInput, AddMessageInput };
 
 function toConversation(row: {
   id: string;
@@ -53,7 +48,7 @@ function toMessage(row: {
   };
 }
 
-export class PrismaConversationRepository {
+export class PrismaConversationRepository implements ConversationStorePort {
   constructor(private prisma: PrismaClient) {}
 
   async create(input: CreateConversationInput): Promise<Conversation> {

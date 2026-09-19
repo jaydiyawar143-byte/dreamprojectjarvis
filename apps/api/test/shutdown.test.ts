@@ -9,7 +9,7 @@
 // and idempotent startup recovery (memory-journal level; durable level is
 // proven against PostgreSQL in packages/db).
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import type { ExpressRouter } from "express";
+import type { Router as ExpressRouter } from "express";
 import {
   createShutdownController,
   installSignalHandlers,
@@ -41,11 +41,31 @@ async function waitFor(
   }
 }
 
+/** The controller's own `server` parameter type, derived so it cannot drift. */
+type ShutdownServer = NonNullable<
+  Parameters<typeof createShutdownController>[0]["server"]
+>;
+
+/**
+ * Bridges a fake onto that parameter type.
+ *
+ * Node declares `close(cb): this`, so `Pick<Server, "close">` is satisfiable
+ * only by a real `http.Server` — the mismatch is in the RETURN type alone, and
+ * the controller calls `close(cb)` and ignores what comes back. So this is the
+ * single place that bridges it, rather than a cast repeated at every
+ * construction site. The fake's own functions keep their exact types through
+ * the intersection, so the `.mock.calls` assertions that read them stay
+ * type-checked.
+ */
+function asShutdownServer<T extends { close: unknown }>(fake: T): ShutdownServer & T {
+  return fake as unknown as ShutdownServer & T;
+}
+
 function makeFakeServer() {
-  return {
+  return asShutdownServer({
     close: vi.fn((cb?: (err?: Error | undefined) => void) => cb?.()),
     closeAllConnections: vi.fn(),
-  };
+  });
 }
 
 interface LogEntry {
@@ -77,7 +97,14 @@ function makeController(lifecycle: ShutdownLifecycle, overrides?: {
 }
 
 function healthBody(router: ExpressRouter): Record<string, unknown> {
-  const layer = router.stack.find((l) => l.route?.methods?.get)!;
+  // `route.methods` is a real Express runtime property that
+  // @types/express-serve-static-core does not declare on `IRoute`. Until the
+  // `ExpressRouter` import was corrected above, `router` was an error type and
+  // nothing here was checked at all. The expression is unchanged; only the
+  // shape of the undeclared property is stated.
+  const layer = router.stack.find(
+    (l) => (l.route as { methods?: Record<string, boolean> } | undefined)?.methods?.get
+  )!;
   const handler = layer.route!.stack[0]!.handle;
   const json = vi.fn();
   const res = { json } as unknown as import("express").Response;
@@ -256,13 +283,13 @@ describe("PHASE 10.6 — shutdown controller", () => {
   it("11/14/J. draining order: stop accepting → drain → io close → connections → db → stopped", async () => {
     const lifecycle = new ShutdownLifecycle();
     const events: string[] = [];
-    const server = {
+    const server = asShutdownServer({
       close: vi.fn((cb?: () => void) => {
         events.push("server.close");
         cb?.();
       }),
       closeAllConnections: vi.fn(() => events.push("closeAllConnections")),
-    };
+    });
     const closeIo = vi.fn(() => events.push("io.close"));
     const disconnectDatabase = vi.fn(async () => {
       await Promise.resolve();

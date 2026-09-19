@@ -126,9 +126,26 @@ class FakeApprovalStore {
   }
 }
 
+/** The filter shape this fake's `query` is actually called with. */
+interface AuditQueryFilters {
+  userId?: string;
+  startDate?: Date;
+  endDate?: Date;
+}
+
+/**
+ * `AuditLogger` declares only `log`; this fake also answers `query`, so the
+ * extra member is stated in the type instead of erased with a cast. The old
+ * `as unknown as AuditLogger` stripped the contextual type from the literal,
+ * which is exactly why `entry` and `filters` below were implicit `any`.
+ */
+type AuditLoggerFake = AuditLogger & {
+  query: (filters: AuditQueryFilters) => Promise<AuditEntry[]>;
+};
+
 class FakeAuditLog {
   entries: AuditEntry[] = [];
-  logger: AuditLogger = {
+  logger: AuditLoggerFake = {
     log: async (entry) => {
       this.entries.push({
         ...entry,
@@ -143,7 +160,7 @@ class FakeAuditLog {
           (!filters.startDate || e.timestamp >= filters.startDate) &&
           (!filters.endDate || e.timestamp <= filters.endDate)
       ),
-  } as unknown as AuditLogger;
+  };
 }
 
 function makeTokenService() {
@@ -205,7 +222,7 @@ function makeContainer(opts?: {
   };
 
   const router = createApprovalsRouter(
-    container as unknown as ConstructorParameters<typeof createApprovalsRouter>[0]
+    container as unknown as Parameters<typeof createApprovalsRouter>[0]
   );
   return { router, store, audit, tokens, toolRegistry };
 }
@@ -295,7 +312,6 @@ async function call(
       },
     };
 
-    let idx = 0;
     const chain = layer.route.stack;
     const responded = () =>
       (res as unknown as { _body: unknown })._body !== null;

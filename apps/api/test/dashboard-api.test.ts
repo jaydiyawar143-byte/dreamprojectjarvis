@@ -603,7 +603,10 @@ describe("dashboard API — Meta account context (Sprint 4.6)", () => {
   function withAccounts(accounts: Record<string, unknown>[]) {
     const executor = new FakeExecutor();
     // meta.accounts answers under an `accounts` key.
-    executor.execute = async function (request: never) {
+    // `this` is declared, not changed: the function is `.bind(executor)`-ed
+    // below, so this annotation states the receiver that already exists at
+    // runtime. It is erased on compile and alters nothing.
+    executor.execute = async function (this: FakeExecutor, request: never) {
       const r = request as unknown as { toolId: string; params: Record<string, unknown>; userId: string };
       this.calls.push({ toolId: r.toolId, params: r.params, userId: r.userId });
       return {

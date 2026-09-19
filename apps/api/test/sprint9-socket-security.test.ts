@@ -10,7 +10,7 @@
 // behaviour is stated per test.
 // ---------------------------------------------------------------------------
 
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect } from "vitest";
 import type { Socket } from "socket.io";
 import type { AuthContext } from "@jarvis/core";
 import {

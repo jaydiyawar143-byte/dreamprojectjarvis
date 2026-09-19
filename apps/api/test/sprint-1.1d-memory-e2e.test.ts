@@ -7,6 +7,7 @@ import type {
   IToolExecutor,
   AuditLogger,
   AICompletionRequest,
+  AIMessage,
   AICompletionResponse,
   EmbeddingRequest,
   EmbeddingResponse,
@@ -79,7 +80,7 @@ class InProcessMemoryStore implements IMemoryStore {
     return results;
   }
 
-  async storeWithEmbedding(request: MemoryStoreRequest, embeddings: number[][]): Promise<MemoryRecord[]> {
+  async storeWithEmbedding(request: MemoryStoreRequest, _embeddings: number[][]): Promise<MemoryRecord[]> {
     return this.store(request);
   }
 
@@ -141,7 +142,7 @@ class InProcessMemoryStore implements IMemoryStore {
     return m;
   }
 
-  async findSimilar(userId: string, embedding: number[], threshold = 0.5, limit = 10): Promise<MemoryRecord[]> {
+  async findSimilar(_userId: string, _embedding: number[], _threshold = 0.5, _limit = 10): Promise<MemoryRecord[]> {
     return [];
   }
 
@@ -163,13 +164,13 @@ class MockAIProvider implements IAIProvider {
   readonly name = "Mock AI";
   readonly defaultModel = "mock-model";
   private completeResponse: string = "Default AI response.";
-  private lastMessages: any[] = [];
+  private lastMessages: AIMessage[] = [];
 
   setResponse(response: string) {
     this.completeResponse = response;
   }
 
-  getLastMessages(): any[] {
+  getLastMessages(): AIMessage[] {
     return this.lastMessages;
   }
 

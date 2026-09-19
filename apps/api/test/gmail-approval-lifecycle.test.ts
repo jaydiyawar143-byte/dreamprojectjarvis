@@ -214,10 +214,19 @@ describe("fresh plan → approve → confirm → execute, exactly once", () => {
     expect(run.ok).toBe(true);
 
     // 5. Exactly one SUCCESSFUL consume, and the approval is now spent.
-    const successes = approvals.consumeForExecution.mock.results.filter(
-      (r) => (r.value as unknown as Promise<{ ok: boolean }>) && true
+    //
+    // `settledResults`, not `results`: consumeForExecution is async, so
+    // `mock.results[].value` holds the PROMISE, never the resolved value. The
+    // previous filter tested `Promise && true` — always truthy — so it removed
+    // nothing and the assertion passed even if every consume had failed.
+    //
+    // Two consumes happen in this lifecycle: step 2 is refused before approval
+    // ("approval is not approved"), step 4 succeeds. Exactly one of them is
+    // allowed to burn the approval, which is the property this step exists for.
+    const successes = approvals.consumeForExecution.mock.settledResults.filter(
+      (r) => r.type === "fulfilled" && r.value.ok
     );
-    expect(successes.length).toBeGreaterThan(0);
+    expect(successes).toHaveLength(1);
     expect(approvals.rows.get(approvalId)!.status).toBe("CONSUMED");
   });
 

@@ -15,7 +15,7 @@
 // The route and tool constructors are the exact ones container.ts builds.
 // ---------------------------------------------------------------------------
 
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 import type { Router } from "express";
 import { createAnalysisRouter } from "../src/routes/analysis.js";
 import { AnalysisGenerator, MetaAnalyzeTool } from "@jarvis/tools";
@@ -25,7 +25,6 @@ import type {
 } from "@jarvis/tools";
 import type { Container } from "../src/services/container.js";
 import type {
-  TokenService,
   ToolExecutionRequest,
   ToolExecutionResult,
   IAIProvider,
@@ -87,8 +86,8 @@ function makeExecutor() {
       status: "completed" as const,
       toolId: req.toolId,
       executionId: `exe_${req.toolId}`,
-      startedAt: NOW.toISOString(),
-      completedAt: NOW.toISOString(),
+      startedAt: NOW,
+      completedAt: NOW,
     };
     if (!entry) {
       return { ...completed, result: { success: false, error: `unknown ${req.toolId}` } };
@@ -164,15 +163,29 @@ function makeStore(): RecommendationStorePort & { saved: unknown[] } {
   };
 }
 
-function makeAudit(): AuditLogger {
-  const rows: Array<Record<string, unknown>> = [];
+/** What `AuditLogger.log` is actually handed. Derived, so it cannot drift. */
+type AuditEntryInput = Parameters<AuditLogger["log"]>[0];
+
+/**
+ * The fake carries `rows` and `query` on top of `AuditLogger`, so the type is
+ * stated rather than cast away. The previous `as unknown as AuditLogger` left
+ * the object literal with no contextual type, which is why `entry` below was
+ * an implicit `any` — the cast was what removed the checking, not what added it.
+ */
+type AuditFake = AuditLogger & {
+  rows: AuditEntryInput[];
+  query: () => Promise<unknown[]>;
+};
+
+function makeAudit(): AuditFake {
+  const rows: AuditEntryInput[] = [];
   return {
     rows,
     log: async (entry) => {
       rows.push(entry);
     },
     query: async () => [],
-  } as unknown as AuditLogger;
+  };
 }
 
 interface Harness {
@@ -309,7 +322,7 @@ describe("one AnalysisGenerator, two callers", () => {
     const h = harness();
 
     // The button.
-    const container = { tokenService: tokenSvc as unknown as TokenService, analysisService: h.service } as unknown as Container;
+    const container = { tokenService: tokenSvc, analysisService: h.service } as unknown as Container;
     const router = createAnalysisRouter(container);
     await fromButton(router, token, {});
 

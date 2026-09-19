@@ -26,6 +26,10 @@ import {
 } from "../src/services/google/execute-approved-action.js";
 import { GOOGLE_WRITE_TOOL_IDS } from "@jarvis/tools";
 import type { GoogleWriteResult } from "@jarvis/core";
+import type {
+  GoogleWriteService,
+  WriteContext,
+} from "../src/services/google/write-service.js";
 
 const APPROVAL = "ap-1";
 const USER = "user-1";
@@ -36,20 +40,28 @@ function input(over: Record<string, unknown> = {}) {
 
 /** A GoogleWriteService double. Only `execute` is reachable from this path. */
 function writes(result: Partial<GoogleWriteResult>) {
-  const execute = vi.fn(async () => ({
-    success: true,
-    source: "gmail",
-    action: "gmail.createDraft",
-    status: "COMPLETED",
-    verification: "verification_unavailable",
-    data: { draftId: "d-1" },
-    requestId: "r-1",
-    auditRef: "audit-1",
-    retrySafe: false,
-    ...result,
-  }) as GoogleWriteResult);
+  // The parameters are DECLARED even though the body ignores them: `vi.fn`
+  // infers its mock signature from the implementation, so an arity-zero
+  // callback made `execute.mock.calls` an array of empty tuples and every
+  // assertion that reads an argument below became untypeable. Declaring the
+  // real signature is what lets those assertions be checked instead of cast.
+  const execute = vi.fn(
+    async (_approvalId: string, _context: WriteContext) =>
+      ({
+        success: true,
+        source: "gmail",
+        action: "gmail.createDraft",
+        status: "ok",
+        verification: "verification_unavailable",
+        data: { draftId: "d-1" },
+        requestId: "r-1",
+        auditRef: "audit-1",
+        retrySafe: false,
+        ...result,
+      }) as GoogleWriteResult
+  );
 
-  return { execute } as never as import("../src/services/google/write-service.js").GoogleWriteService & {
+  return { execute } as never as GoogleWriteService & {
     execute: typeof execute;
   };
 }
@@ -121,7 +133,7 @@ describe("the approval boundary is not weakened by this path", () => {
     // and must not swallow its refusal either.
     const svc = writes({
       success: false,
-      status: "FAILED",
+      status: "provider_error",
       verification: "failed",
       message: "This approval has not been approved.",
       requiredAction: "Approve it on the Approvals page first.",
@@ -138,7 +150,9 @@ describe("the approval boundary is not weakened by this path", () => {
     const svc = writes({});
     await executeApprovedGoogleWrite(svc, input());
 
-    const ctx = svc.execute.mock.calls[0]![1] as Record<string, unknown>;
+    // No cast: the mock now declares its real signature, so this is a
+    // WriteContext and `ctx.voice` is checked against the actual field.
+    const ctx = svc.execute.mock.calls[0]![1];
     expect(ctx.voice).toBe(false);
   });
 
@@ -158,7 +172,7 @@ describe("duplicate execution cannot create a second draft", () => {
     // reaches the same service and is refused there, not here.
     const svc = writes({
       success: false,
-      status: "FAILED",
+      status: "provider_error",
       verification: "failed",
       message: "This approval has already been used.",
     });
@@ -195,7 +209,7 @@ describe("a missing or unusable handler answers safely", () => {
   it("surfaces a permission failure with its remedy", async () => {
     const svc = writes({
       success: false,
-      status: "FAILED",
+      status: "permission_missing",
       verification: "failed",
       message: "Your Google connection does not include Gmail access.",
       requiredAction: "Grant Gmail access in Integrations, then plan it again.",
@@ -210,7 +224,7 @@ describe("a missing or unusable handler answers safely", () => {
   it("surfaces a needs-reauth failure with its remedy", async () => {
     const svc = writes({
       success: false,
-      status: "FAILED",
+      status: "needs_reauth",
       verification: "failed",
       message: "Your Google authorization has expired.",
       requiredAction: "Reconnect Google, then plan the action again.",

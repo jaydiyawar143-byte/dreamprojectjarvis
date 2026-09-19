@@ -5,15 +5,64 @@ import { JarvisRequestSchema, JarvisError } from "@jarvis/core";
 import { maskIdentifiersInText } from "@jarvis/core";
 import type { SessionContext, AuthContext } from "@jarvis/core";
 import { createAuthMiddleware, type AuthenticatedRequest } from "../middleware/auth.js";
-import type { Container } from "../services/container.js";
-import { detectIntent } from "@jarvis/agents";
-import type { PendingAction } from "@jarvis/core";
+import { detectIntent, type PendingActionService } from "@jarvis/agents";
+import type {
+  ConversationStorePort,
+  IOrchestrator,
+  ITokenService,
+  IToolExecutor,
+  PendingAction,
+} from "@jarvis/core";
+import type { GoogleWriteService } from "../services/google/write-service.js";
 import {
   executeApprovedGoogleWrite,
   isGoogleWriteApprovalAction,
 } from "../services/google/execute-approved-action.js";
 
-export function createChatRouter(container: Container): Router {
+/**
+ * The four pending-action operations a chat turn performs.
+ *
+ * Derived with `Pick` from the service itself rather than hand-written: a
+ * duplicated interface would silently drift the first time a signature
+ * changed, whereas this cannot — if `PendingActionService` changes, this
+ * changes with it. `Pick` over a class also drops its private fields, which is
+ * what makes the result satisfiable by an ordinary object in a test.
+ */
+export type PendingActionPort = Pick<
+  PendingActionService,
+  | "getActivePendingAction"
+  | "confirmPendingAction"
+  | "rejectPendingAction"
+  | "modifyPendingAction"
+>;
+
+/**
+ * What a chat turn actually needs — six dependencies, not the 23-field
+ * `Container`.
+ *
+ * The `Container` still satisfies this structurally, so `index.ts` passes the
+ * same object it always did and the production object graph is unchanged. The
+ * gain is that this signature now states the truth about what a chat request
+ * can reach: it cannot touch approvals, the agent registry, memory, knowledge
+ * or the integration command service, and a reader no longer has to take that
+ * on trust from the body of the file.
+ *
+ * `googleWrites` stays the concrete `GoogleWriteService` on purpose:
+ * `executeApprovedGoogleWrite` takes that type, and narrowing it would mean
+ * changing a shared helper that `pending-actions.ts` also uses. That is a
+ * separate decision, deliberately not made here.
+ */
+export interface ChatRouterDeps {
+  tokenService: ITokenService;
+  conversationRepo: ConversationStorePort;
+  orchestrator: IOrchestrator;
+  executor: IToolExecutor;
+  /** Absent on deployments without the pending-action flow. */
+  pendingActionService?: PendingActionPort;
+  googleWrites: GoogleWriteService | null;
+}
+
+export function createChatRouter(container: ChatRouterDeps): Router {
   const router = Router();
   const requireAuth = createAuthMiddleware(container.tokenService);
 

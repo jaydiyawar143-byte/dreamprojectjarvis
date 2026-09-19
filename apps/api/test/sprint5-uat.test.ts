@@ -827,7 +827,7 @@ describe("UAT-3 n8n: bidirectional flow, directional secrets, SSRF, idempotency,
     const provider = new MockN8nProvider();
     const tool = new N8nTriggerWorkflowTool(provider, sys.n8nRepo as never, mockKeyDeriver);
 
-    const first = await tool.execute({ workflowId: "wf-alice", payload: { x: 1 } }, ctx(ALICE));
+    await tool.execute({ workflowId: "wf-alice", payload: { x: 1 } }, ctx(ALICE));
     const second = await tool.execute({ workflowId: "wf-alice", payload: { x: 1 } }, ctx(ALICE));
 
     expect(second.success).toBe(true);

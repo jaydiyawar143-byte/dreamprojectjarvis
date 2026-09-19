@@ -57,7 +57,12 @@ describe("outcome worker scheduler", () => {
   it("never runs a second sweep while one is in flight", async () => {
     vi.useFakeTimers();
     const lifecycle = new ShutdownLifecycle();
-    let release: (() => void) | null = null;
+    // Held on an object, not in a bare `let`: the assignment below happens
+    // inside a Promise callback, and TypeScript's control-flow analysis
+    // cannot see that it ran, so a bare `let` stays narrowed to `null` and
+    // the call site reads as uncallable. A property is re-read at its
+    // declared type, which is what actually models this.
+    const released: { fn: (() => void) | null } = { fn: null };
     let calls = 0;
     const processDue = vi.fn().mockImplementation(() => {
       calls += 1;
@@ -65,7 +70,7 @@ describe("outcome worker scheduler", () => {
       // resolve immediately so stop() has nothing left to wait for.
       if (calls === 1) {
         return new Promise<typeof EMPTY_RESULT>((resolve) => {
-          release = () => resolve(EMPTY_RESULT);
+          released.fn = () => resolve(EMPTY_RESULT);
         });
       }
       return Promise.resolve(EMPTY_RESULT);
@@ -92,7 +97,7 @@ describe("outcome worker scheduler", () => {
     expect(processDue).toHaveBeenCalledTimes(1);
 
     // Resolve the in-flight sweep; the NEXT tick starts a fresh one.
-    release?.();
+    released.fn?.();
     await vi.advanceTimersByTimeAsync(0);
     expect(lifecycle.getActiveExecutionCount()).toBe(0);
 
@@ -105,11 +110,16 @@ describe("outcome worker scheduler", () => {
   it("moves the in-flight count with each sweep", async () => {
     vi.useFakeTimers();
     const lifecycle = new ShutdownLifecycle();
-    let release: (() => void) | null = null;
+    // Held on an object, not in a bare `let`: the assignment below happens
+    // inside a Promise callback, and TypeScript's control-flow analysis
+    // cannot see that it ran, so a bare `let` stays narrowed to `null` and
+    // the call site reads as uncallable. A property is re-read at its
+    // declared type, which is what actually models this.
+    const released: { fn: (() => void) | null } = { fn: null };
     const processDue = vi.fn().mockImplementation(
       () =>
         new Promise<typeof EMPTY_RESULT>((resolve) => {
-          release = () => resolve(EMPTY_RESULT);
+          released.fn = () => resolve(EMPTY_RESULT);
         })
     );
 
@@ -121,7 +131,7 @@ describe("outcome worker scheduler", () => {
 
     expect(lifecycle.getActiveExecutionCount()).toBe(1);
 
-    release?.();
+    released.fn?.();
     await vi.advanceTimersByTimeAsync(0);
     expect(lifecycle.getActiveExecutionCount()).toBe(0);
 

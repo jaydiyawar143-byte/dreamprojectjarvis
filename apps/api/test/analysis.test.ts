@@ -16,7 +16,6 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import type { Router } from "express";
 import { createAnalysisRouter } from "../src/routes/analysis.js";
 import type { Container } from "../src/services/container.js";
-import type { TokenService } from "@jarvis/core";
 import type { AnalysisCaller, AnalysisInput, AnalysisOutcome } from "@jarvis/tools";
 
 // ---------------------------------------------------------------------------
@@ -202,7 +201,7 @@ function buildRouter(
 ): { router: Router; calls: Array<{ input: AnalysisInput; caller: AnalysisCaller }> } {
   const double = outcomeOrService ? serviceReturning(outcomeOrService) : null;
   const fakeContainer = {
-    tokenService: tokenSvc as unknown as TokenService,
+    tokenService: tokenSvc,
     analysisService: double ? double.service : null,
   } as unknown as Container;
   return {
@@ -326,7 +325,7 @@ describe("Phase 11.10 — Analysis API", () => {
       }),
     };
     const fakeContainer = {
-      tokenService: tokenSvc as unknown as TokenService,
+      tokenService: tokenSvc,
       analysisService: service,
     } as unknown as Container;
     const router = createAnalysisRouter(fakeContainer);

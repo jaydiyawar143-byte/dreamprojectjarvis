@@ -7,7 +7,7 @@
 // so no OpenAI key or network is involved). That keeps the tests about the API
 // layer while still proving the pipeline it drives actually runs.
 
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 import type { Router } from "express";
 import { createKnowledgeRouter, MAX_UPLOAD_BYTES } from "../src/routes/knowledge.js";
 import { KNOWLEDGE_DOCUMENT_STATUS } from "../src/services/knowledge-ingestion.js";

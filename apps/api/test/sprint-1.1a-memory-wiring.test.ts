@@ -123,7 +123,7 @@ class InProcessMemoryStore implements IMemoryStore {
   async update(request: MemoryUpdateRequest): Promise<MemoryRecord> {
     const rec = this.records.get(request.memoryId);
     if (!rec || rec.userId !== request.userId) {
-      throw new JarvisError("NOT_FOUND", "Memory not found");
+      throw new JarvisError("MEMORY_ERROR", "Memory not found");
     }
     const updated: MemoryRecord = {
       ...rec,

@@ -8,6 +8,7 @@ import type {
   AuditLogger,
   Conversation,
   ConversationMessage,
+  IToolExecutor,
 } from "@jarvis/core";
 import type { TokenService } from "@jarvis/security";
 import type { PrismaConversationRepository } from "@jarvis/db";
@@ -152,6 +153,25 @@ function createMockConversationRepo(): PrismaConversationRepository & {
   };
 }
 
+/**
+ * A ToolExecutor that must never run.
+ *
+ * `createChatRouter` genuinely requires an executor — the CONFIRM branch of a
+ * pending action calls it — so it is supplied rather than omitted. None of the
+ * tests below take that branch, and it throws instead of returning a canned
+ * result so that a test which starts taking it fails loudly rather than
+ * quietly asserting against a stub. Before this file declared its
+ * dependencies, the same fixtures passed no executor at all and relied on the
+ * path never being reached; this states that assumption instead of hiding it.
+ */
+function createUnreachableExecutor(): IToolExecutor {
+  return {
+    async execute(): Promise<never> {
+      throw new Error("ToolExecutor was not expected to run in this test");
+    },
+  };
+}
+
 function createMockAuditLogger(): AuditLogger & {
   getEntries: () => AuditEntry[];
 } {
@@ -264,8 +284,9 @@ describe("POST /api/v1/chat", () => {
     router = createChatRouter({
       tokenService,
       orchestrator: mockOrchestrator,
-      conversationRepo: mockConversationRepo as any,
-      auditLogger: mockAuditLogger as any,
+      conversationRepo: mockConversationRepo,
+      executor: createUnreachableExecutor(),
+      googleWrites: null,
     });
 
     userToken = tokenService.generateAccessToken({
@@ -373,8 +394,9 @@ describe("POST /api/v1/chat", () => {
     const testRouter = createChatRouter({
       tokenService,
       orchestrator: disabledOrchestrator,
-      conversationRepo: mockConversationRepo as any,
-      auditLogger: mockAuditLogger as any,
+      conversationRepo: mockConversationRepo,
+      executor: createUnreachableExecutor(),
+      googleWrites: null,
     });
 
     const res = await makeRequest(testRouter, {
@@ -401,8 +423,9 @@ describe("POST /api/v1/chat", () => {
     const testRouter = createChatRouter({
       tokenService,
       orchestrator: failingOrchestrator,
-      conversationRepo: mockConversationRepo as any,
-      auditLogger: mockAuditLogger as any,
+      conversationRepo: mockConversationRepo,
+      executor: createUnreachableExecutor(),
+      googleWrites: null,
     });
 
     const res = await makeRequest(testRouter, {
@@ -429,8 +452,9 @@ describe("POST /api/v1/chat", () => {
     const testRouter = createChatRouter({
       tokenService,
       orchestrator: timeoutOrchestrator,
-      conversationRepo: mockConversationRepo as any,
-      auditLogger: mockAuditLogger as any,
+      conversationRepo: mockConversationRepo,
+      executor: createUnreachableExecutor(),
+      googleWrites: null,
     });
 
     const res = await makeRequest(testRouter, {
@@ -575,7 +599,7 @@ describe("POST /api/v1/chat", () => {
 
   it("20. No stack trace in response", async () => {
     const failingOrchestrator: IOrchestrator = {
-      async process(_req, ctx) {
+      async process(_req, _ctx) {
         throw new Error("Internal stack trace should not leak");
       },
     };
@@ -583,8 +607,9 @@ describe("POST /api/v1/chat", () => {
     const testRouter = createChatRouter({
       tokenService,
       orchestrator: failingOrchestrator,
-      conversationRepo: mockConversationRepo as any,
-      auditLogger: mockAuditLogger as any,
+      conversationRepo: mockConversationRepo,
+      executor: createUnreachableExecutor(),
+      googleWrites: null,
     });
 
     const res = await makeRequest(testRouter, {
@@ -679,11 +704,13 @@ describe("POST /api/v1/chat", () => {
       email: "beta@test.com",
     });
 
-    const resA1 = await makeRequest(router, {
+    // The request itself is what matters here — it seeds user A's conversation
+    // so the isolation assertion below has something to fail against. Its
+    // response was never read.
+    await makeRequest(router, {
       headers: { authorization: `Bearer ${userAToken}` },
       body: { message: "My secret Q4 budget is 50000" },
     });
-    const convIdA = (resA1.body as any).data.conversationId;
 
     const resB1 = await makeRequest(router, {
       headers: { authorization: `Bearer ${userBToken}` },

@@ -20,7 +20,6 @@ import type {
   MemoryListResult,
   JarvisRequest,
   SessionContext,
-  MemoryType,
 } from "@jarvis/core";
 import { Orchestrator, AgentRegistry, ConversationalAssistant } from "@jarvis/agents";
 import { MemoryExtractionService } from "@jarvis/memory";
@@ -142,7 +141,7 @@ class InMemoryStore implements IMemoryStore {
     return results;
   }
 
-  async storeWithEmbedding(request: MemoryStoreRequest, embeddings: number[][]): Promise<MemoryRecord[]> {
+  async storeWithEmbedding(request: MemoryStoreRequest, _embeddings: number[][]): Promise<MemoryRecord[]> {
     return this.store(request);
   }
 
@@ -150,7 +149,7 @@ class InMemoryStore implements IMemoryStore {
     return this.memories.find((m) => m.id === memoryId && m.userId === userId) ?? null;
   }
 
-  async recall(request: MemoryRecallRequest): Promise<MemoryRecallResult[]> {
+  async recall(_request: MemoryRecallRequest): Promise<MemoryRecallResult[]> {
     return [];
   }
 
@@ -195,7 +194,7 @@ class InMemoryStore implements IMemoryStore {
     return m;
   }
 
-  async findSimilar(userId: string, embedding: number[], threshold = 0.5, limit = 10): Promise<MemoryRecord[]> {
+  async findSimilar(_userId: string, _embedding: number[], _threshold = 0.5, _limit = 10): Promise<MemoryRecord[]> {
     return [];
   }
 
@@ -508,9 +507,6 @@ describe("Sprint 1.1B: Memory Extraction Service Wiring Tests", () => {
           content: "Alice likes coding.",
           importance: 0.6,
           confidence: 0.9,
-          accessCount: 0,
-          createdAt: new Date(),
-          updatedAt: new Date(),
         },
       ],
     });
@@ -567,7 +563,7 @@ describe("Sprint 1.1B: Memory Extraction Service Wiring Tests", () => {
     const customExtractor: IMemoryExtractor = {
       id: "custom-extractor",
       name: "Custom Extractor",
-      async extract(req) {
+      async extract(_req) {
         extractionCalls++;
         return {
           candidates: [],

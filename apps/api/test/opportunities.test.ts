@@ -36,7 +36,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import type { Router } from "express";
 import { createOpportunitiesRouter } from "../src/routes/opportunities.js";
 import type { Container } from "../src/services/container.js";
-import type { RecommendationRecord, TokenService, AuditLogger } from "@jarvis/core";
+import type { RecommendationRecord, AuditLogger } from "@jarvis/core";
 
 // ---------------------------------------------------------------------------
 // Helpers / Factories
@@ -313,7 +313,7 @@ describe("Phase 11.9B — Opportunity Queue API", () => {
     tokenBob = tokenSvc.issue(USER_BOB);
 
     const fakeContainer = {
-      tokenService: tokenSvc as unknown as TokenService,
+      tokenService: tokenSvc,
       auditLogger: { log: vi.fn() } as unknown as AuditLogger,
       recommendationRepo: repo,
     } as unknown as Container;

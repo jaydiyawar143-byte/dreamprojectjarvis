@@ -157,12 +157,15 @@ async function buildPgHarness(opts: { lifecycle?: ShutdownLifecycle } = {}): Pro
       },
     },
     approvals: approvalService,
+    // `input` is threaded BOTH into the factory context (which is where this
+    // port actually reads identity from) and through as the third argument the
+    // contract declares — the same shape production uses in AnalysisGenerator.
     stateOf: (accountId, entityId, input) =>
       createExecutorBackedExternalStatePort({
         executor,
         userId: input.userId,
         role: input.role as Role,
-      })(accountId, entityId),
+      })(accountId, entityId, input),
     authorizer,
     audit: auditLogger,
   });
@@ -184,7 +187,7 @@ function makeEvidence(accountId = ACCOUNT, entityId = CAMPAIGN_ID) {
     anomalies: [],
     dataQuality: "COMPLETE" as const,
     freshness: "FRESH" as const,
-    relevantContext: {},
+    relevantContext: { labels: [], notes: [] },
     evidenceHash: computeParamsHash({ accountId, entityId, salt: "ev116a" }),
     builtAt: new Date().toISOString(),
   };
@@ -227,6 +230,11 @@ function makeRecord(
     },
     risk: "LOW",
     confidence: "HIGH",
+    // Both carry a schema default (priority "MEDIUM", historicalEvidenceIds
+    // []), so these are the values a parsed record would hold. Required by
+    // RecommendationRecord; previously masked by the evidence-shape error.
+    priority: "MEDIUM",
+    historicalEvidenceIds: [],
     preconditions: ["state unchanged"],
     paramsHash: computeParamsHash(params),
     stateHash: computeExternalStateHash(ACCOUNT, CAMPAIGN_ID, state),
@@ -318,7 +326,14 @@ describe.skipIf(!dbUp)("PHASE 11.6A — recommendation bridge on real PostgreSQL
     expect(execRow?.status).toBe("SUCCEEDED");
     expect(execRow?.externalResourceId).toBe(CAMPAIGN_ID);
     expect(execRow?.approvalId).toBe(approvalId);
-    expect(JSON.stringify(execRow?.resultSummary ?? execRow)).toContain("120");
+    // The journal is bound to THIS budget change, not merely to some execution
+    // of this tool. `ToolExecution` persists no result payload by design, so
+    // `resultSummary` — a field of N8nExecution, a different subsystem — never
+    // existed here: it read as undefined and the `?? execRow` fallback matched
+    // "120" anywhere in the serialised row. The value is genuinely carried on
+    // the idempotency key, built as `budget:${requestedBudget}` in
+    // MetaUpdateCampaignBudgetTool, so that is what this asserts.
+    expect(execRow?.idempotencyKey).toContain("budget:120");
   }, 30_000);
 
   it("is single-winner under x2 concurrent execution (real row locks)", async () => {
