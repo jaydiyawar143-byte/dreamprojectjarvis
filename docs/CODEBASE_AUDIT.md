@@ -56,7 +56,7 @@ JARVIS is in far better shape than a "messy codebase" description suggests. It a
 **What is wrong, in order of seriousness**
 
 1. **A full database backup is committed to git and pushed to GitHub.** It contains names, email addresses (6 of them real Gmail accounts), password hashes, refresh-token hashes, IP addresses and chat history. This is the most important finding in the audit and needs a decision from you. See §7, SEC-1.
-2. **Six memory tests fail every time**, while the project ledger describes them as merely "flaky". See §8, B-1.
+2. **Memory end-to-end tests — RESOLVED 2026-09-14.** *Historical (audit baseline):* six of the thirteen tests in the memory end-to-end suite failed on every run, while the project ledger described them as merely "flaky". The root cause was a **test-harness race in the mock AI provider, not a production memory bug**; it was fixed in commit `c48a1a3`, which is in the current `main`. The suite now passes **13/13 in three consecutive runs**, and the historical six-test subset passes **6/6 in three runs**. **RUN** No production memory bug remains. See §8, B-1.
 3. **OAuth sign-in codes are written to the server's request log.** See §7, SEC-2.
 4. **Dead code that looks alive:** two memory classes that silently throw data away, four broken scratch scripts, unused packages, a superseded SQL file.
 5. **Documentation that misleads:** the README describes folders that do not exist, the environment template tells you to use a file the API never reads, and 29 reports clutter the repository root.
@@ -201,7 +201,7 @@ KnowledgeRetrievalService ─► Orchestrator ─ document search (RAG)
 | `KnowledgeBase` — `ingestDocument()` returns a random id, `query()` returns `[]` | ⚠️ DEAD CODE | I-05 |
 | Deprecated `MemoryManager` interface in `packages/core/src/types/agent.ts` | ⚠️ DEAD CODE | I-06 |
 | `MemoryEngine` — a real, tested wrapper that production does not use | ⚠️ UNUSED | I-07 |
-| End-to-end memory tests | 🔴 BROKEN | B-1 |
+| End-to-end memory tests | 🟢 WORKING | B-1 resolved 2026-09-14; 13/13, **RUN** ×3 |
 
 **Competing memory managers:** after Task 3 exactly one runtime path remains. `MemoryEngine` is kept pending your decision (D-4), because it is tested and working, just unwired.
 
@@ -258,7 +258,7 @@ All AI SDK clients are constructed inside their adapter package, except two `new
 | Item | Status |
 |---|---|
 | 181 test files, colocated per workspace | 🟢 WORKING |
-| `apps/api/test/sprint-1.1d-memory-e2e.test.ts`, 6 of 13 failing | 🔴 BROKEN — B-1 |
+| `apps/api/test/sprint-1.1d-memory-e2e.test.ts`, 13 of 13 passing (**RUN** ×3) | 🟢 WORKING — B-1 resolved 2026-09-14. *Historical baseline: 6 of 13 failing* |
 | No continuous integration anywhere; no `.github/` | ⚠️ SECURITY RISK — SEC-7 |
 
 Tests are **not** moved into a root `tests/` folder: each workspace's Vitest config resolves paths from its own folder.
@@ -421,7 +421,7 @@ The ESLint baseline is correctness-only by design (ledger R-14).
 
 | Id | What | Status | Evidence | In this cleanup |
 |---|---|---|---|---|
-| B-1 | 6 of 13 tests in `apps/api/test/sprint-1.1d-memory-e2e.test.ts` fail: system-prompt content and memory injection. The ledger calls this suite "flaky, 13/13 in isolation"; it fails identically in isolation on every run. | 🔴 BROKEN | **RUN** ×3, including with this branch's source edits reverted | **Not fixed during the cleanup** — debugging, not cleanup; ledger corrected. **Resolved 2026-09-14** on `fix/b1-memory-e2e`; see Part 3 §5. |
+| B-1 | Memory end-to-end suite, `apps/api/test/sprint-1.1d-memory-e2e.test.ts`. **Root cause:** a test-harness race — fire-and-forget extraction shared the suite's `MockAIProvider` and overwrote the recorded chat request the assertions read. **No production memory bug.** *Historical (audit baseline):* 6 of 13 tests failed — system-prompt content and memory injection — identically in isolation on every run, while the ledger called the suite "flaky, 13/13 in isolation". | 🟢 WORKING — resolved 2026-09-14, commit `c48a1a3`, in the current `main` | **RUN** ×3 after the fix: full suite 13/13; historical six-test subset 6/6. *Historical baseline:* **RUN** ×3 failing, including with this branch's source edits reverted | **Not fixed during the cleanup** — debugging, not cleanup; ledger corrected. Fixed afterwards on `fix/b1-memory-e2e`; see Part 3 §5. |
 | B-2 | Four scratch scripts in `apps/api/` do not compile (18 TypeScript errors) and are excluded from every tsconfig | 🔴 BROKEN | **RUN** | Removed — Task 2 |
 | B-3 | 8 Postgres integration tests fail in `@jarvis/db` | 🔴 BROKEN | **INHERITED** | Not in scope |
 | B-4 | The live Google grant lacks the `adwords` scope, so Google Ads cannot work | 🔴 BROKEN | **INHERITED** | Needs a re-grant by you |
@@ -519,7 +519,7 @@ Each important issue: the file, what it is, why it exists, whether anything uses
 
 **I-21 · README** — four false claims. **Action:** rewrite (Task 9).
 
-**I-22 · B-1** — see §8. **Action:** diagnose next, as its own task.
+**I-22 · B-1** — see §8. **Resolved 2026-09-14** in commit `c48a1a3`, which is in the current `main`: a test-harness `MockAIProvider` recording race, not a production memory bug. **Action:** none — closed. (*Historical action, now superseded:* "diagnose next, as its own task".)
 
 **I-23 · Test mocks in production barrels**
 - **Files:** `packages/tools/src/tools/*-mock.ts`, `packages/agents/src/mock-ai-provider.ts`, exported from each `src/index.ts`.
@@ -545,7 +545,7 @@ These are left out of the plan on purpose: each is destructive, outward-facing, 
 | **D-1** | Purge the database backup from git history (rewrite plus force-push); reset passwords for the 6 real accounts; revoke all refresh tokens issued on or before 2026-09-03. Also: is the GitHub repository public? | Do it. If the repository is or ever was public, treat the password hashes as exposed. The refresh tokens in the dump carried a 7-day lifetime and have expired, but revoking them costs nothing. |
 | **D-2** | Keep or remove `/hero-preview` and its component (and with them `gsap`, `swiper`) | Remove if the hero design is no longer being evaluated. |
 | **D-3** | Wire `@jarvis/ai-anthropic` in, or remove it | Decide with the model-id refresh. |
-| **D-4** | Make `MemoryEngine` the single memory entry point, or remove it and its tests | Decide when B-1 is diagnosed; both live in the same area. |
+| **D-4** | Make `MemoryEngine` the single memory entry point, or remove it and its tests | B-1 is resolved (2026-09-14), so this no longer waits on it. Decide on its own merits: `MemoryEngine` is tested and working, just unwired. |
 | **D-5** | Commit strategy: this branch holds the uncommitted ESLint work plus this cleanup | One commit for ESLint, then one per cleanup task. No commit is made without your say-so. |
 | **D-6** | Five tested tool classes are never registered: `data.csv.analyze` (granted to two agents), `document.analyze`, `pdf.generate`, `web.research`, `system.echo`. Wire them in, or remove the grant and the classes. *Found during execution — see Part 3.* | Register `data.csv.analyze` or drop it from `ANALYSIS_TOOLS`; a grant that points at nothing misleads anyone reading the policy. Decide the other four with the capability roadmap. |
 
@@ -587,7 +587,9 @@ Recorded transparently, per `docs/DOCUMENTATION_PROTOCOL.md`.
 - `AGENTS.md` invariants hold: one integration command service; `ToolExecutor` is the only execution authority; progressive Google scopes.
 - Out of scope: the separate project at `D:\ai youtube agent`.
 - **Commits:** each task ends with a *proposed* commit. It is run only after the owner approves committing (D-5).
-- **Baseline to preserve:** §3 — 4,609 passed, 6 failed (B-1 only), 8 skipped; typecheck 33/33; build 18/18; lint 18/18.
+- **Baseline to preserve:** §3 — 4,609 passed, 6 failed (B-1 only — historical baseline), 8 skipped; typecheck 33/33; build 18/18; lint 18/18.
+
+> **Historical-counts note (added after B-1 was resolved).** Every expected test count in Part 2 was written on 2026-09-14, *before* B-1 was fixed, so each one carries "6 failed (B-1)". Those are the **pre-fix baseline, not the current state.** B-1 was resolved the same day in commit `c48a1a3` (in the current `main`) — a test-harness `MockAIProvider` recording race, not a production memory bug. Those six tests now pass, and the memory end-to-end suite passes **13/13 in three consecutive runs**. Read every "6 failed (B-1 …)" below as a historical figure, and the corresponding current expectation as **0 failed**.
 
 ---
 
@@ -668,7 +670,7 @@ Expected: only a comment in `apps/api/test/sprint8-voice-routes.test.ts`; nothin
 - [ ] **Step 5: Verify**
 
 Run: `pnpm --filter @jarvis/api typecheck && pnpm --filter @jarvis/api exec vitest run`
-Expected: typecheck passes; **1,143 passed, 6 failed (B-1 only), 8 skipped**.
+Expected: typecheck passes; **1,143 passed, 6 failed (B-1 only — historical baseline), 8 skipped**.
 
 - [ ] **Step 6: Proposed commit** — `chore(api): remove broken scratch scripts, superseded enum SQL, unused jsonwebtoken`
 
@@ -724,7 +726,7 @@ Expected: no output.
 - [ ] **Step 6: Verify**
 
 Run: `npx turbo typecheck && npx turbo run test --concurrency=1 --continue --filter=@jarvis/core --filter=@jarvis/memory --filter=@jarvis/agents --filter=@jarvis/api`
-Expected: typecheck 33/33; core 541, memory 453, agents 498; api 1,143 passed, 6 failed (B-1), 8 skipped.
+Expected: typecheck 33/33; core 541, memory 453, agents 498; api 1,143 passed, 6 failed (B-1 — historical baseline), 8 skipped.
 
 - [ ] **Step 7: Proposed commit** — `refactor(memory): remove non-functional MemoryManager and KnowledgeBase stubs`
 
@@ -856,7 +858,7 @@ Expected: no output.
 - [ ] **Step 6: Full API suite**
 
 Run: `pnpm --filter @jarvis/api typecheck && pnpm --filter @jarvis/api exec vitest run`
-Expected: **1,147 passed** (1,143 + 4 new), 6 failed (B-1), 8 skipped.
+Expected: **1,147 passed** (1,143 + 4 new), 6 failed (B-1 — historical baseline), 8 skipped.
 
 - [ ] **Step 7: Proposed commit** — `fix(api): bind write confirmations with the canonical recursive params hash`
 
@@ -1017,7 +1019,7 @@ and replace `app.use(morgan("combined"));` with `app.use(accessLog());`.
 - [ ] **Step 6: Run and verify**
 
 Run: `pnpm --filter @jarvis/api exec vitest run test/access-log.test.ts && pnpm --filter @jarvis/api typecheck && pnpm --filter @jarvis/api exec vitest run`
-Expected: 6 new tests pass; typecheck passes; **1,153 passed** (1,147 + 6), 6 failed (B-1), 8 skipped.
+Expected: 6 new tests pass; typecheck passes; **1,153 passed** (1,147 + 6), 6 failed (B-1 — historical baseline), 8 skipped.
 
 - [ ] **Step 7: Proposed commit** — `fix(api): redact OAuth codes and webhook tokens from access logs`
 
@@ -1138,7 +1140,7 @@ Evidence: `git grep` for each name finds no reader — see `docs/CODEBASE_AUDIT.
 - [ ] **Step 7: Verify**
 
 Run: `npx turbo typecheck && pnpm --filter @jarvis/config exec vitest run && pnpm --filter @jarvis/api exec vitest run`
-Expected: typecheck 33/33; config 28; api 1,153 passed, 6 failed (B-1), 8 skipped.
+Expected: typecheck 33/33; config 28; api 1,153 passed, 6 failed (B-1 — historical baseline), 8 skipped.
 
 - [ ] **Step 8: Proposed commit** — `chore(config): one root .env; complete, value-free template; drop unused names`
 
@@ -1217,7 +1219,7 @@ Expected: no `BROKEN` lines; no credential-shaped strings.
 - [ ] `npx turbo typecheck` → 33/33
 - [ ] `npx turbo lint` → 18/18
 - [ ] `pnpm build` → 18/18
-- [ ] `npx turbo run test --concurrency=1 --continue --filter='!@jarvis/db'` → **4,619 passed** (4,609 + 10 new), 6 failed (B-1 only), 8 skipped
+- [ ] `npx turbo run test --concurrency=1 --continue --filter='!@jarvis/db'` → **4,619 passed** (4,609 + 10 new), 6 failed (B-1 only — historical baseline), 8 skipped
 - [ ] API and web start: boot with `node .claude/skills/run-jarvis/driver.mjs` if Docker is running; otherwise record the boot check as **NOT RUN** with the reason
 - [ ] `git status` reviewed; nothing unexpected staged
 
@@ -1241,13 +1243,15 @@ Expected: no `BROKEN` lines; no credential-shaped strings.
 | Lint | 18/18 | **18/18** |
 | Build | 18/18 | **18/18** |
 | Tests outside `@jarvis/db` | 4,609 passed, 6 failed, 8 skipped | **4,619 passed, 6 failed, 8 skipped** |
-| Failing file | `sprint-1.1d-memory-e2e.test.ts` (B-1) | the same file, the same six tests — nothing new broke |
+| Failing file | `sprint-1.1d-memory-e2e.test.ts` (B-1) | the same file, the same six tests — nothing new broke. **These six failures are historical:** B-1 was resolved later the same day (2026-09-14, commit `c48a1a3`) and the suite now passes 13/13 — see Part 3 §5 |
 | API boot | — | **NOT RUN** — Docker is not running, and the API runs startup recovery against Postgres before it listens |
 | Web boot | — | **NOT RUN** — starting the production server was refused by this environment (`Permission denied`, exit 126). The production build succeeded and all 552 web tests pass |
 
 The ten new tests: 4 in `apps/api/test/confirmation-params-binding.test.ts`, 6 in `apps/api/test/access-log.test.ts`.
 
-After the owner approved the pending deletions, all four gates ran again with Tasks 2 and 3 complete. The results were **identical**: typecheck 33/33, lint 18/18, build 18/18, 4,619 passed, 6 failed (B-1), 8 skipped. **RUN**
+After the owner approved the pending deletions, all four gates ran again with Tasks 2 and 3 complete. The results were **identical**: typecheck 33/33, lint 18/18, build 18/18, 4,619 passed, 6 failed (B-1 — historical baseline), 8 skipped. **RUN**
+
+> **Historical.** The six B-1 failures recorded in both tables above are the **pre-fix baseline** for the cleanup run. B-1 was resolved later on 2026-09-14 (commit `c48a1a3`, in the current `main`); the memory end-to-end suite now passes **13/13 in three consecutive runs** and the historical six-test subset **6/6 in three runs**. **RUN**
 
 ## Task status
 
@@ -1366,7 +1370,7 @@ JARVIS/
 
 | Id | What | Next step |
 |---|---|---|
-| B-1 | **Resolved 2026-09-14** on `fix/b1-memory-e2e`. A test-harness race, not a production memory bug: fire-and-forget extraction shared the suite's mock AI provider and overwrote the chat request the assertions read. Fix: extraction gets a non-recording view of the mock; test file only. The six tests passed three consecutive runs (6 passed, 7 skipped each); API suite 1,159 passed, 8 skipped; in-process store, and 13/13 against Postgres in three runs. Not verified: the full repository suite | None — command in `docs/MEMORY.md` |
+| B-1 | **Resolved 2026-09-14** on `fix/b1-memory-e2e`, commit `c48a1a3` — included in the current `main`. A test-harness race, not a production memory bug: fire-and-forget extraction shared the suite's `MockAIProvider` and overwrote the recorded chat request the assertions read. Fix: extraction gets a non-recording view of the mock; **test file only — no production code changed.** Current verification (**RUN**, in-process store): the full memory end-to-end suite **13/13 in three consecutive runs**, and the historical six-test subset **6/6 in three runs**; API suite 1,159 passed, 8 skipped. **Not verified:** PostgreSQL-backed runs of this suite — a separate exercise, **unverified** here; also not verified, the full repository suite | None — command in `docs/MEMORY.md` |
 | B-3 | 8 `@jarvis/db` Postgres tests fail. **Classified 2026-09-14:** 7 test bugs, 1 stale test, no product bug — ledger §8.2, R-4 | Fix the tests |
 | B-4 | Live Google grant lacks the `adwords` scope | Re-grant |
 | I-29 | `data.csv.analyze` granted to two agents but never registered | D-6 |
@@ -1440,7 +1444,7 @@ Not implemented. In order:
 1. **Finish D-1.** History and GitHub `main` were purged on 2026-09-14. Still to do: the GitHub Support request for `refs/pull/1`–`3`, the six password resets, then deleting the local pre-purge bundle.
 2. **Review and merge** `feat/p1-3-eslint`. Its eight commits exist only locally.
 3. **Re-clone any other copy** of this repository. Its history no longer matches GitHub and still contains the dump.
-4. **Diagnose B-1** — the six failing memory end-to-end tests — before any new memory work.
+4. **B-1 — done 2026-09-14.** No action remains. *Historically this item read "Diagnose B-1 — the six failing memory end-to-end tests — before any new memory work."* It was resolved in commit `c48a1a3` (in the current `main`): a test-harness `MockAIProvider` recording race, not a production memory bug. The suite passes 13/13 in three consecutive runs. **Optional follow-up:** PostgreSQL-backed verification of this suite is separate and remains **unverified**.
 5. **Add CI** running typecheck, lint, build, tests and a secret scan on every push.
 6. **Decide D-2, D-3, D-4 and D-6** — hero preview, Anthropic adapter, `MemoryEngine`, unregistered tools.
 7. **Refresh the Master Development Document and the capability matrix** to the current system.
