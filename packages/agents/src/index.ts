@@ -39,6 +39,9 @@ export {
   INTEGRATION_READ_TOOLS,
   INTEGRATION_WRITE_TOOLS,
   CAPABILITY_TOOLS,
+  // Core V1 — self-description, and the task lifecycle grant.
+  SELF_TOOLS,
+  TASK_TOOLS,
   GOOGLE_WORKSPACE_TOOLS,
   GOOGLE_WRITE_PLAN_TOOLS,
   getAgentPolicy,
@@ -47,6 +50,10 @@ export {
   sanitizeToolName,
   scopedToolRegistry,
 } from "./agent-policy.js";
+// Task Planner V1.1 — is this turn a request to PERFORM work? Pure
+// heuristic, no model call, same shape as the pending-action detector.
+export { detectWorkRequest, type WorkRequest } from "./work-request-detector.js";
+
 export {
   rankAgentCandidates,
   isAmbiguous,

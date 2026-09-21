@@ -239,6 +239,34 @@ export const AMBIENT_TOOLS = [
   "tasks.list",
 ] as const;
 
+/**
+ * Core V1 — managing the work JARVIS has been asked to hold on to.
+ *
+ * Granted to the GENERAL assistant only, deliberately. "Remember this as a
+ * task" is a conversation with the assistant, not a Meta Ads request or a
+ * browsing session, and a specialist that could quietly create tasks mid-run
+ * would be doing something the user never asked for. If a domain agent later
+ * needs to record its own follow-up, that is a grant made on purpose, not one
+ * inherited by default.
+ *
+ * The two writes reach JARVIS's own store only — no provider, no spend — so
+ * they are LOW_IMPACT and ungated, the same treatment integration writes get.
+ */
+export const TASK_TOOLS = [
+  "task.create",
+  "task.list",
+  "task.get",
+  "task.updateStatus",
+] as const;
+
+/**
+ * Core V1 — JARVIS describing itself: build, environment, model, and a count
+ * of what it can currently do. Read-only, and granted to every agent for the
+ * same reason CAPABILITY_TOOLS are: "what are you?" is a question any
+ * conversation can reach, and an agent that cannot answer it will invent one.
+ */
+export const SELF_TOOLS = ["self.describe"] as const;
+
 // ---------------------------------------------------------------------------
 // Policies
 // ---------------------------------------------------------------------------
@@ -276,6 +304,10 @@ const GENERAL_POLICY = policy({
     ...INTEGRATION_READ_TOOLS,
     ...INTEGRATION_WRITE_TOOLS,
     ...CAPABILITY_TOOLS,
+    ...SELF_TOOLS,
+    // Core V1 — only the general assistant may record work. "Remember this as
+    // a task" is a conversation with the assistant, not a domain request.
+    ...TASK_TOOLS,
     ...GOOGLE_WORKSPACE_TOOLS,
     ...GOOGLE_WRITE_PLAN_TOOLS,
   ],
@@ -288,7 +320,7 @@ const GENERAL_POLICY = policy({
 const META_ADS_POLICY = policy({
   agentId: AGENT_IDS.metaAds,
   domain: "meta-ads",
-  allowedTools: [...META_READ_TOOLS, ...META_WRITE_TOOLS, ...INTEGRATION_READ_TOOLS, ...CAPABILITY_TOOLS],
+  allowedTools: [...META_READ_TOOLS, ...META_WRITE_TOOLS, ...INTEGRATION_READ_TOOLS, ...CAPABILITY_TOOLS, ...SELF_TOOLS],
   requiredPermissions: ["read"],
   writesRequireApproval: true,
   clientSelectable: true,
@@ -306,6 +338,7 @@ const GOOGLE_ADS_POLICY = policy({
     ...INTEGRATION_READ_TOOLS,
     ...INTEGRATION_WRITE_TOOLS,
     ...CAPABILITY_TOOLS,
+    ...SELF_TOOLS,
     ...GOOGLE_WORKSPACE_TOOLS,
     ...GOOGLE_WRITE_PLAN_TOOLS,
   ],
@@ -329,7 +362,7 @@ const KNOWLEDGE_POLICY = policy({
   // Capability discovery only. Retrieval already happened before this agent
   // ran, so it still owns no search tool — but a capability question landing
   // here must reach the registry rather than this agent's prompt.
-  allowedTools: [...CAPABILITY_TOOLS],
+  allowedTools: [...CAPABILITY_TOOLS, ...SELF_TOOLS],
   requiredPermissions: ["read"],
   writesRequireApproval: true,
   clientSelectable: true,
@@ -349,6 +382,7 @@ const ANALYTICS_POLICY = policy({
     ...ANALYSIS_TOOLS,
     ...INTEGRATION_READ_TOOLS,
     ...CAPABILITY_TOOLS,
+    ...SELF_TOOLS,
   ],
   requiredPermissions: ["read"],
   writesRequireApproval: true,
@@ -368,7 +402,7 @@ const ANALYTICS_POLICY = policy({
 const AUTOMATION_POLICY = policy({
   agentId: AGENT_IDS.automation,
   domain: "automation",
-  allowedTools: ["n8n.trigger", ...INTEGRATION_READ_TOOLS, ...CAPABILITY_TOOLS],
+  allowedTools: ["n8n.trigger", ...INTEGRATION_READ_TOOLS, ...CAPABILITY_TOOLS, ...SELF_TOOLS],
   requiredPermissions: ["read", "write"],
   writesRequireApproval: true,
   clientSelectable: true,
@@ -378,7 +412,7 @@ const AUTOMATION_POLICY = policy({
 const COMMUNICATION_POLICY = policy({
   agentId: AGENT_IDS.communication,
   domain: "communication",
-  allowedTools: ["whatsapp.send", ...INTEGRATION_READ_TOOLS, ...CAPABILITY_TOOLS],
+  allowedTools: ["whatsapp.send", ...INTEGRATION_READ_TOOLS, ...CAPABILITY_TOOLS, ...SELF_TOOLS],
   requiredPermissions: ["read", "write"],
   writesRequireApproval: true,
   clientSelectable: true,
@@ -401,7 +435,7 @@ const COMMUNICATION_POLICY = policy({
 const BROWSER_POLICY = policy({
   agentId: AGENT_IDS.browser,
   domain: "browser",
-  allowedTools: [...BROWSER_READ_TOOL_IDS, ...BROWSER_ACTION_TOOL_IDS, ...CAPABILITY_TOOLS],
+  allowedTools: [...BROWSER_READ_TOOL_IDS, ...BROWSER_ACTION_TOOL_IDS, ...CAPABILITY_TOOLS, ...SELF_TOOLS],
   requiredPermissions: ["read", "write"],
   writesRequireApproval: true,
   clientSelectable: true,
@@ -427,7 +461,7 @@ const BROWSER_POLICY = policy({
 const LOCATION_POLICY = policy({
   agentId: AGENT_IDS.location,
   domain: "location",
-  allowedTools: [...MAPS_TOOLS, ...INTEGRATION_READ_TOOLS, ...CAPABILITY_TOOLS],
+  allowedTools: [...MAPS_TOOLS, ...INTEGRATION_READ_TOOLS, ...CAPABILITY_TOOLS, ...SELF_TOOLS],
   requiredPermissions: ["read"],
   writesRequireApproval: true,
   clientSelectable: true,

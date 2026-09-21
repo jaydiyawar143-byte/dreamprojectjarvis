@@ -9,6 +9,7 @@ import { createHealthRouter } from "./routes/health.js";
 import { createAuthRouter } from "./routes/auth.js";
 import { createChatRouter } from "./routes/chat.js";
 import { createConversationsRouter } from "./routes/conversations.js";
+import { createTasksRouter } from "./routes/tasks.js";
 import { createApprovalsRouter } from "./routes/approvals.js";
 import { createPendingActionsRouter } from "./routes/pending-actions.js";
 import { createRecommendationsRouter } from "./routes/recommendations.js";
@@ -231,6 +232,8 @@ app.use(
 app.use("/api/v1/auth", createAuthRouter(container.authService, container.tokenService));
 app.use("/api/v1/chat", createChatRouter(container));
 app.use("/api/v1/conversations", createConversationsRouter(container));
+// Core V1 — the first persistent work primitive. Records work; runs none.
+app.use("/api/v1/tasks", createTasksRouter(container));
 app.use("/api/v1/approvals", createApprovalsRouter(container));
 app.use("/api/v1/pending-actions", createPendingActionsRouter(container));
 app.use("/api/v1/recommendations", createRecommendationsRouter(container));

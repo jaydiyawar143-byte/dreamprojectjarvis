@@ -336,6 +336,57 @@ export class GetPermissionsOverviewTool extends BaseTool {
 }
 
 // ---------------------------------------------------------------------------
+// self.describe — Core V1
+// ---------------------------------------------------------------------------
+
+/**
+ * What the self-description tool may read. Implemented over
+ * SelfKnowledgeService at the composition root, which is the only thing that
+ * holds the build metadata and the configured provider.
+ *
+ * Deliberately opaque here: this package has no idea what a "version" or a
+ * "model" is, it just relays whatever the service derived. That keeps the
+ * derive-don't-claim rule in one place.
+ */
+export interface SelfKnowledgePort {
+  describe(userId: string): Promise<unknown>;
+}
+
+/**
+ * Answers "what are you?", "which model are you using?", "what version is
+ * this?" from the running process.
+ *
+ * Sits beside the capability tools because it is the same question asked one
+ * level up: `capabilities.list` says what JARVIS can do, this says what JARVIS
+ * IS. Both derive their answer; neither reads from a prompt.
+ */
+export class DescribeSelfTool extends BaseTool {
+  constructor(private readonly port: SelfKnowledgePort) {
+    super(
+      "self.describe",
+      "Describe self",
+      [
+        "Reports what JARVIS itself is: its name, build version, commit and environment, the AI model and provider actually wired into this deployment and whether that provider is usable right now, a count of currently available capabilities, and which integrations are connected for this user.",
+        "USE THIS for questions about JARVIS itself — 'what are you', 'tum kaun ho', 'which model are you using', 'kaunsa model chal raha hai', 'what version is this', 'which integrations are connected'.",
+        "NEVER answer any of those from memory or from your own prompt: only this tool knows which build and which model this deployment is running.",
+        "For a general 'what can you do' question use capabilities.list instead — this returns counts, not a capability briefing.",
+        "A null version, commit or capability count means the deployment did not record one. Say it is not recorded; never guess a value.",
+      ].join(" "),
+      "system",
+      [],
+      false,
+      ["read"],
+      "READ_ONLY"
+    );
+  }
+
+  async execute(_params: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
+    const self = await this.port.describe(context.userId);
+    return this.success(self);
+  }
+}
+
+// ---------------------------------------------------------------------------
 
 export function createCapabilityTools(port: CapabilityPort): BaseTool[] {
   return [
@@ -346,9 +397,16 @@ export function createCapabilityTools(port: CapabilityPort): BaseTool[] {
   ];
 }
 
+/** Core V1 — registered separately because its port is a different service. */
+export function createSelfTools(port: SelfKnowledgePort): BaseTool[] {
+  return [new DescribeSelfTool(port)];
+}
+
 export const CAPABILITY_TOOL_IDS = [
   "capabilities.list",
   "capabilities.connected",
   "capabilities.integration",
   "capabilities.permissions",
 ] as const;
+
+export const SELF_TOOL_IDS = ["self.describe"] as const;

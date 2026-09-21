@@ -105,12 +105,27 @@ import {
   PrismaN8nRepository,
   PrismaMapsUsageRepository,
   PrismaTaskRepository,
+  type TaskRecord,
   PrismaIntegrationStateRepository,
 } from "@jarvis/db";
 import { MemoryExtractionService, KnowledgeRetrievalService } from "@jarvis/memory";
 import { IntegrationCommandService } from "./integrations/command-service.js";
 import { createIntegrationTools, type IntegrationCommandPort } from "@jarvis/tools";
-import { createCapabilityTools, type CapabilityPort } from "@jarvis/tools";
+import {
+  createCapabilityTools,
+  createSelfTools,
+  createTaskTools,
+  type CapabilityPort,
+  type SelfKnowledgePort,
+  type TaskPort,
+  type TaskView,
+} from "@jarvis/tools";
+import { TaskService } from "./tasks/task-service.js";
+import { TaskExecutionService } from "./tasks/task-execution-service.js";
+import { TaskPlannerService } from "./tasks/task-planner-service.js";
+import { TaskConversationService } from "./tasks/task-conversation-service.js";
+import { SelfKnowledgeService } from "./self-knowledge/self-knowledge-service.js";
+import { readBuildMetadata } from "./self-knowledge/build-metadata.js";
 import { createGoogleWorkspaceTools, type GoogleWorkspaceTaskPort } from "@jarvis/tools";
 import { createGoogleWriteTools, type GoogleWritePlanPort } from "@jarvis/tools";
 import { GoogleWorkspaceTaskService } from "./google/workspace-service.js";
@@ -231,6 +246,42 @@ export interface Container {
    * Null when OPENAI_API_KEY is absent, since a query cannot be embedded.
    */
   knowledgeRetriever: IKnowledgeRetriever | null;
+  /**
+   * Core V1 — the task lifecycle.
+   *
+   * The SAME instance the task tools hold, so `POST /api/v1/tasks` and
+   * "JARVIS, remember this as a task" enforce one set of transition rules.
+   */
+  taskService: TaskService;
+  /**
+   * Task Execution V1 — PENDING -> RUNNING -> ToolExecutor -> COMPLETED/FAILED.
+   *
+   * Holds no execution machinery of its own: it sequences the SAME TaskService
+   * and the SAME ToolExecutor this container already builds, so an executed
+   * task passes every check a chat-initiated tool call passes.
+   */
+  taskExecution: TaskExecutionService;
+  /**
+   * Task Planner V1 — one task goal, one proposed tool call.
+   *
+   * Proposes only. It shares the executor's allowlist and the agent layer's
+   * ToolPlanValidator, so a plan it produces is one `executeTask` will accept
+   * and one the ToolExecutor will still permission-check and approval-gate.
+   */
+  taskPlanner: TaskPlannerService;
+  /**
+   * Task Planner V1.1 — the conversational entry point to work.
+   *
+   * Sequences the three services above for a chat turn that asks JARVIS to DO
+   * something. Holds no authority of its own: a message that is not an
+   * unambiguous work request never reaches it.
+   */
+  taskConversation: TaskConversationService;
+  /**
+   * Core V1 — what JARVIS is: build, environment, model, capability counts.
+   * Shared with the `self.describe` tool for the same reason.
+   */
+  selfKnowledge: SelfKnowledgeService;
 }
 
 /**
@@ -319,7 +370,11 @@ function createMetaToolRegistry(
   /** Phase 12 Workspace tasks, or null when Google cannot be connected here. */
   googleWorkspace: GoogleWorkspaceTaskService | null,
   /** Phase 13 write planning, or null when writes are unavailable here. */
-  googleWrites: GoogleWriteService | null
+  googleWrites: GoogleWriteService | null,
+  /** Core V1 — the task lifecycle. Always present; it needs only the database. */
+  tasks: TaskService,
+  /** Core V1 — JARVIS describing itself. */
+  selfKnowledge: SelfKnowledgePort
 ): ToolRegistry {
   const registry = new ToolRegistry();
   const metaAccessToken = process.env.META_ACCESS_TOKEN;
@@ -660,7 +715,75 @@ function createMetaToolRegistry(
     registry.register(tool);
   }
 
+  // -------------------------------------------------------------------------
+  // Core V1 — tasks, and JARVIS describing itself.
+  //
+  // Registered UNCONDITIONALLY. Both reach JARVIS's own database and nothing
+  // else, so there is no credential that could be missing and no provider that
+  // could be unconfigured — the failure mode that gates the integration tools
+  // above simply does not exist here.
+  //
+  // The port is the boundary: `packages/tools` cannot import the database, so
+  // these four methods are the entire write surface the model can reach, and
+  // each one is already scoped to the authenticated caller by TaskService.
+  // -------------------------------------------------------------------------
+  const taskPort: TaskPort = {
+    create: async (userId, input) => {
+      const result = await tasks.createTask(userId, input);
+      return result.ok
+        ? { ok: true as const, task: toTaskView(result.task) }
+        : { ok: false as const, message: result.message };
+    },
+    list: async (userId, options) =>
+      (await tasks.listTasks(userId, options)).map(toTaskView),
+    get: async (userId, taskId) => {
+      const result = await tasks.getTask(userId, taskId);
+      return result.ok
+        ? { ok: true as const, task: toTaskView(result.task) }
+        : { ok: false as const, message: result.message };
+    },
+    updateStatus: async (userId, taskId, status, error) => {
+      const result =
+        status === "RUNNING"
+          ? await tasks.startTask(userId, taskId)
+          : status === "COMPLETED"
+            ? await tasks.completeTask(userId, taskId)
+            : await tasks.failTask(userId, taskId, error);
+      return result.ok
+        ? { ok: true as const, task: toTaskView(result.task) }
+        : { ok: false as const, message: result.message };
+    },
+  };
+
+  for (const tool of createTaskTools(taskPort)) {
+    registry.register(tool);
+  }
+
+  for (const tool of createSelfTools(selfKnowledge)) {
+    registry.register(tool);
+  }
+
   return registry;
+}
+
+/**
+ * One task, as a model may see it.
+ *
+ * Dates become ISO strings and nothing else changes. `userId` is deliberately
+ * NOT carried: the caller already is that user, and a tool result is the last
+ * place an identifier should reappear.
+ */
+function toTaskView(task: TaskRecord): TaskView {
+  return {
+    id: task.id,
+    title: task.title,
+    description: task.description,
+    status: task.status,
+    createdAt: task.createdAt.toISOString(),
+    startedAt: task.startedAt ? task.startedAt.toISOString() : null,
+    completedAt: task.completedAt ? task.completedAt.toISOString() : null,
+    error: task.error,
+  };
 }
 
 export function getContainer(options?: {
@@ -778,12 +901,46 @@ export function getContainer(options?: {
   // they are.
   const googleWriteService = buildGoogleWriteService({ prisma, auditLogger });
 
+  // Core V1 — the task lifecycle. One instance, shared by the REST route and
+  // the task tools, for the same reason the integration command service is:
+  // a button and a sentence must move the same task through the same rules.
+  const taskService = new TaskService({ tasks: new PrismaTaskRepository(prisma) });
+
+  // Core V1 — self-knowledge. The provider is built a few lines below, so its
+  // identity is read through a ref rather than captured now; same lazy shape
+  // as `registryRef` above, and for the same reason.
+  const providerRef: { current: IAIProvider | null } = { current: null };
+  const selfKnowledgeService = new SelfKnowledgeService({
+    build: readBuildMetadata(),
+    capabilities: capabilityService,
+    model: {
+      get id() {
+        return providerRef.current?.id ?? "none";
+      },
+      get name() {
+        return providerRef.current?.name ?? "Not configured";
+      },
+      get defaultModel() {
+        return providerRef.current?.defaultModel ?? "none";
+      },
+      isAvailable: async () => providerRef.current?.isAvailable() ?? false,
+    },
+  });
+
+  // Task Execution V1 — built AFTER the registry and executor exist, below.
+  // Declared here so the Container literal can carry it.
+  let taskExecutionService: TaskExecutionService | null = null;
+  let taskPlannerService: TaskPlannerService | null = null;
+  let taskConversationService: TaskConversationService | null = null;
+
   const toolRegistry = createMetaToolRegistry(
     approvalRepo,
     integrationCommands,
     capabilityService,
     googleWorkspaceService,
-    googleWriteService
+    googleWriteService,
+    taskService,
+    { describe: (userId) => selfKnowledgeService.describe(userId) }
   );
   registryRef.current = toolRegistry;
 
@@ -802,6 +959,8 @@ export function getContainer(options?: {
   const adapter: IAIProvider = openAIConfigured
     ? new FallbackAIProvider([new OpenAIAdapter()], {}, { onEvent: logProviderChainEvent })
     : new NotConfiguredAIProvider();
+  // Self-knowledge can now name the model that will actually answer.
+  providerRef.current = adapter;
   if (!openAIConfigured) {
     console.log(JSON.stringify({
       level: "warn",
@@ -1075,6 +1234,46 @@ export function getContainer(options?: {
     { lifecycle: options?.lifecycle }
   );
 
+  // Task Execution V1 — the sequencer, over the two services built above.
+  //
+  // It receives the SAME executor every other write path uses, so a task
+  // cannot skip a permission check, an approval or an audit row; and the SAME
+  // allowlist CapabilityService is built with, so a task cannot reach a tool
+  // no agent may propose. Both are narrowing, never widening.
+  // ONE allowlist, shared by the planner and the executor. If these could
+  // drift, the planner could propose something `executeTask` would then
+  // refuse — a plan the user is told is runnable and is not.
+  const taskToolAllowlist = new Set(
+    Object.values(AGENT_POLICIES).flatMap((policy) => [...policy.allowedTools])
+  );
+
+  taskExecutionService = new TaskExecutionService({
+    tasks: taskService,
+    executor: toolExecutor,
+    allowedToolIds: taskToolAllowlist,
+  });
+
+  // Task Planner V1 — proposes, never runs.
+  //
+  // It receives the registry for READING (catalogue + validation) and the
+  // configured provider through the existing IAIProvider abstraction. It is
+  // deliberately NOT given the executor: there is no code path from a plan to
+  // a side effect that does not go through TaskExecutionService.
+  taskPlannerService = new TaskPlannerService({
+    provider: adapter,
+    registry: toolRegistry,
+    allowedToolIds: taskToolAllowlist,
+  });
+
+  // The conversational sequencer. Same three services the REST endpoints use,
+  // so "check this site" in chat and POST /plan + POST /execute follow one
+  // path with one set of rules.
+  taskConversationService = new TaskConversationService({
+    tasks: taskService,
+    planner: taskPlannerService,
+    execution: taskExecutionService,
+  });
+
   // PHASE 11.9 — Pending action service for write-tool confirmation flow
   const pendingActionService = new PendingActionService({
     approvalRepo,
@@ -1239,6 +1438,12 @@ export function getContainer(options?: {
     memoryExtractor,
     knowledgeRepo,
     knowledgeRetriever,
+    // Core V1 — the first persistent work primitive, and self-knowledge.
+    taskService,
+    selfKnowledge: selfKnowledgeService,
+    taskExecution: taskExecutionService!,
+    taskPlanner: taskPlannerService!,
+    taskConversation: taskConversationService!,
   };
 
   return _container;

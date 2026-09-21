@@ -582,7 +582,9 @@ describe("Sprint 6.10 — agent layer security", () => {
       // rather than this agent's prompt. The isolation property is unchanged:
       // it can see nothing that acts on a provider.
       const visible = ctx.toolRegistry.getAll().map((t: ITool) => t.id);
-      expect(visible.every((id) => id.startsWith("capabilities."))).toBe(true);
+      expect(
+        visible.every((id) => id.startsWith("capabilities.") || id === "self.describe")
+      ).toBe(true);
       expect(ctx.toolRegistry.get("whatsapp.send")).toBeUndefined();
       expect(ctx.toolRegistry.get("meta.insights")).toBeUndefined();
     });

@@ -101,7 +101,9 @@ describe("Sprint 7 — browser agent", () => {
       // Capability discovery is granted to every agent so "what can you do?"
       // reaches the registry instead of this agent's system prompt. The
       // browser-specific assertion is that nothing ELSE leaked in.
-      const browserOnly = allowed.filter((id) => !id.startsWith("capabilities."));
+      const browserOnly = allowed.filter(
+        (id) => !id.startsWith("capabilities.") && id !== "self.describe"
+      );
       expect(browserOnly.slice().sort()).toEqual(
         [...BROWSER_READ_TOOL_IDS, ...BROWSER_ACTION_TOOL_IDS].slice().sort()
       );

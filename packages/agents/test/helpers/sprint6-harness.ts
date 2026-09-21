@@ -193,6 +193,14 @@ export function productionLikeTools(): ITool[] {
     read("capabilities.connected"),
     read("capabilities.integration"),
     read("capabilities.permissions"),
+    // Core V1 — self-description (READ_ONLY, every agent) and the task
+    // lifecycle (general assistant only). The two writes reach JARVIS's own
+    // store, so they are LOW_IMPACT and ungated rather than approval-gated.
+    read("self.describe"),
+    read("task.list"),
+    read("task.get"),
+    fakeTool({ id: "task.create", risk: "LOW_IMPACT", requiredPermissions: ["read", "write"] }),
+    fakeTool({ id: "task.updateStatus", risk: "LOW_IMPACT", requiredPermissions: ["read", "write"] }),
     // Phase 12 — real Gmail, Drive and Calendar reads. All READ_ONLY: there is
     // no write tool in this group and no write scope behind it.
     read("gmail.listUnread"),

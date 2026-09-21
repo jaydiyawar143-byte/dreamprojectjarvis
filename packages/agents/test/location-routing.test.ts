@@ -24,6 +24,7 @@ import {
   MAPS_TOOLS,
   INTEGRATION_READ_TOOLS,
   CAPABILITY_TOOLS,
+  SELF_TOOLS,
   isToolAllowed,
 } from "../src/agent-policy.js";
 
@@ -123,7 +124,7 @@ describe("location policy", () => {
     // change a provider.
     const policy = AGENT_POLICIES[AGENT_IDS.location]!;
     expect([...policy.allowedTools].sort()).toEqual(
-      [...MAPS_TOOLS, ...INTEGRATION_READ_TOOLS, ...CAPABILITY_TOOLS].sort()
+      [...MAPS_TOOLS, ...INTEGRATION_READ_TOOLS, ...CAPABILITY_TOOLS, ...SELF_TOOLS].sort()
     );
   });
 

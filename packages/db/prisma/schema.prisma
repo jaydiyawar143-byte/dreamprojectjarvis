@@ -764,6 +764,25 @@ model OutcomeRevision {
 // `completedAt` is a timestamp rather than a boolean so "when did I finish
 // this" is answerable, and so completion is idempotent.
 // ---------------------------------------------------------------------------
+/// Tasks and reminders (V3) AND, since Core V1, JARVIS work tasks.
+///
+/// ONE table on purpose. A work task is a task: it belongs to a user, has a
+/// title, and is either outstanding or finished. Splitting it into a second
+/// model would have given the Tasks widget, the reminder sweep and the
+/// `tasks.list` tool two places to look, which is the duplication the
+/// integration rule exists to prevent.
+///
+/// The three Core V1 columns are ADDITIVE. Nothing that existed reads them,
+/// and the two existing behaviours are unaffected:
+///   - the reminder sweep requires `dueAt != null`, and a work task carries no
+///     due date in this slice, so it can never be surfaced as a reminder;
+///   - every list/complete path keys off `completedAt`, which the lifecycle
+///     keeps in lockstep with `status` in BOTH directions (see
+///     PrismaTaskRepository) so the two can never disagree.
+///
+/// `createdBy` already distinguishes the two kinds — it predates this change
+/// and means "which agent or flow created it, null when manual" — so no
+/// discriminator column was added.
 model Task {
   id          String    @id @default(cuid())
   userId      String    @map("user_id")
@@ -772,7 +791,16 @@ model Task {
   /// Null means "someday": a task with no deadline, which is never overdue.
   dueAt       DateTime? @map("due_at")
   priority    String    @default("NORMAL")
+  /// Core V1 lifecycle: PENDING | RUNNING | COMPLETED | FAILED.
+  /// A plain String, matching `priority` above, rather than a Prisma enum:
+  /// the lifecycle is enforced in one place (TaskService) and a database enum
+  /// would need a migration to add a state the service already rejects.
+  status      String    @default("PENDING")
+  /// When the work actually began. Null for anything never started.
+  startedAt   DateTime? @map("started_at")
   completedAt DateTime? @map("completed_at")
+  /// Why a run failed, in the user's terms. Null unless status is FAILED.
+  error       String?
   /// Set once a reminder has been surfaced, so it is not raised twice.
   remindedAt  DateTime? @map("reminded_at")
   /// Which agent or flow created it, for the audit trail. Null when manual.
@@ -784,6 +812,7 @@ model Task {
 
   @@index([userId, dueAt])
   @@index([userId, completedAt])
+  @@index([userId, status])
   @@map("Task")
 }
 

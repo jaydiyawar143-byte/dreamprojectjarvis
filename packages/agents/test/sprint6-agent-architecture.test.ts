@@ -29,7 +29,7 @@ import {
   productionLikeTools,
   toolRegistryOf,
 } from "./helpers/sprint6-harness.js";
-import { INTEGRATION_READ_TOOLS, CAPABILITY_TOOLS } from "../src/agent-policy.js";
+import { INTEGRATION_READ_TOOLS, CAPABILITY_TOOLS, SELF_TOOLS } from "../src/agent-policy.js";
 
 describe("Sprint 6.1 — agent architecture", () => {
   let provider: ScriptedAIProvider;
@@ -177,6 +177,7 @@ describe("Sprint 6.1 — agent architecture", () => {
         "n8n.trigger",
         ...INTEGRATION_READ_TOOLS,
         ...CAPABILITY_TOOLS,
+        ...SELF_TOOLS,
       ]);
 
       const communication = AGENT_POLICIES[AGENT_IDS.communication]!;
@@ -184,6 +185,7 @@ describe("Sprint 6.1 — agent architecture", () => {
         "whatsapp.send",
         ...INTEGRATION_READ_TOOLS,
         ...CAPABILITY_TOOLS,
+        ...SELF_TOOLS,
       ]);
 
       const google = AGENT_POLICIES[AGENT_IDS.googleAds]!;
@@ -202,7 +204,8 @@ describe("Sprint 6.1 — agent architecture", () => {
             t.startsWith("drive.") ||
             t.startsWith("calendar.") ||
             t.startsWith("integration.") ||
-            t.startsWith("capabilities.")
+            t.startsWith("capabilities.") ||
+            t === "self.describe"
         )
       ).toBe(true);
       // It still cannot reach another provider's data.
@@ -216,8 +219,12 @@ describe("Sprint 6.1 — agent architecture", () => {
       // do?" landing here must reach the registry rather than this agent's
       // prompt, which is the failure the capability tools exist to remove.
       const allowed = AGENT_POLICIES[AGENT_IDS.knowledge]!.allowedTools;
-      expect([...allowed].sort()).toEqual([...CAPABILITY_TOOLS].sort());
-      expect(allowed.every((t) => t.startsWith("capabilities."))).toBe(true);
+      // Core V1 — `self.describe` joins capability discovery: READ_ONLY,
+      // reaches no provider, held by every agent for the same reason.
+      expect([...allowed].sort()).toEqual([...CAPABILITY_TOOLS, ...SELF_TOOLS].sort());
+      expect(
+        allowed.every((t) => t.startsWith("capabilities.") || t === "self.describe")
+      ).toBe(true);
     });
 
     it("keeps the analytics agent read-only", () => {

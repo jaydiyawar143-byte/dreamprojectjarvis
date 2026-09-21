@@ -9,6 +9,7 @@ import type {
   WeatherPort,
   WeatherReading,
 } from "@jarvis/tools";
+import { JARVIS_TASK_CREATOR } from "@jarvis/core";
 import { getWeather } from "./providers/weather-provider.js";
 import { getTopCrypto } from "./providers/market-provider.js";
 import { snapshot as systemSnapshot } from "./providers/system-monitor.js";
@@ -166,14 +167,27 @@ export function createMarketPort(): MarketPort {
  * existing route, behind the permissions they already had.
  */
 export function createTasksPort(tasks: {
-  list(userId: string, options: { includeCompleted?: boolean; limit?: number }): Promise<
+  list(
+    userId: string,
+    options: { includeCompleted?: boolean; limit?: number; excludeCreatedBy?: string }
+  ): Promise<
     Array<{ id: string; title: string; dueAt: Date | string | null; priority: string; completedAt: Date | string | null }>
   >;
 }): TasksPort {
   return {
     async list(userId, options): Promise<AmbientOutcome<TaskReading[]>> {
       try {
-        const rows = await tasks.list(userId, { includeCompleted: options.includeCompleted, limit: 50 });
+        const rows = await tasks.list(userId, {
+          includeCompleted: options.includeCompleted,
+          limit: 50,
+          // Core V1.1 — todos only.
+          //
+          // `tasks.list` answers "what is due?", and work JARVIS is carrying
+          // out is not a todo the user has to do. Without this, asking about
+          // due items returned undated work tasks mixed in with real
+          // reminders. The work surface is `task.list`.
+          excludeCreatedBy: JARVIS_TASK_CREATOR,
+        });
         return {
           data: rows.map((t) => ({
             id: t.id,

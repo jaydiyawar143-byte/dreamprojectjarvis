@@ -88,6 +88,8 @@ export * from "./types/capability.js";
 export * from "./types/google-workspace.js";
 // Phase 13 — approval-gated Google write actions.
 export * from "./types/google-write.js";
+// Core V1 — the task lifecycle (the single definition of legal transitions).
+export * from "./types/task.js";
 export * from "./capability-catalog.js";
 export * from "./capability-presentation.js";
 export * from "./speech-preparation.js";

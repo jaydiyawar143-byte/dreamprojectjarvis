@@ -198,6 +198,20 @@ export type {
   SystemReading,
 } from "./tools/ambient-tools.js";
 
+// Core V1 — the task lifecycle surface. Separate from `tasks.list` above:
+// that one reads the user's todos for the dashboard, these manage the work
+// JARVIS has been asked to hold on to. Both end up in the same table; see the
+// Task model in schema.prisma for why that is one store and not two.
+export {
+  TaskCreateTool,
+  TaskListTool,
+  TaskGetTool,
+  TaskUpdateStatusTool,
+  createTaskTools,
+  TASK_TOOL_IDS,
+} from "./tools/task-tools.js";
+export type { TaskPort, TaskView } from "./tools/task-tools.js";
+
 // Integration management — the JARVIS arm of the universal integration
 // contract. Every tool here delegates to IntegrationCommandPort, which the API
 // implements over the SAME IntegrationCommandService the REST routes use.
@@ -229,8 +243,13 @@ export {
   GetPermissionsOverviewTool,
   createCapabilityTools,
   CAPABILITY_TOOL_IDS,
+  // Core V1 — the same question one level up: not what JARVIS can do, but
+  // what JARVIS is.
+  DescribeSelfTool,
+  createSelfTools,
+  SELF_TOOL_IDS,
 } from "./tools/capability-tools.js";
-export type { CapabilityPort } from "./tools/capability-tools.js";
+export type { CapabilityPort, SelfKnowledgePort } from "./tools/capability-tools.js";
 
 // Phase 12 — real read-only Gmail, Drive and Calendar tasks. Every tool routes
 // to the SAME GoogleWorkspaceTaskService the dashboard panels call.

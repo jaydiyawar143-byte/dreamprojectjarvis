@@ -5,13 +5,14 @@ import { JarvisRequestSchema, JarvisError } from "@jarvis/core";
 import { maskIdentifiersInText } from "@jarvis/core";
 import type { SessionContext, AuthContext } from "@jarvis/core";
 import { createAuthMiddleware, type AuthenticatedRequest } from "../middleware/auth.js";
-import { detectIntent, type PendingActionService } from "@jarvis/agents";
+import { detectIntent, detectWorkRequest, type PendingActionService } from "@jarvis/agents";
 import type {
   ConversationStorePort,
   IOrchestrator,
   ITokenService,
   IToolExecutor,
   PendingAction,
+  Role,
 } from "@jarvis/core";
 import type { GoogleWriteService } from "../services/google/write-service.js";
 import {
@@ -52,6 +53,22 @@ export type PendingActionPort = Pick<
  * changing a shared helper that `pending-actions.ts` also uses. That is a
  * separate decision, deliberately not made here.
  */
+/**
+ * The conversational work path. One method, so the route cannot reach the
+ * planner or the executor directly.
+ */
+export interface TaskConversationPort {
+  handle(input: {
+    userId: string;
+    role: Role;
+    goal: string;
+    planOnly: boolean;
+    traceId?: string;
+    conversationId?: string;
+    ipAddress?: string;
+  }): Promise<{ message: string; taskId: string; plan?: unknown; execution?: unknown }>;
+}
+
 export interface ChatRouterDeps {
   tokenService: ITokenService;
   conversationRepo: ConversationStorePort;
@@ -59,6 +76,14 @@ export interface ChatRouterDeps {
   executor: IToolExecutor;
   /** Absent on deployments without the pending-action flow. */
   pendingActionService?: PendingActionPort;
+  /**
+   * Task Planner V1.1 — handles a turn that asks JARVIS to DO something.
+   *
+   * Optional, like `pendingActionService`: a deployment without it simply
+   * routes every message to the orchestrator, which is the behaviour that
+   * existed before this branch. Nothing else in this file depends on it.
+   */
+  taskConversation?: TaskConversationPort;
   googleWrites: GoogleWriteService | null;
 }
 
@@ -346,6 +371,62 @@ export function createChatRouter(container: ChatRouterDeps): Router {
               expiresAt: modifyResult.pendingAction.expiresAt,
               summary: modifyResult.message,
             },
+          },
+          traceId,
+          timestamp: new Date().toISOString(),
+        });
+        return;
+      }
+
+      // -----------------------------------------------------------------------
+      // TASK PLANNER V1.1 — a turn that asks JARVIS to DO something.
+      //
+      // Sits here, beside the pending-action branches above, for the same
+      // reason they do: it is a narrow special case decided BEFORE the general
+      // path, and the general path below is untouched by it.
+      //
+      // `detectWorkRequest` is a pure heuristic whose default is NONE, so an
+      // ordinary question — "what is blockchain?", "website ka response?" —
+      // never reaches this branch and behaves exactly as it did before. Only
+      // an unambiguous imperative gets here, and only one without an explicit
+      // "don't execute" actually runs anything.
+      // -----------------------------------------------------------------------
+      const workRequest = detectWorkRequest(jarvisRequest.message);
+
+      if (workRequest.type !== "NONE" && container.taskConversation) {
+        await container.conversationRepo.addMessage({
+          conversationId,
+          role: "user",
+          content: jarvisRequest.message,
+        });
+
+        const result = await container.taskConversation.handle({
+          userId: authContext.userId,
+          // The AUTHENTICATED role, never anything from the body: the work
+          // runs with exactly the permissions this caller already has.
+          role: authContext.role as Role,
+          goal: workRequest.goal,
+          planOnly: workRequest.type === "PLAN_ONLY",
+          traceId,
+          conversationId,
+          ...(req.ip ? { ipAddress: req.ip } : {}),
+        });
+
+        await container.conversationRepo.addMessage({
+          conversationId,
+          role: "assistant",
+          content: result.message,
+          metadata: { traceId, taskId: result.taskId },
+        });
+
+        res.status(200).json({
+          success: true,
+          data: {
+            message: result.message,
+            conversationId,
+            taskId: result.taskId,
+            ...(result.plan ? { plan: result.plan } : {}),
+            ...(result.execution ? { execution: result.execution } : {}),
           },
           traceId,
           timestamp: new Date().toISOString(),

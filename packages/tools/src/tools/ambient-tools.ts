@@ -329,10 +329,12 @@ export class TasksListTool extends AmbientTool {
   constructor(private readonly tasks: TasksPort) {
     super(
       "tasks.list",
-      "List Tasks",
-      "Read the user's own saved tasks: title, due date, priority and whether each is done. " +
-        "Use this before answering any question about what they have to do, what is pending, " +
-        "or what is due — never answer from memory or from earlier in the conversation.",
+      "List Todos and Reminders",
+      "Your dated todos and reminders — use for questions like what is due, what's pending today, " +
+        "or what todos do I have. Returns title, due date, priority and whether each is done. " +
+        "This is the user's OWN to-do list. It is NOT the work JARVIS was asked to carry out: " +
+        "for 'what are you working on' or 'what did you finish', use task.list instead. " +
+        "Never answer from memory or from earlier in the conversation.",
       [
         {
           name: "includeCompleted",

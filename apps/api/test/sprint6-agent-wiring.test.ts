@@ -104,6 +104,17 @@ const ALL_REGISTERED_TOOLS = [
   "capabilities.connected",
   "capabilities.integration",
   "capabilities.permissions",
+  // Core V1 — JARVIS describing itself. Registered unconditionally: it
+  // reaches no provider and needs no credential, so there is nothing that
+  // could be missing. Granted to every policy for the same reason the
+  // capability tools are.
+  "self.describe",
+  // Core V1 — the task lifecycle. Registered unconditionally (JARVIS's own
+  // database), granted to the general assistant alone.
+  "task.create",
+  "task.list",
+  "task.get",
+  "task.updateStatus",
   // Phase 12 — real Gmail, Drive and Calendar reads. Registered whenever a
   // Google OAuth client and an encryption key are present.
   "gmail.listUnread",
@@ -210,7 +221,17 @@ const stubProvider = {
  * model sees sanitized names (dots become dashes), hence the dashed prefixes.
  */
 const actingOnly = (names: string[]): string[] =>
-  names.filter((n) => !n.startsWith("integration-") && !n.startsWith("capabilities-"));
+  names.filter(
+    (n) =>
+      !n.startsWith("integration-") &&
+      !n.startsWith("capabilities-") &&
+      // Core V1 — `self.describe` is discovery, not action: READ_ONLY,
+      // reaches no provider and changes nothing. It belongs with the
+      // capability tools these assertions already exclude, for the same
+      // reason — every agent holds it, so counting it would say nothing
+      // about what a given agent can DO.
+      n !== "self-describe"
+  );
 
 describe("Sprint 6 — per-agent tool definition filtering", () => {
   const all = definitionsFor(ALL_REGISTERED_TOOLS);
@@ -263,7 +284,12 @@ describe("Sprint 6 — per-agent tool definition filtering", () => {
       (d) => d.name
     );
     expect(actingOnly(defs)).toEqual([]);
-    expect(defs.every((n) => n.startsWith("capabilities-"))).toBe(true);
+    // Discovery only: the capability tools, plus Core V1's `self.describe`.
+    // Both are READ_ONLY and neither can reach a provider, so this agent
+    // still holds nothing it could act with.
+    expect(
+      defs.every((n) => n.startsWith("capabilities-") || n === "self-describe")
+    ).toBe(true);
   });
 
   it("offers the Google agent only Google tools and its own connection lifecycle", () => {
