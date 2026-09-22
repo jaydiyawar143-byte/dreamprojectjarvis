@@ -124,6 +124,7 @@ import { TaskService } from "./tasks/task-service.js";
 import { TaskExecutionService } from "./tasks/task-execution-service.js";
 import { TaskPlannerService } from "./tasks/task-planner-service.js";
 import { TaskConversationService } from "./tasks/task-conversation-service.js";
+import { TaskSchedulerService } from "./tasks/task-scheduler-service.js";
 import { SelfKnowledgeService } from "./self-knowledge/self-knowledge-service.js";
 import { readBuildMetadata } from "./self-knowledge/build-metadata.js";
 import { createGoogleWorkspaceTools, type GoogleWorkspaceTaskPort } from "@jarvis/tools";
@@ -277,6 +278,13 @@ export interface Container {
    * unambiguous work request never reaches it.
    */
   taskConversation: TaskConversationService;
+  /**
+   * Scheduler V1 — WHEN a pending work task runs.
+   *
+   * Sequences the same TaskService / Planner / Execution the immediate path
+   * uses, so a scheduled run passes every check an explicit one does.
+   */
+  taskScheduler: TaskSchedulerService;
   /**
    * Core V1 — what JARVIS is: build, environment, model, capability counts.
    * Shared with the `self.describe` tool for the same reason.
@@ -904,7 +912,10 @@ export function getContainer(options?: {
   // Core V1 — the task lifecycle. One instance, shared by the REST route and
   // the task tools, for the same reason the integration command service is:
   // a button and a sentence must move the same task through the same rules.
-  const taskService = new TaskService({ tasks: new PrismaTaskRepository(prisma) });
+  // ONE repository instance, shared by the lifecycle service and the
+  // scheduler: the schedule columns and the status columns are the same rows.
+  const taskRepository = new PrismaTaskRepository(prisma);
+  const taskService = new TaskService({ tasks: taskRepository });
 
   // Core V1 — self-knowledge. The provider is built a few lines below, so its
   // identity is read through a ref rather than captured now; same lazy shape
@@ -932,6 +943,7 @@ export function getContainer(options?: {
   let taskExecutionService: TaskExecutionService | null = null;
   let taskPlannerService: TaskPlannerService | null = null;
   let taskConversationService: TaskConversationService | null = null;
+  let taskSchedulerService: TaskSchedulerService | null = null;
 
   const toolRegistry = createMetaToolRegistry(
     approvalRepo,
@@ -1268,10 +1280,19 @@ export function getContainer(options?: {
   // The conversational sequencer. Same three services the REST endpoints use,
   // so "check this site" in chat and POST /plan + POST /execute follow one
   // path with one set of rules.
+  // Scheduler V1 — built before the conversation service, which takes it.
+  taskSchedulerService = new TaskSchedulerService({
+    tasks: taskRepository,
+    taskService,
+    planner: taskPlannerService,
+    execution: taskExecutionService,
+  });
+
   taskConversationService = new TaskConversationService({
     tasks: taskService,
     planner: taskPlannerService,
     execution: taskExecutionService,
+    scheduler: taskSchedulerService,
   });
 
   // PHASE 11.9 — Pending action service for write-tool confirmation flow
@@ -1444,6 +1465,7 @@ export function getContainer(options?: {
     taskExecution: taskExecutionService!,
     taskPlanner: taskPlannerService!,
     taskConversation: taskConversationService!,
+    taskScheduler: taskSchedulerService!,
   };
 
   return _container;

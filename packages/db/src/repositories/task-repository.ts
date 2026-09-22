@@ -28,6 +28,11 @@ export interface TaskRecord {
   completedAt: Date | null;
   /** Why a run failed. Null unless status is FAILED. */
   error: string | null;
+  /**
+   * Scheduler V1 — when this work task becomes eligible for execution.
+   * Null means "not scheduled", and is also what a consumed schedule leaves.
+   */
+  scheduledAt: Date | null;
   remindedAt: Date | null;
   createdBy: string | null;
   createdAt: Date;
@@ -50,6 +55,30 @@ export interface UpdateTaskInput {
   priority?: TaskPriority;
   /** true completes, false reopens. Omitted leaves completion untouched. */
   completed?: boolean;
+}
+
+/**
+ * "Created by anyone except `creator`" — INCLUDING rows where `createdBy` is
+ * NULL, which is every task the dashboard itself made.
+ *
+ * THIS IS NOT THE OBVIOUS SPELLING, AND THE OBVIOUS SPELLING IS WRONG.
+ * `NOT: { createdBy: "jarvis" }` renders as `NOT created_by = 'jarvis'` and
+ * `createdBy: { not: "jarvis" }` renders as `created_by <> 'jarvis'`. In SQL's
+ * three-valued logic both evaluate to NULL — not true — for a row whose
+ * `created_by` IS NULL, so both silently DROP every ordinary todo. Verified
+ * against Postgres:
+ *
+ *   rows (1, NULL) (2, 'jarvis') (3, 'other')
+ *   WHERE NOT created_by = 'jarvis'                 -> {3}
+ *   WHERE created_by <> 'jarvis'                    -> {3}
+ *   WHERE created_by IS NULL OR created_by <> '…'   -> {1, 3}   <- correct
+ *
+ * `POST /command-center/tasks` never sets `createdBy`, so NULL is the normal
+ * case for a todo, not an edge case. Written once, here, so the three call
+ * sites cannot each rediscover it.
+ */
+function createdByIsNot(creator: string) {
+  return { OR: [{ createdBy: null }, { createdBy: { not: creator } }] };
 }
 
 export class PrismaTaskRepository {
@@ -103,7 +132,7 @@ export class PrismaTaskRepository {
         ...(options.includeCompleted ? {} : { completedAt: null }),
         ...(options.createdBy !== undefined ? { createdBy: options.createdBy } : {}),
         ...(options.excludeCreatedBy !== undefined
-          ? { NOT: { createdBy: options.excludeCreatedBy } }
+          ? createdByIsNot(options.excludeCreatedBy)
           : {}),
       },
       orderBy: [{ dueAt: { sort: "asc", nulls: "last" } }, { createdAt: "desc" }],
@@ -121,7 +150,8 @@ export class PrismaTaskRepository {
   async updateOwned(
     userId: string,
     taskId: string,
-    input: UpdateTaskInput
+    input: UpdateTaskInput,
+    options: { excludeCreatedBy?: string } = {}
   ): Promise<TaskRecord | null> {
     const data: Record<string, unknown> = {};
     if (input.title !== undefined) data.title = input.title;
@@ -142,7 +172,17 @@ export class PrismaTaskRepository {
       if (!input.completed) data.error = null;
     }
 
-    if (Object.keys(data).length === 0) return this.findOwned(userId, taskId);
+    if (Object.keys(data).length === 0) {
+      // An empty PATCH is a read, and it has to refuse the same things the
+      // write does — otherwise `PATCH {}` becomes a way to read a JARVIS work
+      // task from a surface that is not allowed to list it.
+      const current = await this.findOwned(userId, taskId);
+      if (!current) return null;
+      if (options.excludeCreatedBy !== undefined && current.createdBy === options.excludeCreatedBy) {
+        return null;
+      }
+      return current;
+    }
 
     const result = await this.prisma.task.updateMany({
       where: {
@@ -171,6 +211,22 @@ export class PrismaTaskRepository {
         // same answer it gives for "no such task", and deliberately
         // indistinguishable from it.
         ...(input.completed !== undefined ? { NOT: { status: "RUNNING" } } : {}),
+        // Core V1.1 — the todo surface may not edit a JARVIS work task.
+        //
+        // This matters more than a tidy boundary: Scheduler V1 re-plans from
+        // the task's title AT EXECUTION TIME. A rename through the dashboard
+        // checkbox UI would therefore change what a scheduled task actually
+        // does, silently, between the moment it was agreed and the moment it
+        // runs. The title a schedule was accepted against has to be the title
+        // it runs against.
+        //
+        // In the WHERE clause, like the RUNNING guard above, so a task that
+        // becomes JARVIS work between a check and a write still matches zero
+        // rows. Zero rows returns null, which the route renders as 404 — the
+        // same answer "no such task" gets.
+        ...(options.excludeCreatedBy !== undefined
+          ? createdByIsNot(options.excludeCreatedBy)
+          : {}),
       },
       data,
     });
@@ -236,6 +292,87 @@ export class PrismaTaskRepository {
     return { ok: true, task };
   }
 
+  // -------------------------------------------------------------------------
+  // Scheduler V1
+  // -------------------------------------------------------------------------
+
+  /**
+   * Set or clear a work task's one-time schedule.
+   *
+   * The WHERE clause carries every eligibility rule, so they hold atomically
+   * rather than being checked and then trusted:
+   *
+   *   userId           the caller owns it
+   *   createdBy        it is JARVIS WORK, never a dashboard todo
+   *   status PENDING   terminal and running tasks cannot be scheduled
+   *
+   * Returns null when nothing matched — "no such task", "not yours", "that is
+   * a todo" and "it is already running" are deliberately one answer, the same
+   * way `updateOwned` treats ownership.
+   */
+  async setScheduleOwned(
+    userId: string,
+    taskId: string,
+    createdBy: string,
+    scheduledAt: Date | null
+  ): Promise<TaskRecord | null> {
+    const result = await this.prisma.task.updateMany({
+      where: { id: taskId, userId, createdBy, status: "PENDING" },
+      data: { scheduledAt },
+    });
+    if (result.count === 0) return null;
+    return this.findOwned(userId, taskId);
+  }
+
+  /**
+   * Work that is due to run.
+   *
+   * Candidate discovery only — every row returned must still be claimed with
+   * `claimSchedule` before anything runs, because between this read and that
+   * write another process may have taken it.
+   */
+  async findDueScheduled(
+    createdBy: string,
+    now: Date,
+    limit = 20
+  ): Promise<TaskRecord[]> {
+    return this.prisma.task.findMany({
+      where: {
+        createdBy,
+        status: "PENDING",
+        scheduledAt: { not: null, lte: now },
+      },
+      orderBy: { scheduledAt: "asc" },
+      take: Math.min(limit, 100),
+    }) as unknown as Promise<TaskRecord[]>;
+  }
+
+  /**
+   * Take ownership of one due schedule. THE race-safe step.
+   *
+   * Clearing `scheduledAt` IS the claim: `scheduledAt: { not: null }` in the
+   * WHERE means the second caller — another tick, another replica, or a
+   * restart racing a live sweep — matches zero rows and is told it lost. One
+   * statement, no lock held in this process, and no second "consumed" column
+   * to keep in step.
+   *
+   * It deliberately does NOT touch `status`. The PENDING -> RUNNING move stays
+   * with TaskService, so a scheduled run and a manual one travel the same
+   * lifecycle path and obey the same transition rules.
+   */
+  async claimSchedule(taskId: string, createdBy: string): Promise<boolean> {
+    const result = await this.prisma.task.updateMany({
+      where: {
+        id: taskId,
+        createdBy,
+        status: "PENDING",
+        scheduledAt: { not: null },
+      },
+      data: { scheduledAt: null },
+    });
+    return result.count === 1;
+  }
+
   /** A user's tasks in one lifecycle state. Used by the Core V1 task surface. */
   async listByStatus(
     userId: string,
@@ -260,9 +397,31 @@ export class PrismaTaskRepository {
     }) as unknown as Promise<TaskRecord | null>;
   }
 
-  /** True when a row was actually removed. */
-  async deleteOwned(userId: string, taskId: string): Promise<boolean> {
-    const result = await this.prisma.task.deleteMany({ where: { id: taskId, userId } });
+  /**
+   * True when a row was actually removed.
+   *
+   * `excludeCreatedBy` is the same Core V1.1 boundary `list()` documents above,
+   * applied to deletion: the todo surface passes "jarvis" so that a JARVIS work
+   * task cannot be removed through the dashboard. It lives in the WHERE clause
+   * rather than in a read-then-delete check in the route, so the guard is
+   * atomic and cannot be raced.
+   *
+   * It only ever NARROWS the query. The userId filter is unconditional.
+   */
+  async deleteOwned(
+    userId: string,
+    taskId: string,
+    options: { excludeCreatedBy?: string } = {}
+  ): Promise<boolean> {
+    const result = await this.prisma.task.deleteMany({
+      where: {
+        id: taskId,
+        userId,
+        ...(options.excludeCreatedBy !== undefined
+          ? createdByIsNot(options.excludeCreatedBy)
+          : {}),
+      },
+    });
     return result.count > 0;
   }
 

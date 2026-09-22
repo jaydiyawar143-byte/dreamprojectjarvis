@@ -55,6 +55,18 @@ services:
     environment:
       NODE_ENV: production
       API_PORT: 3001
+      # Scheduler V1 — the zone a spoken time is read in.
+      #
+      # A container with no TZ runs UTC, and `parseSchedulePhrase` resolves a
+      # bare "12:55 PM" with `setHours`, which is process-local. On UTC that
+      # silently became 12:55Z — 6:25 PM here — and the confirmation echoed
+      # "12:55 PM" back, so it looked right and was not.
+      #
+      # Set explicitly for the current single-operator India deployment. This
+      # is a deployment fact, not a user preference: there is still no
+      # per-user timezone, and this does not add one. A second operator in
+      # another zone is the point at which that has to be built.
+      TZ: Asia/Kolkata
       # `postgres` is the service name on the compose network. The host's
       # DATABASE_URL from .env points at 127.0.0.1 and would resolve to the
       # container itself.

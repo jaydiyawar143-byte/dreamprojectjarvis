@@ -801,6 +801,20 @@ model Task {
   completedAt DateTime? @map("completed_at")
   /// Why a run failed, in the user's terms. Null unless status is FAILED.
   error       String?
+  /// Scheduler V1 — when this WORK task becomes eligible for execution.
+  ///
+  /// Deliberately NOT `dueAt`. That field belongs to the todo surface: it is
+  /// user-writable through PATCH /command-center/tasks/:id, so editing a due
+  /// date would silently reschedule real execution, and `dueForReminder()`
+  /// keys on it, so wiring reminders later would announce work tasks as
+  /// reminders. Core V1.1 separated those two meanings on purpose.
+  ///
+  /// It is also the CONSUMPTION marker: the scheduler claims a due task by
+  /// setting this back to null in the same atomic statement that selects it,
+  /// so no second "already run" column is needed and a task cannot be picked
+  /// up twice — not by a second tick, not by a second replica, and not by a
+  /// task later reopened through the todo checkbox.
+  scheduledAt DateTime? @map("scheduled_at")
   /// Set once a reminder has been surfaced, so it is not raised twice.
   remindedAt  DateTime? @map("reminded_at")
   /// Which agent or flow created it, for the audit trail. Null when manual.
@@ -813,6 +827,8 @@ model Task {
   @@index([userId, dueAt])
   @@index([userId, completedAt])
   @@index([userId, status])
+  /// The scheduler sweep's only query: due work, by state.
+  @@index([scheduledAt, status])
   @@map("Task")
 }
 

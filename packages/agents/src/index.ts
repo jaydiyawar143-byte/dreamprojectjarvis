@@ -53,6 +53,14 @@ export {
 // Task Planner V1.1 — is this turn a request to PERFORM work? Pure
 // heuristic, no model call, same shape as the pending-action detector.
 export { detectWorkRequest, type WorkRequest } from "./work-request-detector.js";
+// Scheduler V1 — a closed grammar for explicit future times. Not a date parser.
+export {
+  parseSchedulePhrase,
+  mentionsVagueTime,
+  mentionsExplicitTime,
+  SCHEDULE_ZONE,
+  type SchedulePhrase,
+} from "./schedule-phrase.js";
 
 export {
   rankAgentCandidates,

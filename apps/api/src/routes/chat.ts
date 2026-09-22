@@ -63,10 +63,18 @@ export interface TaskConversationPort {
     role: Role;
     goal: string;
     planOnly: boolean;
+    scheduledAt?: Date;
     traceId?: string;
     conversationId?: string;
     ipAddress?: string;
-  }): Promise<{ message: string; taskId: string; plan?: unknown; execution?: unknown }>;
+  }): Promise<{
+    message: string;
+    taskId: string;
+    plan?: unknown;
+    execution?: unknown;
+    /** Present when the turn scheduled the task instead of running it. */
+    scheduledAt?: string;
+  }>;
 }
 
 export interface ChatRouterDeps {
@@ -400,6 +408,26 @@ export function createChatRouter(container: ChatRouterDeps): Router {
           content: jarvisRequest.message,
         });
 
+        // NEEDS_TIME never reaches the work path: a vague time is answered
+        // with a question, not a guess, and nothing is created or run.
+        if (workRequest.type === "NEEDS_TIME") {
+          const ask =
+            "I can do that, but I need a specific time — for example \"tomorrow at 10 am\" or \"in 30 minutes\".";
+          await container.conversationRepo.addMessage({
+            conversationId,
+            role: "assistant",
+            content: ask,
+            metadata: { traceId },
+          });
+          res.status(200).json({
+            success: true,
+            data: { message: ask, conversationId },
+            traceId,
+            timestamp: new Date().toISOString(),
+          });
+          return;
+        }
+
         const result = await container.taskConversation.handle({
           userId: authContext.userId,
           // The AUTHENTICATED role, never anything from the body: the work
@@ -407,6 +435,7 @@ export function createChatRouter(container: ChatRouterDeps): Router {
           role: authContext.role as Role,
           goal: workRequest.goal,
           planOnly: workRequest.type === "PLAN_ONLY",
+          ...(workRequest.type === "SCHEDULE" ? { scheduledAt: workRequest.at } : {}),
           traceId,
           conversationId,
           ...(req.ip ? { ipAddress: req.ip } : {}),
@@ -427,6 +456,7 @@ export function createChatRouter(container: ChatRouterDeps): Router {
             taskId: result.taskId,
             ...(result.plan ? { plan: result.plan } : {}),
             ...(result.execution ? { execution: result.execution } : {}),
+            ...(result.scheduledAt ? { scheduledAt: result.scheduledAt } : {}),
           },
           traceId,
           timestamp: new Date().toISOString(),

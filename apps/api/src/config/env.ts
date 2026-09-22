@@ -27,5 +27,7 @@ export function loadEnvironment() {
     SHUTDOWN_GRACE_MS: env.JARVIS_SHUTDOWN_GRACE_MS,
     // Phase 11.7B runtime — outcome worker sweep interval (0 disables).
     OUTCOME_WORKER_INTERVAL_MS: env.JARVIS_OUTCOME_WORKER_INTERVAL_MS,
+    // Scheduler V1 — task scheduler sweep interval (0 disables scheduling).
+    TASK_SCHEDULER_INTERVAL_MS: env.JARVIS_TASK_SCHEDULER_INTERVAL_MS,
   };
 }

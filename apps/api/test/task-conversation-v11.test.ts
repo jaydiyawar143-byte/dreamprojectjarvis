@@ -193,7 +193,7 @@ function makeStore() {
         id: `task-${++seq}`, userId, title: input.title,
         description: input.description ?? null, dueAt: null, priority: "NORMAL",
         status: "PENDING", startedAt: null, completedAt: null, error: null,
-        remindedAt: null, createdBy: input.createdBy ?? null, createdAt: now, updatedAt: now,
+        remindedAt: null, scheduledAt: null, createdBy: input.createdBy ?? null, createdAt: now, updatedAt: now,
       };
       rows.set(row.id, row);
       return row;

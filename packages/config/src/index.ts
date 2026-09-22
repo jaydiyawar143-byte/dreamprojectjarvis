@@ -74,6 +74,20 @@ const baseEnvSchema = z.object({
     .min(0)
     .max(3600000)
     .default(300000),
+
+  // Scheduler V1 — how often the task scheduler sweeps for tasks whose
+  // scheduled time has arrived. 0 disables scheduled execution entirely.
+  //
+  // The default is a minute because the sweep interval is the WORST-CASE
+  // LATENESS of a scheduled task: a task due at 10:00:01 runs at 10:01 at the
+  // latest. Shorter would mean more empty queries for no user-visible gain,
+  // longer would make "at 10 AM" visibly wrong.
+  JARVIS_TASK_SCHEDULER_INTERVAL_MS: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(3600000)
+    .default(60000),
 });
 
 const serverEnvSchema = baseEnvSchema.extend({

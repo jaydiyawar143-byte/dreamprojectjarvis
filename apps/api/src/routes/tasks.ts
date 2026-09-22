@@ -7,6 +7,8 @@
 //   PATCH  /api/v1/tasks/:id/status  move it through the lifecycle
 //   POST   /api/v1/tasks/:id/plan    propose ONE tool call; runs nothing
 //   POST   /api/v1/tasks/:id/execute run it once, through the ToolExecutor
+//   POST   /api/v1/tasks/:id/schedule   run it ONCE at a future instant
+//   DELETE /api/v1/tasks/:id/schedule   cancel that; the task survives
 //
 // THIS ROUTE DECIDES NOTHING. It reads the body, calls TaskService and
 // translates the outcome into HTTP. Which transitions are legal lives in
@@ -33,6 +35,28 @@ import { asyncHandler } from "../middleware/error-handler.js";
 import type { Container } from "../services/container.js";
 import type { TaskFailureReason } from "../services/tasks/task-service.js";
 import type { TaskExecutionRefusal } from "../services/tasks/task-execution-service.js";
+import type { ScheduleRefusal } from "../services/tasks/task-scheduler-service.js";
+
+/**
+ * An ISO-8601 date-time that carries an explicit offset — `Z` or `±hh:mm`.
+ *
+ * Checked BEFORE `new Date()`, because `new Date()` accepts an offset-less
+ * string happily and silently reads it in the process's zone. The colon in the
+ * offset is required: `+0530` is legal ISO-8601 but its handling by `Date` is
+ * implementation-defined, and this route's whole purpose is to be the path
+ * with no ambiguity in it.
+ */
+const ISO_WITH_OFFSET =
+  /^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:[Zz]|[+-]\d{2}:\d{2})$/;
+
+/** One HTTP status per schedule refusal, in one place. */
+const STATUS_FOR_SCHEDULE: Record<ScheduleRefusal, number> = {
+  // Not yours, not work, or not PENDING — deliberately one answer, so this
+  // cannot be used to probe another user's tasks.
+  NOT_SCHEDULABLE: 404,
+  INVALID_TIME: 400,
+  ALREADY_SCHEDULED: 409,
+};
 
 /** One HTTP status per execution refusal, in one place. */
 const STATUS_FOR_REFUSAL: Record<TaskExecutionRefusal, number> = {
@@ -314,6 +338,97 @@ export function createTasksRouter(container: Container): Router {
       // 200 for both outcomes: "no action fits this task" is a successful
       // planning result, not a request error.
       ok(res, { plan });
+    })
+  );
+
+  // -------------------------------------------------------------------------
+  // POST /:id/schedule  — run it once, later
+  // -------------------------------------------------------------------------
+  //
+  // `scheduledAt` is an ISO-8601 timestamp and an OFFSET is REQUIRED (…Z or
+  // ±hh:mm). This application has no user-timezone system, so an offset is the
+  // only way a client can state an instant unambiguously.
+  //
+  // It is required rather than merely expected, because the alternative is
+  // silent: per the ECMAScript spec a date-time string WITHOUT an offset is
+  // parsed as the PROCESS's local time, so "2026-09-22T23:30:00" means a
+  // different instant on a UTC container than on an IST one — and neither the
+  // client nor the server would ever say so. A schedule that quietly means
+  // something else five and a half hours away is exactly the failure this
+  // route is the unambiguous path around, so it refuses instead of guessing.
+  //
+  // Scheduling runs nothing. The task stays PENDING until the sweep claims it.
+  router.post(
+    "/:id/schedule",
+    requireAuth,
+    asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
+      const userId = callerOf(req, res);
+      if (!userId) return;
+
+      const body = (req.body ?? {}) as { scheduledAt?: unknown; replace?: unknown };
+      if (typeof body.scheduledAt !== "string" || body.scheduledAt.trim().length === 0) {
+        fail(res, 400, "INVALID_REQUEST", "scheduledAt is required, as an ISO-8601 timestamp.");
+        return;
+      }
+
+      if (!ISO_WITH_OFFSET.test(body.scheduledAt.trim())) {
+        fail(
+          res,
+          400,
+          "INVALID_REQUEST",
+          "scheduledAt must be an ISO-8601 timestamp with an explicit offset, " +
+            "such as 2026-09-22T23:30:00+05:30 or 2026-09-22T18:00:00Z."
+        );
+        return;
+      }
+
+      const at = new Date(body.scheduledAt);
+      if (Number.isNaN(at.getTime())) {
+        fail(res, 400, "INVALID_REQUEST", "scheduledAt is not a valid ISO-8601 timestamp.");
+        return;
+      }
+
+      const result = await container.taskScheduler.scheduleTask(userId, req.params.id ?? "", at, {
+        replace: body.replace === true,
+      });
+
+      if (!result.ok) {
+        fail(res, STATUS_FOR_SCHEDULE[result.refusal], result.refusal, result.message);
+        return;
+      }
+
+      ok(res, {
+        task: result.task,
+        scheduledAt: result.task.scheduledAt?.toISOString() ?? null,
+      });
+    })
+  );
+
+  // -------------------------------------------------------------------------
+  // DELETE /:id/schedule  — cancel a future run
+  // -------------------------------------------------------------------------
+  //
+  // Clears the schedule only. The task is NOT deleted, stays PENDING, and can
+  // be scheduled again. A RUNNING task is refused by the same PENDING filter,
+  // so this can never interrupt work in flight.
+  router.delete(
+    "/:id/schedule",
+    requireAuth,
+    asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
+      const userId = callerOf(req, res);
+      if (!userId) return;
+
+      const result = await container.taskScheduler.cancelScheduledTask(
+        userId,
+        req.params.id ?? ""
+      );
+
+      if (!result.ok) {
+        fail(res, STATUS_FOR_SCHEDULE[result.refusal], result.refusal, result.message);
+        return;
+      }
+
+      ok(res, { task: result.task, scheduledAt: null });
     })
   );
 

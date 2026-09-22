@@ -15,20 +15,42 @@
 // it did yesterday, while a false positive is JARVIS running a tool nobody
 // asked it to run. So the rules below are written to under-trigger.
 //
-// THREE OUTCOMES:
+// THE OUTCOMES:
 //
-//   EXECUTE    an unambiguous imperative — "check digitalonebox.com"
-//   PLAN_ONLY  an imperative the user explicitly does NOT want run —
-//              "iska plan banao, execute mat karo"
-//   NONE       everything else, including anything ambiguous
+//   EXECUTE     an unambiguous imperative — "check digitalonebox.com"
+//   PLAN_ONLY   an imperative the user explicitly does NOT want run —
+//               "iska plan banao, execute mat karo"
+//   SCHEDULE    an imperative with an explicit future time (Scheduler V1) —
+//               "tomorrow at 10 am check my system status"
+//   NEEDS_TIME  an imperative with a VAGUE time — "check it later". Nothing is
+//               scheduled and nothing runs; the caller asks for a real time,
+//               because guessing one would run work at an hour nobody chose.
+//   NONE        everything else, including anything ambiguous
 //
 // "Ambiguous" resolves to NONE, never to EXECUTE. "Website ka response?" names
 // a subject and no action; it is a question, and a question is answered.
 // ---------------------------------------------------------------------------
 
+import {
+  parseSchedulePhrase,
+  mentionsVagueTime,
+  mentionsExplicitTime,
+} from "./schedule-phrase.js";
+
 export type WorkRequest =
   | { type: "EXECUTE"; goal: string }
   | { type: "PLAN_ONLY"; goal: string }
+  /**
+   * Scheduler V1 — an imperative carrying an explicit future time.
+   *
+   * `goal` is the WORK ONLY: the temporal phrase has been removed, because it
+   * is already represented by `at` and leaving it in made the planner read
+   * "in 3 minutes check X" as two actions. `matched` keeps the phrase as the
+   * user said it, for the confirmation message.
+   */
+  | { type: "SCHEDULE"; goal: string; at: Date; matched: string }
+  /** An imperative with a VAGUE time. Nothing runs; ask for a real one. */
+  | { type: "NEEDS_TIME"; goal: string }
   | { type: "NONE" };
 
 /**
@@ -102,6 +124,68 @@ const TASK_CREATION_SIGNALS =
 const MAX_GOAL = 500;
 
 /**
+ * Day words that belong to a consumed schedule phrase.
+ *
+ * Only the four the grammar itself recognises, and only when one sits directly
+ * against the phrase that was removed — see `withoutSchedulePhrase`.
+ */
+const ADJACENT_DAY_WORD = "today|tomorrow|aaj|kal";
+
+/**
+ * The goal with its temporal phrase taken out.
+ *
+ * WHY THIS EXISTS. The detector consumed "In 3 minutes" to produce the
+ * schedule, but the goal kept it — so the planner was asked to plan "In 3
+ * minutes check my system status" and read it, correctly, as two actions:
+ * wait, then check. It answered `requiresMultipleActions: true` and the task
+ * was refused. The model was not wrong; the input was.
+ *
+ * It broke the run twice over: the feasibility check refused the schedule up
+ * front, and the execution-time re-plan would have refused it again three
+ * minutes later, because the scheduler re-plans from the task's stored title.
+ * Cleaning the goal HERE fixes both, because the task is stored clean.
+ *
+ * NOT A SECOND PARSER. It removes the exact substring `parseSchedulePhrase`
+ * reported as `matched`, and nothing else it had to find for itself.
+ *
+ * The day word is the one addition, and it is deliberately narrow: only a word
+ * sitting IMMEDIATELY against the removed phrase is taken, because that is the
+ * one that can only have been part of the time. "Tomorrow at 9 AM send the
+ * report about tomorrow's meeting" loses the first `tomorrow` and keeps the
+ * second, which is the difference between reading the phrase and guessing at
+ * the sentence.
+ */
+function withoutSchedulePhrase(message: string, matched: string): string {
+  const at = message.indexOf(matched);
+  if (at === -1) return message;
+
+  let start = at;
+  let end = at + matched.length;
+
+  // A day word directly BEFORE the phrase: "Today at 10:45 PM", "Kal 5 baje".
+  const before = message.slice(0, start);
+  const leading = new RegExp(`\\b(?:${ADJACENT_DAY_WORD})\\s*$`, "i").exec(before);
+  if (leading) {
+    start = leading.index;
+  } else {
+    // Or directly AFTER it: "at 10 am tomorrow".
+    const after = message.slice(end);
+    const trailing = new RegExp(`^\\s*\\b(?:${ADJACENT_DAY_WORD})\\b`, "i").exec(after);
+    if (trailing) end += trailing[0].length;
+  }
+
+  const stripped = (message.slice(0, start) + " " + message.slice(end))
+    .replace(/\s+/g, " ")
+    .replace(/^[\s,;:.–—-]+/, "")
+    .trim();
+
+  // A goal that is now empty says nothing at all. Rule 1 guarantees an action
+  // word is in there somewhere, so this should be unreachable — but a goal is
+  // what gets planned and stored, and an empty one is worse than a noisy one.
+  return stripped.length === 0 ? message : stripped;
+}
+
+/**
  * Decide whether a chat message is asking JARVIS to perform work.
  *
  * Order matters and is the safety design:
@@ -111,6 +195,10 @@ const MAX_GOAL = 500;
  *   3. explicit "don't execute"   -> PLAN_ONLY
  *   4. interrogative opener       -> NONE  (a question about doing, not an order)
  *   5. trailing question mark     -> NONE  (asking, not instructing)
+ *   5b. explicit future time      -> SCHEDULE   (runs nothing now; the goal
+ *                                               carries the WORK, not the WHEN)
+ *   5c. vague time word           -> NEEDS_TIME (ask, never guess)
+ *   5d. stated time, unusable     -> NEEDS_TIME (never silently "run it now")
  *   6. not in imperative position -> NONE  (a mention, not an instruction)
  *   7. otherwise                  -> EXECUTE
  *
@@ -121,7 +209,7 @@ const MAX_GOAL = 500;
  * Steps 4 and 5 are what make "Website ka response?" safe: it reaches neither
  * the planner nor the executor, and the conversation answers it as before.
  */
-export function detectWorkRequest(message: string): WorkRequest {
+export function detectWorkRequest(message: string, now: Date = new Date()): WorkRequest {
   const trimmed = message.trim();
   if (trimmed.length === 0) return { type: "NONE" };
 
@@ -142,6 +230,52 @@ export function detectWorkRequest(message: string): WorkRequest {
 
   // 5. A question mark means asking. Nothing runs on a maybe.
   if (trimmed.endsWith("?")) return { type: "NONE" };
+
+  // 5b. Scheduler V1 — an explicit future time turns "do it" into "do it then".
+  //
+  // Checked BEFORE the imperative gate for the same reason PLAN_ONLY is: the
+  // user has said WHEN, and scheduling runs nothing now, so it does not need
+  // the strict gate that immediate execution needs. A VAGUE time word with no
+  // parsable instant is refused outright rather than guessed at — "later" is
+  // not a time, and the caller asks for a real one.
+  const schedule = parseSchedulePhrase(trimmed, now);
+  if (schedule) {
+    return {
+      type: "SCHEDULE",
+      // The WORK, with the WHEN taken out — the time has been turned into
+      // `at` and must not also survive as part of the thing to do.
+      goal: withoutSchedulePhrase(trimmed, schedule.matched).slice(0, MAX_GOAL),
+      at: schedule.at,
+      // Unchanged, and still the original phrase: the confirmation message
+      // echoes what was understood, which is only useful verbatim.
+      matched: schedule.matched,
+    };
+  }
+  if (mentionsVagueTime(trimmed)) {
+    return { type: "NEEDS_TIME", goal };
+  }
+
+  // 5d. AN EXPLICIT TIME THAT COULD NOT BE USED IS NEVER "RUN IT NOW".
+  //
+  // `parseSchedulePhrase` returns null for two different reasons: there was no
+  // time at all, or there WAS one that cannot be scheduled — a named day that
+  // has already gone, an hour out of range. Before this rule the detector
+  // could not tell those apart, so it dropped the time and carried on to the
+  // imperative gate. "Check my system status today at 1:50 PM", asked at 2 PM,
+  // therefore EXECUTED IMMEDIATELY: the user named an hour, the hour was
+  // refused, and the work ran anyway at an instant nobody chose.
+  //
+  // Stating a time is stating a constraint. If the constraint cannot be met,
+  // the answer is a question, not a different action — so the caller asks for
+  // a usable time and nothing is created and nothing runs.
+  //
+  // Placed BEFORE the strict gate deliberately: "today at 1:50 PM check my
+  // system status" puts the verb mid-sentence and would otherwise fall to
+  // NONE, which is silent. Asking is better than silence, and asking runs
+  // nothing, so it does not need the gate that execution needs.
+  if (mentionsExplicitTime(trimmed)) {
+    return { type: "NEEDS_TIME", goal };
+  }
 
   // 6. THE STRICT GATE. An action word is not an instruction — it has to be in
   //    imperative position. This is the asymmetry the detector rests on:

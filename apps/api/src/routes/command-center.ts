@@ -24,6 +24,7 @@
 import { Router } from "express";
 import type { Response } from "express";
 import { z } from "zod";
+import { JARVIS_TASK_CREATOR } from "@jarvis/core";
 import type {
   PrismaMapsUsageRepository,
   PrismaPreferenceRepository,
@@ -574,7 +575,17 @@ export function createCommandCenterRouter(
     if (!req.auth) return fail(res, 401, "AUTHENTICATION_REQUIRED", "Authentication required");
     try {
       const includeCompleted = req.query.includeCompleted === "true";
-      const tasks = await deps.tasks.list(req.auth.userId, { includeCompleted });
+      // Core V1.1 boundary: this is the TODO surface, so it reads todos only.
+      //
+      // Without this filter JARVIS work tasks rendered in the dashboard Tasks
+      // widget as if they were todos — and a scheduled work task, which is
+      // PENDING, was exactly what the widget showed and offered a delete
+      // button for. The two surfaces read disjoint sets of the same table;
+      // `task.list` passes the mirror-image `createdBy` filter.
+      const tasks = await deps.tasks.list(req.auth.userId, {
+        includeCompleted,
+        excludeCreatedBy: JARVIS_TASK_CREATOR,
+      });
       ok(res, { tasks });
     } catch {
       fail(res, 500, "INTERNAL_ERROR", "Could not load tasks");
@@ -625,10 +636,16 @@ export function createCommandCenterRouter(
           : {}),
         ...(parsed.data.priority !== undefined ? { priority: parsed.data.priority } : {}),
         ...(parsed.data.completed !== undefined ? { completed: parsed.data.completed } : {}),
+      }, {
+        // A JARVIS work task is not this surface's to edit. Scheduler V1
+        // re-plans from the title at run time, so a rename here would change
+        // what a scheduled task does between agreeing it and running it.
+        excludeCreatedBy: JARVIS_TASK_CREATOR,
       });
 
-      // Null means "no such task, or not yours". Deliberately one message for
-      // both, so this cannot be used to probe another user's task ids.
+      // Null means "no such task, not yours, or not this surface's to edit".
+      // Deliberately one message for all three, so this cannot be used to
+      // probe another user's task ids — or to find out which ids are work.
       if (!task) return fail(res, 404, "NOT_FOUND", "Task not found");
       ok(res, { task });
     } catch {
@@ -639,7 +656,13 @@ export function createCommandCenterRouter(
   router.delete("/tasks/:id", requireAuth, async (req: AuthenticatedRequest, res: Response) => {
     if (!req.auth) return fail(res, 401, "AUTHENTICATION_REQUIRED", "Authentication required");
     try {
-      const removed = await deps.tasks.deleteOwned(req.auth.userId, req.params.id!);
+      // A JARVIS work task is not this surface's to delete, so it is filtered
+      // out in the WHERE clause and comes back as "not found" — the same
+      // answer another user's task gets, which is also what stops this being
+      // used to probe which ids are work tasks.
+      const removed = await deps.tasks.deleteOwned(req.auth.userId, req.params.id!, {
+        excludeCreatedBy: JARVIS_TASK_CREATOR,
+      });
       if (!removed) return fail(res, 404, "NOT_FOUND", "Task not found");
       ok(res, { deleted: true });
     } catch {

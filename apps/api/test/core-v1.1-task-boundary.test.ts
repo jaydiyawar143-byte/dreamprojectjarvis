@@ -48,6 +48,7 @@ function makeStore() {
         completedAt: null,
         error: null,
         remindedAt: null,
+        scheduledAt: null,
         createdBy: null,
         createdAt: now,
         updatedAt: now,

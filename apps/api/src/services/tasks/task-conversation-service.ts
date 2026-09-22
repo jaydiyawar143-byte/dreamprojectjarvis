@@ -30,6 +30,7 @@ import { JARVIS_TASK_CREATOR, type Role } from "@jarvis/core";
 import type { TaskService } from "./task-service.js";
 import type { TaskPlannerService } from "./task-planner-service.js";
 import type { TaskExecutionService } from "./task-execution-service.js";
+import type { TaskSchedulerService } from "./task-scheduler-service.js";
 
 export interface WorkTurnInput {
   userId: string;
@@ -38,6 +39,11 @@ export interface WorkTurnInput {
   goal: string;
   /** True when the user explicitly asked NOT to execute. */
   planOnly: boolean;
+  /**
+   * Scheduler V1 — an explicit future instant. When present the task is
+   * recorded and scheduled, and NOTHING runs now.
+   */
+  scheduledAt?: Date;
   traceId?: string;
   conversationId?: string;
   ipAddress?: string;
@@ -51,12 +57,16 @@ export interface WorkTurnResult {
   plan?: { executable: boolean; toolId?: string; reason: string };
   /** Present only when something actually ran. */
   execution?: { toolId: string; status: string };
+  /** Present when the task was scheduled instead of run. */
+  scheduledAt?: string;
 }
 
 export interface TaskConversationDeps {
   tasks: TaskService;
   planner: TaskPlannerService;
   execution: TaskExecutionService;
+  /** Scheduler V1. Absent on a deployment without scheduling. */
+  scheduler?: TaskSchedulerService;
 }
 
 const MAX_TITLE = 200;
@@ -105,6 +115,44 @@ export class TaskConversationService {
         message: `I have saved this as a task, but I cannot carry it out yet: ${plan.reason}`,
         taskId: task.id,
         plan: { executable: false, reason: plan.reason },
+      };
+    }
+
+    if (input.scheduledAt && this.deps.scheduler) {
+      // Scheduler V1 — record it for later and run NOTHING now.
+      //
+      // The plan above was a FEASIBILITY check, not a commitment: it is not
+      // persisted, and the scheduler re-plans from the task at run time. Doing
+      // it here anyway is what lets the answer be "I can, and I will at 10"
+      // rather than "scheduled" followed by a failure tomorrow — the user
+      // finds out now, while they can still rephrase.
+      const scheduled = await this.deps.scheduler.scheduleTask(
+        input.userId,
+        task.id,
+        input.scheduledAt
+      );
+
+      if (!scheduled.ok) {
+        return {
+          message: `I could not schedule that: ${scheduled.message}`,
+          taskId: task.id,
+          plan: { executable: true, toolId: plan.toolId, reason: plan.reason },
+        };
+      }
+
+      return {
+        // The resolved absolute time is stated back deliberately. There is no
+        // user-timezone system in this application, so "10 AM" was read in the
+        // server's zone — saying which instant that became is what makes a
+        // mismatch visible now instead of at 10 AM.
+        message:
+          `Scheduled for ${scheduled.task.scheduledAt?.toLocaleString() ?? "the requested time"}. ` +
+          `I will run ${plan.toolId} then. Nothing has run yet.`,
+        taskId: task.id,
+        plan: { executable: true, toolId: plan.toolId, reason: plan.reason },
+        ...(scheduled.task.scheduledAt
+          ? { scheduledAt: scheduled.task.scheduledAt.toISOString() }
+          : {}),
       };
     }
 

@@ -78,6 +78,10 @@ import {
 } from "./shutdown.js";
 import { OutcomeWorker } from "@jarvis/core";
 import { startOutcomeWorkerSweep } from "./services/outcome-worker-scheduler.js";
+import {
+  startTaskSchedulerLoop,
+  type TaskSchedulerLoop,
+} from "./services/task-scheduler-loop.js";
 
 const env = loadEnvironment();
 
@@ -598,12 +602,24 @@ installProcessErrorHandlers();
 // single-flight: a second SIGTERM/SIGINT or duplicate call cannot re-run
 // cleanup. process.exit fires only after STOPPED via onStopped.
 // ---------------------------------------------------------------------------
+/**
+ * Scheduler V1 — assigned after `listen`, read here during shutdown.
+ *
+ * The forward declaration exists because the shutdown controller is built
+ * before the port opens while the loop starts after it (a scheduled run
+ * reaches real providers, and that must never delay the port). The loop stops
+ * its own timer on the lifecycle state change anyway; stopping it explicitly
+ * here is what makes the drain WAIT for a sweep that was already running.
+ */
+let taskSchedulerLoop: TaskSchedulerLoop | null = null;
+
 const jarvisShutdown = createShutdownController({
   lifecycle,
   server: httpServer,
   closeIo: () => io.close(),
   // Sprint 7 — close the shared Chrome, if browsing is switched on at all.
   releaseExternalResources: async () => {
+    await taskSchedulerLoop?.stop();
     await getBrowserRuntime()?.shutdown();
   },
   disconnectDatabase: async () => {
@@ -643,6 +659,27 @@ httpServer.listen(env.PORT, () => {
       intervalMs: outcomeIntervalMs,
     });
   }
+
+  // -------------------------------------------------------------------------
+  // Scheduler V1 at runtime — the loop that makes "at 10 AM" actually happen.
+  //
+  // AFTER listen, for the same reason as the sweep above: the first tick fires
+  // immediately and can execute a tool, and no provider call belongs on the
+  // path to opening the port.
+  //
+  // THE FIRST TICK IS THE RESTART STORY. Due tasks live in the database, never
+  // in process memory, so a task that fell due while the process was down is
+  // found by that first sweep and run once — the claim clears `scheduledAt`,
+  // which is what stops "late" turning into "repeatedly".
+  //
+  // Gated on JARVIS_TASK_SCHEDULER_INTERVAL_MS; 0 disables scheduled execution
+  // and the loop logs that it is off rather than failing silently.
+  // -------------------------------------------------------------------------
+  taskSchedulerLoop = startTaskSchedulerLoop({
+    scheduler: container.taskScheduler,
+    lifecycle,
+    intervalMs: env.TASK_SCHEDULER_INTERVAL_MS,
+  });
 
   // -------------------------------------------------------------------------
   // Learn integration health at startup, for users who already have a
