@@ -575,17 +575,25 @@ export function createCommandCenterRouter(
     if (!req.auth) return fail(res, 401, "AUTHENTICATION_REQUIRED", "Authentication required");
     try {
       const includeCompleted = req.query.includeCompleted === "true";
-      // Core V1.1 boundary: this is the TODO surface, so it reads todos only.
+      // READ is not WRITE, and the Core V1.1 boundary is about WRITE.
       //
-      // Without this filter JARVIS work tasks rendered in the dashboard Tasks
-      // widget as if they were todos — and a scheduled work task, which is
-      // PENDING, was exactly what the widget showed and offered a delete
-      // button for. The two surfaces read disjoint sets of the same table;
-      // `task.list` passes the mirror-image `createdBy` filter.
-      const tasks = await deps.tasks.list(req.auth.userId, {
-        includeCompleted,
-        excludeCreatedBy: JARVIS_TASK_CREATOR,
-      });
+      // This list deliberately returns JARVIS work tasks alongside todos. An
+      // earlier version excluded them here as well as on PATCH and DELETE,
+      // which protected them by making them invisible — so a task JARVIS had
+      // scheduled or run simply did not exist as far as the dashboard was
+      // concerned, and the only way to know what it was doing was to read the
+      // database. Hiding work from its owner is not a safety property.
+      //
+      // The boundary that matters is still enforced, one layer down and on
+      // the paths that change things: PATCH and DELETE below both pass
+      // `excludeCreatedBy`, so the todo surface can SEE a work task and
+      // cannot rename, complete, reopen or delete it. `userId` remains
+      // unconditional on every path, so this widens what an owner sees about
+      // their own tasks and nothing else.
+      //
+      // `createdBy` rides along on each row; the client uses it to render
+      // work tasks read-only rather than to decide what it is allowed to do.
+      const tasks = await deps.tasks.list(req.auth.userId, { includeCompleted });
       ok(res, { tasks });
     } catch {
       fail(res, 500, "INTERNAL_ERROR", "Could not load tasks");

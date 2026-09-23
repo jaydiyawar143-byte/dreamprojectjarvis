@@ -815,6 +815,29 @@ model Task {
   /// up twice — not by a second tick, not by a second replica, and not by a
   /// task later reopened through the todo checkbox.
   scheduledAt DateTime? @map("scheduled_at")
+  /// Task Engine V2.1 - when the scheduler took ownership of this schedule.
+  ///
+  /// The claim marker. Before V2.1 the claim was expressed by clearing
+  /// `scheduledAt`, which destroyed the only record of when the task was meant
+  /// to run AND left a crash between the claim and the start indistinguishable
+  /// from a task that was never scheduled - the work was silently lost.
+  ///
+  /// Now the claim SETS this and LEAVES `scheduledAt` intact. The compare-and-
+  /// set moves to this column (`claimed_at IS NULL` in the WHERE), so the
+  /// exactly-once guarantee is unchanged: still one conditional statement,
+  /// still exactly one winner across replicas.
+  claimedAt   DateTime? @map("claimed_at")
+  /// Task Engine V2.1 - the execution this task performed.
+  ///
+  /// Correlates the task with its `AuditLog` row, whose `metadata.executionId`
+  /// the ToolExecutor writes for every execution. It is NOT a foreign key to
+  /// `ToolExecution`: that journal is opt-in per tool and the tools a task
+  /// runs do not write to it. See the V2.1 notes in the implementation plan.
+  ///
+  /// Recorded BEFORE the tool runs, so a run that crashes mid-flight is still
+  /// attributable. Null on every historical row and on any task that has not
+  /// executed.
+  executionId String?   @map("execution_id")
   /// Set once a reminder has been surfaced, so it is not raised twice.
   remindedAt  DateTime? @map("reminded_at")
   /// Which agent or flow created it, for the audit trail. Null when manual.

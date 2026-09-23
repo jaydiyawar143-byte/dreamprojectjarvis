@@ -33,6 +33,16 @@ export interface TaskRecord {
    * Null means "not scheduled", and is also what a consumed schedule leaves.
    */
   scheduledAt: Date | null;
+  /**
+   * Task Engine V2.1 - when the scheduler took ownership of this schedule.
+   * Null means unclaimed. Set by `claimSchedule`, and never cleared in V2.1.
+   */
+  claimedAt: Date | null;
+  /**
+   * Task Engine V2.1 - the execution this task performed, correlating it with
+   * its `AuditLog` row. Null until the task runs.
+   */
+  executionId: string | null;
   remindedAt: Date | null;
   createdBy: string | null;
   createdAt: Date;
@@ -253,12 +263,18 @@ export class PrismaTaskRepository {
     taskId: string,
     expectedFrom: TaskStatus,
     to: TaskStatus,
-    options: { error?: string | null } = {}
+    options: { error?: string | null; executionId?: string } = {}
   ): Promise<
     | { ok: true; task: TaskRecord }
     | { ok: false; reason: "not_found" | "state_changed"; current: TaskStatus | null }
   > {
     const data: Record<string, unknown> = { status: to };
+
+    // V2.1 - the execution link, written in the SAME statement as the status
+    // change rather than in a second write. A task that is RUNNING therefore
+    // always carries the id of the execution that is running it, with no
+    // window in between where the two disagree.
+    if (options.executionId !== undefined) data.executionId = options.executionId;
 
     // The timestamps are derived from the target state, never supplied, so a
     // RUNNING task always has a startedAt and a COMPLETED one always has a
@@ -273,6 +289,14 @@ export class PrismaTaskRepository {
       // done, and the Tasks widget reads completedAt as "done". Leaving it null
       // keeps a failure visible as outstanding work instead of silently
       // checking it off.
+      data.error = options.error ?? null;
+    }
+    if (to === "UNRESOLVED") {
+      // V2.3 - same shape as FAILED and for the same reason: finished, not
+      // done, so `completedAt` stays null and the task remains visible as
+      // outstanding. `error` carries WHY the outcome could not be
+      // established - it is the reason for the terminal state, not a claim
+      // that the work failed.
       data.error = options.error ?? null;
     }
 
@@ -341,6 +365,10 @@ export class PrismaTaskRepository {
         createdBy,
         status: "PENDING",
         scheduledAt: { not: null, lte: now },
+        // V2.1 - a claimed schedule is nobody else's to discover. Before, the
+        // claim removed `scheduledAt` and the row fell out of this query by
+        // disappearing; now it stays, so the claim is filtered explicitly.
+        claimedAt: null,
       },
       orderBy: { scheduledAt: "asc" },
       take: Math.min(limit, 100),
@@ -350,25 +378,135 @@ export class PrismaTaskRepository {
   /**
    * Take ownership of one due schedule. THE race-safe step.
    *
-   * Clearing `scheduledAt` IS the claim: `scheduledAt: { not: null }` in the
-   * WHERE means the second caller — another tick, another replica, or a
-   * restart racing a live sweep — matches zero rows and is told it lost. One
-   * statement, no lock held in this process, and no second "consumed" column
-   * to keep in step.
+   * V2.1 - THE CLAIM IS NOW DURABLE. Setting `claimedAt` is the claim, and
+   * `scheduledAt` is left INTACT.
+   *
+   * Before, clearing `scheduledAt` was the claim. That worked for exclusion
+   * but destroyed evidence: a crash between this statement and the start of
+   * execution left the task PENDING with no schedule, which is exactly what a
+   * task that was never scheduled looks like. The work was lost in silence.
+   *
+   * THE EXACTLY-ONCE GUARANTEE IS UNCHANGED. The compare-and-set moved column,
+   * nothing more: `claimedAt: null` in the WHERE is the compare and
+   * `data: { claimedAt }` is the set, in ONE conditional statement. A second
+   * caller — another tick, another replica, or a restart racing a live sweep
+   * — matches zero rows and is told it lost, exactly as before. No lock is
+   * held in this process and no read precedes the write.
+   *
+   * The other three predicates are unchanged and deliberately kept: a task
+   * must still be the right creator's, still PENDING, and still actually
+   * scheduled. This only ADDS a condition; it weakens none.
    *
    * It deliberately does NOT touch `status`. The PENDING -> RUNNING move stays
    * with TaskService, so a scheduled run and a manual one travel the same
    * lifecycle path and obey the same transition rules.
+   *
+   * Nothing re-arms a stale claim in V2.1. That is V2.3.
    */
-  async claimSchedule(taskId: string, createdBy: string): Promise<boolean> {
+  async claimSchedule(
+    taskId: string,
+    createdBy: string,
+    claimedAt: Date = new Date()
+  ): Promise<boolean> {
     const result = await this.prisma.task.updateMany({
       where: {
         id: taskId,
         createdBy,
         status: "PENDING",
         scheduledAt: { not: null },
+        claimedAt: null,
       },
-      data: { scheduledAt: null },
+      data: { claimedAt },
+    });
+    return result.count === 1;
+  }
+
+  // -------------------------------------------------------------------------
+  // Task Engine V2.2 - claim recovery
+  //
+  // THE SAFETY ARGUMENT, IN ONE LINE: a task that is still PENDING proves the
+  // ToolExecutor was never reached, so no external side effect can have
+  // occurred and re-arming cannot duplicate one.
+  //
+  // Why that holds, from the code rather than by assertion:
+  //
+  //   TaskExecutionService.executeTask runs its steps in this order -
+  //     step 4  startTask   PENDING -> RUNNING   (compare-and-set, committed)
+  //     step 5  executor.execute                 (the ONLY side-effect path)
+  //
+  //   so `status = 'PENDING'` means step 4 never committed, which means step 5
+  //   was never called. `executionId` is written in the SAME statement as that
+  //   transition, so a PENDING task also has `executionId IS NULL` and no
+  //   audit evidence can exist for it. Recovery therefore needs no AuditLog
+  //   lookup, no index and no migration.
+  //
+  // A task that crashed AFTER step 4 is RUNNING, not PENDING. That is a
+  // different problem with genuinely ambiguous evidence, and it is V2.3's.
+  // -------------------------------------------------------------------------
+
+  /**
+   * Claims that were taken and then abandoned.
+   *
+   * Candidate discovery only - every row returned must still be recovered
+   * with `recoverClaim`, because between this read and that write the
+   * claiming process may have come back to life, or another recovery worker
+   * may have taken it.
+   */
+  async findOrphanedClaims(
+    createdBy: string,
+    claimedBefore: Date,
+    limit = 20
+  ): Promise<TaskRecord[]> {
+    return this.prisma.task.findMany({
+      where: {
+        createdBy,
+        // The proof that nothing ran. Not a heuristic.
+        status: "PENDING",
+        // Still armed: recovery restores a schedule, it does not create one.
+        scheduledAt: { not: null },
+        claimedAt: { not: null, lt: claimedBefore },
+        // Belt and braces. The status check already implies this, and if the
+        // two ever disagreed the safe reading is "something ran" - so this
+        // excludes the row rather than trusting the status alone.
+        executionId: null,
+      },
+      orderBy: { claimedAt: "asc" },
+      take: Math.min(limit, 100),
+    }) as unknown as Promise<TaskRecord[]>;
+  }
+
+  /**
+   * Re-arm one abandoned claim. THE race-safe step.
+   *
+   * Clearing `claimedAt` is the recovery, and it is the exact inverse of the
+   * V2.1 claim: `claimedAt: { not: null, lt: ... }` in the WHERE is the
+   * compare, `claimedAt: null` is the set, in ONE conditional statement.
+   * `count === 1` means this worker recovered it; a second recovery worker,
+   * another replica, or a sweep racing a live process matches zero rows.
+   *
+   * `scheduledAt` is deliberately UNTOUCHED: the task returns to exactly the
+   * state it was in before it was claimed, so the ordinary scheduler picks it
+   * up on its own terms. Nothing here plans, executes, completes or fails a
+   * task - recovery restores eligibility and stops.
+   *
+   * THE FULL PREDICATE IS REPEATED HERE, not narrowed to the id. A candidate
+   * read moments ago is not evidence about now.
+   */
+  async recoverClaim(
+    taskId: string,
+    createdBy: string,
+    claimedBefore: Date
+  ): Promise<boolean> {
+    const result = await this.prisma.task.updateMany({
+      where: {
+        id: taskId,
+        createdBy,
+        status: "PENDING",
+        scheduledAt: { not: null },
+        claimedAt: { not: null, lt: claimedBefore },
+        executionId: null,
+      },
+      data: { claimedAt: null },
     });
     return result.count === 1;
   }

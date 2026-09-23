@@ -43,7 +43,14 @@ export class ToolExecutor implements IToolExecutor {
   }
 
   async execute(request: ToolExecutionRequest): Promise<ToolExecutionResult> {
-    const executionId = crypto.randomUUID();
+    // V2.1 - honour a caller-supplied id.
+    //
+    // `ToolExecutionRequest.executionId` has always been part of this
+    // contract and was, until now, silently ignored. A caller that needs to
+    // record WHICH execution it is about to start - before it starts, so a
+    // crash mid-flight is still attributable - can supply one. Every existing
+    // caller passes nothing and gets the generated id exactly as before.
+    const executionId = request.executionId ?? crypto.randomUUID();
     const startedAt = new Date();
 
     const tool = this.registry.get(request.toolId);

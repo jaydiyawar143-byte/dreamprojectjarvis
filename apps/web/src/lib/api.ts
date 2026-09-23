@@ -1481,6 +1481,11 @@ export interface SystemSnapshot {
   containerized: boolean;
 }
 
+/** The creator stamp JARVIS puts on work it recorded itself. */
+export const JARVIS_TASK_CREATOR = "jarvis";
+
+export type TaskLifecycleStatus = "PENDING" | "RUNNING" | "COMPLETED" | "FAILED";
+
 export interface TaskRecord {
   id: string;
   title: string;
@@ -1489,6 +1494,32 @@ export interface TaskRecord {
   priority: "LOW" | "NORMAL" | "HIGH" | string;
   completedAt: string | null;
   createdAt: string;
+  /**
+   * The lifecycle state. Always present on the wire; typed loosely because the
+   * server owns this vocabulary and a value this client has not heard of must
+   * render, not crash.
+   */
+  status?: TaskLifecycleStatus | string;
+  /** `"jarvis"` for work JARVIS recorded; null for a todo typed by the user. */
+  createdBy?: string | null;
+  /** Scheduler V1 — when a PENDING work task becomes eligible to run. */
+  scheduledAt?: string | null;
+  startedAt?: string | null;
+  /** Why a run failed, in the user's terms. Null unless status is FAILED. */
+  error?: string | null;
+}
+
+/**
+ * Whether this row is JARVIS's work rather than the user's todo.
+ *
+ * READ-ONLY IS A UI FACT HERE, NOT A SECURITY ONE. The server refuses a PATCH
+ * or DELETE on these rows whatever the client sends; this predicate only stops
+ * the dashboard offering a control that would come back 404. The rule in
+ * AGENTS.md is that a control which cannot do anything is a lie about what the
+ * page can change — so those rows render without one.
+ */
+export function isJarvisTask(task: TaskRecord): boolean {
+  return task.createdBy === JARVIS_TASK_CREATOR;
 }
 
 export interface CommandCenterPreferences {

@@ -128,8 +128,15 @@ export class TaskService {
   }
 
   /** PENDING -> RUNNING. */
-  async startTask(userId: string, taskId: string): Promise<TaskResult> {
-    return this.move(userId, taskId, "RUNNING");
+  async startTask(
+    userId: string,
+    taskId: string,
+    options: { executionId?: string } = {}
+  ): Promise<TaskResult> {
+    // V2.1 - the caller may name the execution it is about to start. Written
+    // in the SAME statement as PENDING -> RUNNING, so a RUNNING task always
+    // carries the id of the run that claimed it.
+    return this.move(userId, taskId, "RUNNING", undefined, options);
   }
 
   /** RUNNING -> COMPLETED. */
@@ -140,6 +147,21 @@ export class TaskService {
   /** RUNNING -> FAILED, with a reason the user can read. */
   async failTask(userId: string, taskId: string, error?: string): Promise<TaskResult> {
     return this.move(userId, taskId, "FAILED", error);
+  }
+
+  /**
+   * RUNNING -> UNRESOLVED. V2.3.
+   *
+   * For a run whose outcome cannot be established. The `reason` is shown to
+   * the user and should say what is unknown, not guess at it - the whole
+   * point of this state is that it makes no claim about whether the external
+   * side effect happened.
+   *
+   * This is the lifecycle primitive only. NOTHING calls it automatically:
+   * detecting an ambiguous run is V2.3 Phase 2, and is not implemented.
+   */
+  async unresolveTask(userId: string, taskId: string, reason?: string): Promise<TaskResult> {
+    return this.move(userId, taskId, "UNRESOLVED", reason);
   }
 
   /**
@@ -154,7 +176,8 @@ export class TaskService {
     userId: string,
     taskId: string,
     to: TaskStatus,
-    error?: string
+    error?: string,
+    options: { executionId?: string } = {}
   ): Promise<TaskResult> {
     const existing = await this.deps.tasks.findOwned(userId, taskId);
     if (!existing) return this.notFound();
@@ -170,6 +193,7 @@ export class TaskService {
 
     const result = await this.deps.tasks.transitionOwned(userId, taskId, existing.status, to, {
       error: error ? error.slice(0, MAX_ERROR) : null,
+      ...(options.executionId !== undefined ? { executionId: options.executionId } : {}),
     });
 
     if (result.ok) return { ok: true, task: result.task };

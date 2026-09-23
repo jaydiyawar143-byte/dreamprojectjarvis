@@ -144,6 +144,8 @@ function makeStore() {
       error: null,
       remindedAt: null,
       scheduledAt: null,
+      claimedAt: null,
+      executionId: null,
       createdBy: JARVIS_TASK_CREATOR,
       createdAt: now,
       updatedAt: now,
@@ -194,7 +196,7 @@ function makeStore() {
       taskId: string,
       expectedFrom: TaskStatus,
       to: TaskStatus,
-      options: { error?: string | null } = {}
+      options: { error?: string | null; executionId?: string } = {}
     ) {
       const r = rows.get(taskId);
       if (!r || r.userId !== userId) {
@@ -204,6 +206,8 @@ function makeStore() {
         return { ok: false as const, reason: "state_changed" as const, current: r.status };
       }
       r.status = to;
+      // V2.1 - written in the SAME statement as the status change.
+      if (options.executionId !== undefined) r.executionId = options.executionId;
       if (to === "RUNNING") r.startedAt = new Date();
       if (to === "COMPLETED") {
         r.completedAt = new Date();
@@ -234,6 +238,36 @@ function makeStore() {
       return r;
     },
 
+    // -- Task Engine V2.2 ---------------------------------------------------
+    // Present so the real scheduler can run its recovery pass; these suites
+    // seed no orphans, so it finds nothing.
+    async findOrphanedClaims(createdBy: string, claimedBefore: Date, limit = 20) {
+      return [...rows.values()]
+        .filter(
+          (r) =>
+            r.createdBy === createdBy &&
+            r.status === "PENDING" &&
+            r.scheduledAt !== null &&
+            r.claimedAt !== null &&
+            r.claimedAt.getTime() < claimedBefore.getTime() &&
+            r.executionId === null
+        )
+        .slice(0, limit);
+    },
+
+    async recoverClaim(taskId: string, createdBy: string, claimedBefore: Date) {
+      const r = rows.get(taskId);
+      if (!r) return false;
+      if (r.createdBy !== createdBy) return false;
+      if (r.status !== "PENDING") return false;
+      if (r.scheduledAt === null) return false;
+      if (r.claimedAt === null) return false;
+      if (r.claimedAt.getTime() >= claimedBefore.getTime()) return false;
+      if (r.executionId !== null) return false;
+      r.claimedAt = null;
+      return true;
+    },
+
     async findDueScheduled(createdBy: string, now: Date, limit = 20) {
       return [...rows.values()]
         .filter(
@@ -241,26 +275,31 @@ function makeStore() {
             r.createdBy === createdBy &&
             r.status === "PENDING" &&
             r.scheduledAt !== null &&
-            r.scheduledAt.getTime() <= now.getTime()
+            r.scheduledAt.getTime() <= now.getTime() &&
+            // V2.1 - a claimed schedule is no longer discoverable. Before, the
+            // claim erased `scheduledAt` and the row fell out by vanishing.
+            r.claimedAt === null
         )
         .slice(0, limit);
     },
 
     /**
-     * The compare-and-set claim, modelled faithfully.
+     * The compare-and-set claim, modelled faithfully — V2.1 shape.
      *
-     * Clearing `scheduledAt` IS the consumption marker — there is no second
-     * "consumed" column — and the read-and-write pair is synchronous inside
-     * one async body, which is exactly the atomicity a single `updateMany`
-     * gives in the database.
+     * Setting `claimedAt` is the claim and `scheduledAt` is LEFT INTACT. The
+     * compare moved column (`claimedAt === null`) and nothing else about the
+     * atomicity changed: the read-and-write pair is synchronous inside one
+     * async body, which is exactly what a single `updateMany` gives in the
+     * database. Every other predicate is unchanged.
      */
-    async claimSchedule(taskId: string, createdBy: string) {
+    async claimSchedule(taskId: string, createdBy: string, claimedAt: Date = new Date()) {
       const r = rows.get(taskId);
       if (!r) return false;
       if (r.createdBy !== createdBy) return false;
       if (r.status !== "PENDING") return false;
       if (r.scheduledAt === null) return false;
-      r.scheduledAt = null;
+      if (r.claimedAt !== null) return false;
+      r.claimedAt = claimedAt;
       r.updatedAt = new Date();
       return true;
     },
@@ -590,8 +629,13 @@ describe("Scheduler V1 — due execution", () => {
 
     const row = h.store.rows.get(task.id)!;
     expect(row.status).toBe("COMPLETED");
-    // The schedule was consumed by the claim.
-    expect(row.scheduledAt).toBeNull();
+    // V2.1 - the claim is DURABLE, not destructive. `scheduledAt` survives as
+    // the record of when the task was meant to run; `claimedAt` is what marks
+    // it taken. Before V2.1 this assertion read `scheduledAt` as null, which
+    // is precisely the behaviour that made a crash after the claim
+    // indistinguishable from work that was never scheduled.
+    expect(row.scheduledAt?.toISOString()).toBe(IN_AN_HOUR().toISOString());
+    expect(row.claimedAt).not.toBeNull();
   });
 
   it("J. executes a due task exactly once, however often the sweep runs", async () => {
@@ -829,6 +873,29 @@ describe("Scheduler V1 — scheduling is not executing", () => {
     expect(h.planSpy.mock.calls[0]![0]).toMatchObject({ userId: ALICE, taskId: task.id });
     expect(h.executeTaskSpy.mock.calls[0]![0]).toBe(ALICE);
     expect(h.executeTaskSpy.mock.calls[0]![1]).toBe(task.id);
+  });
+
+  it("Q1b. V2.1 - the task records the id of the run that performed it", async () => {
+    // End to end through the REAL ToolExecutor: TaskExecutionService generates
+    // the id, records it with the PENDING -> RUNNING claim, and passes it to
+    // the executor, which audits under the same id. A fake executor could not
+    // prove this - it would only echo whatever it was handed.
+    const h = harness();
+    const task = await h.workTask();
+    await h.scheduler.scheduleTask(ALICE, task.id, IN_AN_HOUR());
+    h.advance(minutes(60));
+
+    await h.scheduler.runDue();
+
+    const row = h.store.rows.get(task.id)!;
+    expect(row.executionId).toBeTruthy();
+
+    // Both directions of the link, which together prove the chain:
+    //   the id the task stored WENT INTO the executor...
+    expect(h.executeSpy.mock.calls[0]![0].executionId).toBe(row.executionId);
+    //   ...and CAME BACK as the id the run was audited under.
+    const result = await h.executeSpy.mock.results[0]!.value;
+    expect(result.executionId).toBe(row.executionId);
   });
 
   it("Q2. re-plans from the CURRENT wording, not the wording at scheduling time", async () => {
@@ -1082,7 +1149,9 @@ describe("Scheduler V1 — the interval loop", () => {
     const runDue = vi.fn().mockResolvedValue([]);
 
     const loop = startTaskSchedulerLoop({
-      scheduler: { runDue },
+      // V2.2 widened the loop's port; recovery is a no-op in these
+      // transport tests, which are about the timer, not about recovery.
+      scheduler: { runDue, recoverOrphanedClaims: async () => [] },
       lifecycle,
       intervalMs: 60_000,
       log: () => {},
@@ -1112,7 +1181,9 @@ describe("Scheduler V1 — the interval loop", () => {
     );
 
     const loop = startTaskSchedulerLoop({
-      scheduler: { runDue },
+      // V2.2 widened the loop's port; recovery is a no-op in these
+      // transport tests, which are about the timer, not about recovery.
+      scheduler: { runDue, recoverOrphanedClaims: async () => [] },
       lifecycle,
       intervalMs: 1_000,
       log: () => {},
@@ -1140,7 +1211,9 @@ describe("Scheduler V1 — the interval loop", () => {
     const logged: string[] = [];
 
     const loop = startTaskSchedulerLoop({
-      scheduler: { runDue },
+      // V2.2 widened the loop's port; recovery is a no-op in these
+      // transport tests, which are about the timer, not about recovery.
+      scheduler: { runDue, recoverOrphanedClaims: async () => [] },
       lifecycle,
       intervalMs: 1_000,
       log: (_level, event) => logged.push(event),
@@ -1161,7 +1234,9 @@ describe("Scheduler V1 — the interval loop", () => {
     const logged: string[] = [];
 
     const loop = startTaskSchedulerLoop({
-      scheduler: { runDue },
+      // V2.2 widened the loop's port; recovery is a no-op in these
+      // transport tests, which are about the timer, not about recovery.
+      scheduler: { runDue, recoverOrphanedClaims: async () => [] },
       lifecycle,
       intervalMs: 0,
       log: (_level, event) => logged.push(event),
@@ -1179,7 +1254,9 @@ describe("Scheduler V1 — the interval loop", () => {
     const runDue = vi.fn().mockResolvedValue([]);
 
     const loop = startTaskSchedulerLoop({
-      scheduler: { runDue },
+      // V2.2 widened the loop's port; recovery is a no-op in these
+      // transport tests, which are about the timer, not about recovery.
+      scheduler: { runDue, recoverOrphanedClaims: async () => [] },
       lifecycle,
       intervalMs: 1_000,
       log: () => {},

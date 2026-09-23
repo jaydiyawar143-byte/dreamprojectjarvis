@@ -99,7 +99,11 @@ const env = loadEnvironment();
 // programmatically via jarvisShutdown.beginShutdown().
 // ---------------------------------------------------------------------------
 const lifecycle = new ShutdownLifecycle();
-const container = getContainer({ lifecycle });
+const container = getContainer({
+  lifecycle,
+  // V2.2 — abandoned-claim threshold, from the validated config layer.
+  claimRecoveryAfterMs: env.TASK_CLAIM_RECOVERY_AFTER_MS,
+});
 
 const startupRecovery = await runStartupRecovery(container.executionJournal);
 console.log(

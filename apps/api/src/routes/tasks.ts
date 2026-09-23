@@ -169,7 +169,12 @@ export function createTasksRouter(container: Container): Router {
       // An unrecognised filter is refused rather than ignored: silently
       // returning everything for `?status=urgent` answers a different question.
       if (raw !== undefined && !parsed.success) {
-        fail(res, 400, "INVALID_REQUEST", "status must be PENDING, RUNNING, COMPLETED or FAILED.");
+        fail(
+          res,
+          400,
+          "INVALID_REQUEST",
+          "status must be PENDING, RUNNING, COMPLETED, FAILED or UNRESOLVED."
+        );
         return;
       }
 
@@ -229,12 +234,18 @@ export function createTasksRouter(container: Container): Router {
       const taskId = req.params.id ?? "";
       const error = typeof body.error === "string" ? body.error : undefined;
 
+      // V2.3 - UNRESOLVED is routed EXPLICITLY. The previous shape ended in a
+      // catch-all `failTask`, which would have silently recorded an
+      // unresolvable run as a failure - the exact semantic collapse this
+      // state exists to prevent.
       const result =
         parsed.data === "RUNNING"
           ? await container.taskService.startTask(userId, taskId)
           : parsed.data === "COMPLETED"
             ? await container.taskService.completeTask(userId, taskId)
-            : await container.taskService.failTask(userId, taskId, error);
+            : parsed.data === "UNRESOLVED"
+              ? await container.taskService.unresolveTask(userId, taskId, error)
+              : await container.taskService.failTask(userId, taskId, error);
 
       if (!result.ok) {
         fail(res, STATUS_FOR[result.reason], result.reason, result.message);

@@ -157,7 +157,14 @@ export class TaskExecutionService {
     //    status, so two callers arriving together produce exactly one winner
     //    and the loser matches zero rows. No read-then-write, no lock held in
     //    this process, and nothing here needs to know it raced.
-    const claimed = await this.deps.tasks.startTask(userId, taskId);
+    // V2.1 - name the execution BEFORE claiming, and record it WITH the
+    // claim. The id is generated here rather than read back from the executor
+    // because the executor only returns it once the run is over: an id that
+    // arrives after the fact cannot identify a run that crashed. The executor
+    // honours `request.executionId`, so this is the same id it audits under.
+    const executionId = crypto.randomUUID();
+
+    const claimed = await this.deps.tasks.startTask(userId, taskId, { executionId });
     if (!claimed.ok) {
       return {
         ok: false,
@@ -178,6 +185,9 @@ export class TaskExecutionService {
       params: request.params,
       userId,
       role: request.role,
+      // The SAME id the task row now carries, so the audit row and the task
+      // agree on which run this was.
+      executionId,
       traceId: request.traceId ?? crypto.randomUUID(),
       ...(request.agentId ? { agentId: request.agentId } : {}),
       ...(request.conversationId ? { conversationId: request.conversationId } : {}),

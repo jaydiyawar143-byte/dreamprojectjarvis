@@ -158,6 +158,8 @@ function makeStore() {
         error: null,
         remindedAt: null,
         scheduledAt: null,
+        claimedAt: null,
+        executionId: null,
         createdBy: input.createdBy ?? null,
         createdAt: now,
         updatedAt: now,

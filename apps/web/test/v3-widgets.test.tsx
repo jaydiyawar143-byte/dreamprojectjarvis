@@ -40,7 +40,7 @@ import { WidgetShell, FreshnessBadge, formatAge } from "../src/components/widget
 import { ClockWidget, handAngles } from "../src/components/widgets/clock-widget";
 import { WeatherWidget, describeWeatherCode } from "../src/components/widgets/weather-widget";
 import { MarketsWidget } from "../src/components/widgets/markets-widget";
-import { TasksWidget, bucketFor } from "../src/components/widgets/tasks-widget";
+import { TasksWidget, bucketFor, workStatusOf } from "../src/components/widgets/tasks-widget";
 import { MapWidget } from "../src/components/widgets/map-widget";
 import { resolveWidgets, WIDGETS } from "../src/components/widgets/registry";
 
@@ -364,6 +364,261 @@ describe("tasks", () => {
     fireEvent.click(screen.getByTestId("task-complete"));
     await waitFor(() => expect(mocked.updateTask).toHaveBeenCalledWith("t1", { completed: true }));
     await waitFor(() => expect(screen.queryByText("Call the client")).toBeNull());
+  });
+});
+
+// ---------------------------------------------------------------------------
+// JARVIS work tasks
+//
+// A work task answers a different question from a todo. A todo asks WHEN IS
+// THIS DUE; a work task asks DID IT RUN, AND DID IT WORK. They were previously
+// hidden from this widget altogether, which protected them by making them
+// invisible — so a task JARVIS had scheduled or run did not exist as far as
+// the dashboard was concerned.
+//
+// They are now visible and READ-ONLY. The read-only part is rendered as an
+// ABSENT control rather than a disabled one, because the server answers a
+// PATCH or DELETE on these rows with a 404: a button that cannot do anything
+// is a lie about what the page can change.
+// ---------------------------------------------------------------------------
+
+describe("tasks — JARVIS work", () => {
+  const work = (over: Partial<api.TaskRecord> = {}): api.TaskRecord => ({
+    id: "w1", title: "Check my system status", description: null, dueAt: null,
+    priority: "NORMAL", completedAt: null, createdAt: ts(),
+    createdBy: "jarvis", status: "PENDING", scheduledAt: null,
+    startedAt: null, error: null, ...over,
+  });
+
+  const todo = (over: Partial<api.TaskRecord> = {}): api.TaskRecord => ({
+    id: "t1", title: "Call the client", description: null, dueAt: null,
+    priority: "NORMAL", completedAt: null, createdAt: ts(), createdBy: null, ...over,
+  });
+
+  const listing = (tasks: api.TaskRecord[]) =>
+    mocked.listTasks.mockResolvedValue({ success: true, data: { tasks }, timestamp: ts() } as never);
+
+  it("shows a JARVIS work task, in its own section, with a badge", async () => {
+    listing([work()]);
+    render(<TasksWidget />);
+
+    await waitFor(() => expect(screen.getByTestId("task-jarvis-section")).toBeInTheDocument());
+    expect(screen.getByTestId("task-jarvis-badge")).toHaveTextContent("JARVIS");
+    expect(screen.getByText("Check my system status")).toBeInTheDocument();
+  });
+
+  it("asks the server for completed rows, so a finished run is visible", async () => {
+    listing([work({ status: "COMPLETED", completedAt: ts() })]);
+    render(<TasksWidget />);
+
+    await waitFor(() => expect(mocked.listTasks).toHaveBeenCalledWith(true));
+    await waitFor(() => expect(screen.getByTestId("task-work-COMPLETED")).toBeInTheDocument());
+  });
+
+  it("groups by lifecycle state, not by due date", async () => {
+    listing([
+      work({ id: "a", title: "Running one", status: "RUNNING" }),
+      work({ id: "b", title: "Pending one", status: "PENDING" }),
+      work({ id: "c", title: "Failed one", status: "FAILED", error: "nope" }),
+      work({ id: "d", title: "Done one", status: "COMPLETED", completedAt: ts() }),
+    ]);
+    render(<TasksWidget />);
+
+    await waitFor(() => expect(screen.getByTestId("task-work-RUNNING")).toBeInTheDocument());
+    for (const status of ["RUNNING", "PENDING", "FAILED", "COMPLETED"]) {
+      expect(screen.getByTestId(`task-work-${status}`)).toBeInTheDocument();
+    }
+    // None of them fell into the due-date buckets.
+    expect(screen.queryByTestId("task-bucket-SOMEDAY")).toBeNull();
+  });
+
+  it("shows the scheduled time, labelled as such", async () => {
+    const at = new Date();
+    at.setHours(at.getHours() + 2, 45, 0, 0);
+    listing([work({ scheduledAt: at.toISOString() })]);
+    render(<TasksWidget />);
+
+    await waitFor(() => expect(screen.getByTestId("task-work-detail")).toBeInTheDocument());
+    const detail = screen.getByTestId("task-work-detail").textContent ?? "";
+    expect(detail).toMatch(/^Scheduled /);
+    expect(detail).toMatch(/\d/);
+  });
+
+  it("says UNSCHEDULED for a pending task that will never run", async () => {
+    // The historical rows: recorded before the scheduler stopped folding the
+    // time phrase into the goal, so PENDING with no scheduledAt. Nothing will
+    // pick them up, and plain "Pending" would imply a run that is coming.
+    listing([work({ title: "In 3 minutes check my system status", scheduledAt: null })]);
+    render(<TasksWidget />);
+
+    await waitFor(() => expect(screen.getByTestId("task-work-detail")).toBeInTheDocument());
+    expect(screen.getByTestId("task-work-detail")).toHaveTextContent("Unscheduled");
+    // It is still PENDING — this is a label, not a state change.
+    expect(screen.getByTestId("task-work-PENDING")).toBeInTheDocument();
+  });
+
+  it("shows no detail line for a completed run with no schedule", async () => {
+    listing([work({ status: "COMPLETED", completedAt: ts(), scheduledAt: null })]);
+    render(<TasksWidget />);
+
+    await waitFor(() => expect(screen.getByTestId("task-work-COMPLETED")).toBeInTheDocument());
+    expect(screen.queryByTestId("task-work-detail")).toBeNull();
+  });
+
+  it("renders NO complete and NO delete control for work", async () => {
+    listing([work()]);
+    render(<TasksWidget />);
+
+    await waitFor(() => expect(screen.getByTestId("task-jarvis-section")).toBeInTheDocument());
+    expect(screen.queryByTestId("task-complete")).toBeNull();
+    expect(screen.queryByLabelText(/^Delete "Check my system status"$/)).toBeNull();
+    expect(screen.queryByLabelText(/^Mark "Check my system status" complete$/)).toBeNull();
+  });
+
+  it("states the status for a reader who cannot see colour", async () => {
+    listing([work({ status: "FAILED", error: "could not be planned" })]);
+    render(<TasksWidget />);
+
+    await waitFor(() => expect(screen.getByTestId("task-work-FAILED")).toBeInTheDocument());
+    expect(screen.getByTestId("task-work-row").textContent).toContain("Failed");
+  });
+
+  it("shows WHY a run failed, not just that it did", async () => {
+    listing([work({ status: "FAILED", error: "could not be planned" })]);
+    render(<TasksWidget />);
+
+    await waitFor(() => expect(screen.getByTestId("task-work-detail")).toBeInTheDocument());
+    expect(screen.getByTestId("task-work-detail")).toHaveTextContent("could not be planned");
+  });
+
+  it("still marks a failure when no reason was recorded", async () => {
+    listing([work({ status: "FAILED", error: null })]);
+    render(<TasksWidget />);
+
+    await waitFor(() => expect(screen.getByTestId("task-work-detail")).toBeInTheDocument());
+    expect(screen.getByTestId("task-work-detail")).toHaveTextContent("Failed");
+  });
+
+  it("renders the two halves under their own headings, work FIRST", async () => {
+    listing([work(), todo()]);
+    render(<TasksWidget />);
+
+    await waitFor(() => expect(screen.getByTestId("task-jarvis-heading")).toBeInTheDocument());
+    expect(screen.getByTestId("task-jarvis-heading")).toHaveTextContent(/JARVIS/);
+    expect(screen.getByTestId("task-mine-heading")).toHaveTextContent(/My Tasks/i);
+
+    // Order on the page, not just presence: work is above the todo buckets.
+    const jarvis = screen.getByTestId("task-jarvis-section");
+    const mine = screen.getByTestId("task-mine-heading");
+    expect(jarvis.compareDocumentPosition(mine) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("shows the counts each group actually holds", async () => {
+    listing([
+      work({ id: "a", status: "PENDING" }),
+      work({ id: "b", status: "PENDING" }),
+      work({ id: "c", status: "COMPLETED", completedAt: ts() }),
+    ]);
+    render(<TasksWidget />);
+
+    await waitFor(() => expect(screen.getByTestId("task-work-PENDING")).toBeInTheDocument());
+    expect(screen.getByTestId("task-work-PENDING").textContent).toMatch(/Pending · 2/);
+    expect(screen.getByTestId("task-work-COMPLETED").textContent).toMatch(/Done · 1/);
+  });
+
+  it("renders NO group for a state with nothing in it", async () => {
+    listing([work({ status: "PENDING" })]);
+    render(<TasksWidget />);
+
+    await waitFor(() => expect(screen.getByTestId("task-work-PENDING")).toBeInTheDocument());
+    for (const empty of ["RUNNING", "FAILED", "COMPLETED"]) {
+      expect(screen.queryByTestId(`task-work-${empty}`)).toBeNull();
+    }
+  });
+
+  it("omits the MY TASKS heading when there is no work to distinguish it from", async () => {
+    // A dashboard that never uses JARVIS keeps exactly the widget it had.
+    listing([todo()]);
+    render(<TasksWidget />);
+
+    await waitFor(() => expect(screen.getByText("Call the client")).toBeInTheDocument());
+    expect(screen.queryByTestId("task-mine-heading")).toBeNull();
+    expect(screen.queryByTestId("task-jarvis-heading")).toBeNull();
+  });
+
+  it("leaves ordinary todos with their controls, beside the work section", async () => {
+    listing([work(), todo()]);
+    render(<TasksWidget />);
+
+    await waitFor(() => expect(screen.getByTestId("task-jarvis-section")).toBeInTheDocument());
+
+    // Both visible…
+    expect(screen.getByText("Check my system status")).toBeInTheDocument();
+    expect(screen.getByText("Call the client")).toBeInTheDocument();
+
+    // …and exactly ONE complete button: the todo's.
+    expect(screen.getAllByTestId("task-complete")).toHaveLength(1);
+    expect(screen.getByLabelText('Mark "Call the client" complete')).toBeInTheDocument();
+    expect(screen.getByLabelText('Delete "Call the client"')).toBeInTheDocument();
+  });
+
+  it("completing a todo still reaches the server when work is on screen too", async () => {
+    listing([work(), todo()]);
+    mocked.updateTask.mockResolvedValue({ success: true, data: { task: todo() }, timestamp: ts() } as never);
+    render(<TasksWidget />);
+
+    await waitFor(() => expect(screen.getByText("Call the client")).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId("task-complete"));
+
+    await waitFor(() => expect(mocked.updateTask).toHaveBeenCalledWith("t1", { completed: true }));
+  });
+
+  it("hides completed TODOS, as it always did", async () => {
+    // The widget now fetches completed rows for the work section; a completed
+    // todo must still not reappear in the buckets.
+    listing([todo({ completedAt: ts() })]);
+    render(<TasksWidget />);
+
+    await waitFor(() => expect(mocked.listTasks).toHaveBeenCalled());
+    expect(screen.queryByText("Call the client")).toBeNull();
+  });
+
+  it("shows no work section at all when there is no work", async () => {
+    listing([todo()]);
+    render(<TasksWidget />);
+
+    await waitFor(() => expect(screen.getByText("Call the client")).toBeInTheDocument());
+    expect(screen.queryByTestId("task-jarvis-section")).toBeNull();
+  });
+
+  it("falls back to completedAt for a row written before `status` existed", () => {
+    expect(workStatusOf({ ...work(), status: undefined })).toBe("PENDING");
+    expect(workStatusOf({ ...work(), status: undefined, completedAt: ts() })).toBe("COMPLETED");
+    expect(workStatusOf({ ...work(), status: "running" })).toBe("RUNNING");
+    // An unknown value must render, not crash.
+    expect(workStatusOf({ ...work(), status: "SOMETHING_NEW" })).toBe("PENDING");
+  });
+
+  it("orders the groups RUNNING, PENDING, FAILED, COMPLETED", async () => {
+    listing([
+      work({ id: "d", status: "COMPLETED", completedAt: ts() }),
+      work({ id: "c", status: "FAILED" }),
+      work({ id: "b", status: "PENDING" }),
+      work({ id: "a", status: "RUNNING" }),
+    ]);
+    render(<TasksWidget />);
+
+    await waitFor(() => expect(screen.getByTestId("task-work-RUNNING")).toBeInTheDocument());
+    // Seeded in the OPPOSITE order, so this cannot pass by accident.
+    const onPage = screen
+      .getAllByTestId(/^task-work-(RUNNING|PENDING|FAILED|COMPLETED)$/)
+      .map((el) => el.getAttribute("data-testid"));
+    expect(onPage).toEqual([
+      "task-work-RUNNING",
+      "task-work-PENDING",
+      "task-work-FAILED",
+      "task-work-COMPLETED",
+    ]);
   });
 });
 

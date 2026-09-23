@@ -13,8 +13,15 @@
 // ---------------------------------------------------------------------------
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { CheckCircle2, Circle, ListTodo, Plus, X } from "lucide-react";
-import { createTask, deleteTask, listTasks, updateTask, type TaskRecord } from "@/lib/api";
+import { AlertTriangle, CheckCircle2, Circle, ListTodo, Loader, Plus, X } from "lucide-react";
+import {
+  createTask,
+  deleteTask,
+  isJarvisTask,
+  listTasks,
+  updateTask,
+  type TaskRecord,
+} from "@/lib/api";
 import { WidgetShell } from "./widget-shell";
 
 type Bucket = "OVERDUE" | "TODAY" | "UPCOMING" | "SOMEDAY";
@@ -49,6 +56,152 @@ const BUCKET_TONE: Record<Bucket, string> = {
   SOMEDAY: "text-sys-dim",
 };
 
+// ---------------------------------------------------------------------------
+// JARVIS work tasks
+//
+// A separate section above the buckets, because a work task answers a
+// different question. The buckets sort todos by WHEN THEY ARE DUE; a work task
+// has no due date at all — it has a lifecycle (has it run? did it work?) and,
+// if it is scheduled, an instant it will run at. Folding it into "No date"
+// would show it without saying anything true about it.
+//
+// The rows are READ-ONLY, and rendered without a complete or delete control
+// rather than with a disabled one: the server refuses both with a 404, and
+// AGENTS.md is explicit that a control which cannot do anything is a lie about
+// what the page can change.
+// ---------------------------------------------------------------------------
+
+type WorkStatus = "RUNNING" | "PENDING" | "FAILED" | "COMPLETED";
+
+/** Order the section is read in: what is happening, then what is settled. */
+const WORK_ORDER: WorkStatus[] = ["RUNNING", "PENDING", "FAILED", "COMPLETED"];
+
+const WORK_LABEL: Record<WorkStatus, string> = {
+  RUNNING: "Running",
+  PENDING: "Pending",
+  FAILED: "Failed",
+  COMPLETED: "Done",
+};
+
+const WORK_TONE: Record<WorkStatus, string> = {
+  RUNNING: "text-sys-cyan-soft",
+  PENDING: "text-sys-dim",
+  FAILED: "text-red-300/90",
+  COMPLETED: "text-emerald-300/80",
+};
+
+const WORK_DOT: Record<WorkStatus, string> = {
+  RUNNING: "bg-sys-cyan-soft",
+  PENDING: "bg-sys-dim/70",
+  FAILED: "bg-red-300/80",
+  COMPLETED: "bg-emerald-300/70",
+};
+
+/** A glyph per state, so the group reads without relying on its colour. */
+const WORK_ICON: Record<WorkStatus, typeof Circle> = {
+  RUNNING: Loader,
+  PENDING: Circle,
+  FAILED: AlertTriangle,
+  COMPLETED: CheckCircle2,
+};
+
+/**
+ * The rule that separates the two halves of this widget.
+ *
+ * Same type face and tracking as the bucket headings, one step brighter and
+ * with a hairline after it — enough to say "different kind of thing", not a
+ * new visual language. The widget is small, so the separator is a border
+ * rather than a spacer.
+ */
+function SectionHeading({
+  label,
+  tone,
+  testId,
+  badge = false,
+}: {
+  label: string;
+  tone: string;
+  testId: string;
+  badge?: boolean;
+}) {
+  return (
+    <p
+      data-testid={testId}
+      className={`flex items-center gap-1.5 border-b border-sys-line/60 pb-1 font-mono text-xs uppercase tracking-hud ${tone}`}
+    >
+      {badge && (
+        <span
+          data-testid="task-jarvis-badge"
+          className="rounded border border-sys-cyan-soft/40 px-1 py-px text-[10px] leading-none"
+        >
+          JARVIS
+        </span>
+      )}
+      <span>{label}</span>
+    </p>
+  );
+}
+
+/**
+ * The lifecycle state to show for a work task.
+ *
+ * `status` is the authority. `completedAt` is consulted only as a fallback for
+ * a row written before the status column existed, so an old task reads as Done
+ * rather than as Pending forever.
+ */
+export function workStatusOf(task: TaskRecord): WorkStatus {
+  const status = typeof task.status === "string" ? task.status.toUpperCase() : "";
+  if (status === "RUNNING" || status === "PENDING" || status === "FAILED" || status === "COMPLETED") {
+    return status;
+  }
+  return task.completedAt ? "COMPLETED" : "PENDING";
+}
+
+/**
+ * "Scheduled 22:45" for today, "Scheduled 23 Sep, 10:00" otherwise.
+ *
+ * Empty when there is no schedule, which the caller reads as a DIFFERENT
+ * thing from "scheduled for a time I could not parse" — both return "", but
+ * only the first is a state a task is legitimately in.
+ */
+export function scheduledLabel(task: TaskRecord, now = new Date()): string {
+  if (!task.scheduledAt) return "";
+  const at = new Date(task.scheduledAt);
+  if (Number.isNaN(at.getTime())) return "";
+  const sameDay = at.toDateString() === now.toDateString();
+  const when = sameDay
+    ? at.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })
+    : at.toLocaleString(undefined, {
+        day: "numeric",
+        month: "short",
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+  return `Scheduled ${when}`;
+}
+
+/**
+ * The one secondary line under a work task's title.
+ *
+ * WHY "UNSCHEDULED" IS A LABEL AND NOT A STATUS. A PENDING task with no
+ * `scheduledAt` is a real state the database is in: work that was recorded but
+ * never given a time, including the historical rows created before the
+ * scheduler stopped putting the time phrase into the goal. Nothing will ever
+ * pick those up, and showing them as plain "Pending" implies a run that is
+ * coming. This says so on screen and changes nothing underneath — the row
+ * stays PENDING in the database, and the scheduler's rules are untouched.
+ */
+export function workDetailOf(task: TaskRecord, status: WorkStatus, now = new Date()): string {
+  if (status === "FAILED") {
+    const reason = task.error?.trim();
+    return reason ? `Failed — ${reason}` : "Failed";
+  }
+  const scheduled = scheduledLabel(task, now);
+  if (scheduled) return scheduled;
+  if (status === "PENDING") return "Unscheduled";
+  return "";
+}
+
 function dueLabel(task: TaskRecord): string {
   if (!task.dueAt) return "";
   const due = new Date(task.dueAt);
@@ -70,7 +223,11 @@ export function TasksWidget() {
 
   const load = useCallback(async () => {
     setError(null);
-    const res = await listTasks(false);
+    // Completed rows ARE fetched, because a finished JARVIS run is exactly the
+    // thing worth seeing — "did it work?" is the question the section answers.
+    // Completed TODOS are then dropped below, so the buckets keep behaving as
+    // they always have: this widens what is fetched, not what is shown there.
+    const res = await listTasks(true);
     if (res.success && res.data) setTasks(res.data.tasks);
     else setError(res.error?.message ?? "Could not load tasks.");
     setLoading(false);
@@ -80,10 +237,36 @@ export function TasksWidget() {
     void load();
   }, [load]);
 
+  /** JARVIS's work, by lifecycle state. */
+  const work = useMemo(() => {
+    const groups: Record<WorkStatus, TaskRecord[]> = {
+      RUNNING: [],
+      PENDING: [],
+      FAILED: [],
+      COMPLETED: [],
+    };
+    for (const task of tasks) {
+      if (isJarvisTask(task)) groups[workStatusOf(task)].push(task);
+    }
+    return groups;
+  }, [tasks]);
+
+  const hasWork = useMemo(() => tasks.some(isJarvisTask), [tasks]);
+  /** Any OPEN todo — the heading is pointless above an empty half. */
+  const hasTodos = useMemo(
+    () => tasks.some((t) => !isJarvisTask(t) && !t.completedAt),
+    [tasks]
+  );
+
   const grouped = useMemo(() => {
     const now = new Date();
     const groups: Record<Bucket, TaskRecord[]> = { OVERDUE: [], TODAY: [], UPCOMING: [], SOMEDAY: [] };
-    for (const task of tasks) groups[bucketFor(task, now)].push(task);
+    for (const task of tasks) {
+      // Work tasks have their own section; completed todos stay hidden, which
+      // is what `listTasks(false)` used to do for this half of the widget.
+      if (isJarvisTask(task) || task.completedAt) continue;
+      groups[bucketFor(task, now)].push(task);
+    }
     return groups;
   }, [tasks]);
 
@@ -185,6 +368,76 @@ export function TasksWidget() {
         <p className="text-xs text-sys-dim">
           Nothing due. Ask JARVIS to remind you, or add a task above.
         </p>
+      )}
+
+      {hasWork && (
+        <div className="mb-3 space-y-1.5" data-testid="task-jarvis-section">
+          <SectionHeading
+            testId="task-jarvis-heading"
+            label="JARVIS Work"
+            tone="text-sys-cyan-soft"
+            badge
+          />
+
+          {WORK_ORDER.map((status) => {
+            const items = work[status];
+            // Only groups that contain something. An empty "FAILED · 0" is a
+            // row of chrome on a widget whose whole constraint is height.
+            if (items.length === 0) return null;
+            const Icon = WORK_ICON[status];
+            return (
+              <div key={status} data-testid={`task-work-${status}`}>
+                <p
+                  className={`mb-0.5 flex items-center gap-1 font-mono text-xs uppercase tracking-hud ${WORK_TONE[status]}`}
+                >
+                  <Icon size={10} aria-hidden="true" />
+                  {WORK_LABEL[status]} · {items.length}
+                </p>
+                <ul className="space-y-0.5">
+                  {items.slice(0, 5).map((task) => {
+                    const detail = workDetailOf(task, status);
+                    return (
+                      <li
+                        key={task.id}
+                        data-testid="task-work-row"
+                        data-status={status}
+                        className="flex items-start gap-1.5 pl-0.5"
+                      >
+                        {/* A dot, not a checkbox: there is nothing to tick. */}
+                        <span
+                          aria-hidden="true"
+                          className={`mt-1 size-1.5 shrink-0 rounded-full ${WORK_DOT[status]}`}
+                        />
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate text-xs leading-tight text-sys-text/90">
+                            {task.title}
+                            {/* Colour alone never carries the state. */}
+                            <span className="sr-only">{` — ${WORK_LABEL[status]}`}</span>
+                          </span>
+                          {detail && (
+                            <span
+                              data-testid="task-work-detail"
+                              title={detail}
+                              className={`block truncate font-mono text-[10px] leading-tight ${
+                                status === "FAILED" ? "text-red-300/80" : "text-sys-dim"
+                              }`}
+                            >
+                              {detail}
+                            </span>
+                          )}
+                        </span>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {hasWork && hasTodos && (
+        <SectionHeading testId="task-mine-heading" label="My Tasks" tone="text-sys-dim" />
       )}
 
       <div className="space-y-2">

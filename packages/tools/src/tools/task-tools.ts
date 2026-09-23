@@ -161,7 +161,8 @@ export class TaskListTool extends TaskTool {
         {
           name: "status",
           type: "string",
-          description: "Optional filter: PENDING, RUNNING, COMPLETED or FAILED. Omit for all.",
+          description:
+            "Optional filter: PENDING, RUNNING, COMPLETED, FAILED or UNRESOLVED. Omit for all.",
           required: false,
         },
       ]
@@ -178,7 +179,7 @@ export class TaskListTool extends TaskTool {
     // user did not ask.
     if (typeof params.status === "string" && params.status.trim() && !parsed.success) {
       return this.failure(
-        `"${params.status}" is not a task status. Use PENDING, RUNNING, COMPLETED or FAILED.`
+        `"${params.status}" is not a task status. Use PENDING, RUNNING, COMPLETED, FAILED or UNRESOLVED.`
       );
     }
 

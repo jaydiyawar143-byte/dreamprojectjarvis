@@ -38,7 +38,7 @@ export type TaskSchedulerLog = (
 ) => void;
 
 export interface TaskSchedulerLoopOptions {
-  scheduler: Pick<TaskSchedulerService, "runDue">;
+  scheduler: Pick<TaskSchedulerService, "runDue" | "recoverOrphanedClaims">;
   lifecycle: ShutdownLifecycle;
   /** Milliseconds between sweeps. 0 or negative disables scheduling. */
   intervalMs: number;
@@ -86,6 +86,18 @@ export function startTaskSchedulerLoop(
       const executionId = `task-scheduler-sweep-${seq}-${randomUUID()}`;
       drainHandle = lifecycle.trackExecution(executionId, SWEEP_RISK);
 
+      // V2.2 - recovery runs FIRST, inside the same sweep.
+      //
+      // Inside, not beside: it inherits the whole shutdown story (the drain
+      // handle above, the no-overlap guard, the RUNNING-state gate) and there
+      // is no second daemon to reason about. Running it before `runDue` means
+      // a claim re-armed now becomes eligible in the same sweep rather than
+      // waiting another interval.
+      //
+      // It never calls a tool. It clears one column on tasks whose own status
+      // proves nothing ran.
+      const recovered = await scheduler.recoverOrphanedClaims();
+
       const outcomes = await scheduler.runDue();
 
       // EVERY successful sweep logs, including an empty one.
@@ -98,6 +110,10 @@ export function startTaskSchedulerLoop(
       log("info", "task_scheduler_sweep_completed", {
         sweep: seq,
         durationMs: Date.now() - startedAt,
+        // V2.2 - on the same line as the rest of the sweep, so a recovery is
+        // never something you have to go looking for.
+        reArmed: recovered.filter((r) => r.outcome === "re_armed").length,
+        recoveryLost: recovered.filter((r) => r.outcome === "lost").length,
         dueCount: outcomes.length,
         executed: outcomes.filter((o) => o.outcome === "executed").length,
         notPlanned: outcomes.filter((o) => o.outcome === "not_planned").length,

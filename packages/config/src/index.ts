@@ -88,6 +88,23 @@ const baseEnvSchema = z.object({
     .min(0)
     .max(3600000)
     .default(60000),
+
+  // Task Engine V2.2 - how old a scheduler claim must be before it is treated
+  // as abandoned and re-armed. 0 disables claim recovery.
+  //
+  // The bound that matters is the PLANNER's 20 s abort, not the ToolExecutor's
+  // 30 s deadline: a claimed task is PENDING only between the claim and
+  // `startTask`, and the executor is never reached in that window. The default
+  // is an order of magnitude above it.
+  //
+  // THIS DEFAULT IS FOR DEVELOPMENT. A production value is a deliberate
+  // choice and should be set explicitly.
+  JARVIS_TASK_CLAIM_RECOVERY_AFTER_MS: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(86400000)
+    .default(300000),
 });
 
 const serverEnvSchema = baseEnvSchema.extend({

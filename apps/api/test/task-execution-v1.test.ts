@@ -123,6 +123,8 @@ function makeStore() {
         error: null,
         remindedAt: null,
         scheduledAt: null,
+        claimedAt: null,
+        executionId: null,
         createdBy: input.createdBy ?? null,
         createdAt: now,
         updatedAt: now,
@@ -522,7 +524,15 @@ describe("Task Execution V1 — lifecycle ownership is unchanged", () => {
 
     await run(h, task.id);
 
-    expect(start).toHaveBeenCalledWith(ALICE, task.id);
+    // V2.1 adds a third argument: the id of the execution about to start,
+    // recorded WITH the claim. The property this test exists for is unchanged
+    // - the move goes through TaskService and never a direct write - so the
+    // ownership assertion stays and the new argument is asserted too.
+    expect(start).toHaveBeenCalledWith(
+      ALICE,
+      task.id,
+      expect.objectContaining({ executionId: expect.any(String) })
+    );
     expect(complete).toHaveBeenCalledWith(ALICE, task.id);
   });
 

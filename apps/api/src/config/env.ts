@@ -29,5 +29,7 @@ export function loadEnvironment() {
     OUTCOME_WORKER_INTERVAL_MS: env.JARVIS_OUTCOME_WORKER_INTERVAL_MS,
     // Scheduler V1 — task scheduler sweep interval (0 disables scheduling).
     TASK_SCHEDULER_INTERVAL_MS: env.JARVIS_TASK_SCHEDULER_INTERVAL_MS,
+    // Task Engine V2.2 - abandoned-claim threshold (0 disables recovery).
+    TASK_CLAIM_RECOVERY_AFTER_MS: env.JARVIS_TASK_CLAIM_RECOVERY_AFTER_MS,
   };
 }

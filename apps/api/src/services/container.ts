@@ -751,12 +751,15 @@ function createMetaToolRegistry(
         : { ok: false as const, message: result.message };
     },
     updateStatus: async (userId, taskId, status, error) => {
+      // V2.3 - UNRESOLVED routed explicitly; see the note in routes/tasks.ts.
       const result =
         status === "RUNNING"
           ? await tasks.startTask(userId, taskId)
           : status === "COMPLETED"
             ? await tasks.completeTask(userId, taskId)
-            : await tasks.failTask(userId, taskId, error);
+            : status === "UNRESOLVED"
+              ? await tasks.unresolveTask(userId, taskId, error)
+              : await tasks.failTask(userId, taskId, error);
       return result.ok
         ? { ok: true as const, task: toTaskView(result.task) }
         : { ok: false as const, message: result.message };
@@ -801,6 +804,13 @@ export function getContainer(options?: {
    * earliest safe point.
    */
   lifecycle?: ShutdownLifecycle;
+  /**
+   * Task Engine V2.2 — how old a scheduler claim must be before it is treated
+   * as abandoned. Supplied by the host from the validated config layer, the
+   * same way `lifecycle` is, so this module needs no environment access of
+   * its own. Omitted in tests, which take the service default.
+   */
+  claimRecoveryAfterMs?: number;
 }): Container {
   if (_container) return _container;
 
@@ -1286,6 +1296,15 @@ export function getContainer(options?: {
     taskService,
     planner: taskPlannerService,
     execution: taskExecutionService,
+    // V2.2 — abandoned-claim threshold, from the validated config layer.
+    ...(options?.claimRecoveryAfterMs !== undefined
+      ? { claimRecoveryAfterMs: options.claimRecoveryAfterMs }
+      : {}),
+    // V2.1 — the same one-line JSON shape every other background component
+    // logs in, so `task_schedule_claimed` sits beside `task_scheduler_*`.
+    log: (level, event, meta) => {
+      console.log(JSON.stringify({ level, event, ...(meta ?? {}) }));
+    },
   });
 
   taskConversationService = new TaskConversationService({

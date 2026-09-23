@@ -26,6 +26,24 @@ export const TaskStatusSchema = z.enum([
   "COMPLETED",
   /** Finished unsuccessfully, with a reason. Terminal. */
   "FAILED",
+  /**
+   * V2.3 - the execution was entered and its outcome CANNOT BE DETERMINED.
+   * Terminal, and deliberately NOT a synonym for FAILED.
+   *
+   * A task reaches this only from RUNNING, which means `executeTask` had
+   * already committed PENDING -> RUNNING and called the executor. If the
+   * process then died before any evidence was written, the tool may have
+   * reached an external system and completed there - a campaign paused, an
+   * email sent - or it may never have got that far. Nothing durable says
+   * which.
+   *
+   * FAILED would assert that the work did not happen. That assertion may be
+   * FALSE, and acting on it is how a user redoes a write that already landed.
+   * UNRESOLVED asserts only what is true: it started, and we cannot say more.
+   *
+   * It is terminal for the automatic engine. Nothing retries it.
+   */
+  "UNRESOLVED",
 ]);
 
 export type TaskStatus = z.infer<typeof TaskStatusSchema>;
@@ -59,9 +77,17 @@ export const JARVIS_TASK_CREATOR = "jarvis";
  */
 const TRANSITIONS: Readonly<Record<TaskStatus, readonly TaskStatus[]>> = Object.freeze({
   PENDING: ["RUNNING"],
-  RUNNING: ["COMPLETED", "FAILED"],
+  // V2.3 - a run that was entered ends in exactly one of three ways: it
+  // worked, it demonstrably did not, or nobody can say. The third is a real
+  // outcome, not a failure to categorise, and it needs its own edge.
+  RUNNING: ["COMPLETED", "FAILED", "UNRESOLVED"],
   COMPLETED: [],
   FAILED: [],
+  // Terminal, and terminal on purpose. Resolving an ambiguous external side
+  // effect needs evidence this system does not have; re-running it could
+  // duplicate a write that already succeeded. A human, or a later
+  // reconciliation with real evidence, resolves these - not a retry.
+  UNRESOLVED: [],
 });
 
 /**
