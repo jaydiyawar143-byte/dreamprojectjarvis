@@ -31,5 +31,7 @@ export function loadEnvironment() {
     TASK_SCHEDULER_INTERVAL_MS: env.JARVIS_TASK_SCHEDULER_INTERVAL_MS,
     // Task Engine V2.2 - abandoned-claim threshold (0 disables recovery).
     TASK_CLAIM_RECOVERY_AFTER_MS: env.JARVIS_TASK_CLAIM_RECOVERY_AFTER_MS,
+    // Task Engine V2.3 - grace on top of the executor deadline (0 disables).
+    TASK_RUNNING_RECOVERY_GRACE_MS: env.JARVIS_TASK_RUNNING_RECOVERY_GRACE_MS,
   };
 }

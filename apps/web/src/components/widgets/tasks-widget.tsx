@@ -13,7 +13,16 @@
 // ---------------------------------------------------------------------------
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { AlertTriangle, CheckCircle2, Circle, ListTodo, Loader, Plus, X } from "lucide-react";
+import {
+  AlertTriangle,
+  CheckCircle2,
+  Circle,
+  HelpCircle,
+  ListTodo,
+  Loader,
+  Plus,
+  X,
+} from "lucide-react";
 import {
   createTask,
   deleteTask,
@@ -71,14 +80,24 @@ const BUCKET_TONE: Record<Bucket, string> = {
 // what the page can change.
 // ---------------------------------------------------------------------------
 
-type WorkStatus = "RUNNING" | "PENDING" | "FAILED" | "COMPLETED";
+type WorkStatus = "RUNNING" | "PENDING" | "UNRESOLVED" | "FAILED" | "COMPLETED";
 
-/** Order the section is read in: what is happening, then what is settled. */
-const WORK_ORDER: WorkStatus[] = ["RUNNING", "PENDING", "FAILED", "COMPLETED"];
+/**
+ * Order the section is read in: what is happening, then what needs a person,
+ * then what is settled.
+ *
+ * UNRESOLVED sits high deliberately. It is the only state that asks something
+ * of the reader - JARVIS will not touch it again, so if anyone is going to
+ * find out what happened, it is them.
+ */
+const WORK_ORDER: WorkStatus[] = ["RUNNING", "PENDING", "UNRESOLVED", "FAILED", "COMPLETED"];
 
 const WORK_LABEL: Record<WorkStatus, string> = {
   RUNNING: "Running",
   PENDING: "Pending",
+  // Not "Unknown" and not "Failed": the run happened, and what it did is what
+  // is unknown. "Needs checking" says whose problem it is now.
+  UNRESOLVED: "Needs checking",
   FAILED: "Failed",
   COMPLETED: "Done",
 };
@@ -86,6 +105,8 @@ const WORK_LABEL: Record<WorkStatus, string> = {
 const WORK_TONE: Record<WorkStatus, string> = {
   RUNNING: "text-sys-cyan-soft",
   PENDING: "text-sys-dim",
+  // Amber, not red. A failure is settled; this one is still a question.
+  UNRESOLVED: "text-amber-300/90",
   FAILED: "text-red-300/90",
   COMPLETED: "text-emerald-300/80",
 };
@@ -93,6 +114,7 @@ const WORK_TONE: Record<WorkStatus, string> = {
 const WORK_DOT: Record<WorkStatus, string> = {
   RUNNING: "bg-sys-cyan-soft",
   PENDING: "bg-sys-dim/70",
+  UNRESOLVED: "bg-amber-300/80",
   FAILED: "bg-red-300/80",
   COMPLETED: "bg-emerald-300/70",
 };
@@ -101,6 +123,7 @@ const WORK_DOT: Record<WorkStatus, string> = {
 const WORK_ICON: Record<WorkStatus, typeof Circle> = {
   RUNNING: Loader,
   PENDING: Circle,
+  UNRESOLVED: HelpCircle,
   FAILED: AlertTriangle,
   COMPLETED: CheckCircle2,
 };
@@ -151,7 +174,13 @@ function SectionHeading({
  */
 export function workStatusOf(task: TaskRecord): WorkStatus {
   const status = typeof task.status === "string" ? task.status.toUpperCase() : "";
-  if (status === "RUNNING" || status === "PENDING" || status === "FAILED" || status === "COMPLETED") {
+  if (
+    status === "RUNNING" ||
+    status === "PENDING" ||
+    status === "UNRESOLVED" ||
+    status === "FAILED" ||
+    status === "COMPLETED"
+  ) {
     return status;
   }
   return task.completedAt ? "COMPLETED" : "PENDING";
@@ -192,6 +221,12 @@ export function scheduledLabel(task: TaskRecord, now = new Date()): string {
  * stays PENDING in the database, and the scheduler's rules are untouched.
  */
 export function workDetailOf(task: TaskRecord, status: WorkStatus, now = new Date()): string {
+  if (status === "UNRESOLVED") {
+    // The reason says what is UNKNOWN. It must never read as "this failed",
+    // because the work may well have happened.
+    const reason = task.error?.trim();
+    return reason ?? "Outcome unknown - JARVIS will not repeat this.";
+  }
   if (status === "FAILED") {
     const reason = task.error?.trim();
     return reason ? `Failed — ${reason}` : "Failed";
@@ -242,6 +277,7 @@ export function TasksWidget() {
     const groups: Record<WorkStatus, TaskRecord[]> = {
       RUNNING: [],
       PENDING: [],
+      UNRESOLVED: [],
       FAILED: [],
       COMPLETED: [],
     };
@@ -419,7 +455,11 @@ export function TasksWidget() {
                               data-testid="task-work-detail"
                               title={detail}
                               className={`block truncate font-mono text-[10px] leading-tight ${
-                                status === "FAILED" ? "text-red-300/80" : "text-sys-dim"
+                                status === "FAILED"
+                                  ? "text-red-300/80"
+                                  : status === "UNRESOLVED"
+                                    ? "text-amber-300/80"
+                                    : "text-sys-dim"
                               }`}
                             >
                               {detail}

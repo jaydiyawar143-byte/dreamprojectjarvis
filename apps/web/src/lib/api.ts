@@ -1484,7 +1484,16 @@ export interface SystemSnapshot {
 /** The creator stamp JARVIS puts on work it recorded itself. */
 export const JARVIS_TASK_CREATOR = "jarvis";
 
-export type TaskLifecycleStatus = "PENDING" | "RUNNING" | "COMPLETED" | "FAILED";
+export type TaskLifecycleStatus =
+  | "PENDING"
+  | "RUNNING"
+  | "COMPLETED"
+  | "FAILED"
+  /**
+   * V2.3 - the run was entered and its outcome cannot be determined.
+   * NOT a failure: it may have completed externally. Never retried.
+   */
+  | "UNRESOLVED";
 
 export interface TaskRecord {
   id: string;

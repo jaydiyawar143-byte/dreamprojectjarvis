@@ -103,6 +103,8 @@ const container = getContainer({
   lifecycle,
   // V2.2 — abandoned-claim threshold, from the validated config layer.
   claimRecoveryAfterMs: env.TASK_CLAIM_RECOVERY_AFTER_MS,
+  // V2.3 — grace on top of the executor's enforced deadline.
+  runningRecoveryGraceMs: env.TASK_RUNNING_RECOVERY_GRACE_MS,
 });
 
 const startupRecovery = await runStartupRecovery(container.executionJournal);

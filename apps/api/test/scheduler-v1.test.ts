@@ -241,6 +241,19 @@ function makeStore() {
     // -- Task Engine V2.2 ---------------------------------------------------
     // Present so the real scheduler can run its recovery pass; these suites
     // seed no orphans, so it finds nothing.
+    // -- Task Engine V2.3 ---------------------------------------------------
+    async findStaleRunning(createdBy: string, startedBefore: Date, limit = 20) {
+      return [...rows.values()]
+        .filter(
+          (r) =>
+            r.createdBy === createdBy &&
+            r.status === "RUNNING" &&
+            r.startedAt !== null &&
+            r.startedAt.getTime() < startedBefore.getTime()
+        )
+        .slice(0, limit);
+    },
+
     async findOrphanedClaims(createdBy: string, claimedBefore: Date, limit = 20) {
       return [...rows.values()]
         .filter(
@@ -1151,7 +1164,11 @@ describe("Scheduler V1 — the interval loop", () => {
     const loop = startTaskSchedulerLoop({
       // V2.2 widened the loop's port; recovery is a no-op in these
       // transport tests, which are about the timer, not about recovery.
-      scheduler: { runDue, recoverOrphanedClaims: async () => [] },
+      scheduler: {
+        runDue,
+        recoverOrphanedClaims: async () => [],
+        recoverStaleRunning: async () => [],
+      },
       lifecycle,
       intervalMs: 60_000,
       log: () => {},
@@ -1183,7 +1200,11 @@ describe("Scheduler V1 — the interval loop", () => {
     const loop = startTaskSchedulerLoop({
       // V2.2 widened the loop's port; recovery is a no-op in these
       // transport tests, which are about the timer, not about recovery.
-      scheduler: { runDue, recoverOrphanedClaims: async () => [] },
+      scheduler: {
+        runDue,
+        recoverOrphanedClaims: async () => [],
+        recoverStaleRunning: async () => [],
+      },
       lifecycle,
       intervalMs: 1_000,
       log: () => {},
@@ -1213,7 +1234,11 @@ describe("Scheduler V1 — the interval loop", () => {
     const loop = startTaskSchedulerLoop({
       // V2.2 widened the loop's port; recovery is a no-op in these
       // transport tests, which are about the timer, not about recovery.
-      scheduler: { runDue, recoverOrphanedClaims: async () => [] },
+      scheduler: {
+        runDue,
+        recoverOrphanedClaims: async () => [],
+        recoverStaleRunning: async () => [],
+      },
       lifecycle,
       intervalMs: 1_000,
       log: (_level, event) => logged.push(event),
@@ -1236,7 +1261,11 @@ describe("Scheduler V1 — the interval loop", () => {
     const loop = startTaskSchedulerLoop({
       // V2.2 widened the loop's port; recovery is a no-op in these
       // transport tests, which are about the timer, not about recovery.
-      scheduler: { runDue, recoverOrphanedClaims: async () => [] },
+      scheduler: {
+        runDue,
+        recoverOrphanedClaims: async () => [],
+        recoverStaleRunning: async () => [],
+      },
       lifecycle,
       intervalMs: 0,
       log: (_level, event) => logged.push(event),
@@ -1256,7 +1285,11 @@ describe("Scheduler V1 — the interval loop", () => {
     const loop = startTaskSchedulerLoop({
       // V2.2 widened the loop's port; recovery is a no-op in these
       // transport tests, which are about the timer, not about recovery.
-      scheduler: { runDue, recoverOrphanedClaims: async () => [] },
+      scheduler: {
+        runDue,
+        recoverOrphanedClaims: async () => [],
+        recoverStaleRunning: async () => [],
+      },
       lifecycle,
       intervalMs: 1_000,
       log: () => {},

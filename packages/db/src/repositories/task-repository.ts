@@ -511,6 +511,39 @@ export class PrismaTaskRepository {
     return result.count === 1;
   }
 
+  // -------------------------------------------------------------------------
+  // Task Engine V2.3 - stale RUNNING discovery
+  //
+  // A RUNNING task means `executeTask` committed PENDING -> RUNNING and then
+  // called the executor. Unlike the V2.2 window, the tool MAY have reached an
+  // external system, so nothing here decides an outcome - this only finds
+  // candidates whose execution window has certainly closed. The outcome comes
+  // from durable evidence, looked up separately.
+  // -------------------------------------------------------------------------
+
+  /**
+   * RUNNING work whose execution window has expired.
+   *
+   * `startedBefore` is computed by the caller from the executor's enforced
+   * deadline plus a grace period, so a task still inside its legitimate window
+   * is never a candidate.
+   */
+  async findStaleRunning(
+    createdBy: string,
+    startedBefore: Date,
+    limit = 20
+  ): Promise<TaskRecord[]> {
+    return this.prisma.task.findMany({
+      where: {
+        createdBy,
+        status: "RUNNING",
+        startedAt: { not: null, lt: startedBefore },
+      },
+      orderBy: { startedAt: "asc" },
+      take: Math.min(limit, 100),
+    }) as unknown as Promise<TaskRecord[]>;
+  }
+
   /** A user's tasks in one lifecycle state. Used by the Core V1 task surface. */
   async listByStatus(
     userId: string,

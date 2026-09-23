@@ -811,6 +811,8 @@ export function getContainer(options?: {
    * its own. Omitted in tests, which take the service default.
    */
   claimRecoveryAfterMs?: number;
+  /** Task Engine V2.3 - grace on top of the executor deadline. */
+  runningRecoveryGraceMs?: number;
 }): Container {
   if (_container) return _container;
 
@@ -1299,6 +1301,11 @@ export function getContainer(options?: {
     // V2.2 — abandoned-claim threshold, from the validated config layer.
     ...(options?.claimRecoveryAfterMs !== undefined
       ? { claimRecoveryAfterMs: options.claimRecoveryAfterMs }
+      : {}),
+    // V2.3 — the evidence read side, narrowed to one method.
+    audit: { findExecutionOutcome: (u, e, s) => auditRepo.findExecutionOutcome(u, e, s) },
+    ...(options?.runningRecoveryGraceMs !== undefined
+      ? { runningRecoveryGraceMs: options.runningRecoveryGraceMs }
       : {}),
     // V2.1 — the same one-line JSON shape every other background component
     // logs in, so `task_schedule_claimed` sits beside `task_scheduler_*`.

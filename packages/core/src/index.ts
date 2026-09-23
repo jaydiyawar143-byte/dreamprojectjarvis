@@ -91,6 +91,10 @@ export * from "./types/google-write.js";
 // Core V1 — the task lifecycle (the single definition of legal transitions).
 export * from "./types/task.js";
 export * from "./capability-catalog.js";
+// Skill System V1 — the outcome layer. Metadata only: a skill names an outcome
+// and the tools behind it, and is executed the way everything else is, through
+// the planner and ToolExecutor. There is deliberately no skill runtime.
+export * from "./types/skill.js";
 export * from "./capability-presentation.js";
 export * from "./speech-preparation.js";
 export * from "./tool-failure-classifier.js";

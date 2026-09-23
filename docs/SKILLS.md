@@ -9,6 +9,21 @@ Both are defined in `packages/agents/src/agent-policy.ts`. Adding a capability m
 
 > **Not the same thing:** `.claude/skills/` holds skills for Claude Code — the `run-jarvis` driver and design guidance. They help people *build* JARVIS. JARVIS never loads them.
 
+> **Since Skill System V1 / S1 (2026-09-23)** there IS a code-defined
+> `SkillDefinition` and a `SKILL_CATALOG`, in `packages/core`. The sentence
+> above still holds: they are **metadata**, not a runtime object. A skill names
+> an outcome and the tools behind it; it runs through the planner and
+> `ToolExecutor` like everything else, and it grants nothing — the allowlist in
+> `agent-policy.ts` is still the only thing that decides what may run. See
+> [`architecture/JARVIS_SKILL_SYSTEM_V1.md`](./architecture/JARVIS_SKILL_SYSTEM_V1.md).
+>
+> Phase S2 audited which tool belongs to which skill. Five tools are
+> deliberately in **no** skill, each with a reason recorded in
+> `SKILL_UNLISTED_TOOLS`: `self.describe` (introspection, not an outcome),
+> the four `task.*` tools (JARVIS's own work queue, not your to-do list — which
+> is `tasks.list`, a different tool for a different question) and `system.echo`
+> (a test fixture). None of that changes what any of them may do.
+
 Verified against the code on 2026-09-17.
 
 ---

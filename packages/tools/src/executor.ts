@@ -15,7 +15,21 @@ import {
   computeParamsHash,
 } from "@jarvis/core";
 
-const DEFAULT_TIMEOUT_MS = 30000;
+/**
+ * The authoritative execution deadline.
+ *
+ * EXPORTED because recovery must derive its staleness threshold from the real
+ * bound rather than restate it as a magic number. It is enforced by a race in
+ * `execute()` below - the promise rejects on abort whether or not the tool
+ * honours the signal - so `execute()` ALWAYS returns within this window, and
+ * always writes an audit row before it does.
+ *
+ * That pair of facts is what makes evidence-based recovery possible: past this
+ * deadline plus a margin, a live worker would already have left evidence.
+ */
+export const DEFAULT_TOOL_EXECUTION_TIMEOUT_MS = 30000;
+
+const DEFAULT_TIMEOUT_MS = DEFAULT_TOOL_EXECUTION_TIMEOUT_MS;
 
 export class ToolExecutor implements IToolExecutor {
   private readonly defaultTimeoutMs: number;

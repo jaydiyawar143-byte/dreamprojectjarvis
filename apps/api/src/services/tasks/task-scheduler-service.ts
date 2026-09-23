@@ -39,7 +39,8 @@
 // check, same approval gate.
 // ---------------------------------------------------------------------------
 
-import { JARVIS_TASK_CREATOR, type Role } from "@jarvis/core";
+import { JARVIS_TASK_CREATOR, type Role, type TaskStatus } from "@jarvis/core";
+import { DEFAULT_TOOL_EXECUTION_TIMEOUT_MS } from "@jarvis/tools";
 import type { PrismaTaskRepository, TaskRecord } from "@jarvis/db";
 import type { TaskService } from "./task-service.js";
 import type { TaskPlannerService } from "./task-planner-service.js";
@@ -98,7 +99,19 @@ export interface TaskSchedulerDeps {
     | "claimSchedule"
     | "findOrphanedClaims"
     | "recoverClaim"
+    | "findStaleRunning"
   >;
+  /**
+   * V2.3 - the read side of the execution evidence. Narrow on purpose: the
+   * scheduler may look up an outcome and nothing else.
+   */
+  audit?: { findExecutionOutcome: AuditEvidenceLookup };
+  /**
+   * V2.3 - how long AFTER the executor's enforced deadline a RUNNING task
+   * must sit before its outcome is reconciled. 0 or negative disables
+   * RUNNING recovery.
+   */
+  runningRecoveryGraceMs?: number;
   /**
    * V2.2 - how old a claim must be before it is treated as abandoned.
    *
@@ -116,6 +129,34 @@ export interface TaskSchedulerDeps {
    */
   log?: SchedulerLog;
 }
+
+export type AuditEvidenceLookup = (
+  userId: string,
+  executionId: string,
+  since: Date
+) => Promise<{ result: "success" | "failure" | "rejected" | "pending" } | null>;
+
+/** What one stale RUNNING task's reconciliation produced. */
+export interface RunningRecoveryOutcome {
+  taskId: string;
+  outcome: "reconciled" | "unresolved" | "skipped";
+  newStatus?: TaskStatus;
+}
+
+/**
+ * V2.3 default grace ADDED TO the executor deadline before a RUNNING task is
+ * considered stale.
+ *
+ * The total threshold is `DEFAULT_TOOL_EXECUTION_TIMEOUT_MS + this`, derived
+ * from the real enforced deadline rather than restated. Two minutes of margin
+ * covers the work that sits OUTSIDE the deadline timer - the registry lookup,
+ * the permission check, the approval lookup, the audit write and the settle
+ * transition - with an order of magnitude to spare.
+ *
+ * Erring late is cheap: a task stays RUNNING one sweep longer. Erring early
+ * would reconcile a live execution, so the margin is deliberately generous.
+ */
+export const DEFAULT_RUNNING_RECOVERY_GRACE_MS = 120_000;
 
 export type SchedulerLog = (
   level: "info" | "warn",
@@ -139,12 +180,15 @@ export class TaskSchedulerService {
   private readonly now: () => Date;
   private readonly log: SchedulerLog;
   private readonly claimRecoveryAfterMs: number;
+  private readonly runningRecoveryGraceMs: number;
 
   constructor(private readonly deps: TaskSchedulerDeps) {
     this.now = deps.now ?? (() => new Date());
     this.log = deps.log ?? (() => {});
     this.claimRecoveryAfterMs =
       deps.claimRecoveryAfterMs ?? DEFAULT_CLAIM_RECOVERY_AFTER_MS;
+    this.runningRecoveryGraceMs =
+      deps.runningRecoveryGraceMs ?? DEFAULT_RUNNING_RECOVERY_GRACE_MS;
   }
 
   // -------------------------------------------------------------------------
@@ -320,6 +364,145 @@ export class TaskSchedulerService {
     }
 
     return outcomes;
+  }
+
+  /**
+   * V2.3 - reconcile RUNNING tasks whose execution window has closed.
+   *
+   * WHY THIS IS HARDER THAN V2.2, AND WHY IT IS STILL SAFE.
+   *
+   * A PENDING claim proved nothing had run. RUNNING proves the opposite is
+   * possible: `executeTask` committed PENDING -> RUNNING and then called the
+   * executor, so the tool MAY have reached an external system. Recovery here
+   * therefore decides NOTHING on its own - it reads durable evidence and
+   * reports what that evidence says.
+   *
+   * THE EVIDENCE. `ToolExecutor` writes exactly one `tool.execute` audit row
+   * immediately before EVERY return path, and its deadline is enforced by a
+   * race rather than by the tool's cooperation. So:
+   *
+   *   audit row present  ->  the executor RETURNED; its result is the outcome
+   *   audit row absent
+   *     within the window ->  still running; leave it alone
+   *     past the window   ->  the process died mid-call. The tool may or may
+   *                           not have completed its external write, and
+   *                           nothing durable says which: UNRESOLVED.
+   *
+   * IT NEVER RETRIES. No tool is called, no executionId is minted, no
+   * scheduledAt is touched. `UNRESOLVED` is terminal precisely because
+   * re-running could duplicate a write that already succeeded.
+   */
+  async recoverStaleRunning(): Promise<RunningRecoveryOutcome[]> {
+    if (this.runningRecoveryGraceMs <= 0) return [];
+
+    // Derived from the executor's OWN enforced deadline, not restated.
+    const staleAfterMs = DEFAULT_TOOL_EXECUTION_TIMEOUT_MS + this.runningRecoveryGraceMs;
+    const startedBefore = new Date(this.now().getTime() - staleAfterMs);
+
+    const stale = await this.deps.tasks.findStaleRunning(JARVIS_TASK_CREATOR, startedBefore);
+    if (stale.length === 0) return [];
+
+    this.log("info", "task_scheduler_running_recovery_started", {
+      candidates: stale.length,
+      staleAfterMs,
+      executionDeadlineMs: DEFAULT_TOOL_EXECUTION_TIMEOUT_MS,
+      graceMs: this.runningRecoveryGraceMs,
+    });
+
+    const outcomes: RunningRecoveryOutcome[] = [];
+    for (const task of stale) {
+      outcomes.push(await this.reconcileOne(task, staleAfterMs));
+    }
+    return outcomes;
+  }
+
+  /** One stale RUNNING task, decided entirely by its evidence. */
+  private async reconcileOne(
+    task: TaskRecord,
+    staleAfterMs: number
+  ): Promise<RunningRecoveryOutcome> {
+    const ageMs = task.startedAt ? this.now().getTime() - task.startedAt.getTime() : null;
+
+    // No executionId means the executor was never even named for this task -
+    // a RUNNING state set by hand, or a run that died before the claim wrote
+    // it. Either way there is nothing to look evidence up by, so the honest
+    // answer is the same: we cannot say.
+    const evidence =
+      task.executionId && task.startedAt && this.deps.audit
+        ? await this.deps.audit.findExecutionOutcome(
+            task.userId,
+            task.executionId,
+            task.startedAt
+          )
+        : null;
+
+    const base = {
+      taskId: task.id,
+      executionId: task.executionId,
+      previousStatus: task.status,
+      auditEvidenceFound: evidence !== null,
+      ageMs,
+      staleAfterMs,
+    };
+
+    if (evidence) {
+      // The executor returned. Its recorded result IS the outcome - recovery
+      // is only writing down what already happened.
+      const settled =
+        evidence.result === "success"
+          ? await this.deps.taskService.completeTask(task.userId, task.id)
+          : await this.deps.taskService.failTask(
+              task.userId,
+              task.id,
+              `The run finished while JARVIS was interrupted; the execution was recorded as ${evidence.result}.`
+            );
+
+      if (!settled.ok) {
+        // A worker settled it first. An ordinary compare-and-set loss, not an
+        // error, and NOT something to retry: whoever won wrote a terminal
+        // state and there is exactly one of those.
+        this.log("info", "task_scheduler_running_recovery_skipped", {
+          ...base,
+          recoveryReason: "already_settled_by_another_writer",
+        });
+        return { taskId: task.id, outcome: "skipped" };
+      }
+
+      const newStatus: TaskStatus = evidence.result === "success" ? "COMPLETED" : "FAILED";
+      this.log("info", "task_scheduler_running_recovery_reconciled", {
+        ...base,
+        newStatus,
+        recoveryReason: `audit_result_${evidence.result}`,
+      });
+      return { taskId: task.id, outcome: "reconciled", newStatus };
+    }
+
+    // No evidence past the window. The executor was entered and its outcome
+    // cannot be established. This is NOT a failure and must never be recorded
+    // as one.
+    const unresolved = await this.deps.taskService.unresolveTask(
+      task.userId,
+      task.id,
+      "The run was interrupted and no record of its outcome was found. " +
+        "It may or may not have completed; JARVIS will not repeat it."
+    );
+
+    if (!unresolved.ok) {
+      this.log("info", "task_scheduler_running_recovery_skipped", {
+        ...base,
+        recoveryReason: "already_settled_by_another_writer",
+      });
+      return { taskId: task.id, outcome: "skipped" };
+    }
+
+    this.log("warn", "task_scheduler_running_recovery_unknown", {
+      ...base,
+      newStatus: "UNRESOLVED" satisfies TaskStatus,
+      recoveryReason: task.executionId
+        ? "no_audit_evidence_after_execution_window"
+        : "no_execution_linked",
+    });
+    return { taskId: task.id, outcome: "unresolved", newStatus: "UNRESOLVED" };
   }
 
   /**

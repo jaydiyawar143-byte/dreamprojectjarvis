@@ -38,7 +38,10 @@ export type TaskSchedulerLog = (
 ) => void;
 
 export interface TaskSchedulerLoopOptions {
-  scheduler: Pick<TaskSchedulerService, "runDue" | "recoverOrphanedClaims">;
+  scheduler: Pick<
+    TaskSchedulerService,
+    "runDue" | "recoverOrphanedClaims" | "recoverStaleRunning"
+  >;
   lifecycle: ShutdownLifecycle;
   /** Milliseconds between sweeps. 0 or negative disables scheduling. */
   intervalMs: number;
@@ -98,6 +101,10 @@ export function startTaskSchedulerLoop(
       // proves nothing ran.
       const recovered = await scheduler.recoverOrphanedClaims();
 
+      // V2.3 - reconcile RUNNING work whose execution window has closed.
+      // Reads evidence and writes a terminal state; it never calls a tool.
+      const reconciled = await scheduler.recoverStaleRunning();
+
       const outcomes = await scheduler.runDue();
 
       // EVERY successful sweep logs, including an empty one.
@@ -114,6 +121,10 @@ export function startTaskSchedulerLoop(
         // never something you have to go looking for.
         reArmed: recovered.filter((r) => r.outcome === "re_armed").length,
         recoveryLost: recovered.filter((r) => r.outcome === "lost").length,
+        // V2.3 - on the same line, so a reconciliation is never something you
+        // have to go looking for.
+        reconciled: reconciled.filter((r) => r.outcome === "reconciled").length,
+        unresolved: reconciled.filter((r) => r.outcome === "unresolved").length,
         dueCount: outcomes.length,
         executed: outcomes.filter((o) => o.outcome === "executed").length,
         notPlanned: outcomes.filter((o) => o.outcome === "not_planned").length,

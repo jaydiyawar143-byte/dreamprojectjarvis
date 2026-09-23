@@ -79,6 +79,44 @@ export class PrismaAuditRepository implements IAuditRepository {
     return toAuditEntry(row);
   }
 
+  /**
+   * Task Engine V2.3 - the execution evidence for ONE `executionId`.
+   *
+   * `ToolExecutor` writes exactly one `tool.execute` audit row per execution,
+   * immediately before every return path, so this row existing means the
+   * executor RETURNED - and its `result` is the outcome. Its absence past the
+   * execution deadline means the process died mid-call, which is a different
+   * and genuinely ambiguous fact.
+   *
+   * BOUNDED BY CONSTRUCTION, which is why no index on `metadata` is needed.
+   * `since` is the task's own `startedAt`: the audit row cannot predate the
+   * task that caused it, so the planner uses `AuditLog_createdAt_idx` and the
+   * scan never walks the whole table. Verified with EXPLAIN:
+   *
+   *   Index Scan using "AuditLog_createdAt_idx"
+   *     Index Cond: ("createdAt" >= ...)
+   *     Filter: userId, action, metadata->>'executionId'
+   *
+   * `userId` is in the filter as the tenant boundary, exactly as every other
+   * read in this repository has it.
+   */
+  async findExecutionOutcome(
+    userId: string,
+    executionId: string,
+    since: Date
+  ): Promise<AuditEntry | null> {
+    const row = await this.prisma.auditLog.findFirst({
+      where: {
+        userId,
+        action: "tool.execute",
+        createdAt: { gte: since },
+        metadata: { path: ["executionId"], equals: executionId },
+      },
+      orderBy: { createdAt: "asc" },
+    });
+    return row ? toAuditEntry(row) : null;
+  }
+
   async query(filters: AuditQueryFilters): Promise<AuditEntry[]> {
     const where: Record<string, unknown> = {};
 

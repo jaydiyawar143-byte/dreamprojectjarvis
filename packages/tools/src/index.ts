@@ -1,6 +1,6 @@
 export { ToolRegistry, type ToolHealth, type ToolFilter } from "./registry.js";
 export { BaseTool } from "./base-tool.js";
-export { ToolExecutor } from "./executor.js";
+export { ToolExecutor, DEFAULT_TOOL_EXECUTION_TIMEOUT_MS } from "./executor.js";
 export { MemoryExecutionJournal, isAmbiguousWriteError, classifyWriteOutcome } from "./execution-journal.js";
 export { SystemEchoTool } from "./tools/system-echo.js";
 export { WebResearchTool, type SearchProvider, type WebSearchResult } from "./tools/web-research.js";

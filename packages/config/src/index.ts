@@ -105,6 +105,21 @@ const baseEnvSchema = z.object({
     .min(0)
     .max(86400000)
     .default(300000),
+
+  // Task Engine V2.3 - grace ADDED TO the executor's enforced 30 s deadline
+  // before a RUNNING task's outcome is reconciled from audit evidence.
+  // Total stale threshold = 30000 + this. 0 disables RUNNING recovery.
+  //
+  // The margin covers work outside the deadline timer: registry lookup,
+  // permission check, approval lookup, the audit write and the settle
+  // transition. Erring late costs one sweep; erring early would reconcile a
+  // live execution, so the default is deliberately generous.
+  JARVIS_TASK_RUNNING_RECOVERY_GRACE_MS: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(86400000)
+    .default(120000),
 });
 
 const serverEnvSchema = baseEnvSchema.extend({
