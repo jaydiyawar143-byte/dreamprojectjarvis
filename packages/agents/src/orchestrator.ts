@@ -33,7 +33,8 @@ import type {
 } from "@jarvis/core";
 import { JarvisError, decideSurface, classifyToolFailures, toClientErrorDetails } from "@jarvis/core";
 import type { SurfaceDecision } from "@jarvis/core";
-import type { AgentPolicy, AgentResolution } from "@jarvis/core";
+import type { AgentPolicy, AgentResolution, ISkillContextProvider } from "@jarvis/core";
+import { renderSkillContext } from "@jarvis/core";
 import type { AgentRegistry } from "./registry.js";
 import { rankAgentCandidates, isAmbiguous } from "./agent-router.js";
 import { isToolAllowed, resolveAllowedToolId, scopedToolRegistry } from "./agent-policy.js";
@@ -129,6 +130,8 @@ export class Orchestrator implements IOrchestrator {
   private readonly toolApprovalService: IToolApprovalService | null;
   private readonly permissionChecker: IPermissionChecker | null;
   private readonly pendingActionService: import("./pending-action-service.js").PendingActionService | null;
+  /** S3 — semantic planning context. Null keeps the prompt exactly as it was. */
+  private readonly skillContextProvider: ISkillContextProvider | null;
   private readonly toolDescriptionBuilder: ToolDescriptionBuilder;
   private readonly toolPlanValidator: ToolPlanValidator;
   private readonly toolPlanParser: ToolPlanParser;
@@ -163,6 +166,7 @@ export class Orchestrator implements IOrchestrator {
     this.toolApprovalService = config.toolApprovalService ?? null;
     this.permissionChecker = config.permissionChecker ?? null;
     this.pendingActionService = (config as unknown as { pendingActionService?: import("./pending-action-service.js").PendingActionService }).pendingActionService ?? null;
+    this.skillContextProvider = config.skillContext ?? null;
     this.toolDescriptionBuilder = new ToolDescriptionBuilder();
     this.toolPlanValidator = new ToolPlanValidator();
     this.toolPlanParser = new ToolPlanParser();
@@ -223,13 +227,20 @@ export class Orchestrator implements IOrchestrator {
       // The composed prompt is BYTE-IDENTICAL to what serial execution
       // produced: knowledge block, then memory block, then the message.
       // ---------------------------------------------------------------------
-      const [withMemory, knowledgeResult] = await Promise.all([
+      const [withMemory, knowledgeResult, skillBlock] = await Promise.all([
         this.injectMemoryContext(request.message, context.auth.userId),
         this.retrieveKnowledgeContext(request.message, context.auth.userId),
+        this.buildSkillBlock(context.auth.userId, policy),
       ]);
 
       const knowledge = knowledgeResult.applyTo(withMemory);
-      const userMessage = knowledge.message;
+      // S3 — the skill block is the OUTERMOST prefix, ahead of knowledge and
+      // memory. Those two are about this request; this is standing orientation
+      // about what works right now, and reads as a preamble to both. Empty
+      // string when there is no provider or nothing to say, which is why this
+      // is a concatenation rather than a branch: with no port the string is
+      // byte-identical to what every existing prompt test pins.
+      const userMessage = skillBlock + knowledge.message;
 
       if (process.env.NODE_ENV === "development") {
         console.log(JSON.stringify({
@@ -660,6 +671,66 @@ export class Orchestrator implements IOrchestrator {
    * the moment both halves are in hand — and built in the same order as before,
    * which is what keeps the prompt byte-identical.
    */
+  /**
+   * The skill block for this turn, or "" — Skill System V1, S3.
+   *
+   * SEMANTIC CONTEXT ONLY. What comes back is prose prepended to the message.
+   * It does not touch `providerTools`, which the agent still receives in full,
+   * and it is not consulted by `executeTools`, which re-checks every call
+   * against `policy.allowedTools` regardless of what this said. A skill named
+   * here is not thereby authorized; a tool absent from here is not thereby
+   * forbidden.
+   *
+   * NO POLICY, NO CONTEXT. Without a policy there is no allowlist to intersect
+   * against, so there is no way to promise the agent can reach what the block
+   * would describe. Silence is the honest answer, and it is also what the
+   * Sprint 1-5 registries (which carry no policies) already get.
+   *
+   * FAILURE IS NOT THE USER'S PROBLEM. A capability report needs live
+   * integration state, which can be slow or down. Every failure mode returns
+   * "" and the turn proceeds exactly as it does today; none of them aborts a
+   * conversation over missing ORIENTATION.
+   */
+  private async buildSkillBlock(
+    userId: string,
+    policy: AgentPolicy | undefined
+  ): Promise<string> {
+    if (!this.skillContextProvider || !policy) return "";
+
+    const startedAt = Date.now();
+    try {
+      const contexts = await this.skillContextProvider.forAgent(
+        userId,
+        new Set(policy.allowedTools)
+      );
+      const block = renderSkillContext(contexts);
+
+      // Logged because this is the one place S3 adds work to the critical
+      // path of every turn. A regression here is a regression everyone feels,
+      // and it should be visible before it is felt.
+      if (process.env.NODE_ENV === "development") {
+        console.log(JSON.stringify({
+          level: "debug",
+          event: "skill_context_built",
+          agentId: policy.agentId,
+          skills: contexts.length,
+          durationMs: Date.now() - startedAt,
+        }));
+      }
+
+      return block ? block + "\n\n" : "";
+    } catch (error) {
+      console.log(JSON.stringify({
+        level: "warn",
+        event: "skill_context_failed",
+        agentId: policy.agentId,
+        durationMs: Date.now() - startedAt,
+        error: error instanceof Error ? error.message : String(error),
+      }));
+      return "";
+    }
+  }
+
   private async retrieveKnowledgeContext(
     query: string,
     userId: string,

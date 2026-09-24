@@ -328,6 +328,27 @@ export async function sendChatMessage(
   });
 }
 
+// ---------------------------------------------------------------------------
+// S5 — the one explicit feedback signal.
+//
+// Sent against the request's `traceId`, which the API already returns on the
+// chat envelope and already persists on the assistant message, so nothing new
+// has to be correlated. HELPFUL and NOT_HELPFUL are the only values; a turn
+// that was never rated simply has no row, which is a different thing from
+// NOT_HELPFUL and stays different.
+// ---------------------------------------------------------------------------
+export type UserFeedbackValue = "HELPFUL" | "NOT_HELPFUL";
+
+export async function sendMessageFeedback(
+  traceId: string,
+  feedback: UserFeedbackValue
+): Promise<ApiResponse<{ traceId: string; feedback: UserFeedbackValue | null }>> {
+  return request(`/activity/trace/${encodeURIComponent(traceId)}/feedback`, {
+    method: "POST",
+    body: JSON.stringify({ feedback }),
+  });
+}
+
 export async function listConversations(): Promise<
   ApiResponse<Conversation[]>
 > {

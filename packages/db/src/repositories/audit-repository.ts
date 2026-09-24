@@ -117,6 +117,35 @@ export class PrismaAuditRepository implements IAuditRepository {
     return row ? toAuditEntry(row) : null;
   }
 
+  /**
+   * S5 — every audited row of ONE request, for the execution-outcome view.
+   *
+   * BOUNDED THE SAME WAY `findExecutionOutcome` IS, and for the same reason:
+   * `AuditLog` carries no index on `traceId`, and S5 is not a good enough
+   * reason to add one to a table this hot. `(userId, createdAt)` drives the
+   * scan and `traceId` filters it, so the work is proportional to the window
+   * rather than to the table.
+   *
+   * `userId` is the tenant boundary, exactly as every other read here has it:
+   * a trace id belonging to another user returns nothing rather than someone
+   * else's request.
+   *
+   * Ascending, so the caller receives the request in the order it happened.
+   */
+  async findByTrace(
+    userId: string,
+    traceId: string,
+    since: Date,
+    limit = 200
+  ): Promise<AuditEntry[]> {
+    const rows = await this.prisma.auditLog.findMany({
+      where: { userId, traceId, createdAt: { gte: since } },
+      orderBy: { createdAt: "asc" },
+      take: Math.min(limit, AUDIT_QUERY_MAX_ROWS),
+    });
+    return rows.map(toAuditEntry);
+  }
+
   async query(filters: AuditQueryFilters): Promise<AuditEntry[]> {
     const where: Record<string, unknown> = {};
 

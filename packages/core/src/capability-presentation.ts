@@ -38,7 +38,12 @@ import {
   type CapabilityReport,
   type CapabilityView,
 } from "./types/capability.js";
-import type { SkillDefinition, SkillView, UnlistedTool } from "./types/skill.js";
+import type {
+  SkillContext,
+  SkillDefinition,
+  SkillView,
+  UnlistedTool,
+} from "./types/skill.js";
 
 /**
  * A capability group as a USER would think of it.
@@ -537,6 +542,50 @@ function rankOf(availability: CapabilityAvailability): number {
 }
 
 /**
+ * Fold a skill's member capabilities into the facts every caller needs.
+ *
+ * ONE derivation, used by `buildSkillViews` (all members) and by
+ * `buildSkillContext` (members the selected agent may actually call). Sharing
+ * it is the point: the reader-facing view and the model-facing context must
+ * never disagree about whether a skill works.
+ *
+ * `members` must be non-empty.
+ */
+function summarizeMembers(members: readonly CapabilityView[]): {
+  usable: CapabilityView[];
+  availability: CapabilityAvailability;
+  toolIds: string[];
+  blockedBy: string[];
+} {
+  // The BEST member, not the weakest: an outcome with four working tools and
+  // one unconnected provider is partly available, not unavailable. What is
+  // missing is carried in the counts and in `blockedBy` instead of being
+  // allowed to veto the headline.
+  const availability = members.reduce<CapabilityAvailability>(
+    (best, c) => (rankOf(c.availability) < rankOf(best) ? c.availability : best),
+    members[0]!.availability
+  );
+
+  // Plain-English remedies, de-duplicated: four Google members blocked for
+  // one reason are one thing to fix, not four.
+  const blockedBy: string[] = [];
+  for (const c of members) {
+    if (isUsable(c.availability)) continue;
+    const why = c.reason;
+    if (why && !blockedBy.includes(why)) blockedBy.push(why);
+  }
+
+  return {
+    usable: members.filter((c) => isUsable(c.availability)),
+    availability,
+    // PLANNED members have no tool in this build, so their ids are not tool
+    // ids and do not belong in a list a caller might try to execute.
+    toolIds: members.filter((c) => c.registered).map((c) => c.id),
+    blockedBy,
+  };
+}
+
+/**
  * Turn a live report into the skills it currently supports.
  *
  * DERIVED, NEVER STORED — the same rule capability itself follows. Every field
@@ -577,33 +626,11 @@ export function buildSkillViews(report: CapabilityReport): SkillView[] {
     const caps = members.get(skill.id);
     if (!caps || caps.length === 0) continue;
 
-    const usable = caps.filter((c) => isUsable(c.availability));
-
-    // The BEST member, not the weakest: an outcome with four working tools and
-    // one unconnected provider is partly available, not unavailable. What is
-    // missing is carried in `unavailableCount` and `blockedBy` instead of being
-    // allowed to veto the headline.
-    const availability = caps.reduce<CapabilityAvailability>(
-      (best, c) => (rankOf(c.availability) < rankOf(best) ? c.availability : best),
-      caps[0]!.availability
-    );
-
-    // PLANNED members have no tool in this build, so their ids are not tool
-    // ids and do not belong in a list a caller might try to execute.
-    const toolIds = caps.filter((c) => c.registered).map((c) => c.id);
+    const { usable, availability, toolIds, blockedBy } = summarizeMembers(caps);
 
     const integrations: string[] = [];
     for (const c of caps) {
       if (c.integration && !integrations.includes(c.integration)) integrations.push(c.integration);
-    }
-
-    // Plain-English remedies, de-duplicated: four Google members blocked for
-    // one reason are one thing to fix, not four.
-    const blockedBy: string[] = [];
-    for (const c of caps) {
-      if (isUsable(c.availability)) continue;
-      const why = c.reason;
-      if (why && !blockedBy.includes(why)) blockedBy.push(why);
     }
 
     views.push({
@@ -632,6 +659,144 @@ export function buildSkillViews(report: CapabilityReport): SkillView[] {
       a.id.localeCompare(b.id)
   );
   return views;
+}
+
+/**
+ * The skills a SPECIFIC agent can serve right now — Skill System V1, Phase S3.
+ *
+ * A projection of `buildSkillViews`, narrowed twice:
+ *
+ *   1. `CapabilityService` has already dropped every tool no agent policy
+ *      grants, before the report was built;
+ *   2. this intersects what remains with the SELECTED agent's own allowlist.
+ *
+ * Both are narrowing. There is no argument to this function that widens
+ * anything, and nothing it returns is consulted when a tool call is authorized
+ * — `Orchestrator.executeTools` re-checks the policy afterwards regardless.
+ * The result exists to ORIENT a planner, not to gate it.
+ *
+ * Availability is recomputed over the intersected members rather than copied
+ * from the view. A skill whose only agent-visible tool is blocked must not
+ * inherit a healthy headline from a sibling this agent cannot call.
+ *
+ * A skill with no callable member for this agent is omitted entirely: showing
+ * it would invite a call the allowlist gate will deny and audit.
+ *
+ * Pure, synchronous, non-mutating. Same report and same allowlist in, same
+ * contexts out.
+ */
+export function buildSkillContext(
+  report: CapabilityReport,
+  agentAllowedToolIds: ReadonlySet<string>
+): SkillContext[] {
+  // Reuse the S1 derivation for membership, titles and ordering rules rather
+  // than re-deriving any of it here.
+  const views = buildSkillViews(report);
+
+  // The same resolver, over the same report — so a capability lands in the
+  // same skill it landed in above.
+  const membersBySkill = new Map<string, CapabilityView[]>();
+  for (const cap of report.capabilities) {
+    if (!agentAllowedToolIds.has(cap.id)) continue;
+    const rule = ruleFor(cap.id);
+    if (!rule) continue;
+    const list = membersBySkill.get(rule.id) ?? [];
+    list.push(cap);
+    membersBySkill.set(rule.id, list);
+  }
+
+  const contexts: SkillContext[] = [];
+  for (const view of views) {
+    const members = membersBySkill.get(view.id);
+    if (!members || members.length === 0) continue;
+
+    const { availability, toolIds, blockedBy } = summarizeMembers(members);
+    if (toolIds.length === 0) continue;
+
+    contexts.push({
+      id: view.id,
+      title: view.title,
+      summary: view.summary,
+      availability,
+      toolIds,
+      blockedBy,
+    });
+  }
+
+  // Re-sorted on the AGENT's availability, not the deployment's, so a caller
+  // reading top-down sees what this agent can actually do first. Total, so the
+  // ordering is deterministic.
+  contexts.sort(
+    (a, b) =>
+      rankOf(a.availability) - rankOf(b.availability) ||
+      b.toolIds.length - a.toolIds.length ||
+      a.id.localeCompare(b.id)
+  );
+  return contexts;
+}
+
+/**
+ * Which skills took part in a piece of work — Skill System V1, Phase S4.
+ *
+ * DERIVED, NOT RECORDED. Nothing stores skill participation, and nothing
+ * should: `AuditLog` already carries the tool id, the trace id and the
+ * execution id for every call, and `skillForToolId` is a pure function. So
+ * "which skills participated in this objective?" is answerable by grouping the
+ * rows that already exist and mapping them here — no column, no table, no
+ * second write path that could disagree with the audit trail.
+ *
+ * Order follows first appearance, so a caller reading it top-down sees the
+ * order the work actually happened in. Tools belonging to no skill — the
+ * intentional orphans, `self.describe` and the `task.*` lifecycle — contribute
+ * nothing rather than being invented a home, and an unknown id is simply
+ * absent.
+ */
+export function skillsForToolIds(toolIds: readonly string[]): string[] {
+  const seen: string[] = [];
+  for (const id of toolIds) {
+    const skill = ruleFor(id);
+    if (skill && !seen.includes(skill.id)) seen.push(skill.id);
+  }
+  return seen;
+}
+
+/**
+ * Skill context as the model reads it.
+ *
+ * OUTCOMES, NOT INVENTORY. The provider already receives every tool definition
+ * by name; repeating them here would be noise at best. What the definitions
+ * cannot express is which of them will actually work right now — a tool
+ * definition looks identical whether Google is connected or not — and that is
+ * the whole reason this block exists.
+ *
+ * DELIBERATELY ABSENT: tool ids, risk levels, parameter shapes, integration
+ * ids, account identifiers, counts. Raw ids in particular are kept out because
+ * a model shown one will eventually quote it to a user, which is the defect
+ * the capability briefing was rewritten to fix.
+ *
+ * The closing line is not decoration. Without it a model reads a list of
+ * skills as the list of things it may do, and stops calling the tools that
+ * belong to no skill on purpose — `self.describe`, the `task.*` lifecycle.
+ *
+ * Returns "" when there is nothing to say, so the caller can concatenate
+ * without a branch and the prompt is untouched.
+ */
+export function renderSkillContext(contexts: readonly SkillContext[]): string {
+  if (contexts.length === 0) return "";
+
+  const lines = ["WHAT YOU CAN ACTUALLY DO RIGHT NOW:", ""];
+  for (const skill of contexts) {
+    lines.push(`${skill.title} — ${skill.summary}`);
+    if (skill.blockedBy.length > 0) {
+      lines.push(`  Partly unavailable: ${skill.blockedBy.join(" ")}`);
+    }
+  }
+  lines.push("");
+  lines.push(
+    "This is orientation, not a restriction: use whichever of your tools the request needs, including any not named above. Where something is listed as unavailable, say so and say why rather than attempting it."
+  );
+
+  return lines.join("\n");
 }
 
 function integrationLabel(report: CapabilityReport, integrationId: string): string {

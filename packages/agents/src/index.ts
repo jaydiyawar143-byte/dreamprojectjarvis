@@ -22,6 +22,14 @@ export { LocationAgent } from "./agents/location-agent.js";
 export { Orchestrator } from "./orchestrator.js";
 export { MockAIProvider } from "./mock-ai-provider.js";
 export { ToolPlanValidator, ToolPlanParser, ToolDescriptionBuilder } from "./tool-planner.js";
+// S4 — multi-round tool context. One implementation of "what has this turn
+// already found", shared by every agent that runs tools.
+export {
+  buildRoundMessages,
+  budgetedEnvelopes,
+  DEFAULT_TOOL_RESULT_BUDGET_CHARS,
+  type ToolRound,
+} from "./tool-rounds.js";
 export type { PlanValidationResult } from "./tool-planner.js";
 export { PendingActionService } from "./pending-action-service.js";
 export { detectIntent, isPendingActionExpired, approvalStatusToPendingState, summarizePendingAction } from "./intent-detector.js";

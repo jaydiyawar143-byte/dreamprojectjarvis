@@ -1,7 +1,7 @@
 import { Router } from "express";
 import type { Response } from "express";
 
-import type { AuditEntry } from "@jarvis/core";
+import { isUserFeedback, type AuditEntry } from "@jarvis/core";
 import { createAuthMiddleware, type AuthenticatedRequest } from "../middleware/auth.js";
 import { asyncHandler } from "../middleware/error-handler.js";
 import type { Container } from "../services/container.js";
@@ -143,6 +143,122 @@ export function createActivityRouter(container: Container): Router {
           count: filtered.length,
           limit,
         },
+        timestamp: new Date().toISOString(),
+      });
+    })
+  );
+
+  // -------------------------------------------------------------------------
+  // S5 — GET /api/v1/activity/trace/:traceId
+  //
+  // The execution outcome of ONE request: which agent ran, which skills and
+  // tools took part, what the orchestrator concluded, and the explicit user
+  // signal if one was given.
+  //
+  // Read-only, derived, and scoped by the verified JWT exactly as the timeline
+  // above is. A trace belonging to another user answers 404 — the same answer
+  // an unknown id gets, so this cannot be used to discover which ids exist.
+  // -------------------------------------------------------------------------
+  router.get(
+    "/trace/:traceId",
+    requireAuth,
+    asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
+      if (!req.auth) {
+        res.status(401).json({
+          success: false,
+          error: { code: "AUTHENTICATION_REQUIRED", message: "Authentication required" },
+          timestamp: new Date().toISOString(),
+        });
+        return;
+      }
+
+      const traceId = optionalString(req.params.traceId, 64);
+      if (!traceId) {
+        res.status(400).json({
+          success: false,
+          error: { code: "INVALID_REQUEST", message: "A traceId is required" },
+          timestamp: new Date().toISOString(),
+        });
+        return;
+      }
+
+      const outcome = await container.executionOutcomes.outcome(req.auth.userId, traceId);
+      if (!outcome) {
+        res.status(404).json({
+          success: false,
+          error: { code: "NOT_FOUND", message: "No activity for that request" },
+          timestamp: new Date().toISOString(),
+        });
+        return;
+      }
+
+      res.status(200).json({
+        success: true,
+        data: outcome,
+        timestamp: new Date().toISOString(),
+      });
+    })
+  );
+
+  // -------------------------------------------------------------------------
+  // S5 — POST /api/v1/activity/trace/:traceId/feedback
+  //
+  // The ONE explicit user signal: HELPFUL or NOT_HELPFUL, and nothing else.
+  //
+  // WHAT THIS ENDPOINT CANNOT DO. It reaches a service that holds no registry,
+  // no executor and no policy, so no request to it can run a tool. It records
+  // a signal and returns the re-derived view; nothing downstream consumes it.
+  //
+  // Absence is not a negative. A request never rated stays `feedback: null`,
+  // which is a different thing from NOT_HELPFUL and is kept different.
+  // -------------------------------------------------------------------------
+  router.post(
+    "/trace/:traceId/feedback",
+    requireAuth,
+    asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
+      if (!req.auth) {
+        res.status(401).json({
+          success: false,
+          error: { code: "AUTHENTICATION_REQUIRED", message: "Authentication required" },
+          timestamp: new Date().toISOString(),
+        });
+        return;
+      }
+
+      const traceId = optionalString(req.params.traceId, 64);
+      const feedback = (req.body ?? {}).feedback;
+
+      if (!traceId || !isUserFeedback(feedback)) {
+        res.status(400).json({
+          success: false,
+          error: {
+            code: "INVALID_REQUEST",
+            message: "feedback must be HELPFUL or NOT_HELPFUL",
+          },
+          timestamp: new Date().toISOString(),
+        });
+        return;
+      }
+
+      const outcome = await container.executionOutcomes.record(
+        req.auth.userId,
+        traceId,
+        feedback,
+        ...(req.ip ? [{ ipAddress: req.ip }] : [])
+      );
+
+      if (!outcome) {
+        res.status(404).json({
+          success: false,
+          error: { code: "NOT_FOUND", message: "No activity for that request" },
+          timestamp: new Date().toISOString(),
+        });
+        return;
+      }
+
+      res.status(200).json({
+        success: true,
+        data: outcome,
         timestamp: new Date().toISOString(),
       });
     })

@@ -88,6 +88,12 @@ export function MessageList({ messages, loading, sending, onRetry, activeConvers
                     content={msg.content}
                     role={msg.role as "user" | "assistant"}
                     onRetry={canRetry ? onRetry : undefined}
+                    // S5 — rides the message metadata the API already stores.
+                    traceId={
+                      typeof msg.metadata?.traceId === "string"
+                        ? msg.metadata.traceId
+                        : undefined
+                    }
                   />
                 </div>
               </div>

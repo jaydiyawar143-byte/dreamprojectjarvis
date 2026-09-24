@@ -23,6 +23,7 @@
 import { sanitizeToolResult } from "@jarvis/tools";
 
 import { BaseAgent } from "./base-agent.js";
+import { buildRoundMessages, type ToolRound } from "./tool-rounds.js";
 import { withCurrentDate } from "./temporal-context.js";
 import type {
   AgentContext,
@@ -32,7 +33,6 @@ import type {
   AgentConfig,
   AICompletionResponse,
   AIMessage,
-  AIToolCall,
   AIToolDefinition,
   ConversationMessage,
   IAIProvider,
@@ -56,7 +56,13 @@ export interface DomainAgentConfig {
 
 interface ConversationState {
   userMessage: string;
-  assistantResponse: AICompletionResponse;
+  /**
+   * S4 — every completed round of this turn, oldest first, so round four can
+   * still reason over round one. Before S4 only the latest was kept.
+   */
+  rounds: ToolRound[];
+  /** The assistant turn whose tool calls are still awaiting results. */
+  pending: AICompletionResponse | null;
 }
 
 export interface AgentAction {
@@ -149,11 +155,14 @@ export abstract class DomainAgent extends BaseAgent {
 
       if (toolResults && toolResults.length > 0) {
         const state = this.conversationStates.get(conversationId);
-        if (state) {
+        if (state?.pending) {
+          // Close the open round with the results it asked for, then replay
+          // every round so far. This is the S4 change in one place.
+          state.rounds.push({ assistant: state.pending, results: toolResults });
+          state.pending = null;
           messages = this.buildToolResultMessages(
             state.userMessage,
-            state.assistantResponse,
-            toolResults,
+            state.rounds,
             input.conversationHistory,
             systemPrompt
           );
@@ -187,13 +196,13 @@ export abstract class DomainAgent extends BaseAgent {
       });
 
       if (response.message.toolCalls && response.message.toolCalls.length > 0) {
+        const existing = this.conversationStates.get(conversationId);
+        const continuing = Boolean(toolResults && toolResults.length > 0 && existing);
         this.conversationStates.set(conversationId, {
-          userMessage:
-            toolResults && toolResults.length > 0
-              ? this.conversationStates.get(conversationId)?.userMessage ??
-                input.message
-              : input.message,
-          assistantResponse: response,
+          userMessage: continuing ? (existing?.userMessage ?? input.message) : input.message,
+          // Rounds survive a continuation and reset on a fresh question.
+          rounds: continuing ? (existing?.rounds ?? []) : [],
+          pending: response,
         });
 
         const actions = this.normalizeActions(
@@ -265,53 +274,17 @@ export abstract class DomainAgent extends BaseAgent {
 
   protected buildToolResultMessages(
     originalUserMessage: string,
-    assistantResponse: AICompletionResponse,
-    toolResults: ToolExecutionResult[],
+    rounds: readonly ToolRound[],
     conversationHistory: ConversationMessage[] | undefined,
     systemPrompt: string
   ): AIMessage[] {
-    const messages: AIMessage[] = [];
-
-    if (systemPrompt) {
-      messages.push({ role: "system", content: systemPrompt });
-    }
-
-    for (const msg of conversationHistory ?? []) {
-      messages.push({
-        role: msg.role as "user" | "assistant",
-        content: msg.content,
-      });
-    }
-
-    messages.push({ role: "user", content: originalUserMessage });
-    messages.push({
-      role: "assistant",
-      content: assistantResponse.message.content ?? "",
-      toolCalls: assistantResponse.message.toolCalls,
+    return buildRoundMessages({
+      systemPrompt,
+      ...(conversationHistory ? { conversationHistory } : {}),
+      userMessage: originalUserMessage,
+      rounds,
+      renderEnvelope: (tr) => this.buildToolResultEnvelope(tr),
     });
-
-    const toolCallsById = new Map<string, AIToolCall>();
-    for (const tc of assistantResponse.message.toolCalls ?? []) {
-      toolCallsById.set(tc.id, tc);
-    }
-
-    for (const tr of toolResults) {
-      let toolCallId = tr.toolCallId;
-      if (!toolCallId) {
-        const matching =
-          toolCallsById.get(tr.toolId) ?? [...toolCallsById.values()].shift();
-        if (matching) toolCallId = matching.id;
-      }
-
-      messages.push({
-        role: "tool",
-        content: this.buildToolResultEnvelope(tr),
-        name: tr.toolId,
-        toolCallId,
-      });
-    }
-
-    return messages;
   }
 
   /**

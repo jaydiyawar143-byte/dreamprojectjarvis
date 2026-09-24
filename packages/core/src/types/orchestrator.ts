@@ -1,4 +1,5 @@
 import type { JarvisRequest, JarvisResponse } from "./request.js";
+import type { SkillContext } from "./skill.js";
 import type { SessionContext } from "./context.js";
 import type { IMemoryStore } from "./memory.js";
 import type { IMemoryExtractor } from "./memory.js";
@@ -106,6 +107,31 @@ export interface OrchestratorConfig {
    * permission narrowing is skipped and the tool layer remains the only gate.
    */
   permissionChecker?: IPermissionChecker;
+  /**
+   * Skill System V1, S3 — semantic planning context for the selected agent.
+   *
+   * A PORT, not a service: `packages/agents` cannot import `apps/api`, where
+   * `CapabilityService` lives, so the composition root supplies this narrow
+   * function instead. Same shape and same optionality as `knowledgeRetriever`
+   * above, and the same consequence when absent — the Orchestrator composes no
+   * skill block and behaves byte-identically to before S3.
+   *
+   * It receives the agent's allowlist so the context it returns can never name
+   * a tool that agent may not call. It grants nothing: the returned value is
+   * rendered into the prompt and is never consulted when a call is authorized.
+   */
+  skillContext?: ISkillContextProvider;
+}
+
+/**
+ * Supplies the skills a given agent can serve for a given user, right now.
+ *
+ * Deliberately one method and no state. An implementation derives from the
+ * live capability report per request — never from a cache, because an
+ * availability that outlives its token is a lie the model would then repeat.
+ */
+export interface ISkillContextProvider {
+  forAgent(userId: string, allowedToolIds: ReadonlySet<string>): Promise<SkillContext[]>;
 }
 
 // ---------------------------------------------------------------------------

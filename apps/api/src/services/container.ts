@@ -1,4 +1,5 @@
 import type { IOrchestrator, IToolExecutor, ITool, AIToolDefinition, ShutdownLifecycle, IMemoryStore, IEmbeddingProvider, IKnowledgeRetriever, IAIProvider } from "@jarvis/core";
+import { ExecutionOutcomeService } from "./execution-outcome-service.js";
 import type { TokenService } from "@jarvis/security";
 import type { IMemoryExtractor } from "@jarvis/core";
 import {
@@ -134,7 +135,12 @@ import { GoogleWriteService } from "./google/write-service.js";
 import { buildGoogleWriteService } from "./google/build-write-service.js";
 import { DbBackedRateLimiter } from "./rate-limiter.js";
 import { CapabilityService } from "./capabilities/capability-service.js";
-import { FallbackAIProvider, INTEGRATION_CATALOG, type ProviderChainEvent } from "@jarvis/core";
+import {
+  buildSkillContext,
+  FallbackAIProvider,
+  INTEGRATION_CATALOG,
+  type ProviderChainEvent,
+} from "@jarvis/core";
 import { buildIntegrationCommandService } from "./integrations/build.js";
 
 export interface Container {
@@ -143,6 +149,13 @@ export interface Container {
   orchestrator: IOrchestrator;
   conversationRepo: PrismaConversationRepository;
   auditLogger: AuditLogger;
+  /**
+   * S5 — Execution Outcome & Evaluation. An OBSERVER over `AuditLog`: it
+   * derives what happened during a request and records the one explicit user
+   * signal. It holds no registry, executor or policy, so it cannot run a tool,
+   * and nothing in the planning path reads it back.
+   */
+  executionOutcomes: ExecutionOutcomeService;
   /**
    * Phase 10.6 — durable execution journal (Prisma-backed), exposed so the
    * shutdown controller can run idempotent startup recovery and so hosts
@@ -1401,6 +1414,47 @@ export function getContainer(options?: {
     status: knowledgeRetriever ? "rag_enabled" : "rag_disabled_no_embedding_provider",
   }));
 
+  // ---------------------------------------------------------------------------
+  // Skill System V1, S3 — the skill-context port.
+  //
+  // Built from the SAME `CapabilityService` the capability tools and the
+  // self-knowledge service use. There is no second capability derivation here:
+  // this asks for the one report and projects it with `buildSkillContext`,
+  // which is itself a projection of `buildSkillViews`.
+  //
+  // WHAT IT CANNOT DO. It returns prose-shaped metadata. It does not touch the
+  // tool definitions handed to any agent, and the Orchestrator re-checks every
+  // resulting tool call against `AGENT_POLICIES` afterwards. Passing the
+  // agent's own allowlist in is what keeps the context from ever describing
+  // reach the selected agent does not have.
+  //
+  // NO CACHE, DELIBERATELY. Availability is a fact about right now; a cached
+  // one survives a token expiring and turns into a false promise. The report
+  // is built per turn, alongside memory recall and knowledge retrieval in the
+  // same `Promise.all`, so it costs wall-clock time only if it is the slowest
+  // of the three.
+  //
+  // Absent when `capabilityService` is null (no integration command service on
+  // this deployment), in which case the Orchestrator composes no skill block.
+  // ---------------------------------------------------------------------------
+  const skillContextProvider = capabilityService
+    ? {
+        async forAgent(userId: string, allowedToolIds: ReadonlySet<string>) {
+          const report = await capabilityService.report(userId);
+          return buildSkillContext(report, allowedToolIds);
+        },
+      }
+    : null;
+
+  // S5 — built from the SAME audit repository and the SAME logger every other
+  // path already uses. No second store, no second pipeline, no schema change:
+  // an execution outcome is a projection of rows that already exist, and a
+  // feedback signal is one more audited user action beside them.
+  const executionOutcomes = new ExecutionOutcomeService({
+    audit: auditRepo,
+    auditLogger,
+  });
+
   const orchestrator = new Orchestrator(agentRegistry, toolExecutor, auditLogger, {
     toolRegistry: resolvingRegistry,
     toolApprovalService,
@@ -1418,6 +1472,8 @@ export function getContainer(options?: {
       : {}),
     // Sprint 3.7: RAG context injection. Absent when no provider is configured.
     ...(knowledgeRetriever !== null ? { knowledgeRetriever } : {}),
+    // S3: skill-aware planning context. Absent leaves the prompt untouched.
+    ...(skillContextProvider !== null ? { skillContext: skillContextProvider } : {}),
   });
 
   const recommendationRepo = new PrismaRecommendationRepository(prisma);
@@ -1466,6 +1522,7 @@ export function getContainer(options?: {
     orchestrator,
     conversationRepo,
     auditLogger,
+    executionOutcomes,
     executionJournal,
     approvalRepo,
     toolRegistry,

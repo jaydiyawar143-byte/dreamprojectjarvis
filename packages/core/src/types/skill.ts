@@ -150,3 +150,62 @@ export interface SkillView {
   /** Things the user can say right now, each backed by a usable tool. */
   youCanAsk: readonly string[];
 }
+
+/**
+ * What the MODEL is told about a skill — Skill System V1, Phase S3.
+ *
+ * A deliberately smaller thing than `SkillView`. The view answers "what should
+ * a person be shown?"; this answers "what does the planner need to orient
+ * itself?", and the two are not the same question. Counts, approval tallies and
+ * curated phrasings are all useful to a reader and noise to a planner, so they
+ * are not here.
+ *
+ * SEMANTIC CONTEXT, NOT A RESTRICTION. This is the load-bearing sentence of S3.
+ * The tool definitions handed to the provider are unchanged by anything here,
+ * and `Orchestrator.executeTools` re-checks every call against the agent's
+ * policy afterwards. So a skill context can make the model better ORIENTED and
+ * cannot make it more, or less, POWERFUL:
+ *
+ *   - naming a tool here does not authorize it;
+ *   - omitting a tool here does not forbid it. The planner may still call
+ *     anything its policy allows, which matters because real tools belong to
+ *     no skill on purpose (`self.describe`, the `task.*` lifecycle).
+ *
+ * AGENT-SCOPED. `toolIds` is intersected with the SELECTED agent's allowlist,
+ * so a skill never advertises reach the agent about to run does not have.
+ *
+ * DERIVED PER REQUEST. Availability is a fact about right now. A stored one is
+ * a claim that goes stale the moment a token expires, so nothing here is
+ * persisted or cached.
+ */
+export interface SkillContext {
+  id: string;
+  /** The outcome, in the user's words. */
+  title: string;
+  /** One sentence on what this skill gets done. */
+  summary: string;
+
+  /**
+   * The state of the most usable member THIS AGENT can reach.
+   *
+   * Recomputed over the intersected member set rather than copied from the
+   * view: a skill whose only agent-visible tool is blocked must not inherit
+   * the headline of a sibling tool this agent cannot call.
+   */
+  availability: CapabilityAvailability;
+
+  /**
+   * Authorized member tool ids, for callers that need them.
+   *
+   * Present in the object, deliberately ABSENT from the rendered prose: the
+   * provider already receives the tool definitions by name, and putting raw
+   * ids in front of the model is how they end up quoted back to a user.
+   */
+  toolIds: readonly string[];
+
+  /**
+   * Distinct, plain-English reasons some members cannot run. Empty when the
+   * skill is whole. Never contains provider internals or credentials.
+   */
+  blockedBy: readonly string[];
+}

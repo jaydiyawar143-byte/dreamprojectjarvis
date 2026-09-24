@@ -6,6 +6,15 @@
 >
 > Task Engine V2 (V2.1 / V2.2 / V2.3) is accepted and was not touched.
 >
+> **S3 note.** Skill-aware planning is built, on **Flow C**: skill context is
+> composed into the message after agent selection, as prose, and the model's
+> tool definitions are untouched. Two things this document only guessed at were
+> settled by tracing the running code: there is no single "planner" — the MODEL
+> plans the conversational path, and `TaskPlannerService` plans the task path —
+> and `Orchestrator.buildToolSystemPrompt` / `validateToolPlan` /
+> `parseToolPlan` are reached only by tests, so S3 was deliberately NOT built
+> on them.
+>
 > **Superseded in part.** Phases S1 and S2 have since been implemented. Where
 > this document says PROPOSED and the built thing differs, the built thing is
 > authoritative: see [`JARVIS_SKILL_SYSTEM_V1.md`](./JARVIS_SKILL_SYSTEM_V1.md).

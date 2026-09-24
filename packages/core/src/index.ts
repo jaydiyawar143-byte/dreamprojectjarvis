@@ -96,6 +96,10 @@ export * from "./capability-catalog.js";
 // the planner and ToolExecutor. There is deliberately no skill runtime.
 export * from "./types/skill.js";
 export * from "./capability-presentation.js";
+// S5 — Execution Outcome & Evaluation. An OBSERVER: a pure projection over
+// audit rows that already exist, plus the one explicit user signal. It
+// executes nothing and feeds nothing back into planning.
+export * from "./execution-outcome.js";
 export * from "./speech-preparation.js";
 export * from "./tool-failure-classifier.js";
 export * from "./integration-health-snapshot.js";

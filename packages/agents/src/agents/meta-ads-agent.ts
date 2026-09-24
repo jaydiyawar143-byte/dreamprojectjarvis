@@ -1,4 +1,6 @@
 import { maskIdentifier } from "@jarvis/core";
+
+import { buildRoundMessages, type ToolRound } from "../tool-rounds.js";
 import { BaseAgent } from "../base-agent.js";
 import { withCurrentDate } from "../temporal-context.js";
 import type {
@@ -7,7 +9,6 @@ import type {
   IAIProvider,
   AIMessage,
   AIToolDefinition,
-  AIToolCall,
   AICompletionResponse,
   ToolExecutionResult,
   ConversationMessage,
@@ -25,7 +26,10 @@ export interface MetaAdsAgentConfig {
 
 interface ConversationState {
   userMessage: string;
-  assistantResponse: AICompletionResponse;
+  /** S4 — every completed round of this turn, oldest first. */
+  rounds: ToolRound[];
+  /** The assistant turn whose tool calls are still awaiting results. */
+  pending: AICompletionResponse | null;
 }
 
 export class MetaAdsAgent extends BaseAgent {
@@ -244,11 +248,13 @@ export class MetaAdsAgent extends BaseAgent {
 
       if (toolResults && toolResults.length > 0) {
         const state = this.conversationStates.get(conversationId);
-        if (state) {
+        if (state?.pending) {
+          // S4 — close the open round, then replay every round of this turn.
+          state.rounds.push({ assistant: state.pending, results: toolResults });
+          state.pending = null;
           messages = this.buildToolResultMessages(
             state.userMessage,
-            state.assistantResponse,
-            toolResults,
+            state.rounds,
             input.conversationHistory,
             fullSystemPrompt
           );
@@ -256,7 +262,8 @@ export class MetaAdsAgent extends BaseAgent {
           messages = this.buildInitialMessages(input.message, input.conversationHistory, fullSystemPrompt);
           this.conversationStates.set(conversationId, {
             userMessage: input.message,
-            assistantResponse: { message: { role: "assistant", content: "" }, finishReason: "stop", model: "" },
+            rounds: [],
+            pending: null,
           });
         }
       } else {
@@ -275,11 +282,12 @@ export class MetaAdsAgent extends BaseAgent {
       });
 
       if (response.message.toolCalls && response.message.toolCalls.length > 0) {
+        const existing = this.conversationStates.get(conversationId);
+        const continuing = Boolean(toolResults && toolResults.length > 0 && existing);
         this.conversationStates.set(conversationId, {
-          userMessage: toolResults && toolResults.length > 0
-            ? (this.conversationStates.get(conversationId)?.userMessage ?? input.message)
-            : input.message,
-          assistantResponse: response,
+          userMessage: continuing ? (existing?.userMessage ?? input.message) : input.message,
+          rounds: continuing ? (existing?.rounds ?? []) : [],
+          pending: response,
         });
 
         const actions = response.message.toolCalls.map((tc) => {
@@ -355,68 +363,17 @@ export class MetaAdsAgent extends BaseAgent {
 
   private buildToolResultMessages(
     originalUserMessage: string,
-    assistantResponse: AICompletionResponse,
-    toolResults: ToolExecutionResult[],
-    conversationHistory?: ConversationMessage[],
-    systemPrompt?: string
+    rounds: readonly ToolRound[],
+    conversationHistory: ConversationMessage[] | undefined,
+    systemPrompt: string
   ): AIMessage[] {
-    const messages: AIMessage[] = [];
-
-    if (systemPrompt) {
-      messages.push({
-        role: "system",
-        content: systemPrompt,
-      });
-    }
-
-    if (conversationHistory && conversationHistory.length > 0) {
-      for (const msg of conversationHistory) {
-        messages.push({
-          role: msg.role as "user" | "assistant",
-          content: msg.content,
-        });
-      }
-    }
-
-    messages.push({
-      role: "user",
-      content: originalUserMessage,
+    return buildRoundMessages({
+      systemPrompt,
+      ...(conversationHistory ? { conversationHistory } : {}),
+      userMessage: originalUserMessage,
+      rounds,
+      renderEnvelope: (tr) => this.buildToolResultEnvelope(tr),
     });
-
-    messages.push({
-      role: "assistant",
-      content: assistantResponse.message.content ?? "",
-      toolCalls: assistantResponse.message.toolCalls,
-    });
-
-    const toolCallsById = new Map<string, AIToolCall>();
-    if (assistantResponse.message.toolCalls) {
-      for (const tc of assistantResponse.message.toolCalls) {
-        toolCallsById.set(tc.id, tc);
-      }
-    }
-
-    for (const tr of toolResults) {
-      let toolCallId = tr.toolCallId;
-      if (!toolCallId) {
-        const matching = toolCallsById.get(tr.toolId)
-          ?? [...toolCallsById.values()].shift();
-        if (matching) {
-          toolCallId = matching.id;
-        }
-      }
-
-      const envelope = this.buildToolResultEnvelope(tr);
-
-      messages.push({
-        role: "tool",
-        content: envelope,
-        name: tr.toolId,
-        toolCallId,
-      });
-    }
-
-    return messages;
   }
 
   private buildToolResultEnvelope(tr: ToolExecutionResult): string {

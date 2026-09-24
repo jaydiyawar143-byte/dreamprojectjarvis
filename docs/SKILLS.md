@@ -23,6 +23,36 @@ Both are defined in `packages/agents/src/agent-policy.ts`. Adding a capability m
 > the four `task.*` tools (JARVIS's own work queue, not your to-do list — which
 > is `tasks.list`, a different tool for a different question) and `system.echo`
 > (a test fixture). None of that changes what any of them may do.
+>
+> Phase S3 tells the planner which skills actually work right now, as a short
+> block of prose composed into the message. It is **orientation, not
+> permission**: the tool definitions offered to the model are unchanged, and
+> every tool call is still checked against `agent-policy.ts` afterwards. A tool
+> named in that block is not thereby authorized, and a tool missing from it is
+> not thereby forbidden — which is why the unlisted tools above keep working.
+>
+> Phase S4 is **not** a composition engine. Doing several things for one
+> request already worked: the general assistant may call tools from seven of
+> the eight skills, and the orchestrator already ran up to five rounds, feeding
+> each tool result back so the model could pick what to do next. What it could
+> not do was **remember earlier rounds** — by step three, step one's findings
+> were gone. S4 replays every round of the turn instead, within a character
+> budget that drops the oldest first and never the newest. Limits are
+> unchanged: five rounds, ten tool calls.
+>
+> Two things S4 deliberately did not do. **Cross-agent work is still not
+> possible** — one agent runs per request, so "check my ads and WhatsApp me the
+> summary" fails, because `whatsapp.send` belongs to the communication agent
+> alone. And **durable, scheduled work stays with the Task Engine**: "every
+> Monday, analyse and send" is not a conversation.
+>
+> Phase S5 added an **observer**. It can now tell you what happened during a
+> request — which agent ran, which skills and tools took part, and how it ended
+> — by reading the audit rows it already writes. And you can mark an answer 👍
+> or 👎. Those are two different things on purpose: a tool working is not the
+> same as an answer being useful, and an answer you never rated is **not** the
+> same as one you disliked. S5 only records these. Nothing reads them back into
+> how JARVIS decides anything — there is no learning here.
 
 Verified against the code on 2026-09-17.
 

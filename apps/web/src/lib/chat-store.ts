@@ -175,6 +175,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         metadata: {
           ...res.data.metadata,
           ...(res.data.pendingAction && { pendingAction: res.data.pendingAction }),
+          // S5 — the trace this answer came from. The API already persists it
+          // on the stored assistant message, so carrying it here means a live
+          // message and a reloaded one both know how to be rated.
+          ...(res.traceId ? { traceId: res.traceId } : {}),
           requestId,
         },
         createdAt: new Date().toISOString(),
