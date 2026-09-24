@@ -315,6 +315,18 @@ export abstract class DomainAgent extends BaseAgent {
       );
     }
 
+    if (tr.status === "not_requested") {
+      lines.push(
+        "ACTION: The user did not request this action — the message was a statement, a question, or a planning/preparation request. Do NOT perform it. Answer conversationally; if a plan was requested, present the recommendation/analysis flow instead of acting."
+      );
+    }
+
+    if (tr.status === "clarification_required") {
+      lines.push(
+        "ACTION: The user's message did not clearly request this action. Do NOT perform it. Ask the user to confirm exactly what they want changed before proceeding."
+      );
+    }
+
     if (tr.error) {
       lines.push(`ERROR: ${tr.error}`);
     }

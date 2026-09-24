@@ -47,7 +47,9 @@ export type ToolExecutionStatus =
   | "permission_denied"
   | "approval_required"
   | "approval_pending"
-  | "approval_denied";
+  | "approval_denied"
+  | "not_requested"
+  | "clarification_required";
 
 export interface ToolExecutionRequest {
   toolId: string;

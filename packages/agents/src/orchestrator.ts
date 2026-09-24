@@ -12,6 +12,7 @@ import type {
   ToolExecutionResult,
   ToolExecutionSummary,
   ToolExecutionEntry,
+  ToolExecutionStatus,
   IMemoryStore,
   IMemoryExtractor,
   IEmbeddingProvider,
@@ -39,6 +40,7 @@ import type { AgentRegistry } from "./registry.js";
 import { rankAgentCandidates, isAmbiguous } from "./agent-router.js";
 import { isToolAllowed, resolveAllowedToolId, scopedToolRegistry } from "./agent-policy.js";
 import { ToolDescriptionBuilder, ToolPlanValidator, ToolPlanParser } from "./tool-planner.js";
+import { classifyWriteIntent } from "./write-intent-gate.js";
 import {
   DEFAULT_KNOWLEDGE_BUDGET_CHARS,
   DEFAULT_KNOWLEDGE_MIN_SCORE,
@@ -426,7 +428,8 @@ export class Orchestrator implements IOrchestrator {
         const { results: toolResults, pendingAction } = await this.executeTools(
           output.actions,
           context,
-          policy
+          policy,
+          request.message
         );
         allToolResults.push(...toolResults);
         if (pendingAction) {
@@ -1016,7 +1019,13 @@ export class Orchestrator implements IOrchestrator {
   private async executeTools(
     actions: Array<{ toolId: string; toolCallId?: string; params: Record<string, unknown> }>,
     context: SessionContext,
-    policy: AgentPolicy | undefined
+    policy: AgentPolicy | undefined,
+    /**
+     * The ORIGINAL user turn, verbatim. Used by the write-intent gate, which
+     * must judge the message the user actually sent — never the composed
+     * prompt (`userMessage`) and never text the model generated mid-turn.
+     */
+    userMessage: string
   ): Promise<{ results: ToolExecutionResult[]; pendingAction?: Record<string, unknown> }> {
     const results: ToolExecutionResult[] = [];
     const executionId = crypto.randomUUID();
@@ -1082,6 +1091,75 @@ export class Orchestrator implements IOrchestrator {
       // Check if this is a write tool that needs pending-action flow
       const tool = this.toolRegistry?.get(action.toolId);
       const needsConfirmation = tool?.requiresApproval === true;
+
+      // ---------------------------------------------------------------------
+      // Write-intent gate — BUG-INTENT-001 / BUG-SAFETY-001.
+      //
+      // Between the model deciding a tool and the pending-action branch. A
+      // contextual statement ("My project budget is ₹50,000") must never
+      // become a pending action or an approval request; the LLM inside the
+      // agent is the one that decides tool calls, and that exact input has
+      // been observed to summon `budget.update` with no request behind it.
+      //
+      // READ_ONLY tools are untouched — analysis and recommendations keep
+      // working. The gate evaluates the ORIGINAL user message, so a write the
+      // agent decided mid-turn without being asked is stopped even though the
+      // round loop re-fed it composed prompts. A refused write renders back
+      // to the model as a normal tool-result envelope (the agent answers
+      // conversationally — the frontend and API contract do not change) and
+      // is audited, because a refused write is worth explaining later.
+      // Nothing executes and no pending action/approval is ever created here.
+      // ---------------------------------------------------------------------
+      if (tool && tool.risk !== "READ_ONLY") {
+        const verdict = classifyWriteIntent(userMessage);
+
+        if (verdict.verdict !== "ACTION") {
+          const ambiguous = verdict.verdict === "AMBIGUOUS";
+          const status: ToolExecutionStatus = ambiguous
+            ? "clarification_required"
+            : "not_requested";
+          const reason =
+            verdict.verdict === "INFO" ? `an unrequested (${verdict.reason}) turn` : "an ambiguous request";
+
+          const error = ambiguous
+            ? `The user's message was ambiguous about requesting "${action.toolId}" — the action was NOT executed. Ask the user to confirm exactly what they want before proceeding.`
+            : verdict.reason === "planning"
+              ? `The user asked for a plan or preparation, not for "${action.toolId}" — nothing was executed. Present the recommendation/analysis flow instead of acting.`
+              : `The user's message did not request "${action.toolId}" (${verdict.reason}). Nothing was executed — answer conversationally.`;
+
+          results.push({
+            executionId,
+            toolId: action.toolId,
+            toolCallId: action.toolCallId,
+            status,
+            error,
+            startedAt: stepStartedAt,
+            completedAt: new Date(),
+            durationMs: Date.now() - stepStartedAt.getTime(),
+          });
+
+          await this.auditLogger.log({
+            userId: context.auth.userId,
+            agentId: policy?.agentId ?? context.agentId,
+            toolId: action.toolId,
+            action: ambiguous ? "agent.tool_clarification_required" : "agent.tool_not_requested",
+            result: "rejected",
+            traceId: context.traceId,
+            ipAddress: context.ipAddress,
+            metadata: {
+              reason,
+              verdict: verdict.verdict,
+              gapReason: verdict.verdict === "AMBIGUOUS" ? verdict.reason : undefined,
+              infoReason: verdict.verdict === "INFO" ? verdict.reason : undefined,
+              domain: policy?.domain,
+              executionId,
+              stepIndex: i,
+            },
+          });
+
+          continue;
+        }
+      }
 
       // ---------------------------------------------------------------------
       // Sprint 6.10 — fail closed when nothing is left to gate a write.
