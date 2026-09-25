@@ -264,5 +264,68 @@ export function createActivityRouter(container: Container): Router {
     })
   );
 
+  // -------------------------------------------------------------------------
+  // S6 — GET /api/v1/activity/trace/:traceId/evaluation
+  //
+  // The objective evaluation of ONE request: what the user asked for, in their
+  // own words, and what the server-written evidence proves about each part —
+  // with anything it cannot prove named rather than guessed.
+  //
+  // THIN BY DESIGN. The handler validates the path parameter exactly as the S5
+  // trace route above does and hands two values — the verified user id and
+  // that trace id — to ObjectiveEvaluationService. It builds no fact, reads no
+  // table and applies no rule; the service returns the approved projection and
+  // this returns it unchanged.
+  //
+  // WHAT THIS ENDPOINT CANNOT DO. It reaches a service that holds two readers
+  // and a tool-risk lookup — no executor, registry, policy, gate or planner —
+  // so no request to it can run a tool, approve or refuse a write, or reach
+  // routing or planning. It writes nothing.
+  //
+  // The trace id comes from the PATH only. A trace belonging to another user
+  // answers 404, the same answer an unknown id gets, so this cannot be used to
+  // discover which ids exist.
+  // -------------------------------------------------------------------------
+  router.get(
+    "/trace/:traceId/evaluation",
+    requireAuth,
+    asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
+      if (!req.auth) {
+        res.status(401).json({
+          success: false,
+          error: { code: "AUTHENTICATION_REQUIRED", message: "Authentication required" },
+          timestamp: new Date().toISOString(),
+        });
+        return;
+      }
+
+      const traceId = optionalString(req.params.traceId, 64);
+      if (!traceId) {
+        res.status(400).json({
+          success: false,
+          error: { code: "INVALID_REQUEST", message: "A traceId is required" },
+          timestamp: new Date().toISOString(),
+        });
+        return;
+      }
+
+      const evaluation = await container.objectiveEvaluations.evaluate(req.auth.userId, traceId);
+      if (!evaluation) {
+        res.status(404).json({
+          success: false,
+          error: { code: "NOT_FOUND", message: "No activity for that request" },
+          timestamp: new Date().toISOString(),
+        });
+        return;
+      }
+
+      res.status(200).json({
+        success: true,
+        data: evaluation,
+        timestamp: new Date().toISOString(),
+      });
+    })
+  );
+
   return router;
 }

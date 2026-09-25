@@ -175,6 +175,30 @@ export function createChatRouter(container: ChatRouterDeps): Router {
 
       sessionContext.conversationId = conversationId;
 
+      // -----------------------------------------------------------------------
+      // REQUEST-TO-TRACE EVIDENCE (S6 prerequisite, PD-2).
+      //
+      // Every branch below saves the user's message through this one function,
+      // so every saved user message carries the traceId of the request that
+      // handled it. Before this only the assistant reply carried it, and a
+      // request could be tied to its trace only by message ORDER — which two
+      // overlapping sends in one conversation break, and which a failed turn
+      // (no reply is stored) cannot do at all.
+      //
+      // Correlation metadata ONLY. The traceId is the one this route generated
+      // above, never a value from the request body; the content is the user's
+      // words unchanged; and agents rebuild history from role and content, so
+      // metadata never reaches the model, the write-intent gate or the router.
+      // -----------------------------------------------------------------------
+      const turnConversationId = conversationId;
+      const saveUserMessage = () =>
+        container.conversationRepo.addMessage({
+          conversationId: turnConversationId,
+          role: "user",
+          content: jarvisRequest.message,
+          metadata: { traceId },
+        });
+
       const existingMessages = await container.conversationRepo.getMessages(conversationId);
 
       const conversationHistory = existingMessages
@@ -202,12 +226,7 @@ export function createChatRouter(container: ChatRouterDeps): Router {
 
       // Handle CONFIRM intent
       if (intent.type === "CONFIRM" && pendingAction && container.pendingActionService) {
-        // Save user message
-        await container.conversationRepo.addMessage({
-          conversationId,
-          role: "user",
-          content: jarvisRequest.message,
-        });
+        await saveUserMessage();
 
         const confirmResult = await container.pendingActionService.confirmPendingAction(
           conversationId,
@@ -301,11 +320,7 @@ export function createChatRouter(container: ChatRouterDeps): Router {
 
       // Handle REJECT intent
       if (intent.type === "REJECT" && pendingAction && container.pendingActionService) {
-        await container.conversationRepo.addMessage({
-          conversationId,
-          role: "user",
-          content: jarvisRequest.message,
-        });
+        await saveUserMessage();
 
         const rejectResult = await container.pendingActionService.rejectPendingAction(
           conversationId,
@@ -331,11 +346,7 @@ export function createChatRouter(container: ChatRouterDeps): Router {
 
       // Handle MODIFY intent
       if (intent.type === "MODIFY" && pendingAction && container.pendingActionService && intent.extractedParams) {
-        await container.conversationRepo.addMessage({
-          conversationId,
-          role: "user",
-          content: jarvisRequest.message,
-        });
+        await saveUserMessage();
 
         const modifyResult = await container.pendingActionService.modifyPendingAction(
           conversationId,
@@ -402,11 +413,7 @@ export function createChatRouter(container: ChatRouterDeps): Router {
       const workRequest = detectWorkRequest(jarvisRequest.message);
 
       if (workRequest.type !== "NONE" && container.taskConversation) {
-        await container.conversationRepo.addMessage({
-          conversationId,
-          role: "user",
-          content: jarvisRequest.message,
-        });
+        await saveUserMessage();
 
         // NEEDS_TIME never reaches the work path: a vague time is answered
         // with a question, not a guess, and nothing is created or run.
@@ -467,11 +474,7 @@ export function createChatRouter(container: ChatRouterDeps): Router {
       // -----------------------------------------------------------------------
       // NORMAL FLOW — route to orchestrator
       // -----------------------------------------------------------------------
-      await container.conversationRepo.addMessage({
-        conversationId,
-        role: "user",
-        content: jarvisRequest.message,
-      });
+      await saveUserMessage();
 
       const response = await container.orchestrator.process(
         { ...jarvisRequest, conversationId, conversationHistory },

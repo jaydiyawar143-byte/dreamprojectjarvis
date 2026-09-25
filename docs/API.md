@@ -37,8 +37,22 @@ Everything below is served by `apps/api` under `/api/v1`. Verified against the c
 | `chat.ts` | `/api/v1/chat` | `POST /` |
 | `conversations.ts` | `/api/v1/conversations` | `GET /`, `GET /:id` |
 | `agents.ts` | `/api/v1/agents` | `GET /` |
-| `activity.ts` | `/api/v1/activity` | `GET /` |
+| `activity.ts` | `/api/v1/activity` | `GET /`, `GET /trace/:traceId`, `POST /trace/:traceId/feedback`, `GET /trace/:traceId/evaluation` |
 | `capabilities.ts` | `/api/v1/capabilities` | `GET /`, `GET /connected`, `GET /permissions`, `GET /:integration` |
+
+### Objective evaluation — `GET /api/v1/activity/trace/:traceId/evaluation` · `activity.ts`
+
+Added 2026-09-25 (Skill System S6). Read-only: it executes nothing, writes nothing and approves nothing.
+
+For one of the caller's requests, it reports what the user asked for and what the evidence the server recorded proves about each part. The request is the user's own words, split into objectives by fixed rules. The response has no score, no confidence and no overall success flag.
+
+- **Access token:** required. Without one, or with an invalid one: `401 AUTHENTICATION_REQUIRED`.
+- **`:traceId`:** the `traceId` returned by `POST /api/v1/chat`. It is taken from the path only; a trace id in the query string, the body or a header is ignored. Empty after trimming, or longer than 64 characters: `400 INVALID_REQUEST`.
+- **`200`:** `{ success: true, data, timestamp }`, where `data` is the evaluation: `traceId`, `bound`, `objectives`, `assessments`, `facts`, `missing`, `feedback`, `asOf`. Each assessment's `status` is `EVIDENCED`, `AWAITING_APPROVAL`, `BLOCKED`, `NOT_ATTEMPTED` or `NOT_EVALUABLE`. A `NOT_EVALUABLE` assessment always names what is missing. A trace for which the caller has records but no bound request comes back `200` with `bound: false`, its facts listed and no objectives.
+- **`404 NOT_FOUND`:** the caller has no records for that trace id. A trace belonging to another user gets the same answer as one that does not exist.
+- **Other failures:** `500 INTERNAL_ERROR` with a fixed message; the detail stays in the server log.
+
+Tool parameters, free-text audit fields and the assistant's reply text are never part of the response. `feedback` is the user's own 👍/👎 signal, copied as recorded; it never changes a status.
 
 ### Approvals and actions
 

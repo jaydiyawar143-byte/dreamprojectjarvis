@@ -1,5 +1,6 @@
 import type { IOrchestrator, IToolExecutor, ITool, AIToolDefinition, ShutdownLifecycle, IMemoryStore, IEmbeddingProvider, IKnowledgeRetriever, IAIProvider } from "@jarvis/core";
 import { ExecutionOutcomeService } from "./execution-outcome-service.js";
+import { ObjectiveEvaluationService } from "./objective-evaluation-service.js";
 import type { TokenService } from "@jarvis/security";
 import type { IMemoryExtractor } from "@jarvis/core";
 import {
@@ -156,6 +157,13 @@ export interface Container {
    * and nothing in the planning path reads it back.
    */
   executionOutcomes: ExecutionOutcomeService;
+  /**
+   * S6 — Objective Evaluation. READ-ONLY: joins the objectives of one request
+   * to the evidence the server wrote for it, under fixed rules. It holds two
+   * readers and the registry's risk lookup — no executor, registry, policy,
+   * gate or planner — and nothing in the planning path reads it back.
+   */
+  objectiveEvaluations: ObjectiveEvaluationService;
   /**
    * Phase 10.6 — durable execution journal (Prisma-backed), exposed so the
    * shutdown controller can run idempotent startup recovery and so hosts
@@ -1455,6 +1463,16 @@ export function getContainer(options?: {
     auditLogger,
   });
 
+  // S6 — the same audit repository S5 reads, the conversation repository for
+  // the request bound to the trace (PD-2), and ONLY the risk level of a tool
+  // from the registry. The service never receives the registry itself, so it
+  // cannot look a tool up to run it.
+  const objectiveEvaluations = new ObjectiveEvaluationService({
+    audit: auditRepo,
+    messages: conversationRepo,
+    riskOf: (toolId: string) => resolvingRegistry.get(toolId)?.risk,
+  });
+
   const orchestrator = new Orchestrator(agentRegistry, toolExecutor, auditLogger, {
     toolRegistry: resolvingRegistry,
     toolApprovalService,
@@ -1523,6 +1541,7 @@ export function getContainer(options?: {
     conversationRepo,
     auditLogger,
     executionOutcomes,
+    objectiveEvaluations,
     executionJournal,
     approvalRepo,
     toolRegistry,

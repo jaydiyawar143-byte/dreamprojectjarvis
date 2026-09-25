@@ -100,6 +100,14 @@ export * from "./capability-presentation.js";
 // audit rows that already exist, plus the one explicit user signal. It
 // executes nothing and feeds nothing back into planning.
 export * from "./execution-outcome.js";
+// S6 — Objective Evaluation, Phase 1: objective extraction. A fixed-rule
+// reader of the user's own request, for a READ-ONLY evaluation after the fact.
+// No model, no I/O; it decides, authorizes and plans nothing.
+export * from "./objective-extraction.js";
+// S6 — Phase 2: the pure evaluation builder. Joins those objectives to the
+// server-written evidence of the same request under fixed rules. Read-only:
+// it holds no executor, registry, policy, gate, planner, memory or model.
+export * from "./objective-evaluation.js";
 export * from "./speech-preparation.js";
 export * from "./tool-failure-classifier.js";
 export * from "./integration-health-snapshot.js";

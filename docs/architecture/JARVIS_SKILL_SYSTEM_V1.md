@@ -1,4 +1,4 @@
-# JARVIS Skill System V1 — Phases S1 to S5
+# JARVIS Skill System V1 — Phases S1 to S6
 
 > **S1 — Skill Foundation.** The type, the catalogue, the derived view.
 > **S2 — Skill Taxonomy & Membership Audit.** Which tool belongs to which skill,
@@ -10,8 +10,23 @@
 > **S5 — Execution Outcome & Evaluation.** An observer beside the execution
 > path: what happened, derived from AuditLog, plus one explicit user signal.
 > It records; it does not steer.
+> **S6 — Objective Evaluation.** Read-only, fixed-rule evaluation of whether
+> each objective in the user's own request is proven, blocked or unknown.
+> Contract approved; Phase 1 (objective extraction) implemented — see §7d.
 >
 > **Status: S1 and S2 committed (`e416a01`). S3 implemented, not committed.**
+>
+> **Status update (2026-09-25):** S3, S4 and S5 are committed (`d6316cc`); the
+> write-intent gate in `5eadae0`. S6 PD-2 evidence capture and S6 Phase 1 are
+> implemented and **not committed**. S6 Phases 2–4 are not implemented.
+> **Status update (2026-09-25, later):** S6 Phase 2 (the pure evaluation
+> builder) is implemented and **not committed**. Phases 3–4 are not implemented.
+> **Status update (2026-09-25, Phase 3):** the read-only evaluation service,
+> its trace-message reader and container wiring are implemented and **not
+> committed**. Phase 4 (the HTTP route) is not implemented.
+> **Status update (2026-09-25, Phase 4):** `GET /api/v1/activity/trace/:traceId/evaluation`
+> is implemented and **not committed**. S6 is complete as specified; nothing
+> in the product calls the endpoint yet (no UI in v1).
 > Nothing here executes.
 > Discovery that preceded it: [`JARVIS_SKILL_SYSTEM_V1_DISCOVERY.md`](./JARVIS_SKILL_SYSTEM_V1_DISCOVERY.md).
 >
@@ -776,6 +791,436 @@ optimisation. No skill scoring. No LLM judge. No automatic self-evaluation. No
 MCP. No self-repair. No cross-agent composition. No Task Engine or Scheduler
 change. **Future learning is not implemented, and nothing here reads the signal
 back into a decision.**
+
+---
+
+## 7d. Phase S6 — Objective Evaluation (contract approved; Phase 1 implemented)
+
+### 7d.0 Stage — read this first
+
+| Part | State |
+|---|---|
+| Contract | **Approved** (verdict PROCEED). This section is that contract. |
+| PD-2 evidence capture — every user message a chat request saves carries `metadata.traceId` | **Implemented, not committed.** `apps/api/src/routes/chat.ts`; tests in `apps/api/test/chat-trace-evidence.test.ts` and `packages/agents/test/trace-metadata-isolation.test.ts`. |
+| Phase 1 — objective extraction (`packages/core/src/objective-extraction.ts`) | **Implemented, not committed.** 146 tests in `packages/core/test/objective-extraction-s6.test.ts`. |
+| Phase 2 — evidence facts, attribution, status rules (`packages/core/src/objective-evaluation.ts`) | **Implemented, not committed.** Pure builder only — nothing calls it yet. 69 tests in `packages/core/test/objective-evaluation-s6.test.ts`; 4 drift tests in `packages/tools/test/objective-evaluation-drift-s6.test.ts`. |
+| Phase 3 — trace message lookup (`packages/db`), read-only service, container wiring | **Implemented, not committed.** `findTraceMessages` in `packages/db/src/repositories/conversation-repository.ts`; `ObjectiveEvaluationService` in `apps/api/src/services/objective-evaluation-service.ts`, wired as `container.objectiveEvaluations`. Nothing calls it yet. 32 service tests; 5 PostgreSQL tests that skip when the database is unreachable. |
+| Phase 4 — `GET /api/v1/activity/trace/:traceId/evaluation` | **Implemented, not committed.** `apps/api/src/routes/activity.ts`; documented in `docs/API.md`. 20 HTTP tests in `apps/api/test/objective-evaluation-route-s6.test.ts`. No UI. |
+
+Nothing in S6 is user-accessible today. No part of it executes, plans,
+authorizes, routes or learns — and no part of it ever will; see 7d.11.
+
+### 7d.1 What S6 is
+
+S5 answers *what happened* during a request. S6 answers, per objective,
+*whether what the user asked for was achieved* — to the extent the evidence
+can prove it, and it names what it cannot prove instead of guessing.
+
+```
+  user request (PD-2: bound to its trace)      AuditLog rows of that trace
+                  │                                        │
+          extractObjectives()                    facts (enumerated fields)
+                  │                                        │
+                  └──────────► fixed status rules ◄────────┘
+                                     │
+                     ObjectiveEvaluation (read-only, derived on request)
+```
+
+**Owner decisions.**
+
+- **PD-1 — fixed, deterministic rules only.** No LLM judge and no LLM
+  extractor. An objective whose satisfaction depends on the meaning of the
+  reply (drafting, analysis) is `NOT_EVALUABLE` unless deterministic evidence
+  exists.
+- **PD-2 — evidence capture approved and implemented.** Before it, a request
+  could be tied to its trace only by message order, which two overlapping sends
+  break and which a failed turn (no reply stored) cannot do at all.
+
+S5 listed "no automatic self-evaluation" among its non-goals (7c.8). S6 is the
+owner-approved step past that line, and only that far: deterministic,
+read-only, derived, and with feedback kept separate exactly as S5 keeps it.
+
+**Three layers, never collapsed:** `facts` are proven (one server-written row
+each); `assessments` are inferred (each names the fixed rule that produced it);
+`missing` names what is unknown. There is no success boolean, no confidence, no
+score and no dependency graph.
+
+### 7d.2 Objective model — implemented in Phase 1
+
+`extractObjectives(traceId, request): Objective[]` — pure, deterministic, no
+imports at all.
+
+1. **Split** at `. ! ? ;` followed by whitespace (the punctuation stays with its
+   clause), line breaks, commas, and the whole words
+   `and | then | also | plus | aur | phir | fir`.
+2. **Mark** each clause with the closed lists in 7d.3 — whole words,
+   case-insensitive. **Noun guard:** a write, compose or creation marker
+   directly after `a | an | the | any | this | that | latest | ad` is a noun
+   ("the draft", "an update", "ad set") and is ignored.
+3. **Merge** each unmarked clause into the marked clause before it, or into the
+   next one when it leads the request.
+4. **Negation:** drop a clause whose *marked* part contains
+   `don't | do not | dont | never | no need to | without | mat | nahi | nahin`,
+   together with any unmarked words merged into it. Negation inside an unmarked
+   clause has no effect.
+5. **Framing:** a clause containing `how do | how can | how to | tell me about |
+   do you know | what if | should i | can i | could i | is it` cannot be
+   `EXTERNAL_WRITE`. A clause ending in `?` cannot either, unless the message
+   opens with `can you | could you | would you | will you | please | kindly`.
+6. **Class** by precedence `EXTERNAL_WRITE > COMPOSE > ANALYZE > RETRIEVE`. A
+   creation verb (`create | make | generate | build | banao | bana do | bana de`)
+   is `COMPOSE` with an artifact noun in the clause, `EXTERNAL_WRITE` without.
+   A clause whose only markers were writes ruled out by framing is `RETRIEVE`.
+7. **Count:** no marked clause → no objectives (reported as `OBJECTIVE_CLASS`
+   missing, `extractionMissing()`). More than `MAX_OBJECTIVES = 8` → one
+   objective spanning the whole trimmed request, with the highest class present.
+8. **Identity:** `objectiveId = ${traceId}#${index}`, zero-based. `text` is the
+   trimmed substring of the request — never rewritten. `skills` are the
+   vocabulary hits in that text, by first appearance.
+
+### 7d.3 Closed lists
+
+Exported as `OBJECTIVE_MARKERS` and `OBJECTIVE_SKILL_VOCABULARY` so they can be
+read and drift-tested. Changing either is a contract change.
+
+| Class | Markers |
+|---|---|
+| `EXTERNAL_WRITE` | send, pause, resume, stop, launch, activate, deactivate, enable, disable, connect, disconnect, reconnect, configure, update, change, set, adjust, increase, decrease, raise, lower, reduce, cut, boost, delete, remove, add, rename, archive, restore, move, upload, publish, share, submit, schedule, book, invite, cancel, trigger, notify, inform · Hinglish: bhejo, bhej do, bhej de, band karo, chalu karo, shuru karo, roko, badhao, badha do, kam karo, hatao (and "<English write verb> karo", which the English list already matches) · `tell / message / email / whatsapp` directly followed by `my / our / the / him / her / them` · a creation verb without an artifact noun |
+| `COMPOSE` | draft, write, compose, prepare, summarize, summarise, outline, plan, rewrite, rephrase, likho, likh do, taiyar karo · a creation verb with an artifact noun (report, summary, plan, draft, outline, proposal, strategy, note, notes, script, caption, copy, agenda, email, message) |
+| `ANALYZE` | analyze, analyse, identify, compare, evaluate, assess, diagnose, rank, recommend, suggest, explain, why, figure out, weak, weakest, strong, strongest, best, worst, top, bottom, underperforming, overperforming, poor, poorly, better, worse, anomaly, anomalies, trend, trends · kyun, kyon, samjhao, kharab, accha |
+| `RETRIEVE` | check, show, list, get, fetch, find, look up, look at, lookup, see, view, read, pull, search, status, tell me, give me, what, which, who, when, where, how much, how many, how is, how are · dikhao, batao, bata do, dekho, nikalo, kya, kitna, kitne, kaun, kab, kahan · a trailing `?` |
+
+| Skill (`SKILL_CATALOG` id) | Words in the objective text |
+|---|---|
+| advertising | campaign(s), ad(s), ad set(s), adset(s), creative(s), budget(s), spend, roas, ctr, cpc, cpm, cpa, impressions, clicks, conversions, meta, facebook, instagram, google ads |
+| places | nearby, near me, route, directions, distance, restaurant(s), cafe(s), place(s), map(s) |
+| workspace | email(s), mail, gmail, inbox, draft(s), calendar, meeting(s), event(s), drive, file(s), folder(s), document(s), doc(s) |
+| research | weather, stock(s), price(s), crypto, csv, pdf, web |
+| productivity | task(s), todo(s), to-do(s), reminder(s), n8n, workflow(s), automation(s) |
+| messaging | whatsapp |
+| monitoring | cpu, disk, system status, memory usage, current time, today's date |
+| integrations | integration(s), connection(s), connected, health |
+
+The vocabulary is keyed by, and pinned by test to, exactly the `SKILL_CATALOG`
+ids. It does not import the catalogue and cannot invent a skill. Naming a skill
+here grants nothing.
+
+**Worked examples** (all pinned by the corpus test):
+
+| Request | Objectives |
+|---|---|
+| "Check my campaign performance." | RETRIEVE [advertising] |
+| "Check my campaigns and tell me which ones are weak." | RETRIEVE [advertising] · ANALYZE "tell me which ones are weak." |
+| "Check my campaigns, identify weak ones, and draft an email." | RETRIEVE · ANALYZE · COMPOSE "draft an email." [workspace] |
+| "…draft an email, and send it." | the three above · EXTERNAL_WRITE "send it." |
+| "How do I change the budget?" | RETRIEVE — framing rules out the write |
+| "Can you pause the campaign?" | EXTERNAL_WRITE — the request opener beats the `?` |
+| "iska plan banao, execute mat karo" | one COMPOSE objective; no action objective (see the correction below) |
+| "yes", "no", "thanks" | none — `OBJECTIVE_CLASS` missing |
+
+#### Correction (added 2026-09-25)
+
+The approved contract's worked example gave the negation case as
+`COMPOSE "iska plan banao"` with "the negated clause dropped". The contract's
+own normative rules produce a different *text*: "execute" is not on any marker
+list, so "execute mat karo" is an **unmarked** clause, which rule 3 merges into
+the compose clause before it and whose negation rule 4 says has no effect. The
+implemented result is therefore one COMPOSE objective with text
+`"iska plan banao, execute mat karo"` — the compose objective is kept and no
+action objective is produced, which is what the requirement asks for. Adding
+"execute" to the write list would give the shorter text; that is a change to a
+closed list and is left to the owner.
+Evidence: `packages/core/test/objective-extraction-s6.test.ts`, case 7.
+
+**Known edges**, pinned deliberately so that any change is a reviewed edit:
+
+| Request | Result | Why |
+|---|---|---|
+| "Check my campaigns but don't pause anything" | none | no separator, so the negation drops the whole clause |
+| "Check my campaigns without changing anything" | none | "without" negates the clause it sits in |
+| "Pause the campaign, right?" | EXTERNAL_WRITE · RETRIEVE | a trailing `?` is itself a RETRIEVE marker |
+| "What is my plan?" | COMPOSE | the noun guard does not cover possessives ("my") |
+| "How do I create a report?" | COMPOSE | framing rules out writes only |
+
+### 7d.4 Evidence model — implemented in Phase 2
+
+Facts are recognised by row action or row shape; only enumerated fields are
+read.
+
+| Source row | Fact |
+|---|---|
+| `tool.execute` success / failure | `TOOL_RESULT` |
+| `tool.execute` rejected | `TOOL_REFUSED` `UNSPECIFIED_REJECTION` — permission, shutdown and a denied approval all look alike here |
+| `tool.execute` pending | `APPROVAL_REQUESTED` |
+| `agent.tool_denied` · `agent.tool_not_requested` · `agent.tool_clarification_required` · `agent.approval_gate_missing` | `TOOL_REFUSED` `POLICY` · `NOT_REQUESTED` · `CLARIFICATION_REQUIRED` · `APPROVAL_GATE_MISSING` |
+| approval-service row (by shape: toolId, result pending, `metadata.approvalId`) | `APPROVAL_REQUESTED` — its prose `action` is never read |
+| approval-service row (by shape: toolId, rejected, `metadata.error.code = AUTHORIZATION_FAILED`) | `TOOL_REFUSED` `PERMISSION` |
+| `google.write.plan.<action>` with `approvalId` | `WRITE_PLANNED` |
+| `google.write.execute.<action>` | `WRITE_EXECUTED`, with `verification` |
+| `google.<action>` (action in `GOOGLE_TASK_ACTIONS`) · `integration.<command>` | `PROVIDER_RESULT`, with a code from the closed `GoogleTaskStatus` / `IntegrationErrorCode` enums |
+| `orchestrator.process` (last wins) | `TURN_VERDICT` |
+| assistant message of the same trace | `REPLY_STORED`; `metadata.pendingAction` → `APPROVAL_REQUESTED`; `metadata.taskId` → `TASK_CREATED` |
+| `approval.*`, `surface.*`, `meta.analyze`, everything else | ignored — `approval.*` takes its traceId from a client header and is not server evidence |
+
+**Never read:** `parameters`, `metadata.detail`, `metadata.internalError`,
+error messages, approval-service `action` prose and `agentId`, message content
+other than the bound request, tool output, model prose.
+
+**Corroboration.** Three tool families report success when nothing useful
+happened — Google read tools when Google is not connected, `integration.test`
+on a bad connection, Google planners when no plan was made — so their success
+counts only when the matching provider row agrees: `google.<toolId>`,
+`integration.<command>` (fixed tool→command map), `google.write.plan.<action>`.
+A Google write is `EVIDENCED` only when `google.write.execute.<action>` reports
+`verification: "verified"`. JARVIS's own task-store writes need no second row.
+Any other write has no same-trace corroboration source and can never be
+`EVIDENCED`.
+
+**Attribution is an inference, never a fact.** A fact's side is READ when the
+tool's risk is `READ_ONLY`, WRITE otherwise; unknown tools are never
+attributed. Rule A1: the tool's skill (`skillForToolId`) is one of the
+objective's skills. Rule A2, only when A1 finds nothing: the objective is the
+only one of its class, so every fact on its side is attributed.
+
+### 7d.5 Status rules — implemented in Phase 2
+
+First matching row wins. *Attempt* = an attributed fact on the objective's side.
+*Stop* = a refusal, a failed or rejected result, a contradicted success, or a
+failed write.
+
+| Class | Order |
+|---|---|
+| `RETRIEVE` | corroborated read → `EVIDENCED` · uncorroborated read → `NOT_EVALUABLE` (CORROBORATION) · all attempts stopped → `BLOCKED` · attempts not attributable → `NOT_EVALUABLE` (ATTRIBUTION) · task created → `NOT_EVALUABLE` (DEFERRED_TO_TASK) · reply stored → `NOT_EVALUABLE` (RESPONSE_MEANING) · failed turn, no reply → `NOT_ATTEMPTED` · otherwise `NOT_EVALUABLE` (TURN_CONCLUSION) |
+| `EXTERNAL_WRITE` | corroborated execution → `EVIDENCED` · approval requested, write planned or `CONFIRMATION_REQUIRED` → `AWAITING_APPROVAL` · uncorroborated execution → `NOT_EVALUABLE` (CORROBORATION) · all attempts stopped → `BLOCKED` · attempts not attributable → `NOT_EVALUABLE` (ATTRIBUTION) · task created → `NOT_EVALUABLE` (DEFERRED_TO_TASK) · concluded without a failed verdict → `NOT_ATTEMPTED` · failed verdict → `NOT_EVALUABLE` (UNRECORDED_WRITE_PATH — a pending action created before the failure is recorded nowhere in the trace) · otherwise `NOT_EVALUABLE` (TURN_CONCLUSION) |
+| `COMPOSE`, `ANALYZE` | reply stored → `NOT_EVALUABLE` (RESPONSE_MEANING) · failed turn, no reply, attributed stops → `BLOCKED` · failed turn, no reply → `NOT_ATTEMPTED` · otherwise `NOT_EVALUABLE` (TURN_CONCLUSION) |
+
+Across all classes: an unbound trace gets no objectives (`REQUEST_TEXT`
+missing, facts still listed); with more than 200 audit rows, `BLOCKED` and
+`NOT_ATTEMPTED` — which depend on proving absence — become `NOT_EVALUABLE`
+(ROW_LIMIT); feedback never changes a status.
+
+### 7d.6 Trace binding
+
+A trace is bound when exactly one user message owned by the caller carries
+`metadata.traceId` equal to it within the 30-day S5 window. Since PD-2 every
+chat branch binds — confirm, reject, modify, the Task path and the
+orchestrator on success, failure and error.
+
+**The Task record is never read.** Its fields change after the trace ends (the
+scheduler clears `scheduledAt`; a later run changes `status`), so reading it
+would silently join later traces. A Task-path objective not executed within its
+own trace is `NOT_EVALUABLE` (DEFERRED_TO_TASK), with the `taskId` reported as
+a fact.
+
+Never bound: traces from before PD-2, the pending-action and approvals REST
+routes, scheduler runs, the integration and Google panels. Approvals and
+scheduled work are never followed into another trace.
+
+### 7d.7 Feedback
+
+Copied from `buildExecutionOutcome(traceId, rows).feedback`. Never an input to a
+rule; no agreement field; silence stays `null`.
+
+### 7d.8 Output contract — implemented in Phase 2
+
+```ts
+// Implemented in Phase 1 (objective-extraction.ts)
+type EvidenceClass = "RETRIEVE" | "EXTERNAL_WRITE" | "COMPOSE" | "ANALYZE";
+interface Objective { objectiveId: string; text: string; evidenceClass: EvidenceClass; skills: readonly string[] }
+
+// Phase 2 (objective-evaluation.ts)
+type ObjectiveStatus = "EVIDENCED" | "AWAITING_APPROVAL" | "BLOCKED" | "NOT_ATTEMPTED" | "NOT_EVALUABLE";
+type MissingEvidence = "REQUEST_TEXT" | "OBJECTIVE_CLASS" | "ROW_LIMIT" | "TURN_CONCLUSION" | "RESPONSE_MEANING"
+  | "ATTRIBUTION" | "CORROBORATION" | "DEFERRED_TO_TASK" | "UNRECORDED_WRITE_PATH";
+interface EvidenceFact { ref: string; kind: FactKind; at: Date; toolId?: string; action?: string;
+  result?: AuditEntry["result"]; refusal?: Refusal; code?: IntegrationErrorCode | GoogleTaskStatus;
+  approvalId?: string; verification?: WriteVerification; taskId?: string }
+interface ObjectiveAssessment { objectiveId: string; status: ObjectiveStatus; rule: AssessmentRule;
+  evidence: readonly string[]; missing?: MissingEvidence /* iff NOT_EVALUABLE */ }
+interface ObjectiveEvaluation { traceId: string; bound: boolean; objectives: readonly Objective[];
+  assessments: readonly ObjectiveAssessment[]; facts: readonly EvidenceFact[];
+  missing: readonly MissingEvidence[]; feedback: UserFeedback | null; asOf: Date | null }
+```
+
+Deliberately absent: `confidence`, a success boolean or counts, `blockers`,
+per-assessment skills, an evaluation timestamp (`asOf` is the latest row read,
+not the clock), a rules version, remedies, and any feedback-agreement field.
+
+### 7d.9 Service (implemented in Phase 3) and API (implemented in Phase 4)
+
+- `ObjectiveEvaluationService.evaluate(userId, traceId)` reads two things in
+  parallel — S5's `findByTrace` (201 rows) and a new read-only
+  `findTraceMessages` scoped through `Conversation.userId` — and calls the pure
+  builder. Its only other input is a `riskOf(toolId)` function; it holds no
+  executor, registry, policy, gate, planner or approval service.
+- `GET /api/v1/activity/trace/:traceId/evaluation` — read-only; 401 / 400 / 404
+  as the S5 trace route; unknown and foreign traces give the identical 404.
+  It writes nothing. No UI in v1. A message-only trace (reject, "time too
+  vague") returns 200 where S5 returns 404.
+
+### 7d.10 Security invariants
+
+S6 cannot authorize, plan, route, select tools, retry or learn: it holds only
+readers and a pure function, and a source scan pins that. Nothing on the
+planning path imports it (Phase 1 already asserts this for the extractor). It
+never reads free text as evidence, never trusts a client-supplied trace id,
+never returns `parameters`, and scopes every read to the authenticated user.
+The write-intent gate and the extractor share no code in either direction.
+
+### 7d.11 Non-goals
+
+No LLM of any kind. No persistence, model, migration or index. No UI. No
+learning, confidence, preference or prompt adaptation. No change to routing,
+tool selection, the write-intent gate, policies, ToolExecutor, the Task
+Engine, the Scheduler, S5, MCP or memory. No following approvals, scheduled
+runs or task state across traces. No backfill of pre-PD-2 traces.
+
+### 7d.12 Risks the contract accepts
+
+- Closed lists will misread some phrasings, Hinglish especially (see the known
+  edges above). Mitigated by the corpus, the noun guard and the one-objective
+  fallback; never by a model.
+- Attribution is by skill and side, not by action.
+- `EVIDENCED` for RETRIEVE proves the read ran, not that the user saw the data —
+  the Task path reply omits tool output.
+- Approval-gated writes are almost never `EVIDENCED` in v1, by the decision
+  not to follow approvals.
+- The extractor and the write-intent gate can disagree, and are allowed to:
+  they answer different questions. Two measured cases where the extractor sees
+  a write and the gate says INFO: "I will pause it later" (the extractor's
+  markers do not depend on position) and "Tell me about the campaign and pause
+  it" (the gate applies framing to the whole message, the extractor per
+  clause). A later gate-consistency test must therefore be scoped to
+  instruction-shaped requests rather than assert "never" over all sentences.
+
+### 7d.13 Phase 1 evidence
+
+`packages/core/test/objective-extraction-s6.test.ts` — 146 tests: the four
+worked requests, framing and openers, negation, the noun guard, merging, class
+precedence, creation verbs, Hinglish writes / analysis / retrieval, empty
+requests, the eight-objective cap, identity and verbatim text, case and
+whole-word matching, the vocabulary pinned to `SKILL_CATALOG`, a 78-sentence
+English and Hinglish corpus plus 5 pinned known edges, determinism across
+interleaved calls, a CPU-time bound on 100 KB inputs, and isolation (no imports
+beyond relative core modules; no database, HTTP, execution, policy, planning,
+memory or model dependency; not reachable from the planning path). Mutation
+checks — removing the noun guard, framing, negation, or swapping precedence —
+each turn tests red.
+
+### 7d.14 Phase 2 evidence
+
+`buildObjectiveEvaluation(input)` and `normalizeEvidence(input)` in
+`packages/core/src/objective-evaluation.ts`, exported from `@jarvis/core`. Pure:
+imports only core types, `skillForToolId`, S5's `buildExecutionOutcome` (for
+the feedback copy) and the Phase 1 extractor, which it uses unchanged.
+
+- `packages/core/test/objective-evaluation-s6.test.ts` — 69 tests: T1–T27,
+  T29, T30, T33–T35 and the builder halves of T28 (rows and messages of another
+  trace are ignored) and T32 (no code shared with the gate in either
+  direction); every fact kind, every refusal, every corroboration family,
+  attribution A1/A2 and its ambiguity, the Task path, binding, row limit,
+  feedback separation, the projection's closed shape, and source/import
+  isolation. T28 over HTTP, T31's service scan, T35's service half and T38
+  belong to Phases 3–4.
+- `packages/tools/test/objective-evaluation-drift-s6.test.ts` — T37: the
+  integration tool → command map, the Google read and planner families and the
+  task-store writes are checked against the real tools.
+- Mutation checks — dropping Google corroboration, the A2 fallback, the closed
+  code enums, the row-limit downgrade, or treating unknown tools as reads,
+  or letting a planning refusal block a COMPOSE objective — each turn tests
+  red. The drift test turns red on a changed command or task-store list.
+
+**Ambiguities found while implementing (rules unchanged; pinned in tests):**
+
+1. **`integration.list` can never be `EVIDENCED`.** The contract requires the
+   matching `integration.<command>` row for every `integration.*` tool, but the
+   command service answers `list` without writing one. Such an objective is
+   `NOT_EVALUABLE` (CORROBORATION).
+2. **An indeterminate or duplicate Google write is `BLOCKED`** — *decided
+   (PD-3, 2026-09-25): kept as a known S6 v1 limitation; no new status.* The write
+   service records "may have happened" (`metadata.indeterminate`) and "already
+   happened" (`reason: "duplicate"`) as `result: "failure"`; the locked rules
+   read only the result. Practically unreachable in v1 — an approved write runs
+   in a confirmation trace whose request ("yes") yields no objectives — but it
+   must be decided before the route exposes evaluations.
+3. **A reply can yield up to three facts** (the reply, its pending action, its
+   task id), so those refs carry a suffix: `message:<id>#pendingAction`,
+   `message:<id>#taskId`.
+4. **Attempts by a tool the registry does not know** are never attributed, and
+   are counted as unattributable attempts: an objective with no attributed
+   attempt is then `NOT_EVALUABLE` (ATTRIBUTION) rather than `NOT_ATTEMPTED`.
+5. **`WriteVerification` has six members**, not four: `indeterminate` and
+   `failed` are recognised; only `verified` corroborates.
+
+### 7d.15 Phase 3 evidence
+
+**The service is a read layer.** `ObjectiveEvaluationService.evaluate(userId,
+traceId)` sets the 30-day window, runs two reads in parallel —
+`findByTrace(userId, traceId, since, 201)` (S5's reader, unchanged) and
+`findTraceMessages(userId, traceId, since, 10)` — returns `null` when both
+are empty, marks the read truncated when more than 200 rows came back, and
+calls `buildObjectiveEvaluation`. It adds no rule. Its dependencies are the
+two readers, `riskOf` and an optional clock; the container passes
+`resolvingRegistry.get(toolId)?.risk`, never the registry.
+
+**The message reader** (`PrismaConversationRepository.findTraceMessages`)
+filters on `createdAt >= since`, `metadata.traceId` equal to the trace id, and
+`conversation.userId` equal to the caller — ownership is the query — oldest
+first, capped at 50 rows whatever the caller asks. No schema change; the scan
+is of the same class as the chat route's `getMessages`.
+
+**Tests.** `apps/api/test/objective-evaluation-service-s6.test.ts` — 32
+tests: T28 without HTTP (own trace; another user's and an unknown trace both
+`null`; readers always given the caller's id; foreign rows and a foreign
+message stamped with the trace id never leak), binding (one, zero, two user
+messages; outside the window; the request is the user message only), traces
+with no bound request (pre-PD-2, pending-action button, approvals REST,
+scheduler), T38's reader arguments and parallel reads, row-limit propagation
+at 201 and exactness at 200, feedback copied but inert, cross-trace approvals
+and task state never followed, prose and secrets, determinism, T31's source
+scan and wiring check, and T35's runtime guard (any access beyond the two
+reads throws). Mutation checks — no extra row, fabricating instead of
+`null`, dropping the window, sequential reads — each turn tests red.
+`packages/db/test/conversation-trace-lookup-s6-pg.integration.test.ts` — 5
+PostgreSQL tests for T38 (ownership, exact match, window, limit, shape); they
+skip when the database is unreachable and were **not run** on 2026-09-25
+because it was.
+
+**PD-3 (locked for S6 v1).** An indeterminate or duplicate Google write follows
+the locked table and may evaluate `BLOCKED`. There is no `INDETERMINATE`
+status and `ObjectiveStatus` is unchanged. Known limitation, recorded here.
+
+### 7d.16 Phase 4 evidence
+
+**The route is thin.** `GET /api/v1/activity/trace/:traceId/evaluation` sits
+beside the S5 trace routes in `activity.ts`: `requireAuth`, the same
+`optionalString(traceId, 64)` validation as S5, one call to
+`container.objectiveEvaluations.evaluate(req.auth.userId, traceId)`, and the
+result returned unchanged — `200` with the evaluation, `404 NOT_FOUND` when
+the service returns `null`. Unexpected failures fall through `asyncHandler` to
+the existing error handler: `500 INTERNAL_ERROR`, fixed message. No new import.
+
+**Tests.** `apps/api/test/objective-evaluation-route-s6.test.ts` — 20 tests
+over a real HTTP socket with real JWTs, the real auth middleware, request-id
+middleware and error handler: T28's HTTP half (own trace 200; unknown and
+foreign 404 with identical bodies; malformed id 400 and no token / bad token /
+wrong-secret token 401 without the service being asked; the path is the only
+trace id), the contract cases (a "yes" request → 200 with no objectives and
+`OBJECTIVE_CLASS`; the caller's own unbound trace → 200 `bound: false`), the
+public shape (envelope, the eight fields, each item's fields, ISO dates, no
+forbidden field), no secret / raw parameter / raw audit detail / raw error /
+model prose on the wire, client-stamped approval rows and model prose changing
+nothing, the 500 convention leaking nothing, T35 (a request touches only the
+evaluation service and writes nothing) and T31 (the router's imports, no
+forbidden name, and a handler that reads only `container.objectiveEvaluations`).
+Mutation checks — trace id from the query, `200` for `null`, no validation,
+the raw error returned — each turn tests red.
+
+**Not found, precisely.** Per the approved contract (§5), `404` means the
+caller has no audit row and no message for the trace. A trace for which the
+caller has records but no bound request — pre-PD-2, a pending-action button,
+an approvals-REST or scheduler trace — is `200` with `bound: false`, never an
+inference about any other user: every read is scoped to the caller.
 
 ---
 
