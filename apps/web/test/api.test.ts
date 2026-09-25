@@ -10,7 +10,9 @@ import {
   listConversations,
   getConversation,
   logout,
+  getObjectiveEvaluation,
   type ApiResponse,
+  type ObjectiveEvaluation,
 } from "../src/lib/api";
 
 const mockFetch = vi.fn();
@@ -350,5 +352,88 @@ describe("API Client", () => {
       expect(content).not.toContain("OPENAI_API_KEY");
       expect(content).not.toContain("process.env.JWT_SECRET");
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// S6 — objective evaluation client.
+//
+// The helper is a plain GET through the shared request helper. These pin the
+// exact URL (the trace id is encoded, never interpolated raw), the method, and
+// that a 404 comes back as the API's own error envelope rather than a throw —
+// the same convention every other call in api.ts follows.
+// ---------------------------------------------------------------------------
+describe("S6 — getObjectiveEvaluation", () => {
+  const TRACE = "trace/with space#1?x";
+  const ENCODED = "trace%2Fwith%20space%231%3Fx";
+
+  const EVALUATION: ObjectiveEvaluation = {
+    traceId: TRACE,
+    bound: true,
+    objectives: [
+      { objectiveId: `${TRACE}#0`, text: "check my system status", evidenceClass: "RETRIEVE", skills: ["system"] },
+    ],
+    assessments: [
+      { objectiveId: `${TRACE}#0`, status: "EVIDENCED", rule: "RETRIEVE_READ_PROVEN", evidence: ["audit:a1"] },
+    ],
+    facts: [{ ref: "audit:a1", kind: "TOOL_RESULT", at: "2026-09-25T10:00:00.000Z", toolId: "system.status", result: "success" }],
+    missing: [],
+    feedback: null,
+    asOf: "2026-09-25T10:00:00.000Z",
+  };
+
+  it("S6-1. sends a GET to the exact encoded trace URL, with no body", async () => {
+    setAccessToken("token");
+    mockFetch.mockResolvedValueOnce({ status: 200, ok: true, json: async () => mockSuccess(EVALUATION) });
+
+    await getObjectiveEvaluation(TRACE);
+
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    const [url, init] = mockFetch.mock.calls[0] as [string, RequestInit];
+    expect(url.endsWith(`/activity/trace/${ENCODED}/evaluation`)).toBe(true);
+    expect(url).not.toContain(TRACE);
+    expect(url).not.toContain("requestId");
+    expect(init.method ?? "GET").toBe("GET");
+    expect(init.body).toBeUndefined();
+    expect(init.credentials).toBe("include");
+    expect((init.headers as Record<string, string>).Authorization).toBe("Bearer token");
+  });
+
+  it("S6-2. returns the evaluation unchanged on success", async () => {
+    setAccessToken("token");
+    mockFetch.mockResolvedValueOnce({ status: 200, ok: true, json: async () => mockSuccess(EVALUATION) });
+
+    const res = await getObjectiveEvaluation(TRACE);
+
+    expect(res.success).toBe(true);
+    expect(res.data).toEqual(EVALUATION);
+  });
+
+  it("S6-3. a 404 comes back as the API's error envelope, not a throw", async () => {
+    setAccessToken("token");
+    mockFetch.mockResolvedValueOnce({
+      status: 404,
+      ok: false,
+      json: async () => mockError("NOT_FOUND", "No activity for that request"),
+    });
+
+    const res = await getObjectiveEvaluation(TRACE);
+
+    expect(res.success).toBe(false);
+    expect(res.data).toBeUndefined();
+    expect(res.error?.code).toBe("NOT_FOUND");
+    // A 404 is not an auth failure: the session is left alone.
+    expect(getAccessToken()).toBe("token");
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("S6-4. a network failure maps to NETWORK_ERROR like every other call", async () => {
+    setAccessToken("token");
+    mockFetch.mockRejectedValueOnce(new Error("offline"));
+
+    const res = await getObjectiveEvaluation(TRACE);
+
+    expect(res.success).toBe(false);
+    expect(res.error?.code).toBe("NETWORK_ERROR");
   });
 });

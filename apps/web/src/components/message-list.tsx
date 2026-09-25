@@ -7,6 +7,7 @@ import { InlineApprovalCard } from "./inline-approval-card";
 import { PendingActionCard, type PendingActionData } from "./pending-action-card";
 import { MessageActions } from "./message-actions";
 import { MessageText } from "./message-text";
+import { ObjectiveEvaluationPanel } from "./objective-evaluation-panel";
 
 interface Props {
   messages: ConversationMessage[];
@@ -45,6 +46,9 @@ export function MessageList({ messages, loading, sending, onRetry, activeConvers
           const approval = meta?.approval as { approvalId: string; summary: string; expiresAt?: string; detailLines?: Array<{ label: string; value: string }> } | undefined;
           const pendingAction = meta?.pendingAction as PendingActionData | undefined;
           const canRetry = msg.role === "user" && idx === messages.length - 1 && onRetry;
+          // S6 — the trace this reply belongs to. Only the server-issued traceId
+          // is used; the browser-only requestId beside it is not a trace.
+          const traceId = typeof meta?.traceId === "string" && meta.traceId.length > 0 ? meta.traceId : undefined;
 
           return (
             <div key={msg.id} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"} group`}>
@@ -78,6 +82,13 @@ export function MessageList({ messages, loading, sending, onRetry, activeConvers
                     expiresAt={approval.expiresAt}
                     detailLines={approval.detailLines}
                   />
+                )}
+
+                {/* S6 — what the evidence proves about each objective of this
+                    request. Collapsed and request-free until opened; always
+                    visible, never behind the hover-only actions row. */}
+                {msg.role === "assistant" && traceId && (
+                  <ObjectiveEvaluationPanel traceId={traceId} />
                 )}
 
                 <div className="flex items-center justify-between">

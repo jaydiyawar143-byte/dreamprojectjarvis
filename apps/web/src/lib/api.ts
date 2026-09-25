@@ -349,6 +349,136 @@ export async function sendMessageFeedback(
   });
 }
 
+// ---------------------------------------------------------------------------
+// S6 — objective evaluation.
+//
+// A read-only view of ONE request: what the user asked for, split into
+// objectives by the server's fixed rules, and what the server-written evidence
+// proves about each. The frontend PRESENTS this; it never recomputes it. There
+// is no score, confidence or overall verdict in the contract and none may be
+// derived here.
+//
+// These mirror the S6 contract in `@jarvis/core` (objective-evaluation.ts and
+// objective-extraction.ts) field for field. They are declared locally because
+// the web app may not import the `@jarvis/core` root — it pulls `node:crypto`
+// into the webpack build. Two contract `Date` fields arrive as ISO strings over
+// JSON, so they are typed as strings. `code` is typed as a string because its
+// server-side enum is owned by the integration contract, which this file does
+// not mirror.
+//
+// Keyed by `traceId` — the value the chat envelope returns and the assistant
+// message stores. The browser-only `requestId` in message metadata is NOT a
+// trace id and must never be sent here.
+// ---------------------------------------------------------------------------
+export type ObjectiveStatus =
+  | "EVIDENCED"
+  | "AWAITING_APPROVAL"
+  | "BLOCKED"
+  | "NOT_ATTEMPTED"
+  | "NOT_EVALUABLE";
+
+export type EvidenceClass = "RETRIEVE" | "EXTERNAL_WRITE" | "COMPOSE" | "ANALYZE";
+
+export type MissingEvidence =
+  | "REQUEST_TEXT"
+  | "OBJECTIVE_CLASS"
+  | "ROW_LIMIT"
+  | "TURN_CONCLUSION"
+  | "RESPONSE_MEANING"
+  | "ATTRIBUTION"
+  | "CORROBORATION"
+  | "DEFERRED_TO_TASK"
+  | "UNRECORDED_WRITE_PATH";
+
+export type AssessmentRule =
+  | "RETRIEVE_READ_PROVEN"
+  | "RETRIEVE_READ_UNCORROBORATED"
+  | "RETRIEVE_ATTEMPTS_STOPPED"
+  | "WRITE_EXECUTION_PROVEN"
+  | "WRITE_AWAITING_APPROVAL"
+  | "WRITE_UNCORROBORATED"
+  | "WRITE_ATTEMPTS_STOPPED"
+  | "WRITE_NOT_ATTEMPTED"
+  | "WRITE_PATH_UNRECORDED"
+  | "RESPONSE_ONLY"
+  | "RESPONSE_STOPPED"
+  | "TURN_FAILED_UNATTEMPTED"
+  | "DEFERRED_TO_TASK"
+  | "ATTRIBUTION_AMBIGUOUS"
+  | "TURN_CONCLUSION_UNKNOWN"
+  | "ROW_LIMIT_ABSENCE_UNPROVEN";
+
+export type Refusal =
+  | "POLICY"
+  | "NOT_REQUESTED"
+  | "CLARIFICATION_REQUIRED"
+  | "APPROVAL_GATE_MISSING"
+  | "PERMISSION"
+  | "UNSPECIFIED_REJECTION";
+
+export type EvidenceFactKind =
+  | "TOOL_RESULT"
+  | "TOOL_REFUSED"
+  | "APPROVAL_REQUESTED"
+  | "WRITE_PLANNED"
+  | "WRITE_EXECUTED"
+  | "PROVIDER_RESULT"
+  | "TURN_VERDICT"
+  | "REPLY_STORED"
+  | "TASK_CREATED";
+
+/** One thing the user asked for, in their own words. */
+export interface Objective {
+  objectiveId: string;
+  /** A verbatim substring of the request. Rendered as-is, never rewritten. */
+  text: string;
+  evidenceClass: EvidenceClass;
+  skills: string[];
+}
+
+export interface ObjectiveAssessment {
+  objectiveId: string;
+  status: ObjectiveStatus;
+  rule: AssessmentRule;
+  evidence: string[];
+  /** Present if and only if the status is NOT_EVALUABLE. */
+  missing?: MissingEvidence;
+}
+
+export interface EvidenceFact {
+  ref: string;
+  kind: EvidenceFactKind;
+  at: string;
+  toolId?: string;
+  action?: string;
+  result?: ActivityResult;
+  refusal?: Refusal;
+  code?: string;
+  approvalId?: string;
+  verification?: GoogleWriteVerification;
+  taskId?: string;
+}
+
+export interface ObjectiveEvaluation {
+  traceId: string;
+  bound: boolean;
+  objectives: Objective[];
+  /** One per objective, in the same order. */
+  assessments: ObjectiveAssessment[];
+  facts: EvidenceFact[];
+  /** Trace-level unknowns. */
+  missing: MissingEvidence[];
+  feedback: UserFeedbackValue | null;
+  /** The latest row read, not the clock. Null when nothing was read. */
+  asOf: string | null;
+}
+
+export async function getObjectiveEvaluation(
+  traceId: string
+): Promise<ApiResponse<ObjectiveEvaluation>> {
+  return request(`/activity/trace/${encodeURIComponent(traceId)}/evaluation`);
+}
+
 export async function listConversations(): Promise<
   ApiResponse<Conversation[]>
 > {
