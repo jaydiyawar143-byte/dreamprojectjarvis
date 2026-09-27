@@ -55,6 +55,13 @@ export interface MemoryStoreRequest {
     sourceMessageId?: string;
     metadata?: Record<string, unknown>;
     expiresAt?: Date;
+    /**
+     * S7 — the content's embedding. When present, the store writes it to the
+     * vector column AND to `metadata.embedding` in the same transaction as the
+     * row, so a memory is never half-created and never recallable by one path
+     * only. Absent: the row is stored exactly as before, with no vector.
+     */
+    embedding?: number[];
   }>;
 }
 
@@ -69,6 +76,12 @@ export interface MemoryRecallRequest {
   limit?: number;
   types?: MemoryType[];
   minImportance?: number;
+  /**
+   * S7 — minimum semantic (cosine) similarity, 0–1. Rows below it are not
+   * returned. The orchestrator passes its relevance threshold here; it is a
+   * similarity floor, never an importance floor. Absent: no floor.
+   */
+  minSimilarity?: number;
 }
 
 export interface MemoryRecallResult {
@@ -104,6 +117,12 @@ export interface MemoryUpdateRequest {
   sourceType?: string;
   sourceConversationId?: string;
   sourceMessageId?: string;
+  /**
+   * S7 — the embedding of the (new) content. When present, the vector column
+   * and `metadata.embedding` are replaced in the same transaction as the other
+   * fields, so merged content never keeps the old content's vector.
+   */
+  embedding?: number[];
 }
 
 // ---------------------------------------------------------------------------

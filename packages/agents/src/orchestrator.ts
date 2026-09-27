@@ -102,6 +102,15 @@ const DEFAULT_CONTEXT_BUDGET_CHARS = 2000;
 const MEMORY_AVAILABILITY_TTL_MS = 60_000;
 const MEMORY_UNAVAILABILITY_TTL_MS = 10_000;
 
+/**
+ * S7 — an error's machine code, only when it looks like one (e.g. Prisma's
+ * "P2010"). Never the message: that can carry query text or connection details.
+ */
+function safeErrorCode(error: unknown): string | undefined {
+  const code = (error as { code?: unknown } | null)?.code;
+  return typeof code === "string" && /^[A-Z0-9_]{1,40}$/.test(code) ? code : undefined;
+}
+
 const createNoopMemoryStore = (): IMemoryStore => ({
   id: "noop-memory",
   name: "Noop Memory Store",
@@ -567,13 +576,28 @@ export class Orchestrator implements IOrchestrator {
             query,
             embedding: queryEmbedding,
             limit: this.memoryConfig.maxMemories,
-            minImportance: this.memoryConfig.relevanceThreshold,
+            // S7 — the relevance threshold is a SIMILARITY floor, the same one
+            // the fallback below applies. It is not an importance floor.
+            minSimilarity: this.memoryConfig.relevanceThreshold,
           });
           if (results && results.length > 0) {
             return results;
           }
-        } catch {
-          // Fall through to manual list-and-loop logic on DB recall failure
+        } catch (error) {
+          // Fall through to manual list-and-loop logic on DB recall failure —
+          // logged rather than silently swallowed, like knowledge retrieval, so
+          // a persistently failing vector path is visible. Only safe, structured
+          // fields: the error's message can carry query text or connection
+          // details, so it is never logged or shown to the user.
+          console.log(JSON.stringify({
+            level: "warn",
+            event: "memory_recall_failed",
+            userId,
+            stage: "vector_recall",
+            fallback: "recent_memory_scan",
+            errorName: error instanceof Error ? error.name : typeof error,
+            ...(safeErrorCode(error) ? { errorCode: safeErrorCode(error) } : {}),
+          }));
         }
       }
 

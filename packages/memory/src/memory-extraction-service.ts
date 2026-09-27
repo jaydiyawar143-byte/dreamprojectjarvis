@@ -11,6 +11,7 @@ import type {
   MemoryRecord,
 } from "@jarvis/core";
 import { ExtractionResultSchema, JarvisError } from "@jarvis/core";
+import { validateEmbeddingBatch } from "./embedding/embedding-validator.js";
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -81,6 +82,48 @@ function cosineSimilarity(a: number[], b: number[]): number {
     dot += a[i] * b[i];
   }
   return dot;
+}
+
+// ---------------------------------------------------------------------------
+// S7 Step 8 — embedding failure policy: DROP + STRUCTURED EVENT.
+//
+// A memory is stored only with a valid, storable embedding, because a memory
+// without one can never be recalled — and would still block later
+// restatements of the same fact through the text-overlap dedup. When no such
+// embedding can be had, the candidate is dropped and `memory_embedding_failed`
+// is logged. There is no retry queue and no re-embedding state.
+// ---------------------------------------------------------------------------
+
+interface EmbeddingFailure {
+  stage: "embed" | "validate" | "persist";
+  reason: "provider_error" | "invalid_response" | "invalid_vector" | "storage_rejected";
+  problem?: "dimensions" | "non_finite" | "empty_or_malformed";
+  operation?: "create" | "merge";
+  candidateIndex?: number;
+  candidateCount: number;
+  error?: unknown;
+}
+
+/** Why a vector was rejected — a category, never the values themselves. */
+function vectorProblem(
+  vector: unknown,
+  dimensions: number,
+): "dimensions" | "non_finite" | "empty_or_malformed" {
+  if (!Array.isArray(vector) || vector.length === 0) return "empty_or_malformed";
+  if (vector.length !== dimensions) return "dimensions";
+  if (vector.some((value) => typeof value !== "number" || !Number.isFinite(value))) return "non_finite";
+  return "empty_or_malformed";
+}
+
+/** An error's machine code, only when it looks like one. Never the message. */
+function safeErrorCode(error: unknown): string | undefined {
+  const code = (error as { code?: unknown } | null | undefined)?.code;
+  return typeof code === "string" && /^[A-Z0-9_]{1,40}$/.test(code) ? code : undefined;
+}
+
+/** The store refused the vector itself (its write has rolled back). */
+function isEmbeddingStorageFailure(error: unknown): boolean {
+  return error instanceof JarvisError && error.code === "MEMORY_EMBEDDING_FAILED";
 }
 
 // ---------------------------------------------------------------------------
@@ -352,20 +395,27 @@ export class MemoryExtractionService implements IMemoryExtractor {
     const embeddings = await this.embedCandidates(candidates);
     const existingMemories = await this.fetchExistingMemories(userId);
 
-    const accepted: MemoryCandidate[] = [];
+    // S7 — outcomes in CANDIDATE ORDER. Each new memory carries its OWN
+    // embedding (skipped or dropped candidates never shift another's vector),
+    // and is only reported as accepted once it has actually been stored.
+    const outcomes: Array<
+      | { kind: "merged"; candidate: MemoryCandidate; memoryId: string }
+      | { kind: "new"; candidate: MemoryCandidate; embedding: number[]; index: number }
+    > = [];
     let duplicatesSkipped = 0;
 
     for (let i = 0; i < candidates.length; i++) {
       const candidate = candidates[i];
       const emb = embeddings[i];
 
+      // S7 Step 8 — DROP: no valid embedding means the memory could never be
+      // recalled, so it is not stored. embedCandidates() already logged why.
       if (!emb) {
-        accepted.push(candidate);
         continue;
       }
 
       if (existingMemories.length === 0) {
-        accepted.push(candidate);
+        outcomes.push({ kind: "new", candidate, embedding: emb, index: i });
         continue;
       }
 
@@ -400,24 +450,43 @@ export class MemoryExtractionService implements IMemoryExtractor {
       }
 
       if (bestScore >= this.deduplicationThreshold && bestMatch) {
-        const merged = await this.mergeMemory(
-          candidate,
-          bestMatch,
-          userId,
-          emb,
-        );
-        accepted.push({
-          ...candidate,
-          metadata: { existingMemoryId: merged.id },
-        });
+        let merged: MemoryRecord;
+        try {
+          merged = await this.mergeMemory(candidate, bestMatch, userId, emb);
+        } catch (error) {
+          // The merge's vector could not be stored: its transaction rolled
+          // back, so the existing memory is unchanged. Drop this candidate.
+          if (!isEmbeddingStorageFailure(error)) throw error;
+          this.reportEmbeddingFailure({
+            stage: "persist",
+            reason: "storage_rejected",
+            operation: "merge",
+            candidateIndex: i,
+            candidateCount: candidates.length,
+            error,
+          });
+          continue;
+        }
+        outcomes.push({ kind: "merged", candidate, memoryId: merged.id });
         continue;
       }
 
-      accepted.push(candidate);
+      outcomes.push({ kind: "new", candidate, embedding: emb, index: i });
     }
 
-    if (accepted.length > 0) {
-      await this.storeMemories(accepted, userId, embeddings);
+    const stored = await this.storeMemories(
+      outcomes.flatMap((o) => (o.kind === "new" ? [o] : [])),
+      userId,
+      candidates.length,
+    );
+
+    const accepted: MemoryCandidate[] = [];
+    for (const outcome of outcomes) {
+      if (outcome.kind === "merged") {
+        accepted.push({ ...outcome.candidate, metadata: { existingMemoryId: outcome.memoryId } });
+      } else if (stored.has(outcome.index)) {
+        accepted.push(outcome.candidate);
+      }
     }
 
     return { accepted, duplicatesSkipped };
@@ -427,19 +496,95 @@ export class MemoryExtractionService implements IMemoryExtractor {
   // Embedding helpers
   // -----------------------------------------------------------------------
 
+  /**
+   * One validated embedding per candidate, or null where none could be had.
+   *
+   * S7 Step 8 — failures are handled PER CANDIDATE: one bad vector drops only
+   * its own candidate, never a valid neighbour. Every failure is logged as
+   * memory_embedding_failed; a null is never stored (see deduplicateAndStore).
+   */
   private async embedCandidates(
     candidates: MemoryCandidate[],
   ): Promise<(number[] | null)[]> {
     const texts = candidates.map((c) => c.content);
+    const none = () => candidates.map(() => null);
+
+    let response: { embeddings?: unknown };
     try {
-      const response = await this.embeddingProvider.embed({
+      response = await this.embeddingProvider.embed({
         input: texts,
         model: this.embeddingModel,
       });
-      return response.embeddings;
-    } catch {
-      return candidates.map(() => null);
+    } catch (error) {
+      this.reportEmbeddingFailure({
+        stage: "embed",
+        reason: "provider_error",
+        candidateCount: texts.length,
+        error,
+      });
+      return none();
     }
+
+    const vectors = response?.embeddings;
+    if (!Array.isArray(vectors) || vectors.length !== texts.length) {
+      this.reportEmbeddingFailure({
+        stage: "embed",
+        reason: "invalid_response",
+        candidateCount: texts.length,
+      });
+      return none();
+    }
+
+    const dimensions = this.embeddingProvider.dimensions;
+    return vectors.map((vector: unknown, index) => {
+      try {
+        // The same strict check document ingestion uses (a non-empty array of
+        // finite numbers of the provider's declared size), applied per
+        // vector. The store additionally enforces the column's own size.
+        return validateEmbeddingBatch([vector], 1, dimensions, {
+          stage: "memory_extraction",
+          position: index,
+        })[0]!;
+      } catch {
+        this.reportEmbeddingFailure({
+          stage: "validate",
+          reason: "invalid_vector",
+          problem: vectorProblem(vector, dimensions),
+          candidateIndex: index,
+          candidateCount: texts.length,
+        });
+        return null;
+      }
+    });
+  }
+
+  /**
+   * Logs one embedding failure. Only structured, non-identifying fields:
+   * never the memory text, the conversation, the vector, the user, or the
+   * provider's or database's own error message.
+   */
+  private reportEmbeddingFailure(failure: EmbeddingFailure): void {
+    const errorName =
+      failure.error === undefined
+        ? undefined
+        : failure.error instanceof Error
+          ? failure.error.name
+          : typeof failure.error;
+    const errorCode = safeErrorCode(failure.error);
+    console.log(JSON.stringify({
+      level: "warn",
+      event: "memory_embedding_failed",
+      stage: failure.stage,
+      reason: failure.reason,
+      ...(failure.problem ? { problem: failure.problem } : {}),
+      ...(failure.operation ? { operation: failure.operation } : {}),
+      ...(failure.candidateIndex !== undefined ? { candidateIndex: failure.candidateIndex } : {}),
+      candidateCount: failure.candidateCount,
+      embeddingModel: this.embeddingModel,
+      ...(errorName ? { errorName } : {}),
+      ...(errorCode ? { errorCode } : {}),
+      action: "dropped",
+    }));
   }
 
   // -----------------------------------------------------------------------
@@ -494,6 +639,9 @@ export class MemoryExtractionService implements IMemoryExtractor {
         candidate.sourceConversationId ?? existing.sourceConversationId,
       sourceMessageId:
         candidate.sourceMessageId ?? existing.sourceMessageId,
+      // S7 — the merged content's embedding: the store replaces the vector in
+      // the same transaction, so new content never keeps the old vector.
+      embedding,
     });
   }
 
@@ -501,34 +649,58 @@ export class MemoryExtractionService implements IMemoryExtractor {
   // Store new memories
   // -----------------------------------------------------------------------
 
+  /**
+   * Stores each new memory in its own write and returns the candidate indexes
+   * that were stored.
+   *
+   * S7 Step 8 — one write per memory, so a vector the store cannot accept
+   * drops only that memory (its transaction rolled back; nothing remains) and
+   * is logged, while its valid neighbours are still stored. Any other storage
+   * failure propagates exactly as before.
+   */
   private async storeMemories(
-    candidates: MemoryCandidate[],
+    pending: Array<{ candidate: MemoryCandidate; embedding: number[]; index: number }>,
     userId: string,
-    embeddings: (number[] | null)[],
-  ): Promise<void> {
-    const toStore = candidates
-      .map((c, i) => ({
-        candidate: c,
-        embedding: embeddings[i],
-      }))
-      .filter((item) => !item.candidate.metadata?.existingMemoryId);
+    candidateCount: number,
+  ): Promise<Set<number>> {
+    const stored = new Set<number>();
 
-    if (toStore.length === 0) return;
+    for (const { candidate, embedding, index } of pending) {
+      try {
+        await this.store.store({
+          userId,
+          memories: [
+            {
+              type: candidate.type,
+              content: candidate.content,
+              summary: candidate.summary,
+              importance: candidate.importance,
+              confidence: candidate.confidence,
+              sourceType: candidate.sourceType,
+              sourceConversationId: candidate.sourceConversationId,
+              sourceMessageId: candidate.sourceMessageId,
+              expiresAt: candidate.expiresAt,
+              metadata: { embedding },
+              // S7 — also written to the vector column, atomically with the row.
+              embedding,
+            },
+          ],
+        });
+        stored.add(index);
+      } catch (error) {
+        if (!isEmbeddingStorageFailure(error)) throw error;
+        this.reportEmbeddingFailure({
+          stage: "persist",
+          reason: "storage_rejected",
+          operation: "create",
+          candidateIndex: index,
+          candidateCount,
+          error,
+        });
+      }
+    }
 
-    const memories = toStore.map((item) => ({
-      type: item.candidate.type,
-      content: item.candidate.content,
-      summary: item.candidate.summary,
-      importance: item.candidate.importance,
-      confidence: item.candidate.confidence,
-      sourceType: item.candidate.sourceType,
-      sourceConversationId: item.candidate.sourceConversationId,
-      sourceMessageId: item.candidate.sourceMessageId,
-      expiresAt: item.candidate.expiresAt,
-      metadata: item.embedding ? { embedding: item.embedding } : undefined,
-    }));
-
-    await this.store.store({ userId, memories });
+    return stored;
   }
 
   // -----------------------------------------------------------------------
