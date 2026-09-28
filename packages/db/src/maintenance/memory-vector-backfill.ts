@@ -32,7 +32,15 @@
 // only rows whose vector is still NULL, verifies the result, and throws —
 // rolling back — if verification fails. Content, type, importance, expiry and
 // timestamps are never changed; a cast does not change metadata at all. Every
-// change can be reverted for exactly the rows it touched.
+// write records the md5 of the exact vector it stored, and rollback clears a
+// vector only while it still has that hash: a vector someone wrote later is
+// reported as a conflict and left alone.
+//
+// PRECONDITION (S7 Step 9B). Only S7 memory code may be writing to the
+// database — before, during and after a backfill. Pre-S7 code updates content
+// and metadata.embedding without the vector, which would leave a backfilled
+// vector stale. The plan counts such rows (`vectorMetadataMismatch`); the
+// operator command refuses to run while any exist.
 // ---------------------------------------------------------------------------
 
 import type { Prisma, PrismaClient } from "@prisma/client";
@@ -58,22 +66,47 @@ export interface MemoryBackfillPlan {
   alreadyVectorized: number;
   invalidMetadataEmbedding: number;
   expiredMetadataOnly: number;
+  /**
+   * Rows whose vector disagrees with their own valid metadata embedding. S7
+   * code always writes the two together, so anything above zero means a
+   * writer that does not — pre-S7 code — has touched vectorized rows.
+   */
+  vectorMetadataMismatch: number;
+}
+
+/** One cast row, and the md5 of the exact vector the cast wrote. */
+export interface MemoryVectorCastRow {
+  id: string;
+  appliedVectorHash: string;
 }
 
 export interface MemoryVectorCastResult {
   requested: number;
   castIds: string[];
+  /** Every cast row with the hash of what was written — the rollback record. */
+  applied: MemoryVectorCastRow[];
   /** Requested rows that no longer qualified (e.g. already have a vector). */
   skippedIds: string[];
 }
 
 export interface MemoryVectorReembedResult {
   id: string;
-  status: "reembedded" | "skipped";
+  /**
+   * `skipped`: the row no longer qualified. `conflicted`: its content or
+   * metadata embedding changed while the new embedding was being generated,
+   * so nothing was written.
+   */
+  status: "reembedded" | "skipped" | "conflicted";
   /** The metadata embedding before re-embedding — needed to roll back. */
   previousMetadataEmbedding?: number[] | null;
   /** md5 of the vector written, so rollback only reverts an unchanged row. */
   appliedVectorHash?: string;
+}
+
+/** A rollback's outcome: rows restored, and rows left alone because they changed. */
+export interface MemoryVectorRollbackResult {
+  reverted: number;
+  conflicted: number;
 }
 
 // SQL fragment: true when `m.metadata->'embedding'` is 1536 numbers pgvector
@@ -105,7 +138,7 @@ export async function planMemoryVectorBackfill(
   prisma: PrismaClient,
   scope: MemoryBackfillScope = {}
 ): Promise<MemoryBackfillPlan> {
-  const rows = await prisma.$queryRawUnsafe<Array<{ id: string; category: string }>>(
+  const rows = await prisma.$queryRawUnsafe<Array<{ id: string; category: string; mismatch: boolean }>>(
     `WITH base AS (
        SELECT m."id", m."userId", m."content", m."createdAt",
               (m."embedding" IS NOT NULL) AS has_vector,
@@ -142,7 +175,10 @@ export async function planMemoryVectorBackfill(
                    AND 1 - (o.effective <=> e.effective) >= $3
               ) THEN 'reembed'
               ELSE 'cast'
-            END AS category
+            END AS category,
+            CASE WHEN e.has_vector AND e.meta_valid
+                 THEN e."embedding" <> (e."metadata"->'embedding')::text::vector
+                 ELSE false END AS mismatch
        FROM emb e
       ORDER BY e."id"`,
     scope.userIds ?? null,
@@ -159,6 +195,7 @@ export async function planMemoryVectorBackfill(
     alreadyVectorized: idsOf("already_vectorized").length,
     invalidMetadataEmbedding: idsOf("invalid").length,
     expiredMetadataOnly: idsOf("expired").length,
+    vectorMetadataMismatch: rows.filter((r) => r.mismatch).length,
   };
 }
 
@@ -176,7 +213,7 @@ export async function applyMemoryVectorCastBatch(
   prisma: PrismaClient,
   ids: string[]
 ): Promise<MemoryVectorCastResult> {
-  if (ids.length === 0) return { requested: 0, castIds: [], skippedIds: [] };
+  if (ids.length === 0) return { requested: 0, castIds: [], applied: [], skippedIds: [] };
 
   return prisma.$transaction(async (tx: Prisma.TransactionClient) => {
     const eligible = await tx.$queryRawUnsafe<Array<{ id: string; fp: string }>>(
@@ -191,7 +228,7 @@ export async function applyMemoryVectorCastBatch(
     );
     const castIds = eligible.map((r) => r.id);
     const skippedIds = ids.filter((id) => !castIds.includes(id));
-    if (castIds.length === 0) return { requested: ids.length, castIds, skippedIds };
+    if (castIds.length === 0) return { requested: ids.length, castIds, applied: [], skippedIds };
 
     const updated = await tx.$executeRawUnsafe(
       `UPDATE "Memory" SET "embedding" = ("metadata"->'embedding')::text::vector
@@ -202,10 +239,11 @@ export async function applyMemoryVectorCastBatch(
       throw new Error(`Backfill verification failed: expected ${castIds.length} rows updated, got ${updated}`);
     }
 
-    const after = await tx.$queryRawUnsafe<Array<{ id: string; fp: string; ok: boolean }>>(
+    const after = await tx.$queryRawUnsafe<Array<{ id: string; fp: string; ok: boolean; hash: string }>>(
       `SELECT m."id", ${ROW_FINGERPRINT} AS fp,
               (vector_dims(m."embedding") = ${BACKFILL_EMBEDDING_DIMENSIONS}
-               AND m."embedding" = (m."metadata"->'embedding')::text::vector) AS ok
+               AND m."embedding" = (m."metadata"->'embedding')::text::vector) AS ok,
+              md5(m."embedding"::text) AS hash
          FROM "Memory" m WHERE m."id" = ANY($1::text[])`,
       castIds
     );
@@ -215,25 +253,34 @@ export async function applyMemoryVectorCastBatch(
       throw new Error(`Backfill verification failed for ${bad.length || castIds.length - after.length} row(s); batch rolled back`);
     }
 
-    return { requested: ids.length, castIds, skippedIds };
+    const applied = after.map((r) => ({ id: r.id, appliedVectorHash: r.hash }));
+    return { requested: ids.length, castIds, applied, skippedIds };
   });
 }
 
 /**
- * Reverts a cast: clears the vector of exactly these rows, and only where it
- * still equals the metadata embedding it was cast from.
+ * Reverts a cast: clears the vector of exactly these rows, and only where it is
+ * still the vector the cast wrote (same md5). A row whose vector changed since
+ * — a later merge, say — is a conflict: it is counted and left untouched.
+ * Content and metadata are never changed.
  */
-export async function rollbackMemoryVectorCastBatch(prisma: PrismaClient, ids: string[]): Promise<number> {
-  if (ids.length === 0) return 0;
-  const reverted = await prisma.$executeRawUnsafe(
-    `UPDATE "Memory" SET "embedding" = NULL
-      WHERE "id" = ANY($1::text[])
-        AND "embedding" IS NOT NULL
-        AND jsonb_typeof("metadata"->'embedding') = 'array'
-        AND "embedding" = ("metadata"->'embedding')::text::vector`,
-    ids
+export async function rollbackMemoryVectorCastBatch(
+  prisma: PrismaClient,
+  rows: MemoryVectorCastRow[]
+): Promise<MemoryVectorRollbackResult> {
+  if (rows.length === 0) return { reverted: 0, conflicted: 0 };
+  const reverted = Number(
+    await prisma.$executeRawUnsafe(
+      `UPDATE "Memory" m SET "embedding" = NULL
+         FROM unnest($1::text[], $2::text[]) AS r("id", "hash")
+        WHERE m."id" = r."id"
+          AND m."embedding" IS NOT NULL
+          AND md5(m."embedding"::text) = r."hash"`,
+      rows.map((r) => r.id),
+      rows.map((r) => r.appliedVectorHash)
+    )
   );
-  return Number(reverted);
+  return { reverted, conflicted: rows.length - reverted };
 }
 
 // ---------------------------------------------------------------------------
@@ -248,11 +295,23 @@ function assertStorableVector(vector: unknown): asserts vector is number[] {
   if (!ok) throw new Error("Re-embedding returned a vector that is not 1536 finite numbers");
 }
 
+/** What re-embedding compares before and under the row lock. */
+const REEMBED_FINGERPRINTS = `md5(m."content") AS content_fp,
+       md5(coalesce((m."metadata"->'embedding')::text, '~')) AS embedding_fp`;
+
+type ReembedOutcome = { status: "skipped" } | { status: "conflicted" } | { status: "reembedded"; hash: string };
+
 /**
  * Re-embeds each row's CURRENT content and stores the result in the vector
  * column and `metadata.embedding` together, one row per transaction. The row's
  * text is sent to `provider` and nowhere else; it is never logged or returned.
  * Content, other metadata keys and every other column are left unchanged.
+ *
+ * The provider call happens OUTSIDE the transaction (no row lock is held
+ * across a network call), so the row is re-read under the lock: if its content
+ * or metadata embedding changed meanwhile, the new vector belongs to text the
+ * row no longer holds — nothing is written and the row is reported
+ * `conflicted`.
  */
 export async function reembedMemoryVectors(
   prisma: PrismaClient,
@@ -263,8 +322,8 @@ export async function reembedMemoryVectors(
   const results: MemoryVectorReembedResult[] = [];
 
   for (const id of ids) {
-    const rows = await prisma.$queryRawUnsafe<Array<{ content: string; previous: unknown }>>(
-      `SELECT m."content", m."metadata"->'embedding' AS previous
+    const rows = await prisma.$queryRawUnsafe<Array<{ content: string; previous: unknown; content_fp: string; embedding_fp: string }>>(
+      `SELECT m."content", m."metadata"->'embedding' AS previous, ${REEMBED_FINGERPRINTS}
          FROM "Memory" m WHERE m."id" = $1 AND m."embedding" IS NULL AND ${ACTIVE}`,
       id
     );
@@ -282,13 +341,16 @@ export async function reembedMemoryVectors(
     assertStorableVector(vector);
     const vectorSql = `[${vector.join(",")}]`;
 
-    const appliedVectorHash = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
-      const before = await tx.$queryRawUnsafe<Array<{ content_fp: string; other_metadata: string }>>(
-        `SELECT md5(m."content") AS content_fp, coalesce((m."metadata" - 'embedding')::text, '~') AS other_metadata
-           FROM "Memory" m WHERE m."id" = $1 AND m."embedding" IS NULL FOR UPDATE`,
+    const outcome = await prisma.$transaction(async (tx: Prisma.TransactionClient): Promise<ReembedOutcome> => {
+      const before = await tx.$queryRawUnsafe<Array<{ content_fp: string; embedding_fp: string; other_metadata: string }>>(
+        `SELECT ${REEMBED_FINGERPRINTS}, coalesce((m."metadata" - 'embedding')::text, '~') AS other_metadata
+           FROM "Memory" m WHERE m."id" = $1 AND m."embedding" IS NULL AND ${ACTIVE} FOR UPDATE`,
         id
       );
-      if (before.length !== 1) throw new Error("Row no longer qualifies for re-embedding");
+      if (before.length !== 1) return { status: "skipped" };
+      if (before[0]!.content_fp !== row.content_fp || before[0]!.embedding_fp !== row.embedding_fp) {
+        return { status: "conflicted" };
+      }
 
       const updated = await tx.$executeRawUnsafe(
         `UPDATE "Memory"
@@ -315,14 +377,18 @@ export async function reembedMemoryVectors(
         before[0]!.other_metadata
       );
       if (!after[0]?.ok) throw new Error("Re-embedding verification failed; row rolled back");
-      return after[0].hash;
+      return { status: "reembedded", hash: after[0].hash };
     });
 
+    if (outcome.status !== "reembedded") {
+      results.push({ id, status: outcome.status });
+      continue;
+    }
     results.push({
       id,
       status: "reembedded",
       previousMetadataEmbedding: Array.isArray(row.previous) ? (row.previous as number[]) : null,
-      appliedVectorHash,
+      appliedVectorHash: outcome.hash,
     });
   }
 
@@ -332,14 +398,17 @@ export async function reembedMemoryVectors(
 /**
  * Reverts re-embedding: clears the vector and restores the previous metadata
  * embedding, only for rows whose vector is still the one the backfill wrote.
+ * Any other row is a conflict: counted, and left untouched.
  */
 export async function rollbackMemoryVectorReembed(
   prisma: PrismaClient,
   entries: MemoryVectorReembedResult[]
-): Promise<number> {
+): Promise<MemoryVectorRollbackResult> {
   let restored = 0;
+  let attempted = 0;
   for (const entry of entries) {
     if (entry.status !== "reembedded" || !entry.appliedVectorHash) continue;
+    attempted++;
     const previous = entry.previousMetadataEmbedding ?? null;
     const updated = await prisma.$executeRawUnsafe(
       `UPDATE "Memory"
@@ -353,5 +422,5 @@ export async function rollbackMemoryVectorReembed(
     );
     restored += Number(updated);
   }
-  return restored;
+  return { reverted: restored, conflicted: attempted - restored };
 }

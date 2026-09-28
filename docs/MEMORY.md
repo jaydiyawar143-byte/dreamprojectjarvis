@@ -1,6 +1,6 @@
 # Memory and Knowledge
 
-How JARVIS remembers facts about a user and answers from their documents. Verified against the code on 2026-09-14; the memory write, recall and backfill sections were updated for S7 on 2026-09-27.
+How JARVIS remembers facts about a user and answers from their documents. Verified against the code on 2026-09-14; the memory write, recall and backfill sections were updated for S7 on 2026-09-27, and the backfill safety rules on 2026-09-28.
 
 ---
 
@@ -102,8 +102,22 @@ A one-off, operator-run tool fills the vector column for them:
 ```
 packages/db/src/maintenance/memory-vector-backfill.ts    plan, cast, re-embed, rollback
 apps/api/scripts/s7-memory-backfill/backfill-cli.ts      guards, batching, rollback log
+apps/api/scripts/s7-memory-backfill/live-api.ts          reads the live API container's code
 apps/api/scripts/s7-memory-backfill/run.ts               entry point
 ```
+
+### Hard prerequisite: S7 code live, and no pre-S7 writer — before, during and after
+
+**The S7 memory code must be deployed and running before the backfill, and no pre-S7 memory-writing code may run during or after it.** This is a requirement, not a recommendation. An earlier version of this plan (Step 8) called running the backfill under the old image harmless; that was wrong.
+
+Pre-S7 code merges a memory by updating its content and `metadata.embedding` through Prisma, which cannot write the vector column. On a row the backfill has already given a vector, that leaves the vector describing the old content. The backfill then counts the row as already vectorized and never repairs it.
+
+The command enforces the order:
+
+- `--execute` inspects the running API container (`--live-api-container=<name>`) read-only: `docker inspect` for its running flag, then `grep -q -F` inside it for five identifiers of the S7 write and recall code in the compiled files the image runs. Unless the container is running and all five are present, nothing is read from or written to the database. The container's environment and file contents are never read.
+- The plan counts rows whose vector disagrees with their own metadata embedding (`vectorMismatch`). S7 code always writes the two together, so a non-zero count means a pre-S7 writer has touched vectorized rows. Execution refuses while it is non-zero, and postflight requires it to be zero. Re-running the dry run later shows whether a pre-S7 writer has run since.
+
+The check proves what the named container runs. It cannot see a writer it is not told about: any other process writing to the same database must be stopped or confirmed to run S7 code by the operator.
 
 It sorts every row into exactly one category and acts on two of them:
 
@@ -116,11 +130,68 @@ It sorts every row into exactly one category and acts on two of them:
 
 The suspicion rule exists because deduplication would have skipped or merged a candidate that similar at creation time, so such a stored embedding cannot be the row's own.
 
-**Guards.** Without `--execute` the tool is a dry run: it prints category counts and changes nothing. It refuses to run at all unless `DATABASE_URL` is set explicitly and `--confirm-target=<host>:<port>/<database>` names the same database. Execution also needs `--expect-cast` and `--expect-reembed` equal to a fresh plan's counts, and `--rollback-log` naming a file that does not yet exist. Re-embedding needs `OPENAI_API_KEY`, with `OPENAI_EMBEDDING_MODEL` unset or `text-embedding-3-small`. Console output is counts only — no ids, content or vectors.
+### Mandatory backup
 
-**Safety.** Casts run in batches (default 50), each in one transaction that verifies every cast row afterwards and rolls the batch back on any mismatch. Re-embeds run one row per transaction. A second run finds nothing to do. The rollback log is rewritten after every batch; `--rollback=<log>` sets back to NULL only the vectors that run wrote, and only while they are still what it wrote, and restores the re-embedded rows' previous `metadata.embedding`. The log holds row ids and the re-embedded rows' previous embeddings, so keep it private; it is written with mode `0600`, which Windows does not enforce.
+Before `--execute`, take a plain-format `pg_dump` of the Memory table and pass it as `--backup-file=<path>`. The command refuses to execute unless the file:
 
-**Tested** on a throwaway pgvector database with synthetic rows in every category: `packages/db/test/memory-vector-backfill-s7-pg.integration.test.ts` (module) and `apps/api/test/memory-backfill-cli-s7.test.ts` (guards). The command was also run end to end there, 2026-09-27: dry run, refused mismatch, execute, a no-op second run, rollback, and recall through the real orchestrator afterwards.
+- exists and is not empty;
+- was written within the last 120 minutes;
+- starts as a pg_dump and ends with pg_dump's `PostgreSQL database dump complete` line, which pg_dump writes only when it finishes;
+- contains the Memory table's data block, properly terminated;
+- holds exactly as many Memory rows as the table has at execution time.
+
+Nothing in the file is printed. Take the dump inside the database container and copy it out, so no shell re-encodes it (a PowerShell `>` redirect writes UTF-16, which the check refuses):
+
+```bash
+docker exec <postgres container> pg_dump -U <user> -d <database> --data-only --table='public."Memory"' -f /tmp/memory-backup.sql
+docker cp <postgres container>:/tmp/memory-backup.sql <backup path>
+```
+
+The backup holds every memory's content: keep it private, and delete it once it is no longer needed. The command never creates a backup itself.
+
+### Guards
+
+- Without `--execute` the tool is a dry run: it prints category counts and changes nothing.
+- It refuses to run at all unless `DATABASE_URL` is set explicitly and `--confirm-target=<host>:<port>/<database>` names the same database.
+- Arguments are strict. A malformed, empty, repeated or misplaced option is refused, and never read as a dry run: `--execute=yes`, a bare `--rollback`, a non-numeric count, or an execution option without `--execute`. Refusals name the option, never its value.
+- Execution needs all of:
+  - `--expect-cast` and `--expect-reembed` equal to a fresh plan's counts;
+  - `--rollback-log` naming a file that does not yet exist;
+  - `--backup-file` passing the checks above;
+  - `--live-api-container` passing the S7 check;
+  - no vector/metadata mismatch.
+- Re-embedding needs `OPENAI_API_KEY`, with `OPENAI_EMBEDDING_MODEL` unset or `text-embedding-3-small`.
+- Console output is counts and status only — no ids, content or vectors. An unexpected error is reported as `memory_backfill_failed` with its stage and error class name, never its message, and the exit code is non-zero.
+
+### Safety
+
+- **Casts** run in batches (default 50), each in one transaction. Every cast row is verified afterwards, and the whole batch rolls back on any mismatch.
+- **Re-embeds** run one row per transaction. The provider call happens outside the transaction, so the row is re-read under its lock. If its content or metadata embedding changed in the meantime, nothing is written and the row is reported `conflicted`.
+- **Repeat runs.** A second run finds nothing to do.
+- **The rollback log.**
+  - It is rewritten after every batch and every re-embed.
+  - It records the md5 of every vector written. `--rollback=<log>` sets back to NULL only a vector whose md5 still matches. A vector that changed since — a later S7 merge, say — is reported as a conflict and left untouched.
+  - Re-embedded rows also get their previous `metadata.embedding` restored. Content is never changed.
+  - A successful rollback marks the log consumed, and a consumed log is refused.
+  - The log holds row ids and the re-embedded rows' previous embeddings, so keep it private. It is written with mode `0600`, which Windows does not enforce.
+
+**The re-embed set can drift.** A row is suspicious only while the earlier memory whose embedding it duplicates still holds that embedding. If S7 code merges into that earlier memory between the audit and the backfill, the suspicious row is classified `cast` instead, with its wrong embedding. The exact `--expect-cast` / `--expect-reembed` gate refuses that run. When the dry run's counts differ from the audited ones, stop and re-audit. Never change the expected counts to match the new plan.
+
+### Tested
+
+On a throwaway pgvector database, with synthetic rows in every category:
+
+- `packages/db/test/memory-vector-backfill-s7-pg.integration.test.ts` covers the module, including:
+  - exact-hash cast rollback, and a later vector left untouched;
+  - re-embed conflicts when content or the metadata embedding changes during the provider call;
+  - the mismatch count.
+- `apps/api/test/memory-backfill-cli-s7.test.ts` covers every command guard.
+- The command was run end to end there on 2026-09-28, with a real `pg_dump` backup:
+  - refusals without a backup, with a pre-S7 live API, with an unfinished backup, and while a mismatch exists;
+  - execute, and a no-op second run;
+  - rollback with one conflict, then a refused second rollback;
+  - recall through the real orchestrator afterwards.
+- The live-API check was run read-only against the deployment's API container, whose image was built 2026-09-24. It found all five identifiers absent and refused. Against the S7-built packages, mounted read-only into a disposable container, it found all five present.
 
 **Deployment status: not executed.** No deployment database has been changed by this tool.
 

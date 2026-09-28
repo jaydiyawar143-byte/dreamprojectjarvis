@@ -160,6 +160,7 @@ async function vectorFacts(key: string, compareWith: number[]) {
 
 let U1 = "";
 let U2 = "";
+let castApplied: Array<{ id: string; appliedVectorHash: string }> = [];
 const scope = () => ({ userIds: [U1, U2] });
 
 afterAll(async () => {
@@ -192,6 +193,7 @@ describe.skipIf(!dbUp)("S7 controlled memory vector backfill (PostgreSQL, synthe
     expect(plan.alreadyVectorized).toBe(1);
     expect(plan.invalidMetadataEmbedding).toBe(1);
     expect(plan.expiredMetadataOnly).toBe(1);
+    expect(plan.vectorMetadataMismatch).toBe(0);
     expect(plan.totalRows).toBe(8);
   });
 
@@ -206,6 +208,7 @@ describe.skipIf(!dbUp)("S7 controlled memory vector backfill (PostgreSQL, synthe
 
     const plan = await backfill.planMemoryVectorBackfill(prisma, scope());
     const cast = await backfill.applyMemoryVectorCastBatch(prisma, plan.castCandidateIds);
+    castApplied = cast.applied;
     const provider = new RecordingEmbeddings();
     const reembedded = await backfill.reembedMemoryVectors(prisma, provider, plan.reembedCandidateIds, { model: "text-embedding-3-small" });
 
@@ -275,8 +278,8 @@ describe.skipIf(!dbUp)("S7 controlled memory vector backfill (PostgreSQL, synthe
     const untouched = ["none", "vectorized", "malformed", "expired"];
     const before = await fingerprints(untouched);
 
-    const reverted = await backfill.rollbackMemoryVectorCastBatch(prisma, [ids.clean!, ids.earlier!, ids.other!]);
-    expect(reverted).toBe(3);
+    const reverted = await backfill.rollbackMemoryVectorCastBatch(prisma, castApplied);
+    expect(reverted).toEqual({ reverted: 3, conflicted: 0 });
 
     const plan = await backfill.planMemoryVectorBackfill(prisma, scope());
     expect([...plan.castCandidateIds].sort()).toEqual([ids.clean, ids.earlier, ids.other].sort());
@@ -300,7 +303,7 @@ describe.skipIf(!dbUp)("S7 controlled memory vector backfill (PostgreSQL, synthe
     expect(result!.status).toBe("reembedded");
 
     const restored = await backfill.rollbackMemoryVectorReembed(prisma, [result!]);
-    expect(restored).toBe(1);
+    expect(restored).toEqual({ reverted: 1, conflicted: 0 });
     const row = await prisma.$queryRawUnsafe<Array<{ hasVector: boolean; metadataEqualsOld: boolean; note: string }>>(
       `SELECT ("embedding" IS NOT NULL) AS "hasVector",
               ("metadata"->'embedding')::text::vector = $2::vector AS "metadataEqualsOld",
@@ -310,5 +313,202 @@ describe.skipIf(!dbUp)("S7 controlled memory vector backfill (PostgreSQL, synthe
       toSql(storedBad)
     );
     expect(row[0]).toEqual({ hasVector: false, metadataEqualsOld: true, note: "kept" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// S7 Step 9B — exact cast rollback (F2), the re-embed content race (F3), and
+// the vector/metadata disagreement count that exposes a pre-S7 writer (F1).
+// ---------------------------------------------------------------------------
+
+/** Every column except the vector: what a rollback or a refused write must not touch. */
+async function rowState(id: string) {
+  const rows = await prisma.$queryRawUnsafe<Array<{ fp: string; hasVector: boolean; vectorHash: string | null; content: string }>>(
+    `SELECT md5(concat_ws('|', "content", "type"::text, "importance"::text, coalesce("metadata"::text,'~'),
+            coalesce("expiresAt"::text,'~'), "updatedAt"::text)) AS fp,
+            ("embedding" IS NOT NULL) AS "hasVector",
+            CASE WHEN "embedding" IS NULL THEN NULL ELSE md5("embedding"::text) END AS "vectorHash",
+            "content"
+       FROM "Memory" WHERE "id" = $1`,
+    id
+  );
+  return rows[0]!;
+}
+
+async function metadataEmbeddingEquals(id: string, vector: number[]) {
+  const rows = await prisma.$queryRawUnsafe<Array<{ eq: boolean }>>(
+    `SELECT ("metadata"->'embedding')::text::vector = $2::vector AS eq FROM "Memory" WHERE "id" = $1`,
+    id,
+    toSql(vector)
+  );
+  return rows[0]!.eq;
+}
+
+/** An S7-code merge: new content, and a new embedding in BOTH places. */
+async function s7Merge(id: string, content: string, vector: number[]) {
+  await prisma.$executeRawUnsafe(
+    `UPDATE "Memory" SET "content" = $2, "embedding" = $3::vector,
+            "metadata" = jsonb_set("metadata", '{embedding}', $4::jsonb)
+      WHERE "id" = $1`,
+    id,
+    content,
+    toSql(vector),
+    JSON.stringify(vector)
+  );
+}
+
+/** Embeds like the real provider, but lets a test run a concurrent write mid-call. */
+class RacingEmbeddings implements IEmbeddingProvider {
+  readonly id = "s7-racing-embeddings";
+  readonly name = "S7 racing embeddings";
+  readonly dimensions = DIMS;
+  constructor(
+    private readonly result: number[],
+    private readonly duringEmbed?: () => Promise<void>
+  ) {}
+  async embed(request: EmbeddingRequest): Promise<EmbeddingResponse> {
+    if (this.duringEmbed) await this.duringEmbed();
+    const inputs = Array.isArray(request.input) ? request.input : [request.input];
+    return { embeddings: inputs.map(() => this.result), model: request.model ?? "s7" };
+  }
+  async isAvailable() {
+    return true;
+  }
+}
+
+describe.skipIf(!dbUp)("S7 Step 9B — exact rollback and re-embed race (PostgreSQL, synthetic data)", () => {
+  const in90 = new Date(Date.now() + 90 * 86400000);
+  let U3 = "";
+  const row: Record<string, string> = {};
+
+  async function metadataOnly(key: string, userId: string, content: string, embedding: number[], extra: object = {}) {
+    const created = await prisma.memory.create({
+      data: { userId, type: "FACT", content, importance: 0.7, confidence: 1, sourceType: "conversation", metadata: { embedding, ...extra }, expiresAt: in90 },
+    });
+    row[key] = created.id;
+    return created.id;
+  }
+
+  it("F2 — a cast records the md5 of the exact vector it wrote", async () => {
+    U3 = await newUser("u3");
+    await metadataOnly("keep", U3, "S7 9B cast row that stays as written", realistic(401));
+    await metadataOnly("changed", U3, "S7 9B cast row that is merged later", realistic(402));
+
+    const result = await backfill.applyMemoryVectorCastBatch(prisma, [row.keep!, row.changed!]);
+
+    expect([...result.castIds].sort()).toEqual([row.keep, row.changed].sort());
+    expect(result.applied).toHaveLength(2);
+    for (const applied of result.applied) {
+      const state = await rowState(applied.id);
+      expect(state.hasVector).toBe(true);
+      expect(applied.appliedVectorHash).toMatch(/^[0-9a-f]{32}$/);
+      expect(applied.appliedVectorHash).toBe(state.vectorHash);
+    }
+    castApplied = result.applied;
+  });
+
+  it("F2 — rollback restores NULL where the hash still matches, leaving content and metadata alone", async () => {
+    const before = await rowState(row.keep!);
+    const keepEntry = castApplied.filter((a) => a.id === row.keep);
+
+    const outcome = await backfill.rollbackMemoryVectorCastBatch(prisma, keepEntry);
+
+    expect(outcome).toEqual({ reverted: 1, conflicted: 0 });
+    const after = await rowState(row.keep!);
+    expect(after.hasVector).toBe(false);
+    expect(after.fp).toBe(before.fp); // content, metadata, timestamps untouched
+  });
+
+  it("F2 — a later change to the vector prevents rollback, and the later change stays untouched", async () => {
+    const LATER = realistic(403);
+    await s7Merge(row.changed!, "S7 9B merged content written later by S7 code", LATER);
+    const before = await rowState(row.changed!);
+    const changedEntry = castApplied.filter((a) => a.id === row.changed);
+
+    const outcome = await backfill.rollbackMemoryVectorCastBatch(prisma, changedEntry);
+
+    expect(outcome).toEqual({ reverted: 0, conflicted: 1 });
+    const after = await rowState(row.changed!);
+    expect(after).toEqual(before); // vector, content and metadata exactly as the later writer left them
+    expect(after.hasVector).toBe(true);
+    expect(after.content).toBe("S7 9B merged content written later by S7 code");
+    expect(await metadataEmbeddingEquals(row.changed!, LATER)).toBe(true);
+  });
+
+  it("F3 — re-embed writes when the content is unchanged under the row lock", async () => {
+    const FRESH = realistic(411);
+    await metadataOnly("stable", U3, "S7 9B re-embed row whose content does not change", realistic(412));
+
+    const [result] = await backfill.reembedMemoryVectors(prisma, new RacingEmbeddings(FRESH), [row.stable!], { model: "text-embedding-3-small" });
+
+    expect(result).toMatchObject({ id: row.stable, status: "reembedded" });
+    const state = await rowState(row.stable!);
+    expect(state.hasVector).toBe(true);
+    expect(state.vectorHash).toBe(result!.appliedVectorHash);
+    expect(await metadataEmbeddingEquals(row.stable!, FRESH)).toBe(true);
+    expect(state.content).toBe("S7 9B re-embed row whose content does not change");
+  });
+
+  it("F3 — re-embed refuses to write when the content changed while the embedding was generated", async () => {
+    const STALE_RESULT = realistic(421); // the embedding of the OLD text
+    const CONCURRENT = realistic(422);
+    await metadataOnly("racing", U3, "S7 9B text that was read and sent for embedding", realistic(423), { note: "kept" });
+    // A pre-S7 merge lands while the provider is working: new content and a
+    // new metadata embedding, no vector.
+    const concurrentWriter = async () => {
+      await prisma.$executeRawUnsafe(
+        `UPDATE "Memory" SET "content" = $2, "metadata" = jsonb_set("metadata", '{embedding}', $3::jsonb) WHERE "id" = $1`,
+        row.racing!,
+        "S7 9B text rewritten by a concurrent writer",
+        JSON.stringify(CONCURRENT)
+      );
+    };
+    const [result] = await backfill.reembedMemoryVectors(
+      prisma,
+      new RacingEmbeddings(STALE_RESULT, concurrentWriter),
+      [row.racing!],
+      { model: "text-embedding-3-small" }
+    );
+
+    expect(result).toEqual({ id: row.racing, status: "conflicted" });
+    const state = await rowState(row.racing!);
+    expect(state.hasVector).toBe(false); // no stale vector
+    expect(state.content).toBe("S7 9B text rewritten by a concurrent writer"); // the writer's content stands
+    expect(await metadataEmbeddingEquals(row.racing!, CONCURRENT)).toBe(true); // and its embedding
+  });
+
+  it("F3 — re-embed also refuses when only the metadata embedding changed underneath it", async () => {
+    const OTHER = realistic(431);
+    await metadataOnly("metaRace", U3, "S7 9B row whose metadata embedding is replaced mid-call", realistic(432));
+    const [result] = await backfill.reembedMemoryVectors(
+      prisma,
+      new RacingEmbeddings(realistic(433), async () => {
+        await prisma.$executeRawUnsafe(
+          `UPDATE "Memory" SET "metadata" = jsonb_set("metadata", '{embedding}', $2::jsonb) WHERE "id" = $1`,
+          row.metaRace!,
+          JSON.stringify(OTHER)
+        );
+      }),
+      [row.metaRace!],
+      { model: "text-embedding-3-small" }
+    );
+
+    expect(result).toEqual({ id: row.metaRace, status: "conflicted" });
+    expect((await rowState(row.metaRace!)).hasVector).toBe(false);
+    expect(await metadataEmbeddingEquals(row.metaRace!, OTHER)).toBe(true);
+  });
+
+  it("F1 — the plan counts rows whose vector disagrees with their metadata embedding", async () => {
+    const U4 = await newUser("u4");
+    const consistent = realistic(441);
+    await insert("vectorized", U4, { metadata: { embedding: consistent }, vector: consistent, createdAt: new Date(), expiresAt: in90 });
+    // A pre-S7 merge after a backfill: metadata moved on, the vector did not.
+    await insert("clean", U4, { metadata: { embedding: realistic(442) }, vector: realistic(443), createdAt: new Date(), expiresAt: in90 });
+
+    const plan = await backfill.planMemoryVectorBackfill(prisma, { userIds: [U4] });
+
+    expect(plan.alreadyVectorized).toBe(2);
+    expect(plan.vectorMetadataMismatch).toBe(1);
+    expect(plan.castCandidateIds).toEqual([]);
   });
 });

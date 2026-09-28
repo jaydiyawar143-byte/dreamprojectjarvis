@@ -81,5 +81,7 @@ export {
   type MemoryBackfillPlan,
   type MemoryBackfillScope,
   type MemoryVectorCastResult,
+  type MemoryVectorCastRow,
   type MemoryVectorReembedResult,
+  type MemoryVectorRollbackResult,
 } from "./maintenance/memory-vector-backfill.js";
