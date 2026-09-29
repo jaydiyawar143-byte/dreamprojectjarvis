@@ -23,6 +23,11 @@ export const SessionContextSchema = z.object({
   agentId: z.string().optional(),
   traceId: z.string().uuid(),
   ipAddress: z.string().optional(),
+  /**
+   * S7.2 L2 — the id of the user message the chat route saved for this turn.
+   * Set by the server only, never from a request body; memory provenance.
+   */
+  userMessageId: z.string().optional(),
 });
 
 export type SessionContext = z.infer<typeof SessionContextSchema>;

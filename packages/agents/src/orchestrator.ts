@@ -362,8 +362,7 @@ export class Orchestrator implements IOrchestrator {
           this.extractMemoryAsync(
             request.message,
             output.message,
-            context.auth.userId,
-            context.conversationId,
+            context,
           ).catch(() => {});
 
           const responseMetadata: Record<string, unknown> = {
@@ -834,8 +833,7 @@ export class Orchestrator implements IOrchestrator {
   private async extractMemoryAsync(
     userMessage: string,
     assistantMessage: string,
-    userId: string,
-    conversationId?: string,
+    context: SessionContext,
   ): Promise<void> {
     if (!this.memoryExtractor || !this.memoryConfig.extractionEnabled) return;
 
@@ -844,12 +842,20 @@ export class Orchestrator implements IOrchestrator {
       if (!isAvailable) return;
 
       await this.memoryExtractor.extract({
-        userId,
+        userId: context.auth.userId,
         messages: [
-          { role: "user", content: userMessage },
+          // S7.2 L2 — the user's message carries its saved id and this turn's
+          // trace, so a memory can point at it. JARVIS's reply is context
+          // only: role and content, no id, never a source.
+          {
+            role: "user",
+            content: userMessage,
+            ...(context.userMessageId ? { messageId: context.userMessageId } : {}),
+            traceId: context.traceId,
+          },
           { role: "assistant", content: assistantMessage },
         ],
-        conversationId,
+        conversationId: context.conversationId,
         expiryDays: this.memoryConfig.extractionExpiryDays,
       });
     } catch {

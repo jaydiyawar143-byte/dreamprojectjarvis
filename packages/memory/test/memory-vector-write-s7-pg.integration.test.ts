@@ -28,6 +28,7 @@ import type {
   IEmbeddingProvider,
 } from "@jarvis/core";
 import { MemoryExtractionService } from "../src/memory-extraction-service.js";
+import { citeFirstUserMessage } from "./helpers/compliant-citation.js";
 
 const EXPLICIT_DATABASE_URL = process.env.DATABASE_URL;
 const { PrismaClient, PrismaMemoryRepository } = await import("@jarvis/db");
@@ -67,9 +68,10 @@ class ScriptedExtractionModel implements IAIProvider {
   readonly name = "S7 scripted extraction model";
   readonly defaultModel = "s7-scripted";
   constructor(private readonly candidates: Array<Record<string, unknown>>) {}
-  async complete(_request: AICompletionRequest): Promise<AICompletionResponse> {
+  async complete(request: AICompletionRequest): Promise<AICompletionResponse> {
     return {
-      message: { role: "assistant", content: JSON.stringify({ candidates: this.candidates }) },
+      // S7.2 L2 — a compliant model: each candidate cites the user's message.
+      message: { role: "assistant", content: citeFirstUserMessage(request, JSON.stringify({ candidates: this.candidates })) },
       finishReason: "stop",
       model: this.defaultModel,
     };
@@ -159,7 +161,8 @@ describe.skipIf(!dbUp)("S7 memory write contract — MemoryExtractionService + P
 
     await service.extract({
       userId: user,
-      messages: [{ role: "user", content: "Please remember that I prefer S7 contract reports as a short PDF." }],
+      conversationId: "conv-s7-t10",
+      messages: [{ role: "user", messageId: "msg-s7-t10", content: "Please remember that I prefer S7 contract reports as a short PDF." }],
       expiryDays: 90,
     });
 
@@ -213,7 +216,8 @@ describe.skipIf(!dbUp)("S7 memory write contract — MemoryExtractionService + P
 
     const result = await service.extract({
       userId: user,
-      messages: [{ role: "user", content: "Actually, I want weekly S7 merge summaries as slides in English." }],
+      conversationId: "conv-s7-t11",
+      messages: [{ role: "user", messageId: "msg-s7-t11", content: "Actually, I want weekly S7 merge summaries as slides in English." }],
       expiryDays: 90,
     });
     expect(result.meta.memoriesUpdated, "the existing path merged rather than created").toBe(1);

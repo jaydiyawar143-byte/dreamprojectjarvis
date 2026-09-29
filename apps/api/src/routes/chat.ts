@@ -474,7 +474,10 @@ export function createChatRouter(container: ChatRouterDeps): Router {
       // -----------------------------------------------------------------------
       // NORMAL FLOW — route to orchestrator
       // -----------------------------------------------------------------------
-      await saveUserMessage();
+      const savedUserMessage = await saveUserMessage();
+      // S7.2 L2 — memory provenance: a memory learned from this turn points at
+      // this saved message. Server-set, like the traceId; never from the body.
+      sessionContext.userMessageId = savedUserMessage.id;
 
       const response = await container.orchestrator.process(
         { ...jarvisRequest, conversationId, conversationHistory },

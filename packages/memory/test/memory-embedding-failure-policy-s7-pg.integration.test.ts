@@ -8,8 +8,9 @@
 // when DATABASE_URL was set explicitly for a separate test database
 // (AGENTS.md); otherwise it is skipped.
 import { describe, it, expect, afterAll, vi } from "vitest";
-import type { EmbeddingRequest, EmbeddingResponse, IAIProvider, IEmbeddingProvider } from "@jarvis/core";
+import type { AICompletionRequest, EmbeddingRequest, EmbeddingResponse, IAIProvider, IEmbeddingProvider } from "@jarvis/core";
 import { MemoryExtractionService } from "../src/memory-extraction-service.js";
+import { citeFirstUserMessage } from "./helpers/compliant-citation.js";
 
 const EXPLICIT_DATABASE_URL = process.env.DATABASE_URL;
 
@@ -43,11 +44,15 @@ function model(contents: string[]): IAIProvider {
     id: "s7-model",
     name: "S7 model",
     defaultModel: "s7",
-    async complete() {
+    async complete(request: AICompletionRequest) {
       return {
         message: {
           role: "assistant",
-          content: JSON.stringify({ candidates: contents.map((content) => ({ type: "FACT", content, importance: 0.8, confidence: 1 })) }),
+          // S7.2 L2 — a compliant model: each candidate cites the user's message.
+          content: citeFirstUserMessage(
+            request,
+            JSON.stringify({ candidates: contents.map((content) => ({ type: "FACT", content, importance: 0.8, confidence: 1 })) })
+          ),
         },
         finishReason: "stop",
         model: "s7",
@@ -99,7 +104,21 @@ async function run(tag: string, contents: string[], provider: IEmbeddingProvider
   });
   let result;
   try {
-    result = await service.extract({ userId, messages: [{ role: "user", content: "Remember these S7 facts." }], expiryDays: 90 });
+    result = await service.extract({
+      userId,
+      conversationId: "conv-s7",
+      // S7.2 L3: the user must SAY the facts these tests script.
+      messages: [
+        {
+          role: "user",
+          messageId: "msg-s7",
+          content:
+            "I use S7 pg good fact, S7 pg mixed a, S7 pg mixed b, S7 pg mixed c, S7 pg mixed d, S7 pg 3072 fact, " +
+            "S7 pg dims fact, S7 pg empty fact, S7 pg non-finite fact, S7 pg provider fact and S7 pg rejected fact.",
+        },
+      ],
+      expiryDays: 90,
+    });
   } finally {
     spy.mockRestore();
   }

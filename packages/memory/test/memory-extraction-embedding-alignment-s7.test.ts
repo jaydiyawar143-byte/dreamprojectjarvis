@@ -22,6 +22,7 @@ import type {
   MemoryStoreRequest,
 } from "@jarvis/core";
 import { MemoryExtractionService } from "../src/memory-extraction-service.js";
+import { citeFirstUserMessage } from "./helpers/compliant-citation.js";
 
 const DUPLICATE = "User's favourite drink is masala chai.";
 const NEW_FACT = "User's office is in Pune.";
@@ -34,16 +35,20 @@ class ScriptedModel implements IAIProvider {
   readonly id = "s7-scripted";
   readonly name = "S7 scripted";
   readonly defaultModel = "s7-scripted";
-  async complete(_request: AICompletionRequest): Promise<AICompletionResponse> {
+  async complete(request: AICompletionRequest): Promise<AICompletionResponse> {
     return {
       message: {
         role: "assistant",
-        content: JSON.stringify({
-          candidates: [
-            { type: "FACT", content: DUPLICATE, importance: 0.8, confidence: 1 },
-            { type: "FACT", content: NEW_FACT, importance: 0.8, confidence: 1 },
-          ],
-        }),
+        // S7.2 L2 — a compliant model: each candidate cites the user's message.
+        content: citeFirstUserMessage(
+          request,
+          JSON.stringify({
+            candidates: [
+              { type: "FACT", content: DUPLICATE, importance: 0.8, confidence: 1 },
+              { type: "FACT", content: NEW_FACT, importance: 0.8, confidence: 1 },
+            ],
+          })
+        ),
       },
       finishReason: "stop",
       model: this.defaultModel,
@@ -132,7 +137,9 @@ describe("S7 extraction — embeddings stay aligned with their candidates", () =
 
     const result = await service.extract({
       userId: "user-s7",
-      messages: [{ role: "user", content: "I drink masala chai and my office is in Pune." }],
+      conversationId: "conv-s7",
+      // S7.2 L3: the user states both facts (the favourite, too), so both reach embedding.
+      messages: [{ role: "user", messageId: "msg-s7", content: "My favourite drink is masala chai and my office is in Pune." }],
     });
 
     expect(result.meta.duplicatesSkipped, "the first candidate is skipped as a duplicate").toBe(1);

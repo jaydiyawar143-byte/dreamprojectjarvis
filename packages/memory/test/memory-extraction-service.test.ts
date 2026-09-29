@@ -18,6 +18,7 @@ import type {
   MemoryType,
 } from "@jarvis/core";
 import { MemoryExtractionService } from "../src/memory-extraction-service.js";
+import { citedResponse } from "./helpers/compliant-citation.js";
 
 // ---------------------------------------------------------------------------
 // Mock AI Provider — returns configurable extraction responses
@@ -50,7 +51,8 @@ class MockAIProvider implements IAIProvider {
       throw new Error("AI provider unavailable");
     }
     if (this.responseFn) {
-      return this.responseFn(request);
+      // S7.2 L2 — answers as a compliant model: uncited candidates cite the user.
+      return citedResponse(request, this.responseFn(request));
     }
     return {
       message: { role: "assistant", content: '{"candidates":[]}' },
@@ -337,7 +339,7 @@ describe("Phase 4: Automatic Memory Extraction", () => {
       const result = await service.extract({
         userId: "user-1",
         messages: [
-          { role: "user", content: "My name is Alice Johnson" },
+          { role: "user", messageId: "msg-user-1", content: "My name is Alice Johnson" },
           { role: "assistant", content: "Nice to meet you, Alice!" },
         ],
         conversationId: "conv-1",
@@ -355,7 +357,7 @@ describe("Phase 4: Automatic Memory Extraction", () => {
       const result = await service.extract({
         userId: "user-1",
         messages: [
-          { role: "user", content: "I really prefer dark mode in all my apps" },
+          { role: "user", messageId: "msg-user-1", content: "I really prefer dark mode over light mode in all my apps" },
         ],
         conversationId: "conv-1",
       });
@@ -364,45 +366,53 @@ describe("Phase 4: Automatic Memory Extraction", () => {
     });
   });
 
-  describe("3. GOAL extraction", () => {
-    it("extracts a GOAL from user statement", async () => {
+  // S7.2 L3 finalization — a goal, project state or a current decision is not
+  // durable USER memory: the model may extract it, but it is never stored.
+  describe("3. GOAL statements", () => {
+    it("are extracted by the model but never stored as memory", async () => {
       mockAI.setResponse(() => llmResponse([GOAL_CANDIDATE]));
       const result = await service.extract({
         userId: "user-1",
         messages: [
-          { role: "user", content: "I want to launch my SaaS by Q3 2026" },
+          { role: "user", messageId: "msg-user-1", content: "I want to launch my SaaS product by Q3 2026" },
         ],
         conversationId: "conv-1",
       });
-      expect(result.candidates[0].type).toBe("GOAL");
+      expect(result.meta.candidatesValidated).toBe(1);
+      expect(result.candidates).toEqual([]);
+      expect(await store.count("user-1")).toBe(0);
     });
   });
 
-  describe("4. PROJECT extraction", () => {
-    it("extracts a PROJECT from user statement", async () => {
+  describe("4. PROJECT statements", () => {
+    it("are extracted by the model but never stored as memory", async () => {
       mockAI.setResponse(() => llmResponse([PROJECT_CANDIDATE]));
       const result = await service.extract({
         userId: "user-1",
         messages: [
-          { role: "user", content: "I'm building a finance app called FinTrack" },
+          { role: "user", messageId: "msg-user-1", content: "I'm building a personal finance tracking app called FinTrack" },
         ],
         conversationId: "conv-1",
       });
-      expect(result.candidates[0].type).toBe("PROJECT");
+      expect(result.meta.candidatesValidated).toBe(1);
+      expect(result.candidates).toEqual([]);
+      expect(await store.count("user-1")).toBe(0);
     });
   });
 
-  describe("5. DECISION extraction", () => {
-    it("extracts a DECISION from user statement", async () => {
+  describe("5. DECISION statements", () => {
+    it("are extracted by the model but never stored as memory", async () => {
       mockAI.setResponse(() => llmResponse([DECISION_CANDIDATE]));
       const result = await service.extract({
         userId: "user-1",
         messages: [
-          { role: "user", content: "I decided to use PostgreSQL instead of MongoDB" },
+          { role: "user", messageId: "msg-user-1", content: "I decided to use PostgreSQL over MongoDB for the backend database" },
         ],
         conversationId: "conv-1",
       });
-      expect(result.candidates[0].type).toBe("DECISION");
+      expect(result.meta.candidatesValidated).toBe(1);
+      expect(result.candidates).toEqual([]);
+      expect(await store.count("user-1")).toBe(0);
     });
   });
 
@@ -412,7 +422,7 @@ describe("Phase 4: Automatic Memory Extraction", () => {
       const result = await service.extract({
         userId: "user-1",
         messages: [
-          { role: "user", content: "I always deploy to staging first, test, then push to prod" },
+          { role: "user", messageId: "msg-user-1", content: "I always deploy to staging first, run tests, then promote to production" },
         ],
         conversationId: "conv-1",
       });
@@ -425,8 +435,9 @@ describe("Phase 4: Automatic Memory Extraction", () => {
       mockAI.setResponse(() => llmResponse([]));
       const result = await service.extract({
         userId: "user-1",
+        conversationId: "conv-1",
         messages: [
-          { role: "user", content: "Hey, what's up?" },
+          { role: "user", messageId: "msg-user-1", content: "Hey, what's up?" },
           { role: "assistant", content: "Not much! How can I help?" },
         ],
       });
@@ -441,10 +452,11 @@ describe("Phase 4: Automatic Memory Extraction", () => {
       const callSpy = mockAI;
       await service.extract({
         userId: "user-1",
+        conversationId: "conv-1",
         messages: [
-          { role: "user", content: "hi" },
+          { role: "user", messageId: "msg-user-1", content: "hi" },
           { role: "assistant", content: "Hello!" },
-          { role: "user", content: "ok" },
+          { role: "user", messageId: "msg-user-1", content: "ok" },
         ],
       });
       expect(callSpy.getCallCount()).toBe(0);
@@ -457,8 +469,9 @@ describe("Phase 4: Automatic Memory Extraction", () => {
       const callCountBefore = mockAI.getCallCount();
       await service.extract({
         userId: "user-1",
+        conversationId: "conv-1",
         messages: [
-          { role: "user", content: "My api_key is sk-1234567890abcdef1234567890abcdef" },
+          { role: "user", messageId: "msg-user-1", content: "My api_key is sk-1234567890abcdef1234567890abcdef" },
         ],
       });
       expect(mockAI.getCallCount()).toBe(callCountBefore);
@@ -471,8 +484,9 @@ describe("Phase 4: Automatic Memory Extraction", () => {
       const callCountBefore = mockAI.getCallCount();
       await service.extract({
         userId: "user-1",
+        conversationId: "conv-1",
         messages: [
-          { role: "user", content: "password: supersecret123" },
+          { role: "user", messageId: "msg-user-1", content: "password: supersecret123" },
         ],
       });
       expect(mockAI.getCallCount()).toBe(callCountBefore);
@@ -485,8 +499,9 @@ describe("Phase 4: Automatic Memory Extraction", () => {
       const callCountBefore = mockAI.getCallCount();
       await service.extract({
         userId: "user-1",
+        conversationId: "conv-1",
         messages: [
-          { role: "user", content: "Use this bearer token: bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U" },
+          { role: "user", messageId: "msg-user-1", content: "Use this bearer token: bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U" },
         ],
       });
       expect(mockAI.getCallCount()).toBe(callCountBefore);
@@ -502,7 +517,8 @@ describe("Phase 4: Automatic Memory Extraction", () => {
       }));
       const result = await service.extract({
         userId: "user-1",
-        messages: [{ role: "user", content: "Remember my preference for tabs" }],
+        conversationId: "conv-1",
+        messages: [{ role: "user", messageId: "msg-user-1", content: "Remember my preference for tabs" }],
       });
       expect(result.candidates).toHaveLength(0);
     });
@@ -515,7 +531,8 @@ describe("Phase 4: Automatic Memory Extraction", () => {
       }));
       const result = await service.extract({
         userId: "user-1",
-        messages: [{ role: "user", content: "Remember this" }],
+        conversationId: "conv-1",
+        messages: [{ role: "user", messageId: "msg-user-1", content: "Remember this" }],
       });
       expect(result.candidates).toHaveLength(0);
     });
@@ -528,7 +545,8 @@ describe("Phase 4: Automatic Memory Extraction", () => {
       }));
       const result = await service.extract({
         userId: "user-1",
-        messages: [{ role: "user", content: "Remember this" }],
+        conversationId: "conv-1",
+        messages: [{ role: "user", messageId: "msg-user-1", content: "Remember this" }],
       });
       expect(result.candidates).toHaveLength(0);
     });
@@ -550,7 +568,8 @@ describe("Phase 4: Automatic Memory Extraction", () => {
       }));
       const result = await service.extract({
         userId: "user-1",
-        messages: [{ role: "user", content: "test" }],
+        conversationId: "conv-1",
+        messages: [{ role: "user", messageId: "msg-user-1", content: "test" }],
       });
       expect(result.candidates).toHaveLength(0);
     });
@@ -570,7 +589,8 @@ describe("Phase 4: Automatic Memory Extraction", () => {
       }));
       const result = await service.extract({
         userId: "user-1",
-        messages: [{ role: "user", content: "test" }],
+        conversationId: "conv-1",
+        messages: [{ role: "user", messageId: "msg-user-1", content: "test" }],
       });
       expect(result.candidates).toHaveLength(0);
     });
@@ -590,7 +610,8 @@ describe("Phase 4: Automatic Memory Extraction", () => {
       }));
       const result = await service.extract({
         userId: "user-1",
-        messages: [{ role: "user", content: "test" }],
+        conversationId: "conv-1",
+        messages: [{ role: "user", messageId: "msg-user-1", content: "test" }],
       });
       expect(result.candidates).toHaveLength(0);
     });
@@ -603,7 +624,8 @@ describe("Phase 4: Automatic Memory Extraction", () => {
       ]));
       const result = await service.extract({
         userId: "user-1",
-        messages: [{ role: "user", content: "This is critical info" }],
+        conversationId: "conv-1",
+        messages: [{ role: "user", messageId: "msg-user-1", content: "My critical fact is simple." }],
       });
       expect(result.candidates[0].importance).toBe(0.95);
     });
@@ -612,11 +634,12 @@ describe("Phase 4: Automatic Memory Extraction", () => {
   describe("15. Confidence scoring", () => {
     it("preserves confidence score from LLM extraction", async () => {
       mockAI.setResponse(() => llmResponse([
-        { type: "FACT", content: "Stated fact", importance: 0.8, confidence: 1.0 },
+        { type: "FACT", content: "User's name is Bob", importance: 0.8, confidence: 1.0 },
       ]));
       const result = await service.extract({
         userId: "user-1",
-        messages: [{ role: "user", content: "My name is Bob" }],
+        conversationId: "conv-1",
+        messages: [{ role: "user", messageId: "msg-user-1", content: "My name is Bob" }],
       });
       expect(result.candidates[0].confidence).toBe(1.0);
     });
@@ -641,7 +664,8 @@ describe("Phase 4: Automatic Memory Extraction", () => {
 
       const result = await service.extract({
         userId: "user-1",
-        messages: [{ role: "user", content: "My name is Alice Johnson" }],
+        conversationId: "conv-1",
+        messages: [{ role: "user", messageId: "msg-user-1", content: "My name is Alice Johnson" }],
       });
 
       expect(result.meta.duplicatesSkipped).toBe(1);
@@ -668,7 +692,8 @@ describe("Phase 4: Automatic Memory Extraction", () => {
 
       const result = await service.extract({
         userId: "user-1",
-        messages: [{ role: "user", content: "I prefer dark mode over light mode" }],
+        conversationId: "conv-1",
+        messages: [{ role: "user", messageId: "msg-user-1", content: "I prefer dark mode over light mode" }],
       });
 
       expect(result.meta.memoriesUpdated).toBe(1);
@@ -684,7 +709,8 @@ describe("Phase 4: Automatic Memory Extraction", () => {
 
       const result = await service.extract({
         userId: "user-1",
-        messages: [{ role: "user", content: "I live in Tokyo" }],
+        conversationId: "conv-1",
+        messages: [{ role: "user", messageId: "msg-user-1", content: "I live in Tokyo, Japan" }],
       });
 
       expect(result.meta.memoriesCreated).toBe(1);
@@ -711,7 +737,8 @@ describe("Phase 4: Automatic Memory Extraction", () => {
 
       const result = await service.extract({
         userId: "user-1",
-        messages: [{ role: "user", content: "My name is Alice Johnson" }],
+        conversationId: "conv-1",
+        messages: [{ role: "user", messageId: "msg-user-1", content: "My name is Alice Johnson" }],
       });
 
       expect(result.meta.memoriesCreated).toBe(1);
@@ -720,19 +747,21 @@ describe("Phase 4: Automatic Memory Extraction", () => {
   });
 
   describe("20. Provenance preservation", () => {
-    it("sets sourceType, conversationId, and messageId on extracted memories", async () => {
+    // S7.2 L2 — provenance is the USER message the candidate cites: its own
+    // id, never the request's lastMessageId (which may be JARVIS's reply).
+    it("sets USER sourceType, conversationId, and the cited user message's id on extracted memories", async () => {
       mockAI.setResponse(() => llmResponse([FACT_CANDIDATE]));
 
       const result = await service.extract({
         userId: "user-1",
-        messages: [{ role: "user", content: "My name is Alice Johnson" }],
+        messages: [{ role: "user", messageId: "msg-user-1", content: "My name is Alice Johnson" }],
         conversationId: "conv-42",
         lastMessageId: "msg-99",
       });
 
-      expect(result.candidates[0].sourceType).toBe("conversation");
+      expect(result.candidates[0].sourceType).toBe("USER");
       expect(result.candidates[0].sourceConversationId).toBe("conv-42");
-      expect(result.candidates[0].sourceMessageId).toBe("msg-99");
+      expect(result.candidates[0].sourceMessageId).toBe("msg-user-1");
     });
   });
 
@@ -742,7 +771,8 @@ describe("Phase 4: Automatic Memory Extraction", () => {
 
       const result = await service.extract({
         userId: "user-1",
-        messages: [{ role: "user", content: "My name is Alice" }],
+        conversationId: "conv-1",
+        messages: [{ role: "user", messageId: "msg-user-1", content: "My name is Alice Johnson" }],
         expiryDays: 30,
       });
 
@@ -766,7 +796,8 @@ describe("Phase 4: Automatic Memory Extraction", () => {
 
       const result = await customService.extract({
         userId: "user-1",
-        messages: [{ role: "user", content: "My name is Alice" }],
+        conversationId: "conv-1",
+        messages: [{ role: "user", messageId: "msg-user-1", content: "My name is Alice Johnson" }],
       });
 
       expect(result.candidates[0].expiresAt).toBeDefined();
@@ -784,7 +815,8 @@ describe("Phase 4: Automatic Memory Extraction", () => {
       await expect(
         service.extract({
           userId: "user-1",
-          messages: [{ role: "user", content: "Remember this important thing" }],
+          conversationId: "conv-1",
+          messages: [{ role: "user", messageId: "msg-user-1", content: "Remember this important thing" }],
         }),
       ).rejects.toThrow();
     });
@@ -814,7 +846,8 @@ describe("Phase 4: Automatic Memory Extraction", () => {
 
       const result = await retryService.processConversation({
         userId: "user-1",
-        messages: [{ role: "user", content: "My name is Alice" }],
+        conversationId: "conv-1",
+        messages: [{ role: "user", messageId: "msg-user-1", content: "My name is Alice Johnson" }],
       });
 
       expect(result.candidates).toHaveLength(1);
@@ -835,7 +868,8 @@ describe("Phase 4: Automatic Memory Extraction", () => {
       await expect(
         retryService.processConversation({
           userId: "user-1",
-          messages: [{ role: "user", content: "Remember this" }],
+          conversationId: "conv-1",
+          messages: [{ role: "user", messageId: "msg-user-1", content: "Remember this" }],
         }),
       ).rejects.toThrow();
     });
@@ -847,13 +881,13 @@ describe("Phase 4: Automatic Memory Extraction", () => {
 
       const result1 = await service.extract({
         userId: "user-1",
-        messages: [{ role: "user", content: "My name is Alice" }],
+        messages: [{ role: "user", messageId: "msg-user-1", content: "My name is Alice Johnson" }],
         conversationId: "conv-1",
       });
 
       const result2 = await service.extract({
         userId: "user-1",
-        messages: [{ role: "user", content: "My name is Alice" }],
+        messages: [{ role: "user", messageId: "msg-user-1", content: "My name is Alice Johnson" }],
         conversationId: "conv-1",
       });
 
@@ -868,7 +902,7 @@ describe("Phase 4: Automatic Memory Extraction", () => {
 
       await service.extract({
         userId: "user-1",
-        messages: [{ role: "user", content: "My name is Alice" }],
+        messages: [{ role: "user", messageId: "msg-user-1", content: "My name is Alice Johnson" }],
         conversationId: "conv-1",
       });
 
@@ -877,7 +911,7 @@ describe("Phase 4: Automatic Memory Extraction", () => {
 
       const result2 = await service.extract({
         userId: "user-1",
-        messages: [{ role: "user", content: "My name is Alice" }],
+        messages: [{ role: "user", messageId: "msg-user-1", content: "My name is Alice Johnson" }],
         conversationId: "conv-2",
       });
 
@@ -891,6 +925,7 @@ describe("Phase 4: Automatic Memory Extraction", () => {
     it("returns empty result for empty messages array", async () => {
       const result = await service.extract({
         userId: "user-1",
+        conversationId: "conv-1",
         messages: [],
       });
       expect(result.candidates).toHaveLength(0);
@@ -899,7 +934,7 @@ describe("Phase 4: Automatic Memory Extraction", () => {
 
     it("returns empty result for missing userId", async () => {
       await expect(
-        service.extract({ userId: "", messages: [{ role: "user", content: "test" }] }),
+        service.extract({ userId: "", messages: [{ role: "user", messageId: "msg-user-1", content: "test" }] }),
       ).rejects.toThrow("userId is required");
     });
   });

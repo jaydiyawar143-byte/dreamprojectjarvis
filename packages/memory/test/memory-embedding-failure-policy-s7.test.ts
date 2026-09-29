@@ -12,6 +12,7 @@
 // Step 5 code, which stored such candidates with no embedding at all.
 import { describe, it, expect, vi, afterEach } from "vitest";
 import type {
+  AICompletionRequest,
   AICompletionResponse,
   EmbeddingRequest,
   EmbeddingResponse,
@@ -25,6 +26,7 @@ import type {
 } from "@jarvis/core";
 import { JarvisError } from "@jarvis/core";
 import { MemoryExtractionService } from "../src/memory-extraction-service.js";
+import { citeFirstUserMessage } from "./helpers/compliant-citation.js";
 
 const DIMS = 4;
 const SECRET_LIKE = "sk-proj-SHOULD-NEVER-BE-LOGGED-1234567890";
@@ -38,13 +40,17 @@ function model(contents: string[]): IAIProvider {
     id: "s7-model",
     name: "S7 model",
     defaultModel: "s7",
-    async complete(): Promise<AICompletionResponse> {
+    async complete(request: AICompletionRequest): Promise<AICompletionResponse> {
       return {
         message: {
           role: "assistant",
-          content: JSON.stringify({
-            candidates: contents.map((content) => ({ type: "FACT", content, importance: 0.8, confidence: 1 })),
-          }),
+          // S7.2 L2 — a compliant model: each candidate cites the user's message.
+          content: citeFirstUserMessage(
+            request,
+            JSON.stringify({
+              candidates: contents.map((content) => ({ type: "FACT", content, importance: 0.8, confidence: 1 })),
+            })
+          ),
         },
         finishReason: "stop",
         model: "s7",
@@ -160,8 +166,21 @@ function service(contents: string[], provider: IEmbeddingProvider, store: IMemor
   return new MemoryExtractionService({ aiProvider: model(contents), store, embeddingProvider: provider, maxRetries: 0 });
 }
 
+// S7.2 L1c-2: the user message must pass the learning gate for extraction to
+// run at all — a message carrying a secret is now refused before the model
+// (see memory-learning-shadow-s7.test.ts). SECRET_LIKE stays where these tests
+// need it: inside the provider errors that must never reach the log.
+// S7.2 L3: the user message must also SAY every fact these tests script, or
+// validation holds the candidate before it is ever embedded.
+const USER_STATEMENT =
+  "I use S7 alpha fact, S7 bravo fact, S7 charlie fact, S7 delta fact, S7 fact one, S7 fact two, " +
+  "S7 provider fact, S7 broken hidden fact and S7 rejected private fact. I now want S7 merge summaries as slides.";
 const extractFor = (svc: MemoryExtractionService) =>
-  svc.extract({ userId: "user-s7", messages: [{ role: "user", content: `Remember this please. ${SECRET_LIKE}x` }] });
+  svc.extract({
+    userId: "user-s7",
+    conversationId: "conv-s7",
+    messages: [{ role: "user", messageId: "msg-s7", content: USER_STATEMENT }],
+  });
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -331,7 +350,7 @@ describe("S7 embedding failure policy — valid candidates are unaffected", () =
     );
 
     const { events, raw } = await captureEvents(async () => {
-      await extractFor(service(["S7 broken secret fact", "S7 rejected private fact"], provider, store));
+      await extractFor(service(["S7 broken hidden fact", "S7 rejected private fact"], provider, store));
       await extractFor(
         service(
           ["S7 provider fact"],
@@ -361,7 +380,7 @@ describe("S7 embedding failure policy — valid candidates are unaffected", () =
     for (const event of events) {
       for (const key of Object.keys(event)) expect(allowed.has(key), `unexpected field ${key}`).toBe(true);
     }
-    for (const forbidden of ["broken secret fact", "rejected private fact", "provider fact", "user-s7", SECRET_LIKE, "Remember this", "0.123456789", "0.111111111", "provider said"]) {
+    for (const forbidden of ["broken hidden fact", "rejected private fact", "provider fact", "user-s7", SECRET_LIKE, "I use S7", "0.123456789", "0.111111111", "provider said"]) {
       expect(raw).not.toContain(forbidden);
     }
   });

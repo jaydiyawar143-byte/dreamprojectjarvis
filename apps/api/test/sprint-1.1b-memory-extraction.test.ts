@@ -23,6 +23,7 @@ import type {
 } from "@jarvis/core";
 import { Orchestrator, AgentRegistry, ConversationalAssistant } from "@jarvis/agents";
 import { MemoryExtractionService } from "@jarvis/memory";
+import { citedResponse } from "./helpers/compliant-citation.js";
 import { getContainer, resetContainer } from "../src/services/container.js";
 
 // ---------------------------------------------------------------------------
@@ -60,7 +61,8 @@ class MockAIProvider implements IAIProvider {
       throw new Error("AI provider unavailable");
     }
     if (this.responseFn) {
-      return this.responseFn(request);
+      // S7.2 L2 — extraction answers as a compliant model: candidates cite the user.
+      return citedResponse(request, this.responseFn(request));
     }
     return {
       message: { role: "assistant", content: '{"candidates":[]}' },
@@ -220,6 +222,8 @@ function makeCtx(userId: string, conversationId = "conv-123"): SessionContext {
     auth: { userId, role: "member", email: `${userId}@example.com` },
     conversationId,
     traceId: "00000000-0000-0000-0000-000000000001",
+    // S7.2 L2 — the saved user message's id, as the chat route supplies it.
+    userMessageId: `msg-${userId}`,
   };
 }
 
@@ -279,7 +283,7 @@ describe("Sprint 1.1B: Memory Extraction Service Wiring Tests", () => {
             role: "assistant",
             content: JSON.stringify({
               candidates: [
-                { type: "FACT", content: "My company uses Meta Ads for acquisition.", importance: 0.9, confidence: 1.0 },
+                { type: "FACT", content: "I use Meta Ads for acquisition.", importance: 0.9, confidence: 1.0 },
               ],
             }),
           },
@@ -291,7 +295,7 @@ describe("Sprint 1.1B: Memory Extraction Service Wiring Tests", () => {
     });
 
     const orch = createOrchestrator();
-    await orch.process(makeReq("My company uses Meta Ads for acquisition."), makeCtx("user-alpha"));
+    await orch.process(makeReq("I use Meta Ads for acquisition."), makeCtx("user-alpha"));
 
     // Allow async extraction to fire and finish
     await new Promise((resolve) => setTimeout(resolve, 30));
@@ -299,7 +303,7 @@ describe("Sprint 1.1B: Memory Extraction Service Wiring Tests", () => {
     const records = store.getMemoriesRaw();
     expect(records).toHaveLength(1);
     expect(records[0].type).toBe("FACT");
-    expect(records[0].content).toBe("My company uses Meta Ads for acquisition.");
+    expect(records[0].content).toBe("I use Meta Ads for acquisition.");
     expect(records[0].userId).toBe("user-alpha");
   });
 
@@ -333,7 +337,8 @@ describe("Sprint 1.1B: Memory Extraction Service Wiring Tests", () => {
     expect(records[0].content).toBe("I prefer concise reports.");
   });
 
-  it("T3: extracts GOAL from user statements", async () => {
+  // S7.2 L3 finalization — a goal is not durable USER memory.
+  it("T3: a GOAL statement is extracted but never stored as memory", async () => {
     mockAI.setResponse((req) => {
       if (req.messages[0].content.includes("memory extraction")) {
         return {
@@ -341,7 +346,7 @@ describe("Sprint 1.1B: Memory Extraction Service Wiring Tests", () => {
             role: "assistant",
             content: JSON.stringify({
               candidates: [
-                { type: "GOAL", content: "I want to reduce CPA this month.", importance: 0.8, confidence: 0.95 },
+                { type: "GOAL", content: "I want to reduce CPA.", importance: 0.8, confidence: 0.95 },
               ],
             }),
           },
@@ -352,15 +357,15 @@ describe("Sprint 1.1B: Memory Extraction Service Wiring Tests", () => {
       return { message: { role: "assistant", content: "Understood." }, finishReason: "stop", model: "mock" };
     });
 
+    const extract = vi.spyOn(extractionService, "extract");
     const orch = createOrchestrator();
-    await orch.process(makeReq("I want to reduce CPA this month."), makeCtx("user-alpha"));
+    await orch.process(makeReq("I want to reduce CPA."), makeCtx("user-alpha"));
 
-    await new Promise((resolve) => setTimeout(resolve, 30));
-
-    const records = store.getMemoriesRaw();
-    expect(records).toHaveLength(1);
-    expect(records[0].type).toBe("GOAL");
-    expect(records[0].content).toBe("I want to reduce CPA this month.");
+    // Extraction is fire-and-forget: wait for it to start, then to finish.
+    await vi.waitFor(() => expect(extract).toHaveBeenCalledOnce());
+    const result = await extract.mock.results[0]!.value;
+    expect(result.meta.candidatesValidated).toBe(1);
+    expect(store.getMemoriesRaw()).toHaveLength(0);
   });
 
   // T4, T5: Conversational/Ambiguous Ignoring
@@ -394,7 +399,8 @@ describe("Sprint 1.1B: Memory Extraction Service Wiring Tests", () => {
             role: "assistant",
             content: JSON.stringify({
               candidates: [
-                { type: "FACT", content: "Alice likes coding.", importance: 0.6, confidence: 0.9 },
+                // S7.2 L3: a durable fact, and the claim keeps the subject the user named ("my friend").
+                { type: "FACT", content: "User's friend Alice is a coder.", importance: 0.6, confidence: 0.9 },
               ],
             }),
           },
@@ -408,7 +414,7 @@ describe("Sprint 1.1B: Memory Extraction Service Wiring Tests", () => {
     const spyStore = vi.spyOn(store, "store");
 
     const orch = createOrchestrator();
-    await orch.process(makeReq("My friend Alice likes coding."), makeCtx("user-alpha"));
+    await orch.process(makeReq("My friend Alice is a coder."), makeCtx("user-alpha"));
 
     await new Promise((resolve) => setTimeout(resolve, 30));
 
@@ -424,7 +430,7 @@ describe("Sprint 1.1B: Memory Extraction Service Wiring Tests", () => {
             role: "assistant",
             content: JSON.stringify({
               candidates: [
-                { type: "FACT", content: "User specific secret.", importance: 0.9, confidence: 1.0 },
+                { type: "FACT", content: "User prefers private reports.", importance: 0.9, confidence: 1.0 },
               ],
             }),
           },
@@ -436,7 +442,7 @@ describe("Sprint 1.1B: Memory Extraction Service Wiring Tests", () => {
     });
 
     const orch = createOrchestrator();
-    await orch.process(makeReq("Save a private fact"), makeCtx("user-A"));
+    await orch.process(makeReq("I prefer private reports."), makeCtx("user-A"));
 
     await new Promise((resolve) => setTimeout(resolve, 30));
 
@@ -504,7 +510,7 @@ describe("Sprint 1.1B: Memory Extraction Service Wiring Tests", () => {
       memories: [
         {
           type: "FACT",
-          content: "Alice likes coding.",
+          content: "User's friend Alice is a coder.",
           importance: 0.6,
           confidence: 0.9,
         },
@@ -518,7 +524,8 @@ describe("Sprint 1.1B: Memory Extraction Service Wiring Tests", () => {
             role: "assistant",
             content: JSON.stringify({
               candidates: [
-                { type: "FACT", content: "Alice likes coding.", importance: 0.6, confidence: 0.9 },
+                // S7.2 L3: a VALID restatement of the stored fact, so the dedup path really runs.
+                { type: "FACT", content: "User's friend Alice is a coder.", importance: 0.6, confidence: 0.9 },
               ],
             }),
           },
@@ -530,7 +537,7 @@ describe("Sprint 1.1B: Memory Extraction Service Wiring Tests", () => {
     });
 
     const orch = createOrchestrator();
-    await orch.process(makeReq("Remember that Alice likes coding."), makeCtx("user-alpha"));
+    await orch.process(makeReq("My friend Alice is a coder."), makeCtx("user-alpha"));
 
     await new Promise((resolve) => setTimeout(resolve, 30));
 

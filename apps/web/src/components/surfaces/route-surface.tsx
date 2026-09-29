@@ -54,6 +54,7 @@ function RouteMap({
   const drawnRef = useRef<google.maps.Polyline[]>([]);
   const markersRef = useRef<google.maps.Marker[]>([]);
   const setLoading = useSurfaceStore((s) => s.setLoading);
+  const [mapError, setMapError] = useState(false);
 
   // The map is loading; the idle timer must not run while it is.
   useEffect(() => {
@@ -62,81 +63,94 @@ function RouteMap({
 
   // ---- create once -------------------------------------------------------
   useEffect(() => {
-    if (status !== "ready" || !hostRef.current || mapRef.current) return;
+    // A failed draw or a retry hides the map behind the error state rather
+    // than trying to build another instance underneath it.
+    if (mapError || status !== "ready" || !hostRef.current || mapRef.current) return;
 
-    mapRef.current = new google.maps.Map(hostRef.current, {
-      // Chrome bars and drag handles inside a transient panel are clutter; the
-      // route is the content, and the user can expand for the full map.
-      disableDefaultUI: true,
-      zoomControl: true,
-      gestureHandling: "greedy",
-      backgroundColor: "#0a0f16",
-      styles: [
-        { elementType: "geometry", stylers: [{ color: "#0d1520" }] },
-        { elementType: "labels.text.fill", stylers: [{ color: "#6f8296" }] },
-        { elementType: "labels.text.stroke", stylers: [{ color: "#0a0f16" }] },
-        { featureType: "water", elementType: "geometry", stylers: [{ color: "#0a1622" }] },
-        { featureType: "road", elementType: "geometry", stylers: [{ color: "#182633" }] },
-        { featureType: "poi", stylers: [{ visibility: "off" }] },
-      ],
-    });
-  }, [status]);
+    try {
+      mapRef.current = new google.maps.Map(hostRef.current, {
+        // Chrome bars and drag handles inside a transient panel are clutter; the
+        // route is the content, and the user can expand for the full map.
+        disableDefaultUI: true,
+        zoomControl: true,
+        gestureHandling: "greedy",
+        backgroundColor: "#0a0f16",
+        styles: [
+          { elementType: "geometry", stylers: [{ color: "#0d1520" }] },
+          { elementType: "labels.text.fill", stylers: [{ color: "#6f8296" }] },
+          { elementType: "labels.text.stroke", stylers: [{ color: "#0a0f16" }] },
+          { featureType: "water", elementType: "geometry", stylers: [{ color: "#0a1622" }] },
+          { featureType: "road", elementType: "geometry", stylers: [{ color: "#182633" }] },
+          { featureType: "poi", stylers: [{ visibility: "off" }] },
+        ],
+      });
+    } catch {
+      // A construction failure must not escape to the route error boundary and
+      // blank the whole page. The surface falls back to its error state, and
+      // the route data stays under it.
+      setMapError(true);
+    }
+  }, [status, mapError]);
 
   // ---- draw / redraw -----------------------------------------------------
   useEffect(() => {
     const map = mapRef.current;
-    if (status !== "ready" || !map) return;
+    if (mapError || status !== "ready" || !map) return;
 
-    for (const line of drawnRef.current) line.setMap(null);
-    for (const marker of markersRef.current) marker.setMap(null);
-    drawnRef.current = [];
-    markersRef.current = [];
+    try {
+      for (const line of drawnRef.current) line.setMap(null);
+      for (const marker of markersRef.current) marker.setMap(null);
+      drawnRef.current = [];
+      markersRef.current = [];
 
-    const bounds = new google.maps.LatLngBounds();
+      const bounds = new google.maps.LatLngBounds();
 
-    // Non-selected first, so the selected route is drawn ON TOP rather than
-    // being crossed by the others.
-    const ordered = [...data.routes].sort((a, b) =>
-      a.id === selectedId ? 1 : b.id === selectedId ? -1 : 0
-    );
-
-    for (const leg of ordered) {
-      if (leg.geometry.length < 2) continue;
-      const selected = leg.id === selectedId;
-
-      const line = new google.maps.Polyline({
-        path: leg.geometry,
-        strokeColor: selected ? ACTIVE : MUTED,
-        strokeOpacity: selected ? 0.95 : 0.5,
-        strokeWeight: selected ? 5 : 3,
-        zIndex: selected ? 10 : 1,
-        map,
-        clickable: true,
-      });
-      line.addListener("click", () => onSelect(leg.id));
-      drawnRef.current.push(line);
-
-      for (const point of leg.geometry) bounds.extend(point);
-    }
-
-    for (const [label, place] of [
-      ["A", data.origin],
-      ["B", data.destination],
-    ] as const) {
-      if (!place.position) continue;
-      markersRef.current.push(
-        new google.maps.Marker({
-          position: place.position,
-          map,
-          label: { text: label, color: "#04121a", fontSize: "11px", fontWeight: "700" },
-          title: place.label,
-        })
+      // Non-selected first, so the selected route is drawn ON TOP rather than
+      // being crossed by the others.
+      const ordered = [...data.routes].sort((a, b) =>
+        a.id === selectedId ? 1 : b.id === selectedId ? -1 : 0
       );
-      bounds.extend(place.position);
-    }
 
-    if (!bounds.isEmpty()) map.fitBounds(bounds, 28);
-  }, [status, data, selectedId, onSelect]);
+      for (const leg of ordered) {
+        if (leg.geometry.length < 2) continue;
+        const selected = leg.id === selectedId;
+
+        const line = new google.maps.Polyline({
+          path: leg.geometry,
+          strokeColor: selected ? ACTIVE : MUTED,
+          strokeOpacity: selected ? 0.95 : 0.5,
+          strokeWeight: selected ? 5 : 3,
+          zIndex: selected ? 10 : 1,
+          map,
+          clickable: true,
+        });
+        line.addListener("click", () => onSelect(leg.id));
+        drawnRef.current.push(line);
+
+        for (const point of leg.geometry) bounds.extend(point);
+      }
+
+      for (const [label, place] of [
+        ["A", data.origin],
+        ["B", data.destination],
+      ] as const) {
+        if (!place.position) continue;
+        markersRef.current.push(
+          new google.maps.Marker({
+            position: place.position,
+            map,
+            label: { text: label, color: "#04121a", fontSize: "11px", fontWeight: "700" },
+            title: place.label,
+          })
+        );
+        bounds.extend(place.position);
+      }
+
+      if (!bounds.isEmpty()) map.fitBounds(bounds, 28);
+    } catch {
+      setMapError(true);
+    }
+  }, [status, data, selectedId, onSelect, mapError]);
 
   // ---- resize ------------------------------------------------------------
   //
@@ -166,7 +180,7 @@ function RouteMap({
     []
   );
 
-  if (status === "unconfigured" || status === "error") {
+  if (mapError || status === "unconfigured" || status === "error") {
     // Honest, and NOT a blank grey box pretending to be a map.
     return (
       <div className="flex h-40 items-center justify-center rounded-lg border border-white/[0.07] bg-white/[0.02] px-4 text-center">
@@ -174,18 +188,38 @@ function RouteMap({
           <p className="text-xs leading-relaxed text-sys-dim">
             {status === "unconfigured"
               ? "No Google Maps key is configured, so the route cannot be drawn."
-              : "Google Maps could not be loaded."}
+              : mapError
+                ? "The map could not be drawn."
+                : "Google Maps could not be loaded."}
           </p>
-          {status === "error" && (
+          {(mapError || status === "error") && (
             <button
               type="button"
-              onClick={retry}
+              onClick={() => {
+                setMapError(false);
+                retry();
+              }}
               className="sys-focus mt-2 rounded border border-sys-line px-2 py-1 font-mono text-xs uppercase tracking-hud text-sys-dim hover:text-white"
             >
               Retry
             </button>
           )}
         </div>
+      </div>
+    );
+  }
+
+  if (status === "checking" || status === "loading") {
+    // The SDK is still coming down. An empty host reads as a broken map, so
+    // say so in the same voice the dashboard widget uses.
+    return (
+      <div
+        data-testid="route-map-loading"
+        className="flex h-[min(38vh,18rem)] items-center justify-center rounded-lg border border-white/[0.07] bg-white/[0.02]"
+      >
+        <p data-testid="route-map-loading-text" className="text-xs text-sys-dim">
+          Loading map…
+        </p>
       </div>
     );
   }
@@ -295,7 +329,14 @@ function PlacesSurface({ data, surfaceId }: { data: MapData; surfaceId: string }
           map beside a list of addresses is decoration, and a grey rectangle
           reads as "broken" rather than "these results have no position". */}
       {anyLocated &&
-        (status === "unconfigured" || status === "error" ? (
+        (status === "checking" || status === "loading" ? (
+          <div
+            data-testid="places-map-loading"
+            className="flex h-[min(32vh,15rem)] items-center justify-center rounded-lg border border-white/[0.07] bg-white/[0.02]"
+          >
+            <p className="text-xs text-sys-dim">Loading map…</p>
+          </div>
+        ) : status === "unconfigured" || status === "error" ? (
           <div className="flex h-28 items-center justify-center rounded-lg border border-white/[0.07] bg-white/[0.02] px-4 text-center">
             <div>
               <p className="text-xs leading-relaxed text-sys-dim">

@@ -9,8 +9,21 @@ import type {
   IMemoryExtractor,
   MemoryType,
   MemoryRecord,
+  LearningDecision,
+  LearningProvenance,
+  LearningValidationResult,
+  ProvenanceCitation,
+  ProvenanceSource,
 } from "@jarvis/core";
-import { ExtractionResultSchema, JarvisError } from "@jarvis/core";
+import {
+  ExtractionResultSchema,
+  JarvisError,
+  LEARNING_RULES,
+  decideLearningCandidate,
+  isLearningValidationResult,
+  resolveUserProvenance,
+  validateLearningCandidate,
+} from "@jarvis/core";
 import { validateEmbeddingBatch } from "./embedding/embedding-validator.js";
 
 // ---------------------------------------------------------------------------
@@ -84,6 +97,55 @@ function cosineSimilarity(a: number[], b: number[]): number {
   return dot;
 }
 
+// S7.2 L1c — only a known decision with a known rule is a verdict.
+const LEARNING_DECISIONS: ReadonlySet<unknown> = new Set(["REJECT", "NOT_A_CANDIDATE", "ACCEPT", "UNDECIDED"]);
+const LEARNING_RULE_SET: ReadonlySet<unknown> = new Set(LEARNING_RULES);
+
+function validLearningVerdict(value: unknown): LearningDecision | null {
+  if (typeof value !== "object" || value === null) return null;
+  const { decision, rule } = value as Record<string, unknown>;
+  return LEARNING_DECISIONS.has(decision) && LEARNING_RULE_SET.has(rule) ? (value as LearningDecision) : null;
+}
+
+// S7.2 L2 — the turn's messages, labelled M1, M2, … for the model, with the
+// speaker and ids the service knows. Only a USER message can carry the ids
+// a memory points at; JARVIS's reply is labelled ASSISTANT and has none.
+function labelSources(messages: ExtractionMessage[], conversationId: string | undefined): ProvenanceSource[] {
+  return messages.map((m, i) =>
+    m.role === "user"
+      ? {
+          ref: `M${i + 1}`,
+          sourceType: "USER",
+          statement: m.content,
+          ...(conversationId ? { sourceConversationId: conversationId } : {}),
+          ...(m.messageId ? { sourceMessageId: m.messageId } : {}),
+          ...(m.traceId ? { sourceTraceId: m.traceId } : {}),
+        }
+      : { ref: `M${i + 1}`, sourceType: "ASSISTANT", statement: m.content },
+  );
+}
+
+/** A candidate with USER provenance (L2), the citation that earned it, and the cited message's text. */
+interface GroundedCandidate {
+  candidate: MemoryCandidate;
+  provenance: LearningProvenance;
+  citation: ProvenanceCitation;
+  userMessage: string | undefined;
+  /** Its position among the model's validated candidates, for content-free events. */
+  index: number;
+}
+
+// S7.2 L3 — results that mean the validator was handed a broken input. L2
+// makes them impossible, so they are treated as a failure, not a rejection.
+const VALIDATION_FAILURE_RULES: ReadonlySet<string> = new Set(["MALFORMED_INPUT", "PROVENANCE_MISSING"]);
+
+/** The model's citation fields for one raw candidate, still untrusted. */
+function citationOf(raw: unknown): ProvenanceCitation {
+  if (typeof raw !== "object" || raw === null) return {};
+  const { source, evidence } = raw as Record<string, unknown>;
+  return { source, evidence };
+}
+
 // ---------------------------------------------------------------------------
 // S7 Step 8 — embedding failure policy: DROP + STRUCTURED EVENT.
 //
@@ -140,6 +202,12 @@ EXTRACTION RULES:
 5. Prefer explicit user statements over implied information.
 6. If nothing in the conversation is worth remembering, return an empty candidates array.
 
+SOURCES:
+- Each message is labelled with an id and its speaker, e.g. "[M1] USER:" or "[M2] ASSISTANT (context only, never a source):".
+- A memory may come ONLY from a USER message: something the user stated, or something the user explicitly endorsed (e.g. "yes, make that my default").
+- ASSISTANT messages are JARVIS's own replies. Use them only to understand what a USER message refers to; never extract a memory from something only the assistant said.
+- For every candidate, "source" is the id of the USER message it comes from, and "evidence" is an exact quote copied word for word from that USER message.
+
 MEMORY TYPES:
 - FACT: Verifiable information (e.g., "User's name is John", "Company uses PostgreSQL")
 - PREFERENCE: User preferences or opinions (e.g., "Prefers dark mode", "Likes Python over Java")
@@ -160,14 +228,22 @@ CONFIDENCE (0.0-1.0):
 - 0.5-0.7: Reasonably inferred
 - Below 0.5: Uncertain (avoid storing these)
 
-OUTPUT FORMAT: Return a valid JSON object with a "candidates" array. Each candidate has: type, content, importance, confidence, and optional summary.
+OUTPUT FORMAT: Return a valid JSON object with a "candidates" array. Each candidate has: type, content, importance, confidence, source, evidence, and optional summary.
 If nothing is worth remembering, return {"candidates": []}.`;
 
+/**
+ * S7.2 L2 — the model sees each message's label and speaker, never an id.
+ * JARVIS's reply is marked as context so it is never taken as a source.
+ */
 function buildExtractionMessages(
-  messages: ExtractionMessage[],
+  sources: ProvenanceSource[],
 ): { role: "system" | "user" | "assistant"; content: string }[] {
-  const conversation = messages
-    .map((m) => `${m.role}: ${m.content}`)
+  const conversation = sources
+    .map((s) =>
+      s.sourceType === "USER"
+        ? `[${s.ref}] USER: ${s.statement}`
+        : `[${s.ref}] ASSISTANT (context only, never a source): ${s.statement}`,
+    )
     .join("\n");
 
   return [
@@ -232,8 +308,24 @@ export class MemoryExtractionService implements IMemoryExtractor {
     const hasUserMessage = filteredMessages.some((m) => m.role === "user");
     if (!hasUserMessage) return this.emptyResult(start);
 
-    const rawCandidates = await this.extractFromLLM(filteredMessages);
+    // S7.2 L1c — the learning gate. A turn the contract refuses never reaches
+    // the model, so nothing from it can be stored.
+    if (this.learningGateRefuses(filteredMessages)) return this.emptyResult(start);
+
+    // S7.2 L2 — the turn as the service recorded it: each message's label,
+    // speaker and ids. The model sees the labels; a candidate's citation is
+    // resolved only against this record.
+    const sources = labelSources(filteredMessages, request.conversationId);
+
+    const rawCandidates = await this.extractFromLLM(sources);
     const validated = this.validateCandidates(rawCandidates);
+    const grounded = this.groundInUserSources(validated, sources);
+
+    // S7.2 L3 — only a candidate the user's own words support goes on. A
+    // validator failure stops the whole turn here: nothing is embedded,
+    // stored or updated.
+    const supported = this.keepSupportedCandidates(grounded, validated.length);
+    if (supported === null) return this.emptyResult(start);
 
     const expiresAt = request.expiryDays
       ? new Date(Date.now() + request.expiryDays * 86400000)
@@ -241,11 +333,12 @@ export class MemoryExtractionService implements IMemoryExtractor {
         ? new Date(Date.now() + this.expiryDays * 86400000)
         : undefined;
 
-    const enriched = validated.map((c) => ({
-      ...c,
-      sourceType: "conversation",
-      sourceConversationId: request.conversationId,
-      sourceMessageId: request.lastMessageId,
+    const enriched = supported.map(({ candidate, provenance }) => ({
+      ...candidate,
+      sourceType: provenance.sourceType,
+      sourceConversationId: provenance.sourceConversationId,
+      sourceMessageId: provenance.sourceMessageId,
+      ...(provenance.sourceTraceId ? { sourceTraceId: provenance.sourceTraceId } : {}),
       expiresAt,
     }));
 
@@ -264,7 +357,7 @@ export class MemoryExtractionService implements IMemoryExtractor {
       meta: {
         candidatesFound: rawCandidates.length,
         candidatesValidated: validated.length,
-        candidatesFiltered: enriched.length - validated.length,
+        candidatesFiltered: validated.length - enriched.length,
         duplicatesSkipped,
         memoriesCreated: created,
         memoriesUpdated: updated,
@@ -332,13 +425,57 @@ export class MemoryExtractionService implements IMemoryExtractor {
   }
 
   // -----------------------------------------------------------------------
+  // S7.2 L1c — the learning gate
+  // -----------------------------------------------------------------------
+
+  /**
+   * Classifies each of the user's own messages with the pure learning
+   * contract, logs each verdict, and says whether the TURN must be refused.
+   *
+   * The statement is the user's message VERBATIM with statedBy "USER": never
+   * JARVIS's reply, a model candidate, a paraphrase or a recalled memory. The
+   * event carries the decision and the rule only: never text, ids or secrets.
+   *
+   * L1c-2 — the most serious verdict decides the turn:
+   *   REJECT > NOT_A_CANDIDATE > PERMISSION_LANGUAGE > UNDECIDED > ACCEPT.
+   * The first three refuse the turn; UNDECIDED and ACCEPT let the existing
+   * pipeline run exactly as before. ACCEPT is eligibility, never a write.
+   *
+   * The gate FAILS CLOSED: if the contract throws or returns anything but a
+   * known decision and rule, the whole turn is refused at once — no model
+   * call, no write, no update — and the only log line is the content-free
+   * { event: "memory_learning_decision_failed" }. The error itself is never
+   * logged: it could carry the user's text.
+   */
+  private learningGateRefuses(messages: ExtractionMessage[]): boolean {
+    let refused = false;
+    for (const message of messages) {
+      if (message.role !== "user") continue;
+      let verdict: LearningDecision | null;
+      try {
+        verdict = validLearningVerdict(decideLearningCandidate({ statement: message.content, statedBy: "USER" }));
+      } catch {
+        verdict = null;
+      }
+      if (!verdict) {
+        console.log(JSON.stringify({ event: "memory_learning_decision_failed" }));
+        return true;
+      }
+      const { decision, rule } = verdict;
+      console.log(JSON.stringify({ event: "memory_learning_decision", decision, rule }));
+      if (decision === "REJECT" || decision === "NOT_A_CANDIDATE" || rule === "PERMISSION_LANGUAGE") refused = true;
+    }
+    return refused;
+  }
+
+  // -----------------------------------------------------------------------
   // LLM extraction
   // -----------------------------------------------------------------------
 
   private async extractFromLLM(
-    messages: ExtractionMessage[],
+    sources: ProvenanceSource[],
   ): Promise<unknown[]> {
-    const llmMessages = buildExtractionMessages(messages);
+    const llmMessages = buildExtractionMessages(sources);
 
     const response = await this.aiProvider.complete({
       messages: llmMessages,
@@ -365,19 +502,120 @@ export class MemoryExtractionService implements IMemoryExtractor {
   // Schema validation
   // -----------------------------------------------------------------------
 
-  private validateCandidates(raw: unknown[]): MemoryCandidate[] {
+  private validateCandidates(raw: unknown[]): Array<{ candidate: MemoryCandidate; citation: ProvenanceCitation }> {
     const result = ExtractionResultSchema.safeParse({ candidates: raw });
     if (!result.success) {
       return [];
     }
 
-    return result.data.candidates.map((c) => ({
-      type: c.type as MemoryType,
-      content: c.content,
-      summary: c.summary,
-      importance: c.importance,
-      confidence: c.confidence,
+    return result.data.candidates.map((c, i) => ({
+      candidate: {
+        type: c.type as MemoryType,
+        content: c.content,
+        summary: c.summary,
+        importance: c.importance,
+        confidence: c.confidence,
+      },
+      // S7.2 L2 — the model's claim about where the candidate came from, kept
+      // untrusted until resolveUserProvenance checks it.
+      citation: citationOf(raw[i]),
     }));
+  }
+
+  // -----------------------------------------------------------------------
+  // S7.2 L2 — USER provenance
+  // -----------------------------------------------------------------------
+
+  /**
+   * Keeps only the candidates whose citation resolves to a USER message of
+   * this turn, with a quote that is really in it, and a message id to point
+   * at. Every id comes from the service's record, never from the model.
+   *
+   * A candidate citing JARVIS's reply, citing nothing, or quoting words the
+   * user never wrote is dropped on its own — a valid neighbour is kept — and
+   * logged as a content-free `memory_candidate_provenance_rejected` event.
+   */
+  private groundInUserSources(
+    validated: Array<{ candidate: MemoryCandidate; citation: ProvenanceCitation }>,
+    sources: ProvenanceSource[],
+  ): GroundedCandidate[] {
+    const grounded: GroundedCandidate[] = [];
+    validated.forEach(({ candidate, citation }, index) => {
+      const resolution = resolveUserProvenance(citation, sources);
+      if (resolution.accepted) {
+        // The cited message itself, found with L2's own check: the one USER
+        // message that the citation resolves to on its own.
+        const cited = sources.find((s) => s.sourceType === "USER" && resolveUserProvenance(citation, [s]).accepted);
+        grounded.push({ candidate, provenance: resolution.provenance, citation, userMessage: cited?.statement, index });
+        return;
+      }
+      console.log(
+        JSON.stringify({
+          event: "memory_candidate_provenance_rejected",
+          reason: resolution.reason,
+          candidateIndex: index,
+          candidateCount: validated.length,
+        }),
+      );
+    });
+    return grounded;
+  }
+
+  // -----------------------------------------------------------------------
+  // S7.2 L3 — validation
+  // -----------------------------------------------------------------------
+
+  /**
+   * Asks the L3 contract, candidate by candidate, whether the user's own
+   * evidence establishes a durable memory. Only VALID with scope MEMORY goes
+   * on to the existing write path. Everything else — HOLD, INVALID, and the
+   * GOAL / TASK / PROJECT / DECISION / TEMPORARY scopes — is dropped on its
+   * own (a VALID neighbour is kept) with a content-free
+   * `memory_candidate_validation_rejected` event.
+   *
+   * FAILS CLOSED: if the contract throws, answers with anything but a
+   * well-formed result (a known rule with its own decision, one of its
+   * scopes, a category exactly when it is a direct statement), or reports
+   * that it was given a malformed input or provenance (which L2 makes
+   * impossible), the whole turn is refused — `null` — and only
+   * `memory_learning_validation_failed` is logged. The error is never
+   * logged: it could carry the user's words.
+   */
+  private keepSupportedCandidates(grounded: GroundedCandidate[], candidateCount: number): GroundedCandidate[] | null {
+    const kept: GroundedCandidate[] = [];
+    for (const item of grounded) {
+      let result: LearningValidationResult | null;
+      try {
+        const answer: unknown = validateLearningCandidate({
+          claim: item.candidate.content,
+          evidence: item.citation.evidence as string,
+          userMessage: item.userMessage as string,
+          provenance: item.provenance,
+        });
+        result = isLearningValidationResult(answer) && !VALIDATION_FAILURE_RULES.has(answer.rule) ? answer : null;
+      } catch {
+        result = null;
+      }
+      if (!result) {
+        console.log(JSON.stringify({ event: "memory_learning_validation_failed" }));
+        return null;
+      }
+      if (result.decision === "VALID" && result.scope === "MEMORY") {
+        kept.push(item);
+        continue;
+      }
+      console.log(
+        JSON.stringify({
+          event: "memory_candidate_validation_rejected",
+          decision: result.decision,
+          rule: result.rule,
+          scope: result.scope,
+          candidateIndex: item.index,
+          candidateCount,
+        }),
+      );
+    }
+    return kept;
   }
 
   // -----------------------------------------------------------------------
@@ -621,6 +859,17 @@ export class MemoryExtractionService implements IMemoryExtractor {
       Math.max(existing.importance, candidate.importance),
     );
 
+    const metadata: Record<string, unknown> = {
+      ...existing.metadata,
+      embedding,
+      lastMergedAt: new Date().toISOString(),
+      mergeCount: ((existing.metadata?.mergeCount as number) ?? 0) + 1,
+    };
+    // S7.2 L2 — the merged memory's provenance is the candidate's, trace
+    // included: never the new message beside the earlier message's trace.
+    if (candidate.sourceTraceId) metadata.sourceTraceId = candidate.sourceTraceId;
+    else delete metadata.sourceTraceId;
+
     return this.store.update({
       userId,
       memoryId: existing.id,
@@ -628,12 +877,7 @@ export class MemoryExtractionService implements IMemoryExtractor {
       summary: candidate.summary ?? existing.summary,
       importance: updatedImportance,
       confidence: updatedConfidence,
-      metadata: {
-        ...existing.metadata,
-        embedding,
-        lastMergedAt: new Date().toISOString(),
-        mergeCount: ((existing.metadata?.mergeCount as number) ?? 0) + 1,
-      },
+      metadata,
       sourceType: candidate.sourceType ?? existing.sourceType,
       sourceConversationId:
         candidate.sourceConversationId ?? existing.sourceConversationId,
@@ -680,7 +924,11 @@ export class MemoryExtractionService implements IMemoryExtractor {
               sourceConversationId: candidate.sourceConversationId,
               sourceMessageId: candidate.sourceMessageId,
               expiresAt: candidate.expiresAt,
-              metadata: { embedding },
+              // S7.2 L2 — the source trace has no column; it lives beside the embedding.
+              metadata: {
+                embedding,
+                ...(candidate.sourceTraceId ? { sourceTraceId: candidate.sourceTraceId } : {}),
+              },
               // S7 — also written to the vector column, atomically with the row.
               embedding,
             },

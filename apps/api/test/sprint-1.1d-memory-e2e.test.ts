@@ -25,6 +25,7 @@ import type {
 } from "@jarvis/core";
 import { Orchestrator, AgentRegistry, ConversationalAssistant } from "@jarvis/agents";
 import { MemoryExtractionService } from "@jarvis/memory";
+import { citedResponse } from "./helpers/compliant-citation.js";
 import { PrismaMemoryRepository } from "@jarvis/db";
 
 // ---------------------------------------------------------------------------
@@ -212,7 +213,8 @@ function extractionView(ai: MockAIProvider): IAIProvider {
     id: "mock-ai-extraction",
     name: "Mock AI (memory extraction)",
     defaultModel: ai.defaultModel,
-    complete: async () => ai.respond(),
+    // S7.2 L2 — extraction answers as a compliant model: candidates cite the user.
+    complete: async (request: AICompletionRequest) => citedResponse(request, ai.respond()),
     listModels: () => ai.listModels(),
     isAvailable: () => ai.isAvailable(),
   };
@@ -371,6 +373,8 @@ function makeCtx(userId: string, conversationId = "conv-e2e-123"): SessionContex
     auth: { userId, role: "member", email: `${userId}@example.com` },
     conversationId,
     traceId: "00000000-0000-0000-0000-000000000001",
+    // S7.2 L2 — the saved user message's id, as the chat route supplies it.
+    userMessageId: `msg-${userId}`,
   };
 }
 
@@ -649,12 +653,12 @@ describe("Sprint 1.1D: Full Memory E2E Validation Tests", () => {
   it("TEST B: FACT memory lifecycle extracts, stores, and recalls", async () => {
     mockAI.setResponse(JSON.stringify({
       candidates: [
-        { type: "FACT", content: "Our primary acquisition channel is Meta Ads.", importance: 0.9, confidence: 1.0 },
+        { type: "FACT", content: "My primary acquisition channel is Meta Ads.", importance: 0.9, confidence: 1.0 },
       ],
     }));
 
     const orch = createOrchestrator();
-    await orch.process(makeReq("Our primary acquisition channel is Meta Ads."), makeCtx("user-A"));
+    await orch.process(makeReq("My primary acquisition channel is Meta Ads."), makeCtx("user-A"));
 
     const records = await waitForMemoryCount("user-A", 1);
     expect(records.memories.some((m) => m.type === "FACT" && m.content.includes("Meta Ads"))).toBe(true);
@@ -663,28 +667,35 @@ describe("Sprint 1.1D: Full Memory E2E Validation Tests", () => {
     await orch.process(makeReq("What is our primary acquisition channel?"), makeCtx("user-A"));
 
     const userMessageContent = mockAI.getLastMessages()[1].content;
-    expect(userMessageContent).toContain("[FACT] Our primary acquisition channel is Meta Ads.");
+    expect(userMessageContent).toContain("[FACT] My primary acquisition channel is Meta Ads.");
   });
 
   // TEST C: Goal Memory lifecycle
-  it("TEST C: GOAL memory lifecycle extracts, stores, and recalls", async () => {
+  // S7.2 L3 finalization — a goal is not durable USER memory: extracted by the
+  // model, never stored, so nothing about it is recalled on the next turn.
+  it("TEST C: a GOAL statement is extracted but never stored, and never recalled", async () => {
     mockAI.setResponse(JSON.stringify({
       candidates: [
-        { type: "GOAL", content: "My goal this month is to reduce CPA.", importance: 0.9, confidence: 1.0 },
+        { type: "GOAL", content: "My goal is to reduce CPA every month.", importance: 0.9, confidence: 1.0 },
       ],
     }));
 
+    const extract = vi.spyOn(extractionService, "extract");
     const orch = createOrchestrator();
-    await orch.process(makeReq("My goal this month is to reduce CPA."), makeCtx("user-A"));
+    await orch.process(makeReq("My goal is to reduce CPA every month."), makeCtx("user-A"));
 
-    const records = await waitForMemoryCount("user-A", 1);
-    expect(records.memories.some((m) => m.type === "GOAL" && m.content.includes("reduce CPA"))).toBe(true);
+    // Extraction is fire-and-forget: wait for it to start, then to finish.
+    await vi.waitFor(() => expect(extract).toHaveBeenCalledOnce());
+    const result = await extract.mock.results[0]!.value;
+    expect(result.meta.candidatesValidated).toBe(1);
+    expect((await activeStore.list({ userId: "user-A" })).total).toBe(0);
 
     mockAI.setResponse("You want to reduce CPA.");
     await orch.process(makeReq("What should I focus on this month?"), makeCtx("user-A"));
 
     const userMessageContent = mockAI.getLastMessages()[1].content;
-    expect(userMessageContent).toContain("[GOAL] My goal this month is to reduce CPA.");
+    expect(userMessageContent).not.toContain("[GOAL]");
+    expect(userMessageContent).not.toContain("reduce CPA every month");
   });
 
   // TEST D: Irrelevant memory excluded

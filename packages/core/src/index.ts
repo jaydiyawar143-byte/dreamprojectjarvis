@@ -108,6 +108,51 @@ export * from "./objective-extraction.js";
 // server-written evidence of the same request under fixed rules. Read-only:
 // it holds no executor, registry, policy, gate, planner, memory or model.
 export * from "./objective-evaluation.js";
+// S7.2 L1 — the learning-candidate contract. Pure fixed rules: what may never
+// be learned (REJECT), what is not a candidate, what is clearly stable
+// (ACCEPT = eligible, never a write) and what is UNDECIDED. Its only runtime
+// consumer is MemoryExtractionService, in shadow mode (L1c-1).
+export {
+  decideLearningCandidate,
+  LEARNING_RULES,
+  type LearningCandidateInput,
+  type LearningDecision,
+  type LearningDecisionKind,
+  type LearningRule,
+  type LearningStatedBy,
+} from "./learning-candidate.js";
+// S7.2 L2 — learning provenance. Pure: a USER memory gets USER provenance
+// (conversation, message, trace) from the service's own record of the cited
+// message, or is refused. Its only runtime consumer is MemoryExtractionService.
+export {
+  PROVENANCE_REJECTIONS,
+  PROVENANCE_SOURCE_TYPES,
+  resolveUserProvenance,
+  type LearningProvenance,
+  type ProvenanceCitation,
+  type ProvenanceRejection,
+  type ProvenanceResolution,
+  type ProvenanceSource,
+  type ProvenanceSourceType,
+} from "./learning-provenance.js";
+// S7.2 L3 — learning validation and scope. Pure: does the user's own evidence
+// establish a DURABLE memory? VALID + MEMORY is the only result ever stored;
+// HOLD, INVALID and the GOAL/TASK/PROJECT/DECISION/TEMPORARY scopes never are.
+// Its only runtime consumer is MemoryExtractionService.
+export {
+  isLearningValidationResult,
+  LEARNING_CATEGORIES,
+  LEARNING_SCOPES,
+  LEARNING_VALIDATION_DECISIONS,
+  LEARNING_VALIDATION_RULES,
+  validateLearningCandidate,
+  type LearningCategory,
+  type LearningScope,
+  type LearningValidationDecision,
+  type LearningValidationInput,
+  type LearningValidationResult,
+  type LearningValidationRule,
+} from "./learning-validation.js";
 export * from "./speech-preparation.js";
 export * from "./tool-failure-classifier.js";
 export * from "./integration-health-snapshot.js";

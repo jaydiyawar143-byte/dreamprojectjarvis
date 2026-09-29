@@ -181,6 +181,8 @@ export interface MemoryCandidate {
   sourceType?: string;
   sourceConversationId?: string;
   sourceMessageId?: string;
+  /** S7.2 L2 — the trace of the source message; stored in `metadata` (no column). */
+  sourceTraceId?: string;
   metadata?: Record<string, unknown>;
   expiresAt?: Date;
 }
@@ -208,12 +210,17 @@ export const ExtractionResultSchema = z.object({
 export interface ExtractionMessage {
   role: "user" | "assistant";
   content: string;
+  /** S7.2 L2 — the saved Message id. Required for a USER memory to cite this message. */
+  messageId?: string;
+  /** S7.2 L2 — the trace of the request that saved this message. */
+  traceId?: string;
 }
 
 export interface MemoryExtractionRequest {
   userId: string;
   messages: ExtractionMessage[];
   conversationId?: string;
+  /** Not used for provenance: a memory's source is the USER message it cites (S7.2 L2). */
   lastMessageId?: string;
   expiryDays?: number;
 }

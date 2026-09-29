@@ -42,10 +42,79 @@ declare global {
 /** Shared across every consumer; see the singleton note above. */
 let loaderPromise: Promise<void> | null = null;
 
+/**
+ * The libraries whose globals the map consumers construct synchronously —
+ * `Map` (maps), `Marker` (marker), `Polyline` (geometry).
+ */
+const REQUIRED_MAP_LIBRARIES = ["maps", "marker", "geometry"] as const;
+
+/**
+ * The constructors, not the libraries: "ready" is only meaningful if calling
+ * them will not throw. A library can be announced without its constructor
+ * being attachable yet, which is the exact gap this polls shut.
+ */
+const REQUIRED_MAP_CONSTRUCTORS = ["Map", "Marker", "Polyline"] as const;
+
+/** Bound on how long a consumer is prepared to wait for the constructors. */
+const CONSTRUCTOR_TIMEOUT_MS = 15_000;
+/** Poll cadence. Bounded, not a busy loop. */
+const CONSTRUCTOR_POLL_MS = 100;
+
+/** `google.maps.Map`, `Marker` and `Polyline` all callable right now? */
+function mapConstructorsAvailable(): boolean {
+  const gmaps = window.google?.maps;
+  if (!gmaps) return false;
+  return REQUIRED_MAP_CONSTRUCTORS.every((name) => typeof gmaps[name] === "function");
+}
+
+/**
+ * Resolves once every required constructor is actually usable. Falls back to a
+ * bounded poll so that readiness never depends on the bootstrap callback
+ * having finished attaching `importLibrary` — it can fire before the JSON-runtime
+ * libraries are imported, and at that instant an early return would let a
+ * consumer call `new google.maps.Map()` into a TypeError.
+ */
+function waitForMapConstructors(): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (mapConstructorsAvailable()) {
+      resolve();
+      return;
+    }
+    const started = Date.now();
+    const poll = () => {
+      if (mapConstructorsAvailable()) {
+        window.clearInterval(id);
+        resolve();
+        return;
+      }
+      if (Date.now() - started >= CONSTRUCTOR_TIMEOUT_MS) {
+        window.clearInterval(id);
+        reject(new Error("Google Maps loaded, but Map/Marker/Polyline never became available"));
+      }
+    };
+    const id = window.setInterval(poll, CONSTRUCTOR_POLL_MS);
+    poll();
+  });
+}
+
+async function ensureMapLibraries(): Promise<void> {
+  const gmaps = window.google?.maps;
+  // Pull in whichever libraries the dynamic loader can load directly. This is
+  // the PREFERRED mechanism — but not the gate: at the instant the bootstrap
+  // callback fires, `importLibrary` may not be callable yet, so readiness is
+  // decided separately by `waitForMapConstructors` below.
+  if (gmaps && typeof gmaps.importLibrary === "function") {
+    await Promise.all(REQUIRED_MAP_LIBRARIES.map((name) => gmaps.importLibrary(name)));
+  }
+  await waitForMapConstructors();
+}
+
 function loadSdk(browserKey: string): Promise<void> {
   if (typeof window === "undefined") return Promise.reject(new Error("no window"));
-  // Already loaded — by us, or by a previous mount.
-  if (window.google?.maps) return Promise.resolve();
+  // Already loaded — by us, or by a previous mount. The SDK may still be
+  // pulling its libraries, so "ready" waits for them rather than trusting the
+  // namespace to be complete.
+  if (window.google?.maps) return ensureMapLibraries();
   if (loaderPromise) return loaderPromise;
 
   loaderPromise = new Promise<void>((resolve, reject) => {
@@ -62,7 +131,15 @@ function loadSdk(browserKey: string): Promise<void> {
 
     window[callback] = () => {
       delete window.__jarvisMapsInit;
-      resolve();
+      // The dynamic loader fires this callback before `Map`/`Marker`/`Polyline`
+      // exist; resolve only once the libraries that define them are present.
+      void ensureMapLibraries()
+        .then(resolve)
+        .catch((err) => {
+          // Let a later mount retry rather than caching the failure forever.
+          loaderPromise = null;
+          reject(err);
+        });
     };
 
     script.onerror = () => {
