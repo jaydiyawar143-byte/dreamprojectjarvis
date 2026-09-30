@@ -187,6 +187,11 @@ export function productionLikeTools(): ITool[] {
     read("integration.enable"),
     read("integration.disable"),
     write("integration.disconnect"),
+    // S7.2 L5 — memory tools, as the container registers them. `memory.list`
+    // is granted to the general assistant; the two deleting tools to no agent.
+    read("memory.list"),
+    fakeTool({ id: "memory.forget", risk: "HIGH_IMPACT", requiresApproval: true }),
+    fakeTool({ id: "memory.forget_all", risk: "HIGH_IMPACT", requiresApproval: true }),
     // Capability discovery. All READ_ONLY: asking what you can do changes
     // nothing, and none of these can execute what they describe.
     read("capabilities.list"),

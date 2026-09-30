@@ -632,7 +632,9 @@ describe("Phase 4: Automatic Memory Extraction", () => {
   });
 
   describe("15. Confidence scoring", () => {
-    it("preserves confidence score from LLM extraction", async () => {
+    // S7.2 L4 — the stored confidence is derived from evidence; the model's
+    // own number is preserved beside it as metadata.modelConfidence.
+    it("preserves the model's confidence score as modelConfidence; the memory's confidence is derived from evidence", async () => {
       mockAI.setResponse(() => llmResponse([
         { type: "FACT", content: "User's name is Bob", importance: 0.8, confidence: 1.0 },
       ]));
@@ -641,7 +643,10 @@ describe("Phase 4: Automatic Memory Extraction", () => {
         conversationId: "conv-1",
         messages: [{ role: "user", messageId: "msg-user-1", content: "My name is Bob" }],
       });
-      expect(result.candidates[0].confidence).toBe(1.0);
+      expect(result.candidates[0].confidence).toBe(0.7);
+      const [stored] = (await store.list({ userId: "user-1" })).memories;
+      expect(stored!.confidence).toBe(0.7);
+      expect(stored!.metadata?.modelConfidence).toBe(1.0);
     });
   });
 

@@ -117,6 +117,8 @@ export interface MemoryUpdateRequest {
   sourceType?: string;
   sourceConversationId?: string;
   sourceMessageId?: string;
+  /** S7.2 L4 — refreshed when genuine new USER evidence is accepted. */
+  expiresAt?: Date;
   /**
    * S7 — the embedding of the (new) content. When present, the vector column
    * and `metadata.embedding` are replaced in the same transaction as the other

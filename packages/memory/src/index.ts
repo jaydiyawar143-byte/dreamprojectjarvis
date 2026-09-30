@@ -2,6 +2,16 @@ export { MemoryEngine } from "./memory-engine.js";
 export type { MemoryEngineConfig } from "./memory-engine.js";
 export { MemoryExtractionService } from "./memory-extraction-service.js";
 export type { MemoryExtractionServiceConfig } from "./memory-extraction-service.js";
+// S7.2 L5 — the one place a user's memories are listed, forgotten, paused or vetoed.
+export { MemoryManagementService, MEMORY_FORGET_LIMIT } from "./memory-management-service.js";
+export type {
+  MemoryAuditPort,
+  MemoryControlStore,
+  MemoryForgetAllOutcome,
+  MemoryForgetOutcome,
+  MemoryManagementServiceConfig,
+  MemoryTarget,
+} from "./memory-management-service.js";
 
 export * from "./extraction/index.js";
 export * from "./chunking/index.js";

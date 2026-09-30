@@ -153,6 +153,27 @@ export {
   type LearningValidationResult,
   type LearningValidationRule,
 } from "./learning-validation.js";
+// S7.2 L4 — learning evidence. Pure: which genuine USER statements stand
+// behind a durable memory (ids and times only), the confidence derived from
+// them, and when expiry is refreshed. Its only runtime consumer is
+// MemoryExtractionService.
+export {
+  hasNegationConflict,
+  isLearningEvidence,
+  LEARNING_EVIDENCE_KINDS,
+  LEARNING_EVIDENCE_LIMIT,
+  resolveLearningEvidence,
+  type LearningEvidence,
+  type LearningEvidenceContext,
+  type LearningEvidenceEvent,
+  type LearningEvidenceKind,
+  type LearningEvidenceResult,
+  type LearningEvidenceSource,
+} from "./learning-evidence.js";
+// S7.2 L5 — memory management. Pure: the user's commands about their
+// memories, the safe view, what each command needs before anything is
+// deleted, and the learning controls (pause, per-message veto).
+export * from "./memory-management.js";
 export * from "./speech-preparation.js";
 export * from "./tool-failure-classifier.js";
 export * from "./integration-health-snapshot.js";

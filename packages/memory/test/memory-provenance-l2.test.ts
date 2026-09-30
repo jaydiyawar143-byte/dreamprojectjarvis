@@ -248,14 +248,16 @@ describe("L2 A — the user's own statement is stored with USER provenance", () 
       type: "PREFERENCE",
       content: "User prefers short captions",
       importance: 0.8,
-      confidence: 0.9,
+      confidence: 0.7, // S7.2 L4 — derived: one DIRECT statement
       sourceType: "USER",
       sourceConversationId: "conv-a",
       sourceMessageId: "msg-a-user",
       embedding: unit(0),
       metadata: { embedding: unit(0), sourceTraceId: "trace-a" },
     });
-    expect(Object.keys(memory.metadata!).sort()).toEqual(["embedding", "sourceTraceId"]);
+    // S7.2 L4 — plus the evidence (ids only) and the model's own confidence.
+    expect(Object.keys(memory.metadata!).sort()).toEqual(["embedding", "evidence", "modelConfidence", "sourceTraceId"]);
+    expect(memory.metadata!.modelConfidence).toBe(0.9);
     expect(result.candidates[0]).toMatchObject({
       sourceType: "USER",
       sourceConversationId: "conv-a",
@@ -420,7 +422,8 @@ describe("L2 — ids propagate from the cited message", () => {
       service.extract({ userId: "u-l2", conversationId: "conv-p", messages: [user("I prefer short captions.", "msg-p")] })
     );
 
-    expect(store.stored[0]!.metadata).toEqual({ embedding: unit(0) });
+    expect(store.stored[0]!.metadata!.embedding).toEqual(unit(0));
+    expect(store.stored[0]!.metadata).not.toHaveProperty("sourceTraceId");
     expect(store.stored[0]).toMatchObject({ sourceType: "USER", sourceConversationId: "conv-p", sourceMessageId: "msg-p" });
   });
 });
@@ -461,12 +464,16 @@ describe("L2 — dedup and merge", () => {
     expect(store.updates[0]!.metadata).not.toHaveProperty("sourceTraceId");
   });
 
-  it("a duplicate is skipped: the earlier memory and its provenance are untouched", async () => {
+  // S7.2 L4 — a duplicate is no longer ignored: it corroborates. Its content,
+  // vector and provenance stay exactly as they were.
+  it("a duplicate corroborates: the earlier memory's content, vector and provenance are untouched", async () => {
     const { service, store } = setup([cited], [earlier([1, 0, 0, 0])]);
     const { result } = await capture(() => service.extract({ userId: "u-l2", conversationId: "conv-new", messages: conversation }));
 
     expect(store.stored).toHaveLength(0);
-    expect(store.updates).toHaveLength(0);
+    expect(store.updates).toHaveLength(1);
+    expect(Object.keys(store.updates[0]!).sort()).toEqual(["confidence", "expiresAt", "memoryId", "metadata", "userId"]);
+    expect(store.updates[0]!.metadata).toMatchObject({ embedding: [1, 0, 0, 0], sourceTraceId: "trace-old" });
     expect(result.meta.duplicatesSkipped).toBe(1);
   });
 

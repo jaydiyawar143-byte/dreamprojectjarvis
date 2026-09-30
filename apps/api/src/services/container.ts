@@ -109,12 +109,14 @@ import {
   PrismaTaskRepository,
   type TaskRecord,
   PrismaIntegrationStateRepository,
+  PrismaPreferenceRepository,
 } from "@jarvis/db";
-import { MemoryExtractionService, KnowledgeRetrievalService } from "@jarvis/memory";
+import { MemoryExtractionService, KnowledgeRetrievalService, MemoryManagementService } from "@jarvis/memory";
 import { IntegrationCommandService } from "./integrations/command-service.js";
 import { createIntegrationTools, type IntegrationCommandPort } from "@jarvis/tools";
 import {
   createCapabilityTools,
+  createMemoryTools,
   createSelfTools,
   createTaskTools,
   type CapabilityPort,
@@ -262,6 +264,12 @@ export interface Container {
   embeddingProvider: IEmbeddingProvider | null;
   /** Sprint 1.1A — memory extractor. Null when OPENAI_API_KEY is absent. */
   memoryExtractor: IMemoryExtractor | null;
+  /**
+   * S7.2 L5 — the one place a user's memories are listed, forgotten, paused
+   * or vetoed. Always present: it needs only the database, so a user can
+   * manage what is stored even when learning is off for lack of a key.
+   */
+  memoryManagement: MemoryManagementService;
   knowledgeRepo?: PrismaKnowledgeRepository;
   /**
    * Sprint 3.7 — knowledge retriever wired into the orchestrator for RAG.
@@ -989,6 +997,29 @@ export function getContainer(options?: {
   );
   registryRef.current = toolRegistry;
 
+  // ---------------------------------------------------------------------------
+  // S7.2 L5 — memory management.
+  //
+  // ONE memory repository instance, shared with the extraction wiring below —
+  // no second store. The learning controls live in the existing per-user
+  // settings table, namespaced like the command-center preferences.
+  //
+  // Registered here, before the agents' tool definitions are computed:
+  // `memory.list` is granted to the general assistant. The two deleting tools
+  // are granted to NO agent — they run only when the user confirms a pending
+  // action the chat route created, through ToolExecutor, consuming its
+  // approval in the same durable step that claims the execution.
+  // ---------------------------------------------------------------------------
+  const memoryRepository = new PrismaMemoryRepository(prisma);
+  const memoryManagement = new MemoryManagementService({
+    store: memoryRepository,
+    control: new PrismaPreferenceRepository(prisma, "prefs:memory"),
+    audit: auditLogger,
+  });
+  for (const tool of createMemoryTools(memoryManagement, executionJournal, approvalRepo)) {
+    toolRegistry.register(tool);
+  }
+
   // R-21 — the adapter's constructor throws without a key, and this line used
   // to run unconditionally, so a server without one never opened its port. The
   // stand-in answers every conversation with AI_PROVIDER_NOT_CONFIGURED
@@ -1369,7 +1400,8 @@ export function getContainer(options?: {
     }
 
     // PrismaMemoryRepository is always safe to instantiate — no API key needed.
-    memoryStore = new PrismaMemoryRepository(prisma);
+    // S7.2 L5 — the same instance memory management uses.
+    memoryStore = memoryRepository;
 
     // OpenAIEmbeddingProvider throws if OPENAI_API_KEY is absent.
     embeddingProvider = new OpenAIEmbeddingProvider();
@@ -1380,6 +1412,9 @@ export function getContainer(options?: {
       aiProvider: adapter,
       store: memoryStore,
       embeddingProvider,
+      // S7.2 L5 — the user's pause and per-message vetoes, checked before the
+      // model reads a turn and again just before anything is written.
+      learningControl: { get: (userId) => memoryManagement.learningControl(userId) },
     });
 
     console.log(JSON.stringify({
@@ -1559,6 +1594,8 @@ export function getContainer(options?: {
     memoryStore,
     embeddingProvider,
     memoryExtractor,
+    // S7.2 L5 — the chat route's memory commands read it through a narrow port.
+    memoryManagement,
     knowledgeRepo,
     knowledgeRetriever,
     // Core V1 — the first persistent work primitive, and self-knowledge.

@@ -5,7 +5,7 @@ import { JarvisRequestSchema, JarvisError } from "@jarvis/core";
 import { maskIdentifiersInText } from "@jarvis/core";
 import type { SessionContext, AuthContext } from "@jarvis/core";
 import { createAuthMiddleware, type AuthenticatedRequest } from "../middleware/auth.js";
-import { detectIntent, detectWorkRequest, type PendingActionService } from "@jarvis/agents";
+import { detectIntent, detectMemoryCommand, detectWorkRequest, type PendingActionService } from "@jarvis/agents";
 import type {
   ConversationStorePort,
   IOrchestrator,
@@ -19,6 +19,7 @@ import {
   executeApprovedGoogleWrite,
   isGoogleWriteApprovalAction,
 } from "../services/google/execute-approved-action.js";
+import { guardMemoryConfirmation, handleMemoryCommand, type MemoryCommandPort } from "./memory-commands.js";
 
 /**
  * The four pending-action operations a chat turn performs.
@@ -35,6 +36,8 @@ export type PendingActionPort = Pick<
   | "confirmPendingAction"
   | "rejectPendingAction"
   | "modifyPendingAction"
+  // S7.2 L5 — a memory deletion is proposed as an ordinary pending action.
+  | "createPendingAction"
 >;
 
 /**
@@ -44,9 +47,10 @@ export type PendingActionPort = Pick<
  * The `Container` still satisfies this structurally, so `index.ts` passes the
  * same object it always did and the production object graph is unchanged. The
  * gain is that this signature now states the truth about what a chat request
- * can reach: it cannot touch approvals, the agent registry, memory, knowledge
- * or the integration command service, and a reader no longer has to take that
- * on trust from the body of the file.
+ * can reach: it cannot touch approvals, the agent registry, knowledge or the
+ * integration command service — and memory only through the narrow L5 port,
+ * which cannot delete — and a reader no longer has to take that on trust from
+ * the body of the file.
  *
  * `googleWrites` stays the concrete `GoogleWriteService` on purpose:
  * `executeApprovedGoogleWrite` takes that type, and narrowing it would mean
@@ -93,6 +97,13 @@ export interface ChatRouterDeps {
    */
   taskConversation?: TaskConversationPort;
   googleWrites: GoogleWriteService | null;
+  /**
+   * S7.2 L5 — memory commands. A narrow port: it can read the user's memories
+   * and set their learning controls, and it cannot delete anything — a
+   * deletion is a pending action confirmed by the user and run by
+   * ToolExecutor. Absent: every message flows exactly as before.
+   */
+  memoryManagement?: MemoryCommandPort;
 }
 
 export function createChatRouter(container: ChatRouterDeps): Router {
@@ -222,7 +233,21 @@ export function createChatRouter(container: ChatRouterDeps): Router {
         );
       }
 
-      const intent = detectIntent(jarvisRequest.message, pendingAction);
+      let intent = detectIntent(jarvisRequest.message, pendingAction);
+
+      // S7.2 L5 — a memory action is confirmed only as its kind allows (a
+      // forget-all needs the exact phrase or the on-screen button) and is
+      // never modified. Every other pending action is untouched by this.
+      if (pendingAction) {
+        const guarded = guardMemoryConfirmation(jarvisRequest.message, pendingAction, intent);
+        if ("reply" in guarded) {
+          await saveUserMessage();
+          await container.conversationRepo.addMessage({ conversationId, role: "assistant", content: guarded.reply, metadata: { traceId } });
+          res.status(200).json({ success: true, data: { message: guarded.reply, conversationId }, traceId, timestamp: new Date().toISOString() });
+          return;
+        }
+        intent = guarded.intent;
+      }
 
       // Handle CONFIRM intent
       if (intent.type === "CONFIRM" && pendingAction && container.pendingActionService) {
@@ -395,6 +420,55 @@ export function createChatRouter(container: ChatRouterDeps): Router {
           timestamp: new Date().toISOString(),
         });
         return;
+      }
+
+      // -----------------------------------------------------------------------
+      // S7.2 L5 — MEMORY COMMANDS: "show my memories", "forget 2", "forget
+      // that", "that's wrong", "forget everything…", pause and resume.
+      //
+      // After the pending-action branches, so "forget it" still cancels an
+      // action and a memory confirmation is an ordinary CONFIRM/REJECT. Before
+      // the work and orchestrator paths, so a memory command never reaches the
+      // model and is never itself learned. The handler returns null — having
+      // changed nothing — for any turn that is not a memory command it can act
+      // on. It cannot delete: a deletion is a pending action the user confirms,
+      // run by ToolExecutor.
+      // -----------------------------------------------------------------------
+      if (container.memoryManagement) {
+        const memoryTurn = await handleMemoryCommand({
+          command: detectMemoryCommand(jarvisRequest.message),
+          userId: authContext.userId,
+          conversationId,
+          history: existingMessages,
+          pendingActionActive: pendingAction !== null,
+          memories: container.memoryManagement,
+          ...(container.pendingActionService ? { pendingActions: container.pendingActionService } : {}),
+          saveUserMessage,
+        });
+
+        if (memoryTurn) {
+          await container.conversationRepo.addMessage({
+            conversationId,
+            role: "assistant",
+            content: memoryTurn.reply,
+            metadata: {
+              traceId,
+              ...memoryTurn.metadata,
+              ...(memoryTurn.pendingAction ? { pendingAction: memoryTurn.pendingAction } : {}),
+            },
+          });
+          res.status(200).json({
+            success: true,
+            data: {
+              message: memoryTurn.reply,
+              conversationId,
+              ...(memoryTurn.pendingAction ? { pendingAction: memoryTurn.pendingAction } : {}),
+            },
+            traceId,
+            timestamp: new Date().toISOString(),
+          });
+          return;
+        }
       }
 
       // -----------------------------------------------------------------------

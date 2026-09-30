@@ -1,6 +1,6 @@
 # Memory and Knowledge
 
-How JARVIS remembers facts about a user and answers from their documents. Verified against the code on 2026-09-14; the memory write, recall and backfill sections were updated for S7 on 2026-09-27, the backfill safety rules on 2026-09-28, and the learning gate (S7.2 L1–L1c), memory provenance (S7.2 L2) and validation with learning scope (S7.2 L3) were added on 2026-09-29.
+How JARVIS remembers facts about a user and answers from their documents. Verified against the code on 2026-09-14; the memory write, recall and backfill sections were updated for S7 on 2026-09-27, the backfill safety rules on 2026-09-28, and the learning gate (S7.2 L1–L1c), memory provenance (S7.2 L2) and validation with learning scope (S7.2 L3) were added on 2026-09-29, and evidence and corroboration (S7.2 L4) with its negation safety patch (L4.1), and memory management (S7.2 L5), on 2026-09-30.
 
 ---
 
@@ -51,8 +51,8 @@ The knowledge agent holds no search tool on purpose. Retrieval has already happe
 1. **Pre-filter, without a model.** Messages matching secret patterns — API keys, bearer tokens, passwords, private keys, database URLs — are dropped. So is transient chit-chat: greetings, "ok", "thanks".
 2. **Learning gate, without a model.** Each remaining user message is classified; the turn either stops here or continues unchanged. See [The learning gate](#the-learning-gate--s72-l1l1c) below.
 3. **Extract.** The model sees each message labelled with its speaker — `[M1] USER`, `[M2] ASSISTANT (context only, never a source)` — and returns candidates typed `FACT`, `PREFERENCE`, `GOAL`, `PROJECT`, `DECISION` or `WORKFLOW`, each with an importance, a confidence, a `source` and an `evidence` quote.
-4. **Validate** against a Zod schema, then **ground** each candidate in a USER message of the turn, or drop it (see [Provenance](#provenance--s72-l2) below). Then keep only a claim the user's own words establish as **durable memory** — a preference, a personal fact or a working convention, never a goal, task, project state, decision or temporary instruction (see [Validation](#validation-and-learning-scope--s72-l3)). **Embed** every remaining candidate with `text-embedding-3-small` (passed explicitly on each request), then **deduplicate** against the user's existing memories: similarity of 0.95 or more, or text overlap above 0.85, skips the candidate; 0.7 or more merges it into the existing memory.
-5. **Store** each new memory with an expiry — 90 days by default.
+4. **Validate** against a Zod schema, then **ground** each candidate in a USER message of the turn, or drop it (see [Provenance](#provenance--s72-l2) below). Then keep only a claim the user's own words establish as **durable memory** — a preference, a personal fact or a working convention, never a goal, task, project state, decision or temporary instruction (see [Validation](#validation-and-learning-scope--s72-l3)). **Embed** every remaining candidate with `text-embedding-3-small` (passed explicitly on each request), then **deduplicate** against the user's existing memories: similarity of 0.95 or more, or text overlap above 0.85, is a duplicate — no new row, but it **corroborates** the existing memory; 0.7 or more merges it into the existing memory as a **revision**. See [Evidence](#evidence-and-corroboration--s72-l4).
+5. **Store** each new memory with its evidence and an expiry — 90 days by default, refreshed whenever new user evidence arrives.
 
 ### The learning gate — S7.2 L1–L1c
 
@@ -117,8 +117,8 @@ On a turn that continues, the reply still reaches the extraction model, because 
 
 **Not implemented.** Do not assume any of the following exists:
 
-- **Retroactive forgetting.** A veto stops only its own turn. It does not delete or change a memory stored earlier, and there is no "forget that" path.
-- **Corroboration (L4) and memory management (L5).** No memory is strengthened because it was repeated, nothing asks the user to confirm one, and nothing corrects or supersedes an older memory. Later layers will add these.
+- **Topic vetoes.** "Never remember my health information" is not supported. L5 can forget what is stored, pause learning and block one message ("forget that"), but it cannot block a subject. See [Memory management](#memory-management--s72-l5).
+- **Supersession history and consent.** A correction forgets the old memory; nothing keeps it as history, and nothing asks the user to confirm a memory before it is learned. A later layer will add these.
 
 **Tests.**
 
@@ -160,7 +160,7 @@ Anything else is dropped on its own; a valid candidate beside it is kept. That c
 
 `reason` is one of `SOURCE_MISSING`, `SOURCE_UNKNOWN`, `SOURCE_NOT_USER`, `SOURCE_IDS_MISSING`, `EVIDENCE_MISSING` or `EVIDENCE_NOT_IN_SOURCE`. Missing provenance is never filled in as USER. The request's old `lastMessageId` is not used as a source.
 
-**Merge and skip.** A merge replaces the memory's content, so it also moves the provenance — trace included — to the user message that restated it. A skipped duplicate leaves the earlier memory and its provenance untouched. Content, type, importance, confidence, embeddings and expiry are handled exactly as before.
+**Merge and duplicate.** A merge replaces the memory's content, so it also moves the provenance — trace included — to the user message that restated it. A duplicate leaves the earlier memory's content, vector and provenance untouched; since L4 it adds evidence, re-derives the confidence and refreshes the expiry (see [Evidence](#evidence-and-corroboration--s72-l4)). Type, importance and embeddings are handled exactly as before.
 
 **Legacy rows.** Memories written before L2 keep `sourceType: "conversation"` and no message id. They are not rewritten.
 
@@ -189,12 +189,12 @@ L2 proves the user wrote the quoted words. L3 decides whether those words establ
 | L1c | Enforcement before the model, including the user's veto; fails closed |
 | L2 | Provenance: every candidate cites a USER message it really quotes |
 | L3 | Validation and learning scope (this section) |
-| L4 | Corroboration — not built |
-| L5 | User memory management: correction, supersession, forgetting — not built |
+| L4 | Evidence and corroboration — [below](#evidence-and-corroboration--s72-l4) |
+| L5 | Memory management: list, forget, correct, veto, pause — [below](#memory-management--s72-l5) |
 
 ```
 L1 → L1b → L1c (the gate) → extraction model → L2 provenance → L3 validation
-   → only VALID + MEMORY → the existing embed / dedup / merge / write
+   → only VALID + MEMORY → L4 evidence → the existing embed / dedup / merge / write
 ```
 
 **The learning boundary.**
@@ -290,9 +290,9 @@ The error is never logged.
 
 **What L3 does not do.**
 
-- **Correct, supersede, delete or mutate memories — that is L5.** A `VALID` new preference that contradicts an older one is judged on its own evidence, and L3 never reads the older memory. The existing S7 dedup path is unchanged, though: if the two are close enough (cosine 0.7 up to 0.95), the merge replaces the older memory's content.
-- **Change confidence, importance, expiry, embeddings, dedup or merge thresholds, or repository SQL.**
-- **Use S5 feedback or S6 evaluation**, or corroborate (L4).
+- **Correct, supersede, delete or mutate memories — that is L5** ([Memory management](#memory-management--s72-l5)). A `VALID` new preference that contradicts an older one is judged on its own evidence, and L3 never reads the older memory. The existing S7 dedup path is unchanged, though: if the two are close enough (cosine 0.7 up to 0.95), the merge replaces the older memory's content.
+- **Change confidence, importance, expiry, embeddings, dedup or merge thresholds, or repository SQL.** (L4, below, derives the confidence and refreshes the expiry.)
+- **Use S5 feedback or S6 evaluation**, or corroborate — that is L4.
 - **Create or feed** a task, project or goal system.
 - **Grant anything.** A memory is data, never authorization.
 - **Call a model.**
@@ -306,6 +306,193 @@ The error is never logged.
 | `packages/core/test/learning-validation-l3.test.ts` | 12+ cases per durable category; 8+ each for goal, task, project, decision and temporary; HOLD, endorsement, security, provenance, claim safety, the rule order, result shape, determinism, isolation |
 | `packages/memory/test/memory-validation-l3.test.ts` | Runtime: order, per-candidate drops, each non-memory scope, JARVIS-suggests-then-user-answers, fail-closed variants, no merge for refused candidates, content-free events |
 | `packages/memory/test/memory-validation-l3-pg.integration.test.ts` | pgvector: VALID writes one aligned row; HOLD, INVALID, each non-memory scope and a failure leave a close earlier memory unchanged in every field |
+
+### Evidence and corroboration — S7.2 L4
+
+L4 records which genuine user statements stand behind each durable memory. It runs at the dedup step, after L3, so only `VALID + MEMORY` candidates with L2 USER provenance ever become evidence. It adds no memory, correction, retrieval or consent logic of its own.
+
+**Where it lives.** The pure contract is `resolveLearningEvidence` in `packages/core/src/learning-evidence.ts`. It has no imports and no clock; the caller supplies every timestamp. `MemoryExtractionService.deduplicateAndStore` applies it to the three dedup outcomes:
+
+| Dedup outcome | L4 event | What is written |
+|---|---|---|
+| No match | `NEW` | The memory, with fresh evidence and a confidence from its kind; expiry now + 90 days |
+| Text overlap above 0.85, or cosine ≥ 0.95 — and the same negation (L4.1) | `CORROBORATE` | **No second row.** One update: evidence gains the source, confidence is re-derived, expiry refreshed. Content, vector, type, importance and the source columns are untouched. |
+| Cosine ≥ 0.7 | `REVISE` | The existing merge (content, provenance and vector replaced together), plus: evidence restarts with this statement, `revisions` goes up by one, the replaced statement's message id is recorded, confidence comes from the new evidence — the old one is never inherited — and expiry is refreshed |
+
+**Negation (L4.1).** A statement and its negation are never the same statement. "User prefers to receive the weekly report every Monday morning" and "User prefers **not** to receive …" share 92% of their words, which alone used to make them a duplicate — so the contradiction corroborated the memory it contradicts. Now, when exactly one of the two carries a clear negation (`hasNegationConflict` in `learning-evidence.ts`), the pair skips the text-overlap shortcut and can never corroborate: the existing memory gains no evidence, no confidence and no expiry refresh. The candidate goes on to the usual decision instead — a revision if the vectors are close (cosine ≥ 0.7), otherwise a new memory — and a genuine duplicate elsewhere still corroborates.
+
+- **Counts as negation:** `not`, `never`, `cannot`, `no longer`, and any `n't` contraction (`don't`, `doesn't`, `can't` …), in any case, with straight or curly apostrophes.
+- **Does not:** "not only / just / merely", "whether or not", a contrast after a comma ("email, not calls"), "not-for-profit", and words that merely contain "not" (note, Notion). Nor "no", "nothing", "without" or Hinglish — when in doubt, it is not a conflict.
+
+**Evidence kinds.**
+
+- `DIRECT`: the user stated it (L3 `DIRECT_USER_STATEMENT`).
+- `ENDORSEMENT`: the user explicitly endorsed it (L3 `EXPLICIT_ENDORSEMENT`).
+
+None of these ever becomes evidence, because none of them reaches this step: JARVIS's statements, S5 feedback, S6 evaluation, HOLD, INVALID, and assistant-only candidates.
+
+**Confidence** is derived, and it is not a probability:
+
+| Evidence | Confidence |
+|---|---|
+| DIRECT, one conversation | 0.70 |
+| Two distinct conversations | 0.80 |
+| Three | 0.90 |
+| Four or more | 0.95 — the cap |
+| ENDORSEMENT only | 0.55, +0.10 per additional distinct conversation |
+
+- **Base:** 0.70 if any recorded source is DIRECT, otherwise 0.55.
+- **Same conversation:** more statements there add to `count` but not to confidence.
+- **The model's number** is kept as `metadata.modelConfidence`, for information only. A pre-L4 memory's confidence is moved there the first time L4 touches it.
+- **Retrieval:** recall does not read confidence. L4 changes what is stored, not what is recalled.
+
+**Idempotency.** A source message that is already recorded changes nothing. The count, the conversation count, the confidence and the expiry all stay the same, and nothing is written. Two candidates from one message in one turn count once.
+
+**Expiry.** It is refreshed to now + the configured expiry (90 days by default) on `NEW`, and on a genuine `CORROBORATE` or `REVISE`. It is never refreshed on a replay, and never by anything that isn't a `VALID + MEMORY` statement.
+
+**What is stored.** `metadata.evidence` holds ids and times only:
+
+```json
+{ "v": 1, "count": 3, "conversations": 2, "firstSeenAt": "…", "lastSeenAt": "…",
+  "sources": [{ "messageId": "…", "conversationId": "…", "traceId": "…", "kind": "DIRECT", "at": "…" }],
+  "revisions": 1, "lastRevisedAt": "…", "previousSourceMessageIds": ["…"] }
+```
+
+- **History kept:** the last 10 sources and the last 10 previous source ids. `count` and `conversations` keep counting past that.
+- **Never stored:** user words, quotes, claims, JARVIS's text or secrets.
+- **Beside it:** `metadata.modelConfidence`.
+- **Always scoped:** every update is scoped by user id.
+
+**Memories from before L4.** Such a memory has no evidence yet. When it is first corroborated or revised:
+
+- If it has its own message id, conversation id and creation time, it counts as one legacy source. That source is recorded as `ENDORSEMENT`, the weaker kind, because its kind was never recorded.
+- If it lacks any of them — every pre-L2 row does — it gets no invented source. Evidence starts from the new statement.
+
+**Fail closed.** The evidence for every outcome is computed before anything is written. The turn writes nothing if the contract:
+
+- throws;
+- refuses, because the event is invalid or the existing evidence can't be read (for example, a future version);
+- returns malformed evidence, or a confidence outside [0, 0.95].
+
+The only thing logged is:
+
+```json
+{"event":"memory_learning_evidence_failed"}
+```
+
+**Metadata only.** There is no migration, no new table and no second repository. The one repository change: an update may now carry `expiresAt`. The vector and `metadata.embedding` stay aligned: a corroboration never carries content or a vector, and a revision replaces both in one transaction, as before.
+
+**Known limits.**
+
+- **Race.** Evidence is read with the turn's memory list and written back whole. Two turns corroborating the same memory at the same moment can lose one source, which only ever undercounts.
+- **Window.** The DIRECT base, the distinct-conversation check and the replay check look at the last 10 sources only. A replay of a message older than that is counted again.
+- **Dedup window.** Dedup compares against the 100 newest memories, which is unchanged S7 behaviour. An older duplicate becomes a new row instead of a corroboration.
+- **Overwrite.** A revision still overwrites the older text; L4 records ids only.
+- **Negation list.** L4.1 recognises only the clear English negations above. A contradiction made some other way ("User has no car" after "User has a car", or in Hinglish) is still judged by overlap and cosine, as before L4.1.
+
+**Not L4.** These belong to L5 ([below](#memory-management--s72-l5)) or later:
+
+- user-visible memory management;
+- correction ("That's wrong");
+- "Forget that" acting on stored memories;
+- explicit preference changes;
+- supersession policy, including whether revisions become explicit history;
+- confirmation;
+- retroactive cleanup;
+- any retrieval ranking by confidence or evidence.
+
+**Tests.**
+
+| File | What it covers |
+|---|---|
+| `packages/core/test/learning-evidence-l4.test.ts` | The contract: every event, both kinds, distinct conversations, the cap, idempotency, both history caps, expiry, revision, legacy memories, invalid input, no content, isolation (no S5, S6, policy, execution or approval path). L4.1: each negation form, both directions, same polarity, the phrases that are not negations, determinism |
+| `packages/memory/test/memory-evidence-l4.test.ts` | Runtime: the three outcomes, replay, HOLD, INVALID and assistant-only doing nothing, the USER message as the only source, user isolation, vector alignment, content-free evidence, fail-closed variants. L4.1: a negation is never a corroboration (by words or by vector), same polarity still is, a conflicting memory never hides a genuine duplicate |
+| `packages/memory/test/memory-evidence-l4-pg.integration.test.ts` | pgvector: evidence persisted, one row per duplicate, confidence by distinct conversations, replay, expiry refresh, revision, alignment, a mixed batch, failure leaving the row unchanged, cross-user isolation. L4.1: a negated statement leaves the positive memory untouched (evidence, confidence, expiry, sources); a negation with an identical vector is a correct revision |
+
+### Memory management — S7.2 L5
+
+The user's own control over what JARVIS remembers: list, forget, correct, veto, pause. L5 never learns. A new or corrected statement is learned only through L1 → L4, exactly as before.
+
+**Where it lives.**
+
+| Part | File |
+|---|---|
+| Contract (pure): commands, the safe view, confirmation rules, learning controls | `packages/core/src/memory-management.ts` |
+| Detector: closed whole-message patterns, English and Hinglish, default NONE | `packages/agents/src/memory-command-detector.ts` |
+| Service: the one place memories are listed, forgotten, paused or vetoed — over the existing store | `packages/memory/src/memory-management-service.ts` |
+| Tools: `memory.list` (READ_ONLY, general assistant only); `memory.forget`, `memory.forget_all` (HIGH_IMPACT, approval-gated, on no allowlist) | `packages/tools/src/tools/memory-tools.ts` |
+| Chat: called after the pending-action branches, before the work and orchestrator paths | `apps/api/src/routes/memory-commands.ts`, `chat.ts` |
+
+**Commands.**
+
+| Command | Examples | What happens |
+|---|---|---|
+| LIST | "show my memories", "what do you remember about me?", "meri memories dikhao" | A numbered list of the newest 20, never through the model. The numbering (ids and versions) is kept on the reply, server-side, for "forget 2". |
+| FORGET | "forget 2", "forget 1 and 3", "forget this memory", "ye memory bhool jao" | Resolved to ids from the list shown, from what the user's last message taught, or from the one memory the last reply used. Otherwise it asks. |
+| FORGET_ALL | "forget everything you remember about me", "delete all my memories", "forget my old memories" (legacy only) | Counted, then proposed as a STRICT action. |
+| CORRECT | "that's wrong", "that's no longer true", "ye galat hai" | Only when the last reply was built on a memory: one → its forgetting is proposed; several → the user picks by number. Otherwise it is ordinary conversation, answered by the assistant. |
+| VETO | "forget that", "don't remember what I just said" | A veto is recorded for the user's previous message at once; what it had already taught is offered for forgetting. |
+| LEARNING_PAUSE / RESUME | "stop remembering things about me" / "start remembering again" | The user's learning flag. Nothing is deleted. |
+| REPLACE | "change my preference to professional tone" | An ordinary statement: answered and learned by L1 → L4. |
+
+"forget it", "forget" and "never mind" are not memory commands; with a pending action open, "forget it" still cancels it. Neither is anything that merely mentions memory ("I have a bad memory for names").
+
+**Deleting.**
+
+```
+resolve to ids — from what the user was shown or said; never text, never similarity
+  → show them → a HIGH_IMPACT pending action (an Approval row: ids + the version each was shown at)
+  → the user confirms: "yes", or the on-screen Confirm button. Voice cannot confirm.
+  → ToolExecutor → memory.forget / memory.forget_all
+  → the approval is consumed with the journal claim: one use only
+  → each target re-checked, scoped to the user: another user's or unknown → NOT_FOUND;
+    changed since it was shown → STALE, and nothing at all is deleted
+  → hard delete: the row, its vector, metadata and evidence together
+```
+
+- **Forget-all is STRICT.** Typed, it must be exactly "yes, forget all"; a loose "yes" or "great" never confirms it. The on-screen button also works.
+- **Never modified.** A memory action can be confirmed or cancelled, never re-targeted: modifying one is refused.
+- **No agent can delete.** The deleting tools are on no allowlist; they run only for a confirmed pending action the chat route created from the user's own words.
+- **One at a time.** While another action waits, a deletion is not stacked on it; listing, pausing and vetoing still work.
+- **The empty-list trap is closed.** `delete({ userId, memoryIds: [] })` used to delete every memory of the user; an empty list now deletes nothing.
+
+**Learning controls.** One JSON document per user in the existing `UserSetting` table, key `prefs:memory`: `{ v: 1, learningPaused, vetoedSourceMessageIds }`, keeping the newest 200 vetoes. MemoryExtractionService reads it twice: before the model reads a turn, and again just before anything is written. A pause or "forget that" that arrives while the model is extracting therefore still stops it.
+
+- **Blocked means nothing:** no new row, no corroboration, no revision, no expiry refresh, no evidence. `memory_learning_blocked` is logged with a reason and a count.
+- **Fail closed:** unreadable controls learn nothing, and only `memory_learning_control_failed` is logged. A document that parses but is malformed reads as paused.
+- **Separate from L1c:** the L1c per-turn veto is unchanged.
+
+**The safe view.** Id, type, content, summary, created and changed (the version) times, expiry, evidence count, first and last seen, revisions, and a legacy flag. Never the metadata, a source, conversation or trace id, the vector, or any confidence.
+
+**Legacy memories.** A memory with no v1 evidence, or a `sourceType` other than USER, is marked legacy. It is shown, never hidden, never deleted automatically, and never migrated. "Forget my old memories" proposes a STRICT forget-all of the legacy ones only.
+
+**Recalled ids.** The orchestrator returns `recalledMemoryIds` in the reply metadata: the memories it actually put in front of the model, after the context budget. The chat route stores them on the assistant message, which is what lets "that's wrong" name its target. Recall, ranking and the prompt are unchanged; the ids never reach the model.
+
+**Audit.** `memory.forget`, `memory.forget_all`, `memory.veto`, `memory.learning_pause`, `memory.learning_resume`, and `memory.command` (proposed, ambiguous, blocked, not found). Rows hold memory ids, counts, the kind and the outcome only — never content, a search phrase, or a source message, conversation or trace id. ToolExecutor's own `tool.execute` row carries the ids and versions.
+
+**Known limits.**
+
+- **Voice.** It cannot confirm because the browser sends no transcript while an action waits; the server cannot tell voice from typing.
+- **Two tiny windows.** A veto that lands in the milliseconds between extraction's final check and its write can lose to it. Likewise, the version check and the delete are separate statements.
+- **Scans.** Lookups by source message, and legacy scans, read the newest 1000 memories.
+- **What forgetting does not reach:** the chat message a memory came from, and copies in database backups.
+- **Later work:** topic vetoes, supersession history, consent for sensitive data, a memory screen and REST endpoints.
+
+**Tests.**
+
+| File | What it covers |
+|---|---|
+| `packages/core/test/memory-management-l5.test.ts` | The contract: kinds, confirmation, the strict phrase, the safe view, legacy, learning controls, isolation |
+| `packages/agents/test/memory-command-detector-l5.test.ts` | Detector corpus, English and Hinglish; collisions with ordinary talk and pending actions; policy |
+| `packages/agents/test/orchestrator-recalled-ids-l5.test.ts` | `recalledMemoryIds`: in order, within the budget, never in the prompt |
+| `packages/agents/test/pending-action.test.ts` | L5 block: a memory action cannot be modified |
+| `packages/memory/test/memory-management-service-l5.test.ts` | The service: scoping, NOT_FOUND, stale, empty lists, forget-all scopes, audit |
+| `packages/memory/test/memory-learning-control-l5.test.ts` | Extraction: pause, veto, the mid-extraction race, fail-closed, unchanged without controls |
+| `packages/memory/test/memory-repository.test.ts` | 4b: the empty-list trap |
+| `packages/memory/test/memory-management-l5-pg.integration.test.ts` | pgvector: hard delete, isolation, the trap, stale, forget-all, veto and pause persistence |
+| `packages/tools/test/memory-tools-l5.test.ts` | Risk, strict parameters, approval consumption, fail-closed |
+| `apps/api/test/chat-memory-l5.test.ts` | The chat branch: order, proposals, confirmation, collisions, veto, correct, pause |
+| `apps/api/test/memory-l5-pg.integration.test.ts` | End to end on the production classes: chat → approval → ToolExecutor → the row gone |
 
 ### The write path
 

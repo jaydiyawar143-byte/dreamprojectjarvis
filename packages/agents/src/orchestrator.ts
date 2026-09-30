@@ -244,7 +244,7 @@ export class Orchestrator implements IOrchestrator {
         this.buildSkillBlock(context.auth.userId, policy),
       ]);
 
-      const knowledge = knowledgeResult.applyTo(withMemory);
+      const knowledge = knowledgeResult.applyTo(withMemory.message);
       // S3 — the skill block is the OUTERMOST prefix, ahead of knowledge and
       // memory. Those two are about this request; this is standing orientation
       // about what works right now, and reads as a preamble to both. Empty
@@ -370,6 +370,11 @@ export class Orchestrator implements IOrchestrator {
           };
           if (toolSummary.total > 0) {
             responseMetadata.toolExecution = toolSummary;
+          }
+          // S7.2 L5 — the memories this reply was built on, by id, so "that's
+          // wrong" can name its target instead of guessing. Never in the prompt.
+          if (withMemory.memoryIds.length > 0) {
+            responseMetadata.recalledMemoryIds = withMemory.memoryIds;
           }
           if (pendingActionData) {
             responseMetadata.pendingAction = pendingActionData;
@@ -541,19 +546,21 @@ export class Orchestrator implements IOrchestrator {
   private async injectMemoryContext(
     userMessage: string,
     userId: string,
-  ): Promise<string> {
-    if (!this.memoryStore) return userMessage;
+  ): Promise<{ message: string; memoryIds: string[] }> {
+    const untouched = { message: userMessage, memoryIds: [] };
+    if (!this.memoryStore) return untouched;
 
     try {
       const isAvailable = await this.isMemoryAvailable();
-      if (!isAvailable) return userMessage;
+      if (!isAvailable) return untouched;
 
       const memories = await this.recallMemories(userMessage, userId);
-      if (memories.length === 0) return userMessage;
+      if (memories.length === 0) return untouched;
 
-      return this.formatMemoryBlock(memories) + "\n\n" + userMessage;
+      const block = this.formatMemoryBlock(memories);
+      return { message: block.text + "\n\n" + userMessage, memoryIds: block.ids };
     } catch {
-      return userMessage;
+      return untouched;
     }
   }
 
@@ -654,8 +661,9 @@ export class Orchestrator implements IOrchestrator {
 
   private formatMemoryBlock(
     memories:   MemoryRecallResult[],
-  ): string {
+  ): { text: string; ids: string[] } {
     const lines: string[] = ["<user_memories>"];
+    const ids: string[] = [];
     let totalChars = 0;
 
     for (const item of memories) {
@@ -663,11 +671,12 @@ export class Orchestrator implements IOrchestrator {
       const line = `[${m.type}] ${m.content}`;
       if (totalChars + line.length > this.memoryConfig.contextBudgetChars) break;
       lines.push(line);
+      ids.push(m.id);
       totalChars += line.length;
     }
 
     lines.push("</user_memories>");
-    return lines.join("\n");
+    return { text: lines.join("\n"), ids };
   }
 
 

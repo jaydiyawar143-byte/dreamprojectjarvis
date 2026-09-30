@@ -211,6 +211,10 @@ export {
   TASK_TOOL_IDS,
 } from "./tools/task-tools.js";
 export type { TaskPort, TaskView } from "./tools/task-tools.js";
+// S7.2 L5 — memory tools. `memory.list` is read-only; the two deleting tools
+// are approval-gated and granted to no agent.
+export { MemoryListTool, MemoryForgetTool, MemoryForgetAllTool, createMemoryTools } from "./tools/memory-tools.js";
+export type { MemoryToolPort } from "./tools/memory-tools.js";
 
 // Integration management — the JARVIS arm of the universal integration
 // contract. Every tool here delegates to IntegrationCommandPort, which the API

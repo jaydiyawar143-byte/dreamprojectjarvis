@@ -205,6 +205,7 @@ function updateData(request: MemoryUpdateRequest): Prisma.MemoryUpdateInput {
   if (request.sourceMessageId !== undefined) {
     data.sourceMessageId = request.sourceMessageId;
   }
+  if (request.expiresAt !== undefined) data.expiresAt = request.expiresAt;
 
   return data;
 }
@@ -398,11 +399,16 @@ export class PrismaMemoryRepository implements IMemoryStore {
   }
 
   async delete(request: MemoryDeleteRequest): Promise<number> {
+    // S7.2 L5 — an explicit selection of nothing deletes nothing. The id
+    // filter used to be dropped for an empty list, which deleted every memory
+    // the user had.
+    if (request.memoryIds !== undefined && request.memoryIds.length === 0) return 0;
+
     const where: Prisma.MemoryWhereInput = {
       userId: request.userId,
     };
 
-    if (request.memoryIds && request.memoryIds.length > 0) {
+    if (request.memoryIds) {
       where.id = { in: request.memoryIds };
     }
 

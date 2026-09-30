@@ -271,6 +271,34 @@ describe("PrismaMemoryRepository", () => {
     });
   });
 
+  // S7.2 L5 — the delete trap: an EMPTY id list used to drop the id filter
+  // and delete every memory the user had. An explicit selection of nothing
+  // must delete nothing — with or without a type or age filter beside it.
+  describe("4b. An empty id list deletes nothing", () => {
+    it.each([
+      ["alone", {}],
+      ["with a type filter", { type: "FACT" as const }],
+      ["with an age filter", { olderThan: new Date(Date.now() + 60_000) }],
+    ])("%s", async (_label, filters) => {
+      const repo = createRepo();
+      await repo.store({
+        userId: "user-a",
+        memories: [
+          { type: "FACT", content: "fact-1", importance: 0.5, confidence: 0.5 },
+          { type: "FACT", content: "fact-2", importance: 0.5, confidence: 0.5 },
+          { type: "GOAL", content: "goal-1", importance: 0.5, confidence: 0.5 },
+        ],
+      });
+      await repo.store({ userId: "user-b", memories: [{ type: "FACT", content: "theirs", importance: 0.5, confidence: 0.5 }] });
+
+      const count = await repo.delete({ userId: "user-a", memoryIds: [], ...filters });
+
+      expect(count).toBe(0);
+      expect((await repo.list({ userId: "user-a", includeExpired: true })).total).toBe(3);
+      expect((await repo.list({ userId: "user-b", includeExpired: true })).total).toBe(1);
+    });
+  });
+
   describe("5. Delete memories by type", () => {
     it("deletes all memories of a specific type", async () => {
       const repo = createRepo();

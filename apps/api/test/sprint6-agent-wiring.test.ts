@@ -115,6 +115,12 @@ const ALL_REGISTERED_TOOLS = [
   "task.list",
   "task.get",
   "task.updateStatus",
+  // S7.2 L5 — memory tools. Registered unconditionally (JARVIS's own
+  // database). `memory.list` is granted to the general assistant; the two
+  // deleting tools to no agent — they run only for a confirmed pending action.
+  "memory.list",
+  "memory.forget",
+  "memory.forget_all",
   // Phase 12 — real Gmail, Drive and Calendar reads. Registered whenever a
   // Google OAuth client and an encryption key are present.
   "gmail.listUnread",

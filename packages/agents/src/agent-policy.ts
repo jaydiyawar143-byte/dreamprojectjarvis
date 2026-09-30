@@ -267,6 +267,18 @@ export const TASK_TOOLS = [
  */
 export const SELF_TOOLS = ["self.describe"] as const;
 
+/**
+ * S7.2 L5 — reading the user's own memories. READ_ONLY, and granted to the
+ * general assistant only: "what do you remember about my captions?" is a
+ * conversation with the assistant.
+ *
+ * The memory tools that DELETE (`memory.forget`, `memory.forget_all`) are
+ * deliberately in no group and on no allowlist. No model can propose one:
+ * they run only when the user confirms a pending action that the chat
+ * route's memory-command path created from the user's own words.
+ */
+export const MEMORY_READ_TOOLS = ["memory.list"] as const;
+
 // ---------------------------------------------------------------------------
 // Policies
 // ---------------------------------------------------------------------------
@@ -310,6 +322,8 @@ const GENERAL_POLICY = policy({
     ...TASK_TOOLS,
     ...GOOGLE_WORKSPACE_TOOLS,
     ...GOOGLE_WRITE_PLAN_TOOLS,
+    // S7.2 L5 — read-only. Deleting a memory is never an agent's tool.
+    ...MEMORY_READ_TOOLS,
   ],
   requiredPermissions: ["read"],
   writesRequireApproval: true,

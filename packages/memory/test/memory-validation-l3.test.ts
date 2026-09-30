@@ -211,7 +211,7 @@ describe("L3 case 1 — a direct user statement is VALID and stored", () => {
       type: "PREFERENCE",
       content: "User prefers short captions",
       importance: 0.8,
-      confidence: 0.9,
+      confidence: 0.7, // S7.2 L4 — derived: one DIRECT statement
       sourceType: "USER",
       sourceConversationId: "conv-l3",
       sourceMessageId: "msg-1",
@@ -535,7 +535,9 @@ describe("L3 finalization — goals, tasks, project state, decisions and tempora
       "summary",
       "type",
     ]);
-    expect(Object.keys(store.stored[0]!.metadata!).sort()).toEqual(["embedding", "sourceTraceId"]);
+    // S7.2 L4 adds evidence (ids only) and the model's own confidence — still no scope or category.
+    expect(Object.keys(store.stored[0]!.metadata!).sort()).toEqual(["embedding", "evidence", "modelConfidence", "sourceTraceId"]);
+    expect(JSON.stringify(store.stored[0])).not.toMatch(/"(?:scope|category)"/);
   });
 });
 

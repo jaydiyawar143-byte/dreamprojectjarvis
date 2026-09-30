@@ -52,6 +52,7 @@ export {
   TASK_TOOLS,
   GOOGLE_WORKSPACE_TOOLS,
   GOOGLE_WRITE_PLAN_TOOLS,
+  MEMORY_READ_TOOLS,
   getAgentPolicy,
   isToolAllowed,
   resolveAllowedToolId,
@@ -61,6 +62,9 @@ export {
 // Task Planner V1.1 — is this turn a request to PERFORM work? Pure
 // heuristic, no model call, same shape as the pending-action detector.
 export { detectWorkRequest, type WorkRequest } from "./work-request-detector.js";
+// S7.2 L5 — is this turn an explicit command about JARVIS's memory? Pure,
+// closed patterns, default NONE; deleting still needs a confirmed pending action.
+export { detectMemoryCommand } from "./memory-command-detector.js";
 // Scheduler V1 — a closed grammar for explicit future times. Not a date parser.
 export {
   parseSchedulePhrase,

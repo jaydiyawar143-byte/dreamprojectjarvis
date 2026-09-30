@@ -43,6 +43,9 @@ function skillOf(toolId: string): string | undefined {
 const IMPLEMENTATION_SOURCE: string = [
   ...walk(new URL("../../tools/src/", import.meta.url)),
   new URL("../../core/src/types/browser.ts", import.meta.url),
+  // S7.2 L5 — the memory tool ids are declared once, in the core contract
+  // (MEMORY_TOOL_IDS), for the same reason the browser ids are.
+  new URL("../../core/src/memory-management.ts", import.meta.url),
 ]
   .map((u) => readFileSync(u, "utf8"))
   .join(" ");
@@ -145,6 +148,8 @@ describe("coverage census — every real tool is accounted for", () => {
   it("pins the intentional orphans exactly", () => {
     // Each is a decision recorded in SKILL_UNLISTED_TOOLS with its reason.
     expect(ALLOWLISTED.filter((id) => !skillOf(id))).toEqual([
+      // S7.2 L5 — memory management; see its SKILL_UNLISTED_TOOLS reason.
+      "memory.list",
       "self.describe",
       "task.create",
       "task.get",

@@ -20,6 +20,7 @@ import type {
   MemoryListResult,
   MemoryRecord,
   MemoryStoreRequest,
+  MemoryUpdateRequest,
 } from "@jarvis/core";
 import { MemoryExtractionService } from "../src/memory-extraction-service.js";
 import { citeFirstUserMessage } from "./helpers/compliant-citation.js";
@@ -80,6 +81,7 @@ class RecordingStore implements IMemoryStore {
   readonly id = "s7-recording";
   readonly name = "S7 recording";
   readonly storeRequests: MemoryStoreRequest[] = [];
+  readonly updateRequests: MemoryUpdateRequest[] = [];
   private readonly existing: MemoryRecord = {
     id: "existing-duplicate",
     userId: "user-s7",
@@ -111,8 +113,10 @@ class RecordingStore implements IMemoryStore {
   async deleteAll(): Promise<number> {
     return 0;
   }
-  async update(): Promise<MemoryRecord> {
-    throw new Error("not expected: nothing is in the merge range");
+  // S7.2 L4 — the duplicate now corroborates: one evidence update, recorded.
+  async update(request: MemoryUpdateRequest): Promise<MemoryRecord> {
+    this.updateRequests.push(request);
+    return this.existing;
   }
   async findSimilar(): Promise<MemoryRecord[]> {
     return [];
@@ -149,5 +153,9 @@ describe("S7 extraction — embeddings stay aligned with their candidates", () =
     expect(stored[0]!.content).toBe(NEW_FACT);
     expect(stored[0]!.metadata?.embedding, "metadata embedding is the new fact's").toEqual(VECTORS.get(NEW_FACT));
     expect(stored[0]!.embedding, "the vector to store is the new fact's").toEqual(VECTORS.get(NEW_FACT));
+    // S7.2 L4 — the duplicate's corroboration touches evidence only: no content, no vector.
+    expect(store.updateRequests.map((u) => u.memoryId)).toEqual(["existing-duplicate"]);
+    expect(store.updateRequests[0]).not.toHaveProperty("embedding");
+    expect(store.updateRequests[0]).not.toHaveProperty("content");
   });
 });

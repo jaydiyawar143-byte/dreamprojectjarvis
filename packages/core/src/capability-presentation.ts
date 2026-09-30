@@ -305,6 +305,11 @@ export const SKILL_UNLISTED_TOOLS: readonly UnlistedTool[] = [
     reason:
       "A test fixture — its own description says 'Harmless test tool'. This is why the monitoring skill claims system.status and time.now by EXACT id and not by a `system.` prefix.",
   },
+  {
+    id: "memory.list",
+    reason:
+      "Memory management (S7.2 L5), not a capability. \"Show my memories\" is answered by the chat route's memory commands before any agent runs; this read-only tool only lets the general assistant answer follow-ups about the user's own memories. A skill for it would change the S6 objective vocabulary, which L5 must not touch.",
+  },
 ];
 
 /**

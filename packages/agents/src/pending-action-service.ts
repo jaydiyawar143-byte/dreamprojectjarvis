@@ -5,7 +5,7 @@ import type {
   ITool,
   ToolExecutionResult,
 } from "@jarvis/core";
-import { APPROVAL_TTL_MS, computeParamsHash } from "@jarvis/core";
+import { APPROVAL_TTL_MS, computeParamsHash, isDestructiveMemoryTool } from "@jarvis/core";
 import type { PendingAction, PendingActionState } from "@jarvis/core";
 
 export interface PendingActionServiceConfig {
@@ -213,6 +213,12 @@ export class PendingActionService {
     const pending = await this.getActivePendingAction(conversationId, userId);
     if (!pending) {
       throw new Error("No pending action found for this conversation.");
+    }
+
+    // S7.2 L5 — a memory action names exactly the memories the user was
+    // shown. It can be confirmed or cancelled, never re-targeted.
+    if (isDestructiveMemoryTool(pending.toolId)) {
+      throw new Error("A memory action cannot be changed. Cancel it and ask again.");
     }
 
     // Merge params: old params + new overrides

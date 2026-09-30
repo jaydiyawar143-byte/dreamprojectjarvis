@@ -10,7 +10,10 @@ import type {
   MemoryType,
   MemoryRecord,
   LearningDecision,
+  LearningEvidence,
+  LearningEvidenceKind,
   LearningProvenance,
+  MemoryLearningControl,
   LearningValidationResult,
   ProvenanceCitation,
   ProvenanceSource,
@@ -20,7 +23,11 @@ import {
   JarvisError,
   LEARNING_RULES,
   decideLearningCandidate,
+  hasNegationConflict,
+  isLearningBlocked,
+  isLearningEvidence,
   isLearningValidationResult,
+  resolveLearningEvidence,
   resolveUserProvenance,
   validateLearningCandidate,
 } from "@jarvis/core";
@@ -40,6 +47,11 @@ export interface MemoryExtractionServiceConfig {
   maxRetries?: number;
   retryDelayMs?: number;
   expiryDays?: number;
+  /**
+   * S7.2 L5 — the user's own learning controls: a pause, and the messages
+   * they said not to learn from. Absent: learning is exactly as before.
+   */
+  learningControl?: { get(userId: string): Promise<MemoryLearningControl> };
 }
 
 // ---------------------------------------------------------------------------
@@ -133,6 +145,44 @@ interface GroundedCandidate {
   userMessage: string | undefined;
   /** Its position among the model's validated candidates, for content-free events. */
   index: number;
+  /** S7.2 L4 — set by L3 on a VALID candidate: a direct statement or an explicit endorsement. */
+  evidenceKind?: LearningEvidenceKind;
+}
+
+/** One dedup outcome, before anything is written. */
+type DedupPlan =
+  | { kind: "new"; candidate: EvidencedCandidate; embedding: number[]; index: number }
+  | { kind: "corroborate"; candidate: EvidencedCandidate; existing: MemoryRecord }
+  | { kind: "revise"; candidate: EvidencedCandidate; existing: MemoryRecord; embedding: number[]; index: number };
+
+/** A candidate on its way to the dedup step, with the evidence kind L3 gave it. */
+type EvidencedCandidate = MemoryCandidate & { evidenceKind?: LearningEvidenceKind };
+
+/** What L4 decided for one dedup outcome. */
+interface EvidenceOutcome {
+  evidence: LearningEvidence;
+  confidence: number;
+  changed: boolean;
+  refreshExpiry: boolean;
+}
+
+/** A well-formed accepted result from the L4 contract, or null. */
+function evidenceOutcome(value: unknown): EvidenceOutcome | null {
+  if (typeof value !== "object" || value === null) return null;
+  const r = value as Record<string, unknown>;
+  const ok =
+    r.accepted === true &&
+    isLearningEvidence(r.evidence) &&
+    typeof r.confidence === "number" &&
+    r.confidence >= 0 &&
+    r.confidence <= 0.95 &&
+    typeof r.changed === "boolean" &&
+    typeof r.refreshExpiry === "boolean";
+  return ok ? (r as unknown as EvidenceOutcome) : null;
+}
+
+function isoOf(date: unknown): string | undefined {
+  return date instanceof Date && Number.isFinite(date.getTime()) ? date.toISOString() : undefined;
 }
 
 // S7.2 L3 — results that mean the validator was handed a broken input. L2
@@ -272,6 +322,7 @@ export class MemoryExtractionService implements IMemoryExtractor {
   private maxRetries: number;
   private retryDelayMs: number;
   private expiryDays: number;
+  private learningControl: MemoryExtractionServiceConfig["learningControl"];
 
   constructor(config: MemoryExtractionServiceConfig) {
     this.aiProvider = config.aiProvider;
@@ -283,6 +334,7 @@ export class MemoryExtractionService implements IMemoryExtractor {
     this.maxRetries = config.maxRetries ?? 2;
     this.retryDelayMs = config.retryDelayMs ?? 1000;
     this.expiryDays = config.expiryDays ?? 90;
+    this.learningControl = config.learningControl;
   }
 
   // -----------------------------------------------------------------------
@@ -307,6 +359,13 @@ export class MemoryExtractionService implements IMemoryExtractor {
 
     const hasUserMessage = filteredMessages.some((m) => m.role === "user");
     if (!hasUserMessage) return this.emptyResult(start);
+
+    // S7.2 L5 — paused, or this message vetoed: not even the model reads it.
+    const allowed = await this.learningAllowed(
+      request.userId,
+      filteredMessages.filter((m) => m.role === "user").map((m) => m.messageId),
+    );
+    if (!allowed || !allowed.some(Boolean)) return this.emptyResult(start);
 
     // S7.2 L1c — the learning gate. A turn the contract refuses never reaches
     // the model, so nothing from it can be stored.
@@ -333,8 +392,9 @@ export class MemoryExtractionService implements IMemoryExtractor {
         ? new Date(Date.now() + this.expiryDays * 86400000)
         : undefined;
 
-    const enriched = supported.map(({ candidate, provenance }) => ({
+    const enriched = supported.map(({ candidate, provenance, evidenceKind }) => ({
       ...candidate,
+      evidenceKind,
       sourceType: provenance.sourceType,
       sourceConversationId: provenance.sourceConversationId,
       sourceMessageId: provenance.sourceMessageId,
@@ -342,8 +402,10 @@ export class MemoryExtractionService implements IMemoryExtractor {
       expiresAt,
     }));
 
-    const { accepted, duplicatesSkipped } =
-      await this.deduplicateAndStore(enriched, request.userId);
+    // S7.2 L4 — null: the evidence contract failed and nothing was written.
+    const deduplicated = await this.deduplicateAndStore(enriched, request.userId);
+    if (!deduplicated) return this.emptyResult(start);
+    const { accepted, duplicatesSkipped } = deduplicated;
 
     const created = accepted.filter(
       (c) => !c.metadata?.existingMemoryId,
@@ -601,7 +663,7 @@ export class MemoryExtractionService implements IMemoryExtractor {
         return null;
       }
       if (result.decision === "VALID" && result.scope === "MEMORY") {
-        kept.push(item);
+        kept.push({ ...item, evidenceKind: result.rule === "EXPLICIT_ENDORSEMENT" ? "ENDORSEMENT" : "DIRECT" });
         continue;
       }
       console.log(
@@ -623,9 +685,9 @@ export class MemoryExtractionService implements IMemoryExtractor {
   // -----------------------------------------------------------------------
 
   private async deduplicateAndStore(
-    candidates: MemoryCandidate[],
+    candidates: EvidencedCandidate[],
     userId: string,
-  ): Promise<{ accepted: MemoryCandidate[]; duplicatesSkipped: number }> {
+  ): Promise<{ accepted: MemoryCandidate[]; duplicatesSkipped: number } | null> {
     if (candidates.length === 0) {
       return { accepted: [], duplicatesSkipped: 0 };
     }
@@ -633,13 +695,10 @@ export class MemoryExtractionService implements IMemoryExtractor {
     const embeddings = await this.embedCandidates(candidates);
     const existingMemories = await this.fetchExistingMemories(userId);
 
-    // S7 — outcomes in CANDIDATE ORDER. Each new memory carries its OWN
+    // S7 — plans in CANDIDATE ORDER. Each new memory carries its OWN
     // embedding (skipped or dropped candidates never shift another's vector),
     // and is only reported as accepted once it has actually been stored.
-    const outcomes: Array<
-      | { kind: "merged"; candidate: MemoryCandidate; memoryId: string }
-      | { kind: "new"; candidate: MemoryCandidate; embedding: number[]; index: number }
-    > = [];
+    const plans: DedupPlan[] = [];
     let duplicatesSkipped = 0;
 
     for (let i = 0; i < candidates.length; i++) {
@@ -653,22 +712,28 @@ export class MemoryExtractionService implements IMemoryExtractor {
       }
 
       if (existingMemories.length === 0) {
-        outcomes.push({ kind: "new", candidate, embedding: emb, index: i });
+        plans.push({ kind: "new", candidate, embedding: emb, index: i });
         continue;
       }
 
       let bestMatch: MemoryRecord | null = null;
       let bestScore = 0;
+      let bestConflicts = false;
 
       for (const existing of existingMemories) {
+        // S7.2 L4.1 — a statement and its negation are never duplicates, so a
+        // conflicting memory takes no shortcut and can never corroborate; it
+        // can still be the one a revision replaces.
+        const conflicts = hasNegationConflict(candidate.content, existing.content);
         const textOverlap = characterOverlap(
           candidate.content,
           existing.content,
         );
 
-        if (textOverlap > 0.85) {
+        if (textOverlap > 0.85 && !conflicts) {
           bestMatch = existing;
           bestScore = 1.0;
+          bestConflicts = false;
           break;
         }
 
@@ -678,38 +743,101 @@ export class MemoryExtractionService implements IMemoryExtractor {
           if (score > bestScore) {
             bestScore = score;
             bestMatch = existing;
+            bestConflicts = conflicts;
           }
         }
       }
 
-      if (bestScore >= 0.95) {
+      // S7.2 L4 — a duplicate is no longer just skipped: it corroborates.
+      if (bestScore >= 0.95 && bestMatch && !bestConflicts) {
         duplicatesSkipped++;
+        plans.push({ kind: "corroborate", candidate, existing: bestMatch });
         continue;
       }
 
       if (bestScore >= this.deduplicationThreshold && bestMatch) {
-        let merged: MemoryRecord;
-        try {
-          merged = await this.mergeMemory(candidate, bestMatch, userId, emb);
-        } catch (error) {
-          // The merge's vector could not be stored: its transaction rolled
-          // back, so the existing memory is unchanged. Drop this candidate.
-          if (!isEmbeddingStorageFailure(error)) throw error;
-          this.reportEmbeddingFailure({
-            stage: "persist",
-            reason: "storage_rejected",
-            operation: "merge",
-            candidateIndex: i,
-            candidateCount: candidates.length,
-            error,
-          });
-          continue;
-        }
-        outcomes.push({ kind: "merged", candidate, memoryId: merged.id });
+        plans.push({ kind: "revise", candidate, existing: bestMatch, embedding: emb, index: i });
         continue;
       }
 
-      outcomes.push({ kind: "new", candidate, embedding: emb, index: i });
+      plans.push({ kind: "new", candidate, embedding: emb, index: i });
+    }
+
+    // S7.2 L4 — the evidence of every plan, before anything is written.
+    const evidence = this.evidenceFor(plans);
+    if (!evidence) return null;
+
+    // S7.2 L5 — the user's controls, read AGAIN just before anything is
+    // written: a pause or a "forget that" that arrived while the model was
+    // extracting still stops it. A blocked plan writes nothing at all.
+    const allowed = await this.learningAllowed(userId, plans.map((p) => p.candidate.sourceMessageId));
+    if (!allowed || !allowed.some(Boolean)) return null;
+    duplicatesSkipped -= plans.filter((plan, p) => !allowed[p] && plan.kind === "corroborate").length;
+
+    const outcomes: Array<
+      | { kind: "merged"; candidate: MemoryCandidate; memoryId: string }
+      | { kind: "new"; candidate: MemoryCandidate; embedding: number[]; index: number; l4: EvidenceOutcome; modelConfidence: number }
+    > = [];
+
+    for (let p = 0; p < plans.length; p++) {
+      if (!allowed[p]) continue;
+      const plan = plans[p]!;
+      const l4 = evidence[p]!;
+      // L4 — the stored confidence is derived from evidence, never the model's number.
+      const candidate: MemoryCandidate = { ...plan.candidate, confidence: l4.confidence };
+      const expiresAt = l4.refreshExpiry ? plan.candidate.expiresAt : undefined;
+
+      if (plan.kind === "new") {
+        outcomes.push({ kind: "new", candidate, embedding: plan.embedding, index: plan.index, l4, modelConfidence: plan.candidate.confidence });
+        continue;
+      }
+
+      // A message already counted — a retry, a replay — writes nothing.
+      if (!l4.changed) {
+        if (plan.kind === "revise") duplicatesSkipped++;
+        continue;
+      }
+
+      if (plan.kind === "corroborate") {
+        // Evidence, confidence and expiry only: content, vector, type and
+        // provenance stay as they are.
+        await this.store.update({
+          userId,
+          memoryId: plan.existing.id,
+          confidence: l4.confidence,
+          metadata: {
+            ...plan.existing.metadata,
+            evidence: l4.evidence,
+            // A pre-L4 memory's confidence was the model's number: kept, not lost.
+            modelConfidence: plan.existing.metadata?.modelConfidence ?? plan.existing.confidence,
+          },
+          ...(expiresAt ? { expiresAt } : {}),
+        });
+        continue;
+      }
+
+      let merged: MemoryRecord;
+      try {
+        merged = await this.mergeMemory(candidate, plan.existing, userId, plan.embedding, {
+          evidence: l4.evidence,
+          modelConfidence: plan.candidate.confidence,
+          expiresAt,
+        });
+      } catch (error) {
+        // The merge's vector could not be stored: its transaction rolled
+        // back, so the existing memory is unchanged. Drop this candidate.
+        if (!isEmbeddingStorageFailure(error)) throw error;
+        this.reportEmbeddingFailure({
+          stage: "persist",
+          reason: "storage_rejected",
+          operation: "merge",
+          candidateIndex: plan.index,
+          candidateCount: candidates.length,
+          error,
+        });
+        continue;
+      }
+      outcomes.push({ kind: "merged", candidate, memoryId: merged.id });
     }
 
     const stored = await this.storeMemories(
@@ -728,6 +856,98 @@ export class MemoryExtractionService implements IMemoryExtractor {
     }
 
     return { accepted, duplicatesSkipped };
+  }
+
+  // -----------------------------------------------------------------------
+  // S7.2 L5 — the user's learning controls
+  // -----------------------------------------------------------------------
+
+  /**
+   * Which of these source messages may still be learned from: none while the
+   * user has paused learning, never one they vetoed. Separate from the L1c
+   * per-turn veto, which is unchanged.
+   *
+   * FAILS CLOSED: controls that cannot be read allow nothing, and only
+   * `memory_learning_control_failed` is logged.
+   */
+  private async learningAllowed(userId: string, sourceMessageIds: Array<string | undefined>): Promise<boolean[] | null> {
+    if (!this.learningControl) return sourceMessageIds.map(() => true);
+
+    let control: MemoryLearningControl;
+    try {
+      control = await this.learningControl.get(userId);
+    } catch {
+      console.log(JSON.stringify({ event: "memory_learning_control_failed" }));
+      return null;
+    }
+
+    const allowed = sourceMessageIds.map((id) => !isLearningBlocked(control, id));
+    const blocked = allowed.filter((a) => !a).length;
+    if (blocked > 0) {
+      console.log(JSON.stringify({ event: "memory_learning_blocked", reason: control.learningPaused ? "PAUSED" : "VETOED", candidates: blocked }));
+    }
+    return allowed;
+  }
+
+  // -----------------------------------------------------------------------
+  // S7.2 L4 — evidence
+  // -----------------------------------------------------------------------
+
+  /**
+   * The L4 evidence of every dedup plan, computed before anything is
+   * written. The source is always the candidate's L2 USER provenance — its
+   * saved message, conversation and trace — never JARVIS, S5 or S6.
+   *
+   * Within a turn, a memory's evidence carries forward from one plan to the
+   * next, so a second candidate from the same message is a replay, not new
+   * evidence.
+   *
+   * FAILS CLOSED: if the contract throws, refuses, or answers with anything
+   * but well-formed evidence and a confidence in [0, 0.95], the whole turn
+   * writes nothing and only `memory_learning_evidence_failed` is logged.
+   */
+  private evidenceFor(plans: DedupPlan[]): EvidenceOutcome[] | null {
+    const occurredAt = new Date().toISOString();
+    const carried = new Map<string, LearningEvidence>();
+    const outcomes: EvidenceOutcome[] = [];
+
+    for (const plan of plans) {
+      const existing = plan.kind === "new" ? null : plan.existing;
+      let outcome: EvidenceOutcome | null;
+      try {
+        outcome = evidenceOutcome(
+          resolveLearningEvidence(
+            {
+              kind: plan.kind === "new" ? "NEW" : plan.kind === "corroborate" ? "CORROBORATE" : "REVISE",
+              evidenceKind: plan.candidate.evidenceKind as LearningEvidenceKind,
+              sourceMessageId: plan.candidate.sourceMessageId as string,
+              conversationId: plan.candidate.sourceConversationId as string,
+              ...(plan.candidate.sourceTraceId ? { traceId: plan.candidate.sourceTraceId } : {}),
+              occurredAt,
+            },
+            existing ? (carried.get(existing.id) ?? existing.metadata?.evidence) : undefined,
+            existing
+              ? {
+                  memorySource: {
+                    messageId: existing.sourceMessageId,
+                    conversationId: existing.sourceConversationId,
+                    createdAt: isoOf(existing.createdAt),
+                  },
+                }
+              : {},
+          ),
+        );
+      } catch {
+        outcome = null;
+      }
+      if (!outcome) {
+        console.log(JSON.stringify({ event: "memory_learning_evidence_failed" }));
+        return null;
+      }
+      if (existing) carried.set(existing.id, outcome.evidence);
+      outcomes.push(outcome);
+    }
+    return outcomes;
   }
 
   // -----------------------------------------------------------------------
@@ -849,11 +1069,8 @@ export class MemoryExtractionService implements IMemoryExtractor {
     existing: MemoryRecord,
     userId: string,
     embedding: number[],
+    l4: { evidence: LearningEvidence; modelConfidence: number; expiresAt?: Date },
   ): Promise<MemoryRecord> {
-    const updatedConfidence = Math.min(
-      1.0,
-      Math.max(existing.confidence, candidate.confidence),
-    );
     const updatedImportance = Math.min(
       1.0,
       Math.max(existing.importance, candidate.importance),
@@ -864,6 +1081,9 @@ export class MemoryExtractionService implements IMemoryExtractor {
       embedding,
       lastMergedAt: new Date().toISOString(),
       mergeCount: ((existing.metadata?.mergeCount as number) ?? 0) + 1,
+      // S7.2 L4 — a revision: evidence restarts with this statement.
+      evidence: l4.evidence,
+      modelConfidence: l4.modelConfidence,
     };
     // S7.2 L2 — the merged memory's provenance is the candidate's, trace
     // included: never the new message beside the earlier message's trace.
@@ -876,7 +1096,8 @@ export class MemoryExtractionService implements IMemoryExtractor {
       content: candidate.content,
       summary: candidate.summary ?? existing.summary,
       importance: updatedImportance,
-      confidence: updatedConfidence,
+      // S7.2 L4 — derived from the new evidence; the old confidence is never inherited.
+      confidence: candidate.confidence,
       metadata,
       sourceType: candidate.sourceType ?? existing.sourceType,
       sourceConversationId:
@@ -886,6 +1107,7 @@ export class MemoryExtractionService implements IMemoryExtractor {
       // S7 — the merged content's embedding: the store replaces the vector in
       // the same transaction, so new content never keeps the old vector.
       embedding,
+      ...(l4.expiresAt ? { expiresAt: l4.expiresAt } : {}),
     });
   }
 
@@ -903,13 +1125,13 @@ export class MemoryExtractionService implements IMemoryExtractor {
    * failure propagates exactly as before.
    */
   private async storeMemories(
-    pending: Array<{ candidate: MemoryCandidate; embedding: number[]; index: number }>,
+    pending: Array<{ candidate: MemoryCandidate; embedding: number[]; index: number; l4: EvidenceOutcome; modelConfidence: number }>,
     userId: string,
     candidateCount: number,
   ): Promise<Set<number>> {
     const stored = new Set<number>();
 
-    for (const { candidate, embedding, index } of pending) {
+    for (const { candidate, embedding, index, l4, modelConfidence } of pending) {
       try {
         await this.store.store({
           userId,
@@ -928,6 +1150,9 @@ export class MemoryExtractionService implements IMemoryExtractor {
               metadata: {
                 embedding,
                 ...(candidate.sourceTraceId ? { sourceTraceId: candidate.sourceTraceId } : {}),
+                // S7.2 L4 — ids and times only; the model's own number kept beside it.
+                evidence: l4.evidence,
+                modelConfidence,
               },
               // S7 — also written to the vector column, atomically with the row.
               embedding,

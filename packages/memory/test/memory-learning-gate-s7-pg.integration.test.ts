@@ -183,7 +183,7 @@ describe.skipIf(!dbUp)("S7.2 L1c-2 — learning gate enforcement (PostgreSQL)", 
       content: "User prefers short captions",
       type: "PREFERENCE",
       importance: 0.8,
-      confidence: 1,
+      confidence: 0.7, // S7.2 L4 — derived: one DIRECT statement
       sourceType: "USER",
       hasConversation: true,
       hasVector: true,

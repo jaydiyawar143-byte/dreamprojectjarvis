@@ -770,3 +770,33 @@ describe("PHASE 11.9c — Pending Action Regression Tests", () => {
     expect(result.type).toBe("CLARIFY");
   });
 });
+
+// ---------------------------------------------------------------------------
+// S7.2 L5 — a memory action names exactly what the user was shown
+// ---------------------------------------------------------------------------
+
+describe("S7.2 L5 — a memory action can be confirmed or cancelled, never re-targeted", () => {
+  it.each([
+    ["memory.forget", { memoryIds: ["mem-1"], versions: ["2026-09-01T10:00:00.000Z"] }],
+    ["memory.forget_all", { scope: "LEGACY" }],
+  ])("%s: modifying is refused and the approval is left exactly as it was", async (toolId, params) => {
+    const repo = createMockApprovalRepo();
+    const service = new PendingActionService({ approvalRepo: repo, toolRegistry: createMockToolRegistry() });
+    const created = await service.createPendingAction({ conversationId: "conv-1", userId: "user-1", toolId, action: "Forget memories", params, riskLevel: "HIGH_IMPACT" });
+
+    await expect(service.modifyPendingAction("conv-1", "user-1", { memoryIds: ["mem-9"], scope: "ALL" })).rejects.toThrow(/cannot be changed/);
+
+    const still = await service.getActivePendingAction("conv-1", "user-1");
+    expect(still).toMatchObject({ approvalId: created.pendingAction.approvalId, params, state: "WAITING_CONFIRMATION" });
+    expect(repo._store.size).toBe(1);
+  });
+
+  it("any other action is modified exactly as before", async () => {
+    const repo = createMockApprovalRepo();
+    const service = new PendingActionService({ approvalRepo: repo, toolRegistry: createMockToolRegistry() });
+    await service.createPendingAction({ conversationId: "conv-1", userId: "user-1", toolId: "meta.campaign.create", action: "create", params: { dailyBudget: 100 }, riskLevel: "EXTERNAL_SIDE_EFFECT" });
+
+    const modified = await service.modifyPendingAction("conv-1", "user-1", { dailyBudget: 200 });
+    expect(modified.pendingAction.params).toEqual({ dailyBudget: 200 });
+  });
+});

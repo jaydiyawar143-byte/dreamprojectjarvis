@@ -20,7 +20,15 @@ import type { PrismaClient } from "@prisma/client";
 const KEY = "prefs:command-center";
 
 export class PrismaPreferenceRepository {
-  constructor(private prisma: PrismaClient) {}
+  /**
+   * `key` names the one row this instance reads and writes. The default is
+   * the command-center document; S7.2 L5 keeps the user's memory-learning
+   * controls in a second row, `prefs:memory`, of the same table.
+   */
+  constructor(
+    private prisma: PrismaClient,
+    private readonly key = KEY
+  ) {}
 
   /**
    * The stored document, or null.
@@ -30,7 +38,7 @@ export class PrismaPreferenceRepository {
    */
   async get(userId: string): Promise<Record<string, unknown> | null> {
     const row = await this.prisma.userSetting.findUnique({
-      where: { userId_key: { userId, key: KEY } },
+      where: { userId_key: { userId, key: this.key } },
     });
     if (!row?.value) return null;
     try {
@@ -44,8 +52,8 @@ export class PrismaPreferenceRepository {
   async put(userId: string, prefs: Record<string, unknown>): Promise<void> {
     const value = JSON.stringify(prefs);
     await this.prisma.userSetting.upsert({
-      where: { userId_key: { userId, key: KEY } },
-      create: { userId, key: KEY, value },
+      where: { userId_key: { userId, key: this.key } },
+      create: { userId, key: this.key, value },
       update: { value },
     });
   }

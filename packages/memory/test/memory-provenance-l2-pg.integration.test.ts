@@ -142,7 +142,7 @@ describe.skipIf(!dbUp)("S7.2 L2 — memory provenance (PostgreSQL)", () => {
       content: "User prefers short captions",
       type: "PREFERENCE",
       importance: 0.8,
-      confidence: 0.9,
+      confidence: 0.7, // S7.2 L4 — derived: one DIRECT statement
       sourceType: "USER",
       sourceConversationId: conversationId,
       sourceMessageId: messageId,
