@@ -150,6 +150,8 @@ export interface IntegrationCommandDeps {
   googleConfig: () => GoogleConfig | null;
   /** Current Maps usage, or null when the guard is not installed. */
   mapsUsage: () => Promise<IntegrationUsage | null>;
+  /** S8.5 — the MCP runtime, handed to the health registry as it is. Absent: switched off. */
+  mcp?: IntegrationDeps["mcp"];
   /**
    * The ONE execution authority. Bound after construction by `setExecutor`,
    * because the tool registry it is built from must contain the integration
@@ -257,7 +259,13 @@ export class IntegrationCommandService {
         };
       },
       googleOAuthMounted: this.deps.googleConfig() !== null,
+      ...(this.deps.mcp ? { mcp: this.deps.mcp } : {}),
     };
+  }
+
+  /** S8.5 — switched on, with at least one reviewed server registered. */
+  private mcpRegistered(): boolean {
+    return Boolean(this.deps.mcp?.enabled() && this.deps.mcp.servers().length > 0);
   }
 
   // -------------------------------------------------------------------------
@@ -546,6 +554,7 @@ export class IntegrationCommandService {
       const on = Boolean(process.env.N8N_BASE_URL && process.env.N8N_API_KEY);
       return { baseUrl: on, apiKey: on, callbackSecret: Boolean(process.env.N8N_CALLBACK_SECRET) };
     }
+    if (id === "mcp") return { enabled: Boolean(this.deps.mcp?.enabled()) };
     return {};
   }
 
@@ -590,6 +599,9 @@ export class IntegrationCommandService {
       const partial = Boolean(process.env.N8N_BASE_URL || process.env.N8N_API_KEY);
       return on ? "CONNECTED" : partial ? "PARTIAL" : "NOT_CONNECTED";
     }
+
+    // Set up, not working: whether a server actually runs is health's question.
+    if (id === "mcp") return this.mcpRegistered() ? "CONNECTED" : "NOT_CONNECTED";
 
     // meta
     const hasStored = Boolean(stored?.accessToken && stored?.adAccountId);
@@ -1015,6 +1027,19 @@ export class IntegrationCommandService {
       return [
         { id: "workflow_read", label: "List registered workflows", granted: on, access: "read" },
         { id: "workflow_execute", label: "Trigger workflows (approval-gated)", granted: on, access: "write" },
+      ];
+    }
+
+    if (id === "mcp") {
+      // One grant whatever the servers: reviewed READ_ONLY tools, which
+      // ToolExecutor runs for owners and admins only.
+      return [
+        {
+          id: "mcp_tools_read",
+          label: "Use reviewed read-only MCP tools (owners and admins)",
+          granted: this.mcpRegistered(),
+          access: "read",
+        },
       ];
     }
 

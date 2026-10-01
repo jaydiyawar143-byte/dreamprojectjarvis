@@ -38,6 +38,7 @@ export const INTEGRATION_IDS = [
   "whatsapp",
   "n8n",
   "meta",
+  "mcp",
 ] as const;
 
 export type IntegrationId = (typeof INTEGRATION_IDS)[number];

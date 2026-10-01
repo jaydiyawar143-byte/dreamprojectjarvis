@@ -31,6 +31,7 @@
 //    control; a future edit cannot leak one without adding a field on purpose.
 // ---------------------------------------------------------------------------
 
+import { mcpFailure, type McpConnectResult, type McpDriftKind, type McpFailureCode } from "@jarvis/core";
 import { createMetaGraphProvider } from "@jarvis/meta-graph";
 import { createWhatsAppConfig, isWhatsAppConfigured } from "@jarvis/whatsapp";
 import { createN8nConfig, isN8nConfigured } from "@jarvis/n8n";
@@ -220,6 +221,20 @@ export interface IntegrationDeps {
   ): Promise<{ accessToken?: string; adAccountId?: string } | null>;
   /** Whether the Google OAuth routes are mounted at all. */
   googleOAuthMounted: boolean;
+  /** S8.5 — MCP as the container built it. Absent: reported as switched off. */
+  mcp?: McpIntegrationRuntime;
+}
+
+/**
+ * S8.5 — what the MCP health check may touch: the deployment switch, and the
+ * managed connection of every registered server — the same objects tool calls
+ * use, read late because the tools register after this layer is built. A
+ * server offers its reviewed id and S8.2's own verification; never a client,
+ * a transport, a listing or the manifest.
+ */
+export interface McpIntegrationRuntime {
+  enabled(): boolean;
+  servers(): readonly { readonly serverId: string; verify(): Promise<McpConnectResult> }[];
 }
 
 // ---------------------------------------------------------------------------
@@ -490,6 +505,44 @@ async function describeMeta(userId: string, deps: IntegrationDeps): Promise<Inte
   };
 }
 
+const MCP_SWITCHED_OFF =
+  "Switched off for this deployment. Set JARVIS_MCP_ENABLED=true and restart to use the reviewed MCP servers.";
+const MCP_NONE_REGISTERED =
+  "No reviewed MCP server is registered on this deployment. A server is added by code review, never at runtime.";
+
+/** The registered servers, or null when MCP is switched off. */
+const mcpServers = (deps: IntegrationDeps) => (deps.mcp?.enabled() ? deps.mcp.servers() : null);
+
+/**
+ * S8.5 — MCP from configuration alone: switched off, nothing registered, or
+ * the servers there are. Starts nothing; only a check (`testMcp`) does.
+ */
+function describeMcp(userId: string, deps: IntegrationDeps): IntegrationView {
+  const servers = mcpServers(deps);
+  const base =
+    servers === null
+      ? { health: "DISABLED" as const, detail: MCP_SWITCHED_OFF }
+      : servers.length === 0
+        ? { health: "NOT_CONNECTED" as const, detail: MCP_NONE_REGISTERED }
+        : {
+            health: "UNVERIFIED" as const,
+            detail: `Reviewed MCP servers: ${servers.map((s) => s.serverId).join(", ")}. Test to start them and verify them against their review.`,
+          };
+
+  return {
+    id: "mcp",
+    name: "MCP Servers",
+    subtitle: "Reviewed local tool servers — read-only tools for owners and admins",
+    category: "automation",
+    ...withCheck(base, servers?.length ? recallCheck(userId, "mcp") : null),
+    capabilities: [],
+    account: null,
+    usage: null,
+    effectiveSource: "reviewed manifest",
+    actions: { testable: Boolean(servers?.length) },
+  };
+}
+
 /** Current Maps usage, or null when the guard is not installed. */
 async function readMapsUsage(): Promise<IntegrationUsage | null> {
   const guard = getMapsUsageGuard();
@@ -527,6 +580,7 @@ export async function listIntegrations(
     describeWhatsApp(userId),
     describeN8n(userId),
     meta,
+    describeMcp(userId, deps),
   ];
 }
 
@@ -749,6 +803,76 @@ async function testMeta(userId: string, deps: IntegrationDeps): Promise<CheckRes
   }
 }
 
+/** S8.5 — what went wrong with one server, in fixed words. Never the server's own text. */
+const MCP_FAILURE: Readonly<Record<McpFailureCode, string>> = {
+  SERVER_UNAVAILABLE: "is unavailable",
+  INITIALIZATION_FAILED: "did not finish starting",
+  SCHEMA_INVALID: "no longer matches its review",
+  TIMEOUT: "timed out",
+  AUTH_FAILURE: "refused JARVIS's credentials — the operator must update them",
+  RATE_LIMITED: "is rate-limiting JARVIS",
+  RESPONSE_TOO_LARGE: "sent more output than allowed",
+  TOOL_NOT_FOUND: "failed its check",
+  INVALID_ARGUMENTS: "failed its check",
+  CANCELLED: "failed its check",
+  REMOTE_ERROR: "failed its check",
+  UNKNOWN: "failed its check",
+};
+
+/** What drifted from the review. Never a tool name: a live one is the server's own text. */
+const MCP_DRIFT: Readonly<Record<McpDriftKind, string>> = {
+  SERVER_INFO_MISMATCH: "another server name or version",
+  MISSING_TOOL: "a reviewed tool is missing",
+  UNEXPECTED_TOOL: "an unreviewed tool is offered",
+  DUPLICATE_TOOL: "a tool is listed twice",
+  FINGERPRINT_MISMATCH: "a reviewed tool has changed",
+  INVALID_TOOL: "an unreadable tool listing",
+};
+
+function mcpOutcome(serverId: string, result: McpConnectResult): string {
+  if (result.ok) return `${serverId} verified`;
+  const drift = [...new Set((result.failure.drift ?? []).map((d) => MCP_DRIFT[d.kind]))];
+  return `${serverId} ${MCP_FAILURE[result.failure.code]}${drift.length > 0 ? ` (${drift.join(", ")})` : ""}`;
+}
+
+/**
+ * S8.5 — every registered MCP server through S8.2's own verification: an idle
+ * server is started and verified, a running one is listed again and compared
+ * with its review. Nothing is registered, granted or remembered here except
+ * the verdict, and nothing retries — an open breaker answers for itself.
+ *
+ * One verdict, deterministically: every server verified → CONNECTED; none →
+ * ERROR; some → DEGRADED. Each server is named with its own outcome, in
+ * manifest order, so one cannot hide another — and a check that throws counts
+ * against its own server alone.
+ */
+async function testMcp(deps: IntegrationDeps): Promise<CheckResult> {
+  const now = new Date().toISOString();
+  const servers = mcpServers(deps);
+  if (servers === null) return { health: "DISABLED", detail: MCP_SWITCHED_OFF, checkedAt: now };
+  if (servers.length === 0) return { health: "NOT_CONNECTED", detail: MCP_NONE_REGISTERED, checkedAt: now };
+
+  const results = await Promise.all(
+    servers.map((server) =>
+      server.verify().catch((): McpConnectResult => ({ ok: false, failure: mcpFailure("UNKNOWN") }))
+    )
+  );
+  const verified = results.filter((result) => result.ok).length;
+  const outcomes = servers.map((server, i) => mcpOutcome(server.serverId, results[i]!)).join("; ");
+
+  if (verified === servers.length) {
+    return { health: "CONNECTED", detail: `Verified against the review: ${outcomes}.`, checkedAt: now };
+  }
+  if (verified === 0) {
+    return { health: "ERROR", detail: `No reviewed MCP server is working: ${outcomes}.`, checkedAt: now };
+  }
+  return {
+    health: "DEGRADED",
+    detail: `${verified} of ${servers.length} reviewed MCP servers verified: ${outcomes}.`,
+    checkedAt: now,
+  };
+}
+
 /**
  * Runs one integration's connection test and remembers the verdict.
  *
@@ -778,6 +902,9 @@ export async function runCheck(
     case "meta":
       result = await testMeta(userId, deps);
       break;
+    case "mcp":
+      result = await testMcp(deps);
+      break;
     default:
       return null;
   }
@@ -787,4 +914,4 @@ export async function runCheck(
 }
 
 /** The ids this registry knows. Used to reject unknown paths early. */
-export const INTEGRATION_IDS = ["google", "google-maps", "whatsapp", "n8n", "meta"] as const;
+export const INTEGRATION_IDS = ["google", "google-maps", "whatsapp", "n8n", "meta", "mcp"] as const;

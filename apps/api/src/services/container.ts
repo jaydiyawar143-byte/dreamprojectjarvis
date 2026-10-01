@@ -19,6 +19,7 @@ import {
   AGENT_IDS,
   AGENT_POLICIES,
   isToolAllowed,
+  schedulableToolIds,
 } from "@jarvis/agents";
 import { createCurrentLocationPort, createMapsPort } from "./maps-adapter.js";
 import {
@@ -144,6 +145,10 @@ import {
   INTEGRATION_CATALOG,
   type ProviderChainEvent,
 } from "@jarvis/core";
+// S8.4 — MCP: the reviewed manifest, the runtime and the tool adapter.
+import { MCP_MANIFEST, validateMcpManifest, type McpManifest } from "@jarvis/core";
+import { McpConnection, isMcpEnabled } from "@jarvis/mcp";
+import { createMcpTools } from "@jarvis/tools";
 import { buildIntegrationCommandService } from "./integrations/build.js";
 
 export interface Container {
@@ -383,6 +388,57 @@ let _container: Container | null = null;
  * test pins.
  */
 let _browserRuntime: BrowserRuntime | null = null;
+
+/**
+ * S8.4 — one connection per reviewed MCP server, held so shutdown can close
+ * them. Empty unless MCP is switched on. Module-scoped for the reason the
+ * browser runtime is.
+ */
+let _mcpConnections: readonly McpConnection[] = [];
+
+/**
+ * S8.5 — MCP as the integration layer sees it: the deployment switch, and the
+ * managed connections tool calls use — never a second connection. Read late,
+ * because the integration layer is built before the tools register. Handed to
+ * the integration command service here and to the no-key route in index.ts.
+ */
+export const mcpIntegrationRuntime = Object.freeze({
+  enabled: (): boolean => isMcpEnabled(),
+  servers: (): readonly McpConnection[] => _mcpConnections,
+});
+
+/**
+ * S8.4 — register the reviewed MCP tools, all or nothing.
+ *
+ * The manifest is validated as a whole against every tool already in the
+ * registry, because the model-facing converter cannot detect a collision: an
+ * invalid entry, a duplicate id, or a name that would collide with a
+ * registered tool registers NOTHING — and nothing is renamed. Nothing is
+ * spawned either: each server starts on its first tool call (S8.2's lazy
+ * connection). Returns one connection per server, for shutdown.
+ */
+export function registerMcpTools(registry: ToolRegistry, manifest: McpManifest): McpConnection[] {
+  const verdict = validateMcpManifest(manifest, { registeredToolIds: registry.getAll().map((t) => t.id) });
+  if (!verdict.valid) {
+    console.log(JSON.stringify({
+      level: "warn",
+      event: "mcp_registration_skipped",
+      reason: "manifest_invalid",
+      issues: [...new Set(verdict.issues.map((issue) => issue.code))],
+    }));
+    return [];
+  }
+  const connections = manifest.servers.map((server) => new McpConnection(server));
+  const tools = manifest.servers.flatMap((server, i) => createMcpTools(server, connections[i]!));
+  for (const tool of tools) registry.register(tool);
+  console.log(JSON.stringify({
+    level: "info",
+    event: "mcp_tools_registered",
+    servers: connections.length,
+    tools: tools.length,
+  }));
+  return connections;
+}
 
 function createMetaToolRegistry(
   approvalConsumption: PrismaApprovalRepository,
@@ -879,6 +935,7 @@ export function getContainer(options?: {
   const integrationCommands = buildIntegrationCommandService({
     prisma,
     auditLogger,
+    mcp: mcpIntegrationRuntime,
   });
 
   // Capability discovery composes three things that already exist: the tool
@@ -1019,6 +1076,16 @@ export function getContainer(options?: {
   for (const tool of createMemoryTools(memoryManagement, executionJournal, approvalRepo)) {
     toolRegistry.register(tool);
   }
+
+  // ---------------------------------------------------------------------------
+  // S8.4 — MCP. Off unless JARVIS_MCP_ENABLED=true; the reviewed manifest is
+  // the only source of servers and tools. Registered after the native tools
+  // above, so collisions are checked against them, and before the agents'
+  // definitions are computed below. (A native tool registered later cannot
+  // collide: the `mcp` namespace is reserved to the manifest.) Nothing
+  // connects at boot — a server starts on its first call, through ToolExecutor.
+  // ---------------------------------------------------------------------------
+  _mcpConnections = isMcpEnabled() ? registerMcpTools(toolRegistry, MCP_MANIFEST) : [];
 
   // R-21 — the adapter's constructor throws without a key, and this line used
   // to run unconditionally, so a server without one never opened its port. The
@@ -1319,9 +1386,11 @@ export function getContainer(options?: {
   // ONE allowlist, shared by the planner and the executor. If these could
   // drift, the planner could propose something `executeTask` would then
   // refuse — a plan the user is told is runnable and is not.
-  const taskToolAllowlist = new Set(
-    Object.values(AGENT_POLICIES).flatMap((policy) => [...policy.allowedTools])
-  );
+  //
+  // S8.4 — everything any agent may call EXCEPT the MCP group: MCP tools are
+  // granted for a conversation with a person present, never for unattended,
+  // scheduled work.
+  const taskToolAllowlist = schedulableToolIds();
 
   taskExecutionService = new TaskExecutionService({
     tasks: taskService,
@@ -1620,7 +1689,17 @@ export function getBrowserRuntime(): BrowserRuntime | null {
   return _browserRuntime;
 }
 
+/**
+ * S8.4 — the MCP connections, empty unless MCP is switched on. Exposed so the
+ * shutdown controller can close them during RELEASE_RESOURCES, leaving no MCP
+ * server process behind.
+ */
+export function getMcpConnections(): readonly McpConnection[] {
+  return _mcpConnections;
+}
+
 export function resetContainer(): void {
   _container = null;
   _browserRuntime = null;
+  _mcpConnections = [];
 }

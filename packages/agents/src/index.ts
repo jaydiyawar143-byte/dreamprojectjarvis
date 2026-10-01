@@ -53,6 +53,9 @@ export {
   GOOGLE_WORKSPACE_TOOLS,
   GOOGLE_WRITE_PLAN_TOOLS,
   MEMORY_READ_TOOLS,
+  // S8.4 — the reviewed MCP group (general assistant only), and what tasks may reach.
+  MCP_READ_TOOLS,
+  schedulableToolIds,
   getAgentPolicy,
   isToolAllowed,
   resolveAllowedToolId,

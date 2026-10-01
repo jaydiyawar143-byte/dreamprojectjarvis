@@ -490,6 +490,31 @@ export const INTEGRATION_CATALOG: readonly IntegrationDescriptor[] = [
     commands: [...UNIVERSAL_COMMANDS, "executeAction"],
     envVars: ["N8N_BASE_URL", "N8N_API_KEY", "N8N_CALLBACK_SECRET"],
   },
+  {
+    // S8.5 — the reviewed MCP servers, as one server-managed integration.
+    // Which servers exist is decided by code review (core's MCP_MANIFEST) and
+    // switched on by the deployment; nothing here changes at runtime. No
+    // action is listed: MCP tools are presented as capabilities (S8.4) and run
+    // only through ToolExecutor.
+    id: "mcp",
+    name: "MCP Servers",
+    subtitle: "Reviewed local tool servers — read-only tools for owners and admins",
+    category: "automation",
+    configKind: "server-managed",
+    fields: [
+      {
+        name: "enabled",
+        label: "MCP switch (JARVIS_MCP_ENABLED)",
+        kind: "boolean",
+        required: true,
+        serverManaged: true,
+        help: "JARVIS_MCP_ENABLED=true turns on the reviewed MCP servers. Servers are added by code review, never at runtime.",
+      },
+    ],
+    actions: [],
+    commands: [...UNIVERSAL_COMMANDS],
+    envVars: ["JARVIS_MCP_ENABLED"],
+  },
 ] as const;
 
 export function getIntegrationDescriptor(id: string): IntegrationDescriptor | undefined {
@@ -510,6 +535,9 @@ export function resolveIntegrationAlias(input: string): IntegrationId | null {
 
   // Exact id first, so a caller that already knows the id is never reinterpreted.
   if (INTEGRATION_CATALOG.some((d) => d.id === text)) return text as IntegrationId;
+
+  // Before n8n's "automation" words: "MCP automation server" means MCP.
+  if (/\bmcp\b/.test(text)) return "mcp";
 
   // Maps before the bare "google" checks: "google maps" contains "google", and
   // the more specific match has to win or every Maps request becomes an Ads one.

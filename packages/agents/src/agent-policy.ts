@@ -15,7 +15,7 @@
 // ---------------------------------------------------------------------------
 
 import type { AgentPolicy, ITool, ToolRegistry } from "@jarvis/core";
-import { BROWSER_READ_TOOL_IDS, BROWSER_ACTION_TOOL_IDS } from "@jarvis/core";
+import { BROWSER_READ_TOOL_IDS, BROWSER_ACTION_TOOL_IDS, MCP_MANIFEST, mcpReadToolIds } from "@jarvis/core";
 
 // ---------------------------------------------------------------------------
 // Agent ids — the closed set. An id absent from here cannot be resolved.
@@ -279,6 +279,19 @@ export const SELF_TOOLS = ["self.describe"] as const;
  */
 export const MEMORY_READ_TOOLS = ["memory.list"] as const;
 
+/**
+ * S8.4 — reviewed MCP tools. READ_ONLY and OWNER/ADMIN-only by S8.1's rules,
+ * and granted to the general assistant alone.
+ *
+ * Never written out by hand: the group is exactly the enabled tools of the
+ * reviewed manifest (`MCP_MANIFEST` in core), so a tool is grantable only by
+ * being reviewed into it — and a manifest that is not valid grants nothing.
+ * It is empty until a server is reviewed in. Registration is separate and
+ * switched off by default (JARVIS_MCP_ENABLED); a granted tool that is not
+ * registered can be offered to no model.
+ */
+export const MCP_READ_TOOLS: readonly string[] = mcpReadToolIds(MCP_MANIFEST);
+
 // ---------------------------------------------------------------------------
 // Policies
 // ---------------------------------------------------------------------------
@@ -324,6 +337,8 @@ const GENERAL_POLICY = policy({
     ...GOOGLE_WRITE_PLAN_TOOLS,
     // S7.2 L5 — read-only. Deleting a memory is never an agent's tool.
     ...MEMORY_READ_TOOLS,
+    // S8.4 — reviewed MCP tools, read-only. No other agent receives them.
+    ...MCP_READ_TOOLS,
   ],
   requiredPermissions: ["read"],
   writesRequireApproval: true,
@@ -494,6 +509,21 @@ export const AGENT_POLICIES: Readonly<Record<string, AgentPolicy>> = Object.free
   [AGENT_IDS.browser]: BROWSER_POLICY,
   [AGENT_IDS.location]: LOCATION_POLICY,
 });
+
+/**
+ * S8.4 — the tools a background task may plan and run: everything any agent
+ * may call, except the MCP group. An MCP tool is granted for a conversation
+ * with the general assistant, with a person present; S8 v1 keeps it out of
+ * unattended, scheduled work.
+ */
+export function schedulableToolIds(): ReadonlySet<string> {
+  const mcp = new Set(MCP_READ_TOOLS);
+  return new Set(
+    Object.values(AGENT_POLICIES)
+      .flatMap((policy) => [...policy.allowedTools])
+      .filter((id) => !mcp.has(id))
+  );
+}
 
 export function getAgentPolicy(agentId: string): AgentPolicy | undefined {
   return Object.prototype.hasOwnProperty.call(AGENT_POLICIES, agentId)

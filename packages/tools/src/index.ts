@@ -215,6 +215,8 @@ export type { TaskPort, TaskView } from "./tools/task-tools.js";
 // are approval-gated and granted to no agent.
 export { MemoryListTool, MemoryForgetTool, MemoryForgetAllTool, createMemoryTools } from "./tools/memory-tools.js";
 export type { MemoryToolPort } from "./tools/memory-tools.js";
+// S8.3 — reviewed MCP tools as ITools, over core's McpCallPort. Not registered anywhere yet.
+export { McpTool, createMcpTools } from "./tools/mcp-tools.js";
 
 // Integration management — the JARVIS arm of the universal integration
 // contract. Every tool here delegates to IntegrationCommandPort, which the API

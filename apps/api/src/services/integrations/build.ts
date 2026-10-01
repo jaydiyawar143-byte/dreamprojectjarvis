@@ -38,13 +38,15 @@ import {
 import type { IToolExecutor, IntegrationUsage } from "@jarvis/core";
 import { DbBackedRateLimiter } from "../rate-limiter.js";
 import { getMapsUsageGuard } from "../maps-usage-guard.js";
-import { IntegrationCommandService, type CredentialPort } from "./command-service.js";
+import { IntegrationCommandService, type CredentialPort, type IntegrationCommandDeps } from "./command-service.js";
 
 export interface BuildInput {
   prisma: PrismaClient;
   auditLogger: AuditLogger;
   /** The single execution authority. Integration actions are gated, then handed here. */
   executor?: IToolExecutor;
+  /** S8.5 — the MCP runtime the container built, for the integration health check. */
+  mcp?: IntegrationCommandDeps["mcp"];
 }
 
 /**
@@ -155,5 +157,6 @@ export function buildIntegrationCommandService(
     googleConfig,
     mapsUsage,
     ...(input.executor ? { executor: input.executor } : {}),
+    ...(input.mcp ? { mcp: input.mcp } : {}),
   });
 }

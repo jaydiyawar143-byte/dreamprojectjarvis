@@ -174,6 +174,11 @@ export {
 // memories, the safe view, what each command needs before anything is
 // deleted, and the learning controls (pause, per-message veto).
 export * from "./memory-management.js";
+// S8.1 — the MCP contract. Pure: the reviewed manifest of MCP servers and
+// tools (empty, so MCP is off), the fingerprint that pins a reviewed listing,
+// and the fail-closed validator. Nothing registers an MCP tool yet.
+export * from "./types/mcp.js";
+export * from "./mcp-manifest.js";
 export * from "./speech-preparation.js";
 export * from "./tool-failure-classifier.js";
 export * from "./integration-health-snapshot.js";

@@ -74,6 +74,15 @@ services:
       # The browser runs on the HOST, so the origin it sends is the published
       # web port, not the compose service name.
       CORS_ORIGIN: http://localhost:3100
+      # The API as the BROWSER reaches it: published on the host as 3101 (see
+      # `ports`), while API_PORT above is its port INSIDE this container. Google
+      # sends the user's browser back to its OAuth callbacks, so they must name
+      # 3101 — the 3001 that `.env` carries in belongs to the local dev stack.
+      # Google sign-in derives its callback from API_PUBLIC_URL; Connect Google
+      # reads GOOGLE_REDIRECT_URI. Both callbacks must also be authorized
+      # redirect URIs on the Google OAuth client, exactly as written.
+      API_PUBLIC_URL: http://localhost:3101
+      GOOGLE_REDIRECT_URI: http://localhost:3101/api/v1/google/callback
       # UI V2 — its own session cookie.
       #
       # Cookies are scoped by HOST and ignore the port, so both stacks would

@@ -22,6 +22,7 @@
     "@jarvis/db": "workspace:*",
     "@jarvis/google-ads": "workspace:*",
     "@jarvis/google-workspace": "workspace:*",
+    "@jarvis/mcp": "workspace:*",
     "@jarvis/memory": "workspace:*",
     "@jarvis/meta-graph": "workspace:*",
     "@jarvis/n8n": "workspace:*",

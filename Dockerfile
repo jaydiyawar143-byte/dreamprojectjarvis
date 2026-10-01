@@ -57,6 +57,7 @@ COPY packages/core/package.json ./packages/core/
 COPY packages/db/package.json ./packages/db/
 COPY packages/google-ads/package.json ./packages/google-ads/
 COPY packages/google-workspace/package.json ./packages/google-workspace/
+COPY packages/mcp/package.json ./packages/mcp/
 COPY packages/memory/package.json ./packages/memory/
 COPY packages/meta-graph/package.json ./packages/meta-graph/
 COPY packages/n8n/package.json ./packages/n8n/

@@ -1,0 +1,25 @@
+{
+  "serverInfo": { "name": "fake-mcp-server", "version": "1.0.0" },
+  "tools": [
+    {
+      "name": "search_notes",
+      "description": "Searches the fake notes and returns matching titles.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": { "type": "string", "description": "Words to look for.", "maxLength": 200 },
+          "limit": { "type": "integer", "description": "How many results to return." }
+        },
+        "required": ["query"],
+        "additionalProperties": false
+      },
+      "annotations": { "readOnlyHint": true, "openWorldHint": false }
+    },
+    {
+      "name": "server_status",
+      "description": "Reports the fake server's process status.",
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+      "annotations": { "readOnlyHint": true }
+    }
+  ]
+}

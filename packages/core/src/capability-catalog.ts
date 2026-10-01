@@ -53,6 +53,8 @@ const PREFIX_RULES: Array<{
   googleService?: "gmail" | "drive" | "calendar" | "ads";
 }> = [
   { prefix: "integration.", group: "system", integration: null },
+  // S8.4 — reviewed MCP tools: ungated reads, filed with JARVIS's own system tools.
+  { prefix: "mcp.", group: "system", integration: null },
   // Phase 13 — write PLANNING. Longest prefix, so it is matched before the
   // bare `gmail.`/`drive.`/`calendar.` read rules below. Each is gated on the
   // same sub-service scope as its read counterpart, because a plan that
@@ -175,6 +177,16 @@ export function groupForToolId(toolId: string): {
 }
 
 /**
+ * S8.4 — an MCP tool is shown by its reviewed tool name in words
+ * (`mcp.docs.search_notes` → "Search notes"), never by its id.
+ */
+function mcpLabel(toolId: string): string | undefined {
+  if (!toolId.startsWith("mcp.")) return undefined;
+  const words = toolId.slice(toolId.lastIndexOf(".") + 1).replace(/_/g, " ").trim();
+  return words ? words.charAt(0).toUpperCase() + words.slice(1) : undefined;
+}
+
+/**
  * Metadata for one registered tool.
  *
  * `description` falls back to the tool's OWN description, which is why a new
@@ -188,7 +200,7 @@ export function describeCapability(
   const { group, integration, googleService } = groupForToolId(toolId);
   return {
     ...(googleService ? { googleService } : {}),
-    label: LABEL_OVERRIDES[toolId] ?? toolId,
+    label: LABEL_OVERRIDES[toolId] ?? mcpLabel(toolId) ?? toolId,
     // Bounded: a tool description is authored in this repo, but the capability
     // report is shown to users and read by a model, and neither benefits from
     // three paragraphs.
