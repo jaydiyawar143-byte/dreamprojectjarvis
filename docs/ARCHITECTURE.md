@@ -109,7 +109,7 @@ One Docker image (`node:24-alpine`, runs as the `node` user) serves both the API
 - `@jarvis/ai-anthropic` is built and not wired.
 - `MemoryEngine` is tested and not used at runtime.
 - Five tool classes are tested but never registered — including `data.csv.analyze`, which two agents are granted. See [SKILLS.md](./SKILLS.md).
-- CI has not run on GitHub yet, and it does not cover the Postgres-backed tests, `typecheck:tests` (ledger R-18), the other workspaces' tests, or secret scanning — [DEVELOPMENT.md](./DEVELOPMENT.md).
+- CI has not run on GitHub yet, and it does not cover `typecheck:tests` (ledger R-18), the other workspaces' tests, or secret scanning — [DEVELOPMENT.md](./DEVELOPMENT.md).
 - Without `OPENAI_API_KEY` a development API runs with chat switched off: every message answers 503 `AI_PROVIDER_NOT_CONFIGURED`, while `GET /api/v1/agents` still lists the agents. Production refuses to start without the key — ledger R-21.
 - An agent stays in service after every classified provider failure — a missing, rejected or unauthorised key, an unknown model, a timeout, a rate limit, a 5xx, an open circuit, an exceeded context window or a cancelled call. Only an unexpected error still leaves it in `error` until the process restarts; a plain request then answers 500 `AGENT_ERROR` instead of being handed to another agent — ledger R-24, R-30.
 - Every agent calls the provider chain `FallbackAIProvider` (`packages/core/src/provider-fallback.ts`), which today holds OpenAI only; no fallback provider is wired (D-3). A provider that fails permanently is skipped for 5 minutes and then probed by one request; while no provider is usable, chat answers 503 `AI_PROVIDER_UNAVAILABLE` with the original code in `details.cause` — ledger R-30.

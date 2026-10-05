@@ -105,12 +105,22 @@ On 2026-09-14 that command gave `6 passed | 7 skipped` in three consecutive runs
 | Typecheck | `pnpm typecheck` |
 | Build | `pnpm build` |
 | Tests | `pnpm --filter <name> test` for `@jarvis/api`, `@jarvis/memory`, `@jarvis/n8n` and `@jarvis/web` |
+| Migrations | `pnpm --filter @jarvis/db exec prisma migrate deploy`, against the CI database |
+| PostgreSQL tests | `vitest run` for all of `@jarvis/db`; `vitest run pg.integration` for `@jarvis/memory`; `vitest run pg.integration sprint-1.1d-memory-e2e` for `@jarvis/api` |
+| Skip check | `node .github/scripts/assert-no-skipped-tests.mjs` on the PostgreSQL tests' JSON reports |
 
 Any failure fails the run. Each test step runs once the build has passed, even if an earlier test step failed, so one run lists every failing suite.
 
+**PostgreSQL-backed tests.** The job starts a `pgvector/pgvector:pg16` service container, pinned by digest, that exists for that run only, on port 5436, away from the development (5432) and deployment (5433) databases; the two L5 memory suites refuse those ports, the other database tests do not. Its credentials are fixed test values written in the workflow; no repository secret is involved. Every migration is applied to the empty database first, so a migration that cannot apply from scratch fails the run (R-22). Then all of `@jarvis/db`, the `*-pg.integration` files of `@jarvis/memory` and `@jarvis/api`, and the API's memory end-to-end test run against it. `DATABASE_URL` is set on those steps only; the four test steps above still run without a database, as before.
+
+Those files skip themselves when they cannot reach a database, and vitest counts a skip as a pass. The skip check therefore fails the run if any test in the PostgreSQL steps was skipped, or a report is missing. A database that is down, a migration that fails and a test that fails each fail the run. The memory end-to-end test is the exception: without a database it falls back to an in-process store instead of skipping, so for that file only the migration step proves the database was there.
+
+A new database-backed test in `apps/api` or `packages/memory` must be named `*-pg.integration.test.ts`: CI selects those files by that name. Every `@jarvis/db` test runs.
+
+The PostgreSQL steps were added on 2026-10-05 and replayed locally, in order, on a fresh container of the pinned image: 27 migrations applied; `@jarvis/db` 223/223, `@jarvis/memory` 61/61, `@jarvis/api` 25/25; nothing skipped. They have not yet run on GitHub.
+
 **Not covered yet:**
 
-- **Postgres-backed tests.** `@jarvis/db` and the API's real-PostgreSQL file stay separate until a pgvector service container is configured. Without a database that API file skips itself and the memory end-to-end test runs against its in-process store, so a green run proves nothing about the Postgres paths.
 - **`typecheck:tests`** in `apps/api` fails with 60 pre-existing errors — ledger R-18, still open. CI does not run it.
 - **The other workspaces' tests** — `@jarvis/agents`, `tools`, `security`, `core`, `config` and the provider packages. Run them locally with `pnpm test`.
 - **Secret scanning and dependency audits** — audit finding SEC-7.

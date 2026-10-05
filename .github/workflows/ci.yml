@@ -4,12 +4,14 @@
 #   lint, typecheck and build for every workspace, the TEST-FILE typecheck of
 #   @jarvis/api, and the test suites of @jarvis/api, @jarvis/memory,
 #   @jarvis/n8n and @jarvis/web.
+#   The PostgreSQL-backed tests, against a fresh pgvector database that exists
+#   for this run only: every migration is applied to it first, then all of
+#   @jarvis/db, the `pg.integration` files of @jarvis/memory and @jarvis/api,
+#   and the API's memory end-to-end test run against it. The test steps above
+#   still run without a database, where those files skip themselves; in the
+#   database steps a skipped test fails the run.
 #
 # Deliberately not gated yet (docs/DEVELOPMENT.md, "Continuous integration"):
-#   - Postgres-backed tests: @jarvis/db, and the API's real-PostgreSQL file.
-#     They stay separate until a pgvector service container is configured.
-#     Without a database that API file skips itself, and the memory end-to-end
-#     test runs against its in-process store.
 #   - Test files OUTSIDE @jarvis/api. `typecheck:tests` exists only in that
 #     workspace, and every other package's tsconfig covers `src/**` alone, so
 #     a green run says nothing about their test files. `apps/web` is the one
@@ -43,6 +45,28 @@ jobs:
     name: Lint, typecheck, build and tests
     runs-on: ubuntu-latest
     timeout-minutes: 30
+
+    # A throwaway database for the PostgreSQL-backed tests: created empty for
+    # this job and discarded with it. The credentials are fixed test values, not
+    # secrets. Port 5436, the throwaway port the local runs use, away from 5432
+    # and 5433 — the development and deployment databases. Two of the suites
+    # (the L5 memory ones) refuse those ports outright; the rest would run
+    # against any database. Steps start once it reports ready.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
+        env:
+          POSTGRES_USER: jarvis_ci
+          POSTGRES_PASSWORD: jarvis_ci
+          POSTGRES_DB: jarvis_ci
+        ports:
+          - 5436:5432
+        options: >-
+          --health-cmd "pg_isready -U jarvis_ci -d jarvis_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -103,3 +127,39 @@ jobs:
       - name: Test @jarvis/web
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: pnpm --filter @jarvis/web test
+
+      # From here on, the PostgreSQL-backed tests. DATABASE_URL is set on these
+      # steps only, so nothing above ever sees a database. Applying every
+      # migration to the empty database first fails the run if it is unreachable
+      # or a migration cannot apply from scratch (R-22).
+      - name: Apply migrations to the CI database
+        id: migrate
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        env:
+          DATABASE_URL: postgresql://jarvis_ci:jarvis_ci@127.0.0.1:5436/jarvis_ci?schema=public
+        run: pnpm --filter @jarvis/db exec prisma migrate deploy
+
+      - name: Test @jarvis/db (PostgreSQL)
+        if: ${{ !cancelled() && steps.migrate.outcome == 'success' }}
+        env:
+          DATABASE_URL: postgresql://jarvis_ci:jarvis_ci@127.0.0.1:5436/jarvis_ci?schema=public
+        run: pnpm --filter @jarvis/db exec vitest run --reporter=default --reporter=json --outputFile.json="$RUNNER_TEMP/vitest-db.json"
+
+      - name: Test @jarvis/memory (PostgreSQL)
+        if: ${{ !cancelled() && steps.migrate.outcome == 'success' }}
+        env:
+          DATABASE_URL: postgresql://jarvis_ci:jarvis_ci@127.0.0.1:5436/jarvis_ci?schema=public
+        run: pnpm --filter @jarvis/memory exec vitest run pg.integration --reporter=default --reporter=json --outputFile.json="$RUNNER_TEMP/vitest-memory.json"
+
+      - name: Test @jarvis/api (PostgreSQL)
+        if: ${{ !cancelled() && steps.migrate.outcome == 'success' }}
+        env:
+          DATABASE_URL: postgresql://jarvis_ci:jarvis_ci@127.0.0.1:5436/jarvis_ci?schema=public
+        run: pnpm --filter @jarvis/api exec vitest run pg.integration sprint-1.1d-memory-e2e --reporter=default --reporter=json --outputFile.json="$RUNNER_TEMP/vitest-api.json"
+
+      # These suites skip themselves when they cannot reach their database, and
+      # vitest counts a skip as a pass. Here a skip means the database never
+      # reached the test, so any skipped test — or a missing report — fails.
+      - name: No PostgreSQL test was skipped
+        if: ${{ !cancelled() && steps.migrate.outcome == 'success' }}
+        run: node .github/scripts/assert-no-skipped-tests.mjs "$RUNNER_TEMP/vitest-db.json" "$RUNNER_TEMP/vitest-memory.json" "$RUNNER_TEMP/vitest-api.json"

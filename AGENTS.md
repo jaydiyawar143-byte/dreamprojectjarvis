@@ -135,6 +135,12 @@ with pgvector: point `DATABASE_URL` at a separate test database, never the
 development one. On a fresh throwaway pgvector database they give 223 passed /
 0 failed (20 files; S8.5 regression, 2026-10-05). The full repository suite has not been run since the fix.
 
+CI runs the PostgreSQL-backed tests against its own throwaway pgvector service,
+after applying every migration, and fails if any of them is skipped
+(`docs/DEVELOPMENT.md`, "Continuous integration"). It picks them up by name: a
+database-backed test in `apps/api` or `packages/memory` must be named
+`*-pg.integration.test.ts`, or CI never gives it a database.
+
 ---
 
 ## Where things live
