@@ -124,9 +124,16 @@ A new database-backed test in `apps/api` or `packages/memory` must be named `*-p
 
 The PostgreSQL steps were added on 2026-10-05 and replayed locally, in order, on a fresh container of the pinned image: 27 migrations applied; `@jarvis/db` 223/223, `@jarvis/memory` 61/61, `@jarvis/api` 25/25; nothing skipped. Those counts are local. On GitHub the steps first ran in run 37306626267 (commit `68628c0`): the service started, every migration applied, the three database steps and the skip check passed. The skip check passing there means each report existed, held tests and skipped none; GitHub's job logs need admin access, so the exact counts were not read from GitHub.
 
+**Protected `main`.** Since 2026-10-05 the active GitHub ruleset "Protect main" applies to `main`, the default branch, and GitHub reports it as protected:
+
+- A change reaches `main` only through a pull request; pushing to `main` directly is refused. The required number of approvals is 0, "Require approval of the most recent reviewable push" is on, and every review conversation must be resolved.
+- The status check "Lint, typecheck, build and tests" — the job in `ci.yml` — must pass, on a branch that is up to date with `main`.
+- Force pushes and deleting `main` are blocked. The ruleset has no bypass list.
+
+So CI blocks merges into `main`. Other branches are not protected. No pull request has been merged through the ruleset yet.
+
 **Not covered yet:**
 
-- **Merge blocking.** `main` has no branch protection, so a failing run blocks nothing.
 - **Test files outside `apps/api`.** `typecheck:tests` exists only in that workspace, so other packages' test files are not type-checked. (Ledger R-18, the API's own 60 errors, is closed: they were fixed in `1c1c1bd` and CI gates the script.)
 - **The other workspaces' tests** — `@jarvis/agents`, `tools`, `security`, `core`, `config` and the provider packages. Run them locally with `pnpm test`.
 - **Secret scanning and dependency audits** — audit finding SEC-7.

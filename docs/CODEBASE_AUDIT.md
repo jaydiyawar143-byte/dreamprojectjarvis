@@ -1447,7 +1447,7 @@ Not implemented. In order:
 2. **Review and merge** `feat/p1-3-eslint`. Its eight commits exist only locally. **Done** — they are in `main` (`533c1e4`).
 3. **Re-clone any other copy** of this repository. Its history no longer matches GitHub and still contains the dump.
 4. **B-1 — done 2026-09-14.** No action remains. *Historically this item read "Diagnose B-1 — the six failing memory end-to-end tests — before any new memory work."* It was resolved in commit `c48a1a3` (in the current `main`): a test-harness `MockAIProvider` recording race, not a production memory bug. The suite passes 13/13 in three consecutive runs. **Optional follow-up:** PostgreSQL-backed verification of this suite is separate and remains **unverified**.
-5. **Add CI** running typecheck, lint, build, tests and a secret scan on every push. **Partly done** (2026-10-05): CI runs typecheck, lint, build, four suites and the PostgreSQL-backed tests on every push; no secret scan yet, and it does not block merges.
+5. **Add CI** running typecheck, lint, build, tests and a secret scan on every push. **Partly done** (2026-10-05): CI runs typecheck, lint, build, four suites and the PostgreSQL-backed tests on every push; no secret scan yet. Since 2026-10-05 its check is required for merges into `main` (GitHub ruleset "Protect main").
 6. **Decide D-2, D-3, D-4 and D-6** — hero preview, Anthropic adapter, `MemoryEngine`, unregistered tools.
 7. **Refresh the Master Development Document and the capability matrix** to the current system. **Partly done** (2026-10-05): the capability matrix is regenerated (version 4.0); the Master Development Document is not.
 8. **Migrate the remaining direct `process.env` reads** in `apps/api` into `packages/config`, keeping tests' ability to inject values.
