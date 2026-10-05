@@ -194,7 +194,9 @@ export function failureFromError(error: unknown, phase: "connect" | "call"): Mcp
         return mcpFailure("REMOTE_ERROR");
     }
   }
-  if (error instanceof Error && error.name === "ZodError") return mcpFailure("REMOTE_ERROR");
+  // A reply that fails the SDK's own schema. The pinned SDK validates with zod
+  // v4, whose error is named `$ZodError` (S8.6 found the bare name never matched).
+  if (error instanceof Error && /^\$?ZodError$/.test(error.name)) return mcpFailure("REMOTE_ERROR");
   if (error instanceof Error && error.message === "Not connected") return mcpFailure("SERVER_UNAVAILABLE");
   return mcpFailure("UNKNOWN");
 }

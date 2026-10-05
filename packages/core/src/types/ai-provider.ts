@@ -12,6 +12,14 @@ export interface AIToolDefinition {
   parameters: Record<string, unknown>;
 }
 
+/**
+ * S8.7 — the most tool definitions one model request may carry: OpenAI's chat
+ * completions limit, the strictest provider this build uses. Every tool an
+ * agent may call is sent on every turn, so a census test holds the general
+ * assistant's native tools plus MCP_LIMITS.toolsTotal within it.
+ */
+export const MAX_TOOLS_PER_MODEL_REQUEST = 128;
+
 export interface AIToolCall {
   id: string;
   name: string;

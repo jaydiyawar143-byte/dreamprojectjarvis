@@ -261,7 +261,8 @@ describe("every tool outside a skill is outside it on purpose", () => {
   it("names each one with a reason, not a TODO", () => {
     expect(SKILL_UNLISTED_TOOLS.length).toBeGreaterThan(0);
     for (const u of SKILL_UNLISTED_TOOLS) {
-      expect(u.id).toMatch(/^[a-z][a-zA-Z0-9]*(\.[a-zA-Z0-9]+)+$/);
+      // Segments are camelCase, or snake_case for reviewed MCP tools (S8.6).
+      expect(u.id).toMatch(/^[a-z][a-zA-Z0-9]*(\.[a-zA-Z0-9_]+)+$/);
       expect(u.reason.length, u.id).toBeGreaterThan(20);
       expect(u.reason, u.id).not.toMatch(/TODO|TBD|FIXME|\?\?\?/i);
     }

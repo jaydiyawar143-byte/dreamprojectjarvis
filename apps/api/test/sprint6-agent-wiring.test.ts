@@ -28,6 +28,7 @@ import {
   LocationAgent,
   KnowledgeAgent,
   MetaAdsAgent,
+  MCP_READ_TOOLS,
   isToolAllowed,
 } from "@jarvis/agents";
 
@@ -486,8 +487,10 @@ describe("Sprint 6 — container wiring has not drifted", () => {
 
 describe("Sprint 6 — allowlists match the tools the container can register", () => {
   it("grants no policy a tool the container never registers", () => {
+    // S8.6 — plus the reviewed MCP tools, which the container registers from
+    // the same manifest whenever JARVIS_MCP_ENABLED is true.
     const registered = new Set(
-      ALL_REGISTERED_TOOLS.concat(["data.csv.analyze"]).map((id) => id)
+      ALL_REGISTERED_TOOLS.concat(["data.csv.analyze"], MCP_READ_TOOLS).map((id) => id)
     );
 
     for (const policy of Object.values(AGENT_POLICIES)) {

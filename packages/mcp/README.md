@@ -4,11 +4,66 @@ The MCP runtime: one reviewed MCP server per `McpConnection`. This is the only
 package that imports the MCP SDK (`@modelcontextprotocol/sdk`, pinned to exactly
 `1.30.0`). The rest of JARVIS never sees the SDK.
 
-**Status (S8.5).** `McpConnection` implements core's `McpCallPort`. The tool adapter
+**Status (S8.8).** `McpConnection` implements core's `McpCallPort`. The tool adapter
 (`createMcpTools` in packages/tools) depends on that port alone and never imports
 this package. With `JARVIS_MCP_ENABLED=true`, the API container registers the
 reviewed servers' tools (S8.4), and the Integration Center checks their health
-through `verify()` (S8.5). Nothing connects at boot.
+through `verify()` (S8.5). Nothing connects at boot. Two servers are reviewed in:
+`dates` (S8.6) and `units` (S8.8), below.
+
+## The reviewed servers (S8.6, S8.8)
+
+Each is a real MCP server over stdio, built on this package's pinned SDK's
+server stack. Each declares tools only and has no state, files, network,
+environment or clock:
+
+- `pilot/dates-server.mjs` (`dates`): `days_between` and `day_of_week`,
+  calendar arithmetic.
+- `pilot/units-server.mjs` (`units`): `convert_length` and
+  `convert_temperature`, unit conversion by fixed factors to six significant
+  figures. Temperatures below absolute zero are refused.
+
+Each server is reviewed independently: its own identity, its own listing and
+its own fingerprints. Once registered it gets its own connection, so its
+verification state, its breaker and its process are its own. One server
+starting, failing, drifting or being refused never touches another.
+
+They use the SDK's low-level `Server`, not `McpServer`. `McpServer` adds
+`$schema` to every input schema, and the S8.1 review contract does not accept
+that. Each listing is copied verbatim into core's `MCP_MANIFEST` under its own
+server id and pinned by fingerprint. Changing anything in a listing means
+reviewing that server again.
+
+They live outside `src/`. The runtime never imports them and stays
+client-only; it only ever starts them as reviewed server processes.
+
+## How JARVIS uses it (S8.4–S8.8)
+
+- **Registration.** Only while `JARVIS_MCP_ENABLED` is exactly `"true"`, the API
+  container registers the reviewed manifest, all or nothing: one connection
+  per server, one ToolRegistry entry per enabled reviewed tool, named
+  `mcp.<server>.<tool>` (`mcp-<server>-<tool>` for the model). A live listing
+  never registers anything.
+- **Who may call.** The general assistant alone, through a grant derived from
+  the manifest. MCP tools are READ_ONLY, need `read` and `execute` (owners and
+  admins), and are excluded from scheduled and background work.
+- **Execution.** Only through ToolExecutor, like every tool: permission check,
+  deadline and the ordinary `tool.execute` audit row. There is no MCP-specific
+  execution path, approval or audit. Results are marked untrusted and pass the
+  assistant's existing sanitizer.
+- **What the model sees.** The reviewed name, description and flat parameters,
+  never a server's live listing, instructions, fingerprints or transport.
+- **Health and presentation.** The Integration Center's Test Connection runs
+  `verify()` on every server and names each one's outcome. The capability
+  report shows a server whose last start or check failed as unavailable, in
+  fixed words (S8.7).
+- **Budget.** `MAX_TOOLS_PER_MODEL_REQUEST` (128) must hold the general
+  assistant's native tools plus `MCP_LIMITS.toolsTotal` (32); a census test
+  keeps it so.
+
+Not implemented: per-server capability labels, per-agent MCP grants and
+choosing tools per turn. The tools of a failed server are still offered to the
+model; calls to them fail closed.
 
 ## Why it exists
 
@@ -75,6 +130,10 @@ failed ──connect()──▶ connecting        any ──close()──▶ clo
 - **How the server starts.** It is spawned as `node <reviewed script> <reviewed args>`. `node` is
   `process.execPath`, so there is no PATH lookup, and there is no shell. Nothing
   is downloaded at runtime: no `npx`, no `uvx`.
+
+  A relative entry script is resolved against this package's directory (S8.6),
+  never against the API's working directory, which differs between the image
+  (`/workspace`) and development (`apps/api`). An absolute path is used as given.
 - **Environment.** The child's environment is exactly the variables its manifest maps, each read
   from the server's own `JARVIS_MCP_<ID>_…` variable. Nothing else is forwarded:
   no `DATABASE_URL`, no `NODE_OPTIONS`, no `LD_PRELOAD`, no `PATH`.
@@ -167,5 +226,6 @@ paged, init/list errors, hang, crash, slow, huge, stderr flood, binary,
 
 `connection-s8.test.ts` runs real processes of the fake server.
 `verify-s8.test.ts` runs the health check against them, using the controllable
-mode to make a running server drift or stop answering. `normalize-s8.test.ts`
+mode to make a running server drift or stop answering. `pilot-s8.test.ts` runs
+the real pilot against the shipped review. `normalize-s8.test.ts`
 covers the pure helpers. `boundaries-s8.test.ts` holds the package boundaries.

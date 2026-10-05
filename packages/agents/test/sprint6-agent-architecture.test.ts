@@ -29,7 +29,7 @@ import {
   productionLikeTools,
   toolRegistryOf,
 } from "./helpers/sprint6-harness.js";
-import { INTEGRATION_READ_TOOLS, CAPABILITY_TOOLS, SELF_TOOLS } from "../src/agent-policy.js";
+import { INTEGRATION_READ_TOOLS, CAPABILITY_TOOLS, SELF_TOOLS, MCP_READ_TOOLS } from "../src/agent-policy.js";
 
 describe("Sprint 6.1 — agent architecture", () => {
   let provider: ScriptedAIProvider;
@@ -239,7 +239,9 @@ describe("Sprint 6.1 — agent architecture", () => {
     });
 
     it("no policy grants a tool that is not a real registry id", () => {
-      const real = new Set(productionLikeTools().map((t) => t.id));
+      // S8.6 — plus the reviewed MCP tools: real ids whenever JARVIS_MCP_ENABLED
+      // is true, registered from the same manifest the grant is derived from.
+      const real = new Set([...productionLikeTools().map((t) => t.id), ...MCP_READ_TOOLS]);
       for (const policy of Object.values(AGENT_POLICIES)) {
         for (const tool of policy.allowedTools) {
           expect(real.has(tool), `${policy.agentId} grants unknown tool ${tool}`).toBe(

@@ -5,6 +5,8 @@
 // runtime and nothing is persisted.
 // ---------------------------------------------------------------------------
 
+import { isAbsolute } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { McpServerManifest } from "@jarvis/core";
 
 export const MCP_RUNTIME = Object.freeze({
@@ -44,6 +46,21 @@ export function serverEnvironment(
     if (value !== undefined) env[name] = value;
   }
   return env;
+}
+
+/** This package's own directory: from src/ and from dist/ alike, one level up. */
+const PACKAGE_ROOT = new URL("../", import.meta.url);
+
+/**
+ * S8.6 — the server's arguments with its entry script made absolute. A
+ * reviewed relative entry script is resolved against packages/mcp, where
+ * reviewed servers and their pinned packages live — never against the API's
+ * working directory, which is /workspace in the image and apps/api in
+ * development. An absolute path is used as given.
+ */
+export function serverArgs(server: McpServerManifest): string[] {
+  const [entry = "", ...rest] = server.transport.args;
+  return [isAbsolute(entry) ? entry : fileURLToPath(new URL(entry, PACKAGE_ROOT)), ...rest];
 }
 
 /**

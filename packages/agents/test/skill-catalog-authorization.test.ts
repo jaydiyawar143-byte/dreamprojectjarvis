@@ -19,7 +19,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { describe, it, expect } from "vitest";
 import { SKILL_CATALOG, SKILL_UNLISTED_TOOLS, skillForToolId } from "@jarvis/core";
-import { AGENT_POLICIES, isToolAllowed } from "../src/agent-policy.js";
+import { AGENT_POLICIES, MCP_READ_TOOLS, isToolAllowed } from "../src/agent-policy.js";
 
 /** Every tool id some agent is permitted to call, anywhere in the build. */
 const ALLOWLISTED: readonly string[] = [
@@ -46,6 +46,9 @@ const IMPLEMENTATION_SOURCE: string = [
   // S7.2 L5 — the memory tool ids are declared once, in the core contract
   // (MEMORY_TOOL_IDS), for the same reason the browser ids are.
   new URL("../../core/src/memory-management.ts", import.meta.url),
+  // S8.6 — reviewed MCP tool ids are declared once, in the reviewed manifest
+  // (MCP_MANIFEST); McpTool builds from it.
+  new URL("../../core/src/mcp-manifest.ts", import.meta.url),
 ]
   .map((u) => readFileSync(u, "utf8"))
   .join(" ");
@@ -126,8 +129,14 @@ describe("membership over the real tool set", () => {
   });
 
   it("names a skill for the overwhelming majority of real tools", () => {
-    const owned = ALLOWLISTED.filter((id) => skillOf(id));
-    expect(owned.length / ALLOWLISTED.length).toBeGreaterThan(0.9);
+    // Over JARVIS's own tools. Reviewed MCP tools are skill-less by a recorded
+    // decision (SKILL_UNLISTED_TOOLS) and the census below still accounts for
+    // every one; counted here, each reviewed server would erode a measure of
+    // native coverage (S8.8: two servers already took it under 0.9).
+    const mcp = new Set(MCP_READ_TOOLS);
+    const native = ALLOWLISTED.filter((id) => !mcp.has(id));
+    const owned = native.filter((id) => skillOf(id));
+    expect(owned.length / native.length).toBeGreaterThan(0.9);
   });
 });
 
@@ -148,6 +157,11 @@ describe("coverage census — every real tool is accounted for", () => {
   it("pins the intentional orphans exactly", () => {
     // Each is a decision recorded in SKILL_UNLISTED_TOOLS with its reason.
     expect(ALLOWLISTED.filter((id) => !skillOf(id))).toEqual([
+      // S8.6 / S8.8 — the reviewed MCP servers; see their SKILL_UNLISTED_TOOLS reason.
+      "mcp.dates.day_of_week",
+      "mcp.dates.days_between",
+      "mcp.units.convert_length",
+      "mcp.units.convert_temperature",
       // S7.2 L5 — memory management; see its SKILL_UNLISTED_TOOLS reason.
       "memory.list",
       "self.describe",

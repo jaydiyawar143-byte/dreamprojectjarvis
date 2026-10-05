@@ -45,8 +45,13 @@ function manifest(tools: McpToolManifestEntry[]): McpManifest {
 }
 
 describe("mcpReadToolIds", () => {
-  it("is empty for the shipped manifest — no reviewed server yet", () => {
-    expect(mcpReadToolIds(MCP_MANIFEST)).toEqual([]);
+  it("is the reviewed servers' tools for the shipped manifest, in manifest order (S8.6, S8.8)", () => {
+    expect(mcpReadToolIds(MCP_MANIFEST)).toEqual([
+      "mcp.dates.days_between",
+      "mcp.dates.day_of_week",
+      "mcp.units.convert_length",
+      "mcp.units.convert_temperature",
+    ]);
   });
 
   it("lists the enabled reviewed tools, in manifest order", () => {

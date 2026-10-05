@@ -40,7 +40,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { ReadBuffer, serializeMessage } from "@modelcontextprotocol/sdk/shared/stdio.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { ToolListChangedNotificationSchema, type JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
-import { MCP_RUNTIME, serverEnvironment } from "./config.js";
+import { MCP_RUNTIME, serverArgs, serverEnvironment } from "./config.js";
 import { failureFromError, normalizeCallResult, verifyServer } from "./normalize.js";
 
 export type McpConnectionState = "idle" | "connecting" | "ready" | "failed" | "closed";
@@ -244,7 +244,7 @@ export class McpConnection implements McpCallPort {
     this.failure = undefined;
     this.listChanged = false;
     const server = new ServerProcess(
-      this.server.transport.args,
+      serverArgs(this.server),
       serverEnvironment(this.server, this.environment),
       this.limits
     );

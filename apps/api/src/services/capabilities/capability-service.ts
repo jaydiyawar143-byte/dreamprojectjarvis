@@ -74,6 +74,13 @@ export interface CapabilityDeps {
    * no conversation can actually trigger.
    */
   allowedToolIds: ReadonlySet<string>;
+  /**
+   * S8.7 — what a tool's runtime has observed since it was registered, read
+   * only: fixed wording for a tool that is unavailable right now, or null. It
+   * can only take a usable capability away — never make one usable, never add
+   * one. Absent: presentation is exactly as before.
+   */
+  runtimeUnavailable?: (toolId: string) => { reason: string; requiredAction: string } | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -293,6 +300,15 @@ export class CapabilityService {
             }
           }
         }
+      }
+
+      // S8.7 — a runtime that has seen this tool's provider fail since it was
+      // registered: unavailable, in the runtime's fixed words. Worse only.
+      const unavailable = isUsable(availability) ? this.deps.runtimeUnavailable?.(tool.id) : null;
+      if (unavailable) {
+        availability = "NOT_CONNECTED";
+        reason = unavailable.reason;
+        requiredAction = unavailable.requiredAction;
       }
 
       capabilities.push({

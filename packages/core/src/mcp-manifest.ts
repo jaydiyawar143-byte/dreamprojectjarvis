@@ -2,9 +2,9 @@
 // S8.1 — the MCP manifest and its validator. Pure: no I/O, no SDK, no clock.
 //
 // The manifest is the reviewed list of MCP servers and tools JARVIS may use.
-// It ships empty, so MCP is off until a reviewed server is added here, and
-// nothing reads it yet: registration is a later step, and it will register
-// only what `validateMcpManifest` accepts.
+// It ships two reviewed servers (S8.6, S8.8). The API container registers
+// exactly what `validateMcpManifest` accepts, and only while
+// JARVIS_MCP_ENABLED is "true" (S8.4).
 //
 // What the validator guarantees for v1, failing closed on anything else:
 //   - names are deterministic — `mcp.<server>.<tool>`, from manifest data
@@ -69,8 +69,137 @@ const ALLOWED_COMMANDS: readonly string[] = ["node"];
 /** OWNER and ADMIN hold both; MEMBER and VIEWER lack `execute`. */
 const REQUIRED_PERMISSIONS: readonly string[] = ["read", "execute"];
 
-/** The reviewed MCP servers. Empty: MCP is off until a server is reviewed in. */
-export const MCP_MANIFEST: McpManifest = Object.freeze({ servers: Object.freeze([]) });
+/** Frozen all the way down: reviewed data cannot be edited at runtime. */
+function deepFreeze<T>(value: T): T {
+  if (typeof value === "object" && value !== null) {
+    for (const child of Object.values(value)) deepFreeze(child);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+/**
+ * The reviewed MCP servers. Each one runs only while JARVIS_MCP_ENABLED is
+ * "true", and only after its live listing matches this review exactly.
+ *
+ * S8.6 — `dates`, the pilot: packages/mcp/pilot/dates-server.mjs, a real MCP
+ * server on the pinned official SDK. Stateless calendar arithmetic, no
+ * environment.
+ *
+ * S8.8 — `units`: packages/mcp/pilot/units-server.mjs, the second server,
+ * reviewed independently. Stateless unit conversion, no environment.
+ *
+ * Every tool below is its server's live listing copied verbatim at review;
+ * the fingerprints pin it. Each server runs on its own connection, verified
+ * against its own entry alone.
+ */
+export const MCP_MANIFEST: McpManifest = deepFreeze<McpManifest>({
+  servers: [
+    {
+      id: "dates",
+      transport: { kind: "stdio", command: "node", args: ["pilot/dates-server.mjs"] },
+      env: {},
+      expectedServerInfo: { name: "jarvis-dates", version: "1.0.0" },
+      tools: [
+        {
+          id: "mcp.dates.days_between",
+          name: "days_between",
+          description:
+            "Counts the days from one calendar date to another. The count is negative when the second date is earlier.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              start: { type: "string", description: "The first date, written YYYY-MM-DD.", maxLength: 10 },
+              end: { type: "string", description: "The second date, written YYYY-MM-DD.", maxLength: 10 },
+            },
+            required: ["start", "end"],
+            additionalProperties: false,
+          },
+          annotations: { title: "Days between dates", readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+          readOnly: true,
+          risk: "READ_ONLY",
+          requiresApproval: false,
+          requiredPermissions: ["read", "execute"],
+          enabled: true,
+          fingerprint: "9d41560c20d5850d8a8232ee35e85d71e913b1bfa028a69a02d83b1fd4adce84",
+        },
+        {
+          id: "mcp.dates.day_of_week",
+          name: "day_of_week",
+          description: "Names the day of the week a calendar date falls on.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              date: { type: "string", description: "The date, written YYYY-MM-DD.", maxLength: 10 },
+            },
+            required: ["date"],
+            additionalProperties: false,
+          },
+          annotations: { title: "Day of the week", readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+          readOnly: true,
+          risk: "READ_ONLY",
+          requiresApproval: false,
+          requiredPermissions: ["read", "execute"],
+          enabled: true,
+          fingerprint: "014d340bf784ddb25b4d1039d666ae40c340e3f28fe6320983fce147b00c85ec",
+        },
+      ],
+    },
+    {
+      id: "units",
+      transport: { kind: "stdio", command: "node", args: ["pilot/units-server.mjs"] },
+      env: {},
+      expectedServerInfo: { name: "jarvis-units", version: "1.0.0" },
+      tools: [
+        {
+          id: "mcp.units.convert_length",
+          name: "convert_length",
+          description: "Converts a length between metric and imperial units.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              value: { type: "number", description: "The amount to convert." },
+              from: { type: "string", description: "The unit to convert from.", enum: ["mm", "cm", "m", "km", "in", "ft", "yd", "mi"] },
+              to: { type: "string", description: "The unit to convert to.", enum: ["mm", "cm", "m", "km", "in", "ft", "yd", "mi"] },
+            },
+            required: ["value", "from", "to"],
+            additionalProperties: false,
+          },
+          annotations: { title: "Convert length", readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+          readOnly: true,
+          risk: "READ_ONLY",
+          requiresApproval: false,
+          requiredPermissions: ["read", "execute"],
+          enabled: true,
+          fingerprint: "dc6e1927307712f32be54cf376ca43068df39fb9e0d002090810cb2d46216362",
+        },
+        {
+          id: "mcp.units.convert_temperature",
+          name: "convert_temperature",
+          description:
+            "Converts a temperature between Celsius, Fahrenheit and Kelvin. Values below absolute zero are refused.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              value: { type: "number", description: "The amount to convert." },
+              from: { type: "string", description: "The unit to convert from.", enum: ["C", "F", "K"] },
+              to: { type: "string", description: "The unit to convert to.", enum: ["C", "F", "K"] },
+            },
+            required: ["value", "from", "to"],
+            additionalProperties: false,
+          },
+          annotations: { title: "Convert temperature", readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+          readOnly: true,
+          risk: "READ_ONLY",
+          requiresApproval: false,
+          requiredPermissions: ["read", "execute"],
+          enabled: true,
+          fingerprint: "cc21084c513bcc4f223112e07c7024e509c6c1d73d57903f2d106c5ee2f0b018",
+        },
+      ],
+    },
+  ],
+});
 
 // ---------------------------------------------------------------------------
 // Names

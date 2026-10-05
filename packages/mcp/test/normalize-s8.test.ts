@@ -275,6 +275,8 @@ describe("failureFromError", () => {
     [sdk(ErrorCode.InternalError), "connect", "INITIALIZATION_FAILED"],
     [Object.assign(new Error("spawn node ENOENT"), { code: "ENOENT" }), "connect", "SERVER_UNAVAILABLE"],
     [Object.assign(new Error("schema"), { name: "ZodError" }), "call", "REMOTE_ERROR"],
+    // S8.6 — what the pinned SDK (zod v4) actually throws for a malformed reply.
+    [Object.assign(new Error("schema"), { name: "$ZodError" }), "call", "REMOTE_ERROR"],
     [new Error("Not connected"), "call", "SERVER_UNAVAILABLE"],
     [new Error("anything else"), "call", "UNKNOWN"],
     ["a thrown string", "connect", "INITIALIZATION_FAILED"],

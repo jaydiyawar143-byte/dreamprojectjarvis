@@ -1,9 +1,9 @@
 // S8.2 — package boundaries for the MCP runtime.
 //
-// The SDK lives in packages/mcp and nowhere else; nothing in JARVIS uses this
-// package yet; no tool is registered, no policy grants anything, no migration
-// exists. The byte-for-byte pins on ToolExecutor and ToolRegistry stay in
-// packages/core/test/mcp-boundaries-s8.test.ts. Asserted on source.
+// The SDK lives in packages/mcp and nowhere else; the API container is this
+// package's only user (S8.4); no policy names an MCP tool by hand, and no
+// migration exists. The byte-for-byte pins on ToolExecutor and ToolRegistry
+// stay in packages/core/test/mcp-boundaries-s8.test.ts. Asserted on source.
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { describe, it, expect } from "vitest";
 
@@ -87,7 +87,7 @@ describe("only the composition root depends on packages/mcp", () => {
     expect({ ...pkg.dependencies, ...pkg.devDependencies }).not.toHaveProperty("@jarvis/mcp");
   });
 
-  it("grants no MCP tool to any agent and adds no migration", () => {
+  it("names no MCP tool in a policy by hand and adds no migration", () => {
     expect(read("packages/agents/src/agent-policy.ts")).not.toMatch(/["'`]mcp[.-]/);
     const migrations = readdirSync(new URL("packages/db/prisma/migrations", REPO));
     expect(migrations.filter((m) => /mcp/i.test(m))).toEqual([]);

@@ -150,6 +150,7 @@ import { MCP_MANIFEST, validateMcpManifest, type McpManifest } from "@jarvis/cor
 import { McpConnection, isMcpEnabled } from "@jarvis/mcp";
 import { createMcpTools } from "@jarvis/tools";
 import { buildIntegrationCommandService } from "./integrations/build.js";
+import { mcpToolUnavailable } from "./integration-registry.js";
 
 export interface Container {
   tokenService: TokenService;
@@ -959,6 +960,10 @@ export function getContainer(options?: {
         allowedToolIds: new Set(
           Object.values(AGENT_POLICIES).flatMap((policy) => [...policy.allowedTools])
         ),
+        // S8.7 — a reviewed MCP server that failed its last start or check is
+        // presented as unavailable. Read from the managed connections tool
+        // calls use; nothing is started, listed or verified to decide it.
+        runtimeUnavailable: (toolId: string) => mcpToolUnavailable(mcpIntegrationRuntime.servers(), toolId),
       })
     : null;
 

@@ -132,8 +132,8 @@ The six memory end-to-end tests that used to fail on every run (B-1 in
 `docs/CODEBASE_AUDIT.md`) pass since 2026-09-14. The cause was a race in the
 test harness, not a production memory bug. `@jarvis/db` tests need PostgreSQL
 with pgvector: point `DATABASE_URL` at a separate test database, never the
-development one. They give 188 passed / 8 failed; the 8 are known: 7 test
-bugs and 1 stale test (ledger R-4). The full repository suite has not been run since the fix.
+development one. On a fresh throwaway pgvector database they give 223 passed /
+0 failed (20 files; S8.5 regression, 2026-10-05). The full repository suite has not been run since the fix.
 
 ---
 
@@ -178,6 +178,7 @@ Every capability has one home. Before creating a file, find that home.
 | `packages/ai-openai`, `ai-elevenlabs` | Model and voice providers |
 | `packages/ai-anthropic` | Claude adapter — built, not wired |
 | `packages/meta-graph`, `google-ads`, `google-workspace`, `whatsapp`, `n8n`, `browser` | Provider clients |
+| `packages/mcp` | MCP runtime (the only home of the MCP SDK) and the reviewed stdio servers in `pilot/`; reviewed in core's `MCP_MANIFEST`, read-only, off unless `JARVIS_MCP_ENABLED=true` |
 
 ## Documentation precedence
 

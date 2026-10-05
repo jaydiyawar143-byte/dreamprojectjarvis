@@ -302,13 +302,25 @@ describe("switched off — JARVIS_MCP_ENABLED is not \"true\"", () => {
   });
 });
 
-describe("switched on with no reviewed server — the manifest as shipped", () => {
-  it("registers no connection, starts nothing and reports NOT_CONNECTED — the existing 'nothing configured' state", async () => {
+describe("switched on with the manifest as shipped — the reviewed servers (S8.6, S8.8)", () => {
+  it("registers one connection per server, starts nothing, and reports them unverified — never healthy before a check", async () => {
     useEnvironment("true");
     getContainer();
-    expect(MCP_MANIFEST.servers).toEqual([]);
-    expect(getMcpConnections()).toEqual([]);
-    const result = await runCheck(USER, "mcp", deps(mcpIntegrationRuntime));
+    expect(MCP_MANIFEST.servers.map((s) => s.id)).toEqual(["dates", "units"]);
+    expect(getMcpConnections().map((c) => [c.serverId, c.getState()])).toEqual([
+      ["dates", "idle"],
+      ["units", "idle"],
+    ]);
+    const view = await getIntegration(USER, "mcp", deps(mcpIntegrationRuntime));
+    expect(view?.health).toBe("UNVERIFIED");
+    expect(view?.detail).toMatch(/Reviewed MCP servers: dates, units\./);
+    expect(getMcpConnections().map((c) => c.getState())).toEqual(["idle", "idle"]);
+  });
+});
+
+describe("switched on with no reviewed server", () => {
+  it("reports NOT_CONNECTED — the existing 'nothing configured' state — and starts nothing", async () => {
+    const result = await runCheck(USER, "mcp", deps(runtime(true, [])));
     expect(result?.health).toBe("NOT_CONNECTED");
     expect(result?.detail).toMatch(/No reviewed MCP server/);
   });

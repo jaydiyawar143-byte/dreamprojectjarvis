@@ -497,12 +497,13 @@ describe("Sprint 6.10 — agent layer security", () => {
       // arbitrary destination.
       //
       // Segments may be camelCase — the Phase 12 Workspace ids are
-      // `gmail.listUnread`, matching the action names in the backend contract.
-      // The property under test is unchanged: a dotted identifier, and nothing
-      // that could address a host or a path.
+      // `gmail.listUnread`, matching the action names in the backend contract —
+      // or snake_case, as reviewed MCP tool names are (S8.6,
+      // `mcp.dates.days_between`). The property under test is unchanged: a
+      // dotted identifier, and nothing that could address a host or a path.
       for (const policy of Object.values(AGENT_POLICIES)) {
         for (const tool of policy.allowedTools) {
-          expect(tool).toMatch(/^[a-zA-Z0-9]+(\.[a-zA-Z0-9]+)+$/);
+          expect(tool).toMatch(/^[a-zA-Z0-9_]+(\.[a-zA-Z0-9_]+)+$/);
           expect(tool).not.toContain("/");
           expect(tool).not.toContain(":");
           expect(tool).not.toContain("@");

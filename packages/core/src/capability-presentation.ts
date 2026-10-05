@@ -44,6 +44,7 @@ import type {
   SkillView,
   UnlistedTool,
 } from "./types/skill.js";
+import { MCP_MANIFEST, mcpReadToolIds } from "./mcp-manifest.js";
 
 /**
  * A capability group as a USER would think of it.
@@ -310,6 +311,13 @@ export const SKILL_UNLISTED_TOOLS: readonly UnlistedTool[] = [
     reason:
       "Memory management (S7.2 L5), not a capability. \"Show my memories\" is answered by the chat route's memory commands before any agent runs; this read-only tool only lets the general assistant answer follow-ups about the user's own memories. A skill for it would change the S6 objective vocabulary, which L5 must not touch.",
   },
+  // S8.6 — every reviewed MCP tool, by being reviewed: a tool is listed here
+  // only because it is in the manifest.
+  ...mcpReadToolIds(MCP_MANIFEST).map((id) => ({
+    id,
+    reason:
+      "A reviewed MCP tool (S8). The review is the decision: the manifest grants it to the general assistant alone, it runs only while JARVIS_MCP_ENABLED is true, and S8.4 presents it under system. A skill would put an outside server's tools into the S6 objective vocabulary, which S8 must not touch.",
+  })),
 ];
 
 /**

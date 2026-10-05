@@ -286,9 +286,9 @@ export const MEMORY_READ_TOOLS = ["memory.list"] as const;
  * Never written out by hand: the group is exactly the enabled tools of the
  * reviewed manifest (`MCP_MANIFEST` in core), so a tool is grantable only by
  * being reviewed into it — and a manifest that is not valid grants nothing.
- * It is empty until a server is reviewed in. Registration is separate and
- * switched off by default (JARVIS_MCP_ENABLED); a granted tool that is not
- * registered can be offered to no model.
+ * It holds the reviewed servers' tools (S8.8: dates and units). Registration
+ * is separate and switched off by default (JARVIS_MCP_ENABLED); a granted tool
+ * that is not registered can be offered to no model.
  */
 export const MCP_READ_TOOLS: readonly string[] = mcpReadToolIds(MCP_MANIFEST);
 

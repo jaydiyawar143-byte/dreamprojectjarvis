@@ -4,13 +4,14 @@
 // THE MANIFEST IS THE AUTHORITY. An MCP server is reachable from JARVIS only
 // through a reviewed manifest entry written in this repository. What a live
 // server says about itself — names, descriptions, schemas, annotations,
-// serverInfo — is untrusted: a later step may compare it with the manifest to
-// DISABLE a tool, never to register, describe, grant or classify one.
+// serverInfo — is untrusted: the runtime's verification (S8.2) compares it with
+// the manifest only to DISABLE a server's tools, never to register, describe,
+// grant or classify one.
 //
 // v1 is deliberately narrow: local stdio servers, READ_ONLY tools only,
 // OWNER/ADMIN only, flat parameter schemas. Nothing here touches ITool, the
-// ToolRegistry or ToolExecutor; an MCP tool will reach them as an ordinary
-// ITool built from an entry.
+// ToolRegistry or ToolExecutor; an MCP tool reaches them as an ordinary ITool
+// built from an entry (S8.3), registered by the API container (S8.4).
 // ---------------------------------------------------------------------------
 
 import type { RiskLevel, ToolPermission } from "./tool.js";
@@ -29,7 +30,10 @@ export interface McpStdioTransport {
   kind: "stdio";
   /** v1: `node` — a pinned package in the image, never a runtime download. */
   command: string;
-  /** `args[0]` is the server's entry script, never a runtime flag. */
+  /**
+   * `args[0]` is the server's entry script, never a runtime flag — absolute,
+   * or relative to packages/mcp, where reviewed servers live (S8.6).
+   */
   args: readonly string[];
 }
 

@@ -19,6 +19,8 @@
 //   stderr_flood       writes 5 MiB to stderr, then behaves normally
 //   binary             search_notes answers with image, audio, text and a link
 //   is_error           search_notes answers with isError and server text
+//   malformed_result   search_notes answers with content that is not a list
+//   record             appends every message it receives to [control-file]
 //   list_changed       the first call changes the listing and announces it
 //   list_changed_same  the first call announces a change that changes nothing
 //   sampling           search_notes asks the client for sampling, reports the answer
@@ -64,6 +66,7 @@ createInterface({ input: process.stdin })
   .on("close", () => process.exit(0));
 
 function handle(message) {
+  if (mode === "record" && controlFile) appendFileSync(controlFile, `${JSON.stringify(message)}\n`);
   if (message.method === undefined) {
     // A response to one of our own requests.
     waiting.get(message.id)?.(message);
@@ -135,6 +138,8 @@ function call({ id, params }) {
       return;
     case "huge":
       return text(id, "x".repeat(2 * 1024 * 1024));
+    case "malformed_result":
+      return reply(id, { content: "not a list" });
     case "is_error":
       return reply(id, {
         content: [{ type: "text", text: "Traceback: fake failure at line 42 (token=not-a-real-secret)" }],

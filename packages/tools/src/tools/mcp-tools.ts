@@ -8,7 +8,7 @@
 // The tool owns no process. It asks its McpCallPort to be ready and to call;
 // spawning, verification and the breaker belong to the runtime
 // (packages/mcp). Approval, policy, permissions, audit and the deadline stay
-// with ToolExecutor. Nothing here registers anything: wiring is a later step.
+// with ToolExecutor. Nothing here registers anything: the API container does (S8.4).
 // ---------------------------------------------------------------------------
 
 import {

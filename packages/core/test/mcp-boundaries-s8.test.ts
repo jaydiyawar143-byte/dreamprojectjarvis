@@ -2,7 +2,8 @@
 //
 // S8.1 adds a pure contract and nothing else. Pinned here: the contract has no
 // SDK and no I/O beyond hashing; ITool, ToolRegistry and ToolExecutor are
-// untouched; no agent policy grants an MCP tool; nothing registers one yet;
+// untouched; agents reach MCP only through the policy's one derived grant and
+// only the API's composition root and integration layer wire it (S8.4, S8.5);
 // the packages that must never know MCP do not; no migration was added.
 // Asserted on source, because that is where these properties live.
 import { createHash } from "node:crypto";
@@ -71,7 +72,7 @@ describe("the MCP contract is pure", () => {
   it("is exported from the package entry", () => {
     expect(typeof core.validateMcpManifest).toBe("function");
     expect(typeof core.mcpToolFingerprint).toBe("function");
-    expect(core.MCP_MANIFEST.servers).toEqual([]);
+    expect(core.MCP_MANIFEST.servers.map((server) => server.id)).toEqual(["dates", "units"]); // S8.6 / S8.8
   });
 });
 

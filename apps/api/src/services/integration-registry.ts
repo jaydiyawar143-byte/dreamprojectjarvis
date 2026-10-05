@@ -873,6 +873,29 @@ async function testMcp(deps: IntegrationDeps): Promise<CheckResult> {
   };
 }
 
+/** S8.7 — how a failed server's tools are presented. Fixed: never the server's own text. */
+const MCP_TOOL_UNAVAILABLE = Object.freeze({
+  reason: "This reviewed MCP server failed its last start or check, so its tools are refused until it passes again.",
+  requiredAction: "Run Test Connection on MCP Servers in the Integration Center to check it again.",
+});
+
+/**
+ * S8.7 — whether a reviewed MCP tool should be presented as unavailable: its
+ * server's managed connection failed its last start or check, or was closed.
+ * Read-only — it looks at the state S8.2 already keeps and never starts,
+ * lists or verifies anything. A server not yet started, starting or verified
+ * keeps its presentation; anything not a registered server's tool gets null.
+ */
+export function mcpToolUnavailable(
+  servers: readonly { readonly serverId: string; getState(): string }[],
+  toolId: string
+): { reason: string; requiredAction: string } | null {
+  const [namespace, serverId] = toolId.split(".");
+  if (namespace !== "mcp") return null;
+  const state = servers.find((server) => server.serverId === serverId)?.getState();
+  return state === "failed" || state === "closed" ? MCP_TOOL_UNAVAILABLE : null;
+}
+
 /**
  * Runs one integration's connection test and remembers the verdict.
  *

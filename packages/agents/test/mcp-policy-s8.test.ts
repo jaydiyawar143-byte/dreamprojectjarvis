@@ -17,7 +17,13 @@ const SOURCE = readFileSync(new URL("../src/agent-policy.ts", import.meta.url), 
 describe("the MCP grant", () => {
   it("is the reviewed manifest's enabled tools, as one group", () => {
     expect(MCP_READ_TOOLS).toEqual(mcpReadToolIds(MCP_MANIFEST));
-    expect(MCP_READ_TOOLS).toEqual([]); // no reviewed server ships yet
+    // S8.6 / S8.8 — the two reviewed servers, in manifest order.
+    expect(MCP_READ_TOOLS).toEqual([
+      "mcp.dates.days_between",
+      "mcp.dates.day_of_week",
+      "mcp.units.convert_length",
+      "mcp.units.convert_temperature",
+    ]);
   });
 
   it("is spread into exactly one policy: the general assistant's", () => {

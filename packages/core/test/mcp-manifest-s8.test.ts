@@ -93,10 +93,11 @@ function deepFreeze<T>(value: T): T {
 // ---------------------------------------------------------------------------
 
 describe("the default manifest", () => {
-  it("is empty, frozen and valid — MCP stays off until a reviewed server is added", () => {
-    expect(MCP_MANIFEST.servers).toEqual([]);
+  it("holds the reviewed servers — dates (S8.6) and units (S8.8) — frozen and valid, and still runs nothing while MCP is off", () => {
+    expect(MCP_MANIFEST.servers.map((server) => server.id)).toEqual(["dates", "units"]);
     expect(Object.isFrozen(MCP_MANIFEST)).toBe(true);
     expect(Object.isFrozen(MCP_MANIFEST.servers)).toBe(true);
+    expect(Object.isFrozen(MCP_MANIFEST.servers[0]!.tools[0]!.inputSchema)).toBe(true);
     expect(validateMcpManifest(MCP_MANIFEST)).toEqual({ valid: true, issues: [] });
   });
 
