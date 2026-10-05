@@ -1,6 +1,6 @@
 # Developing JARVIS
 
-Setup, configuration and the checks a change must pass. Verified on 2026-09-14.
+Setup, configuration and the checks a change must pass. Verified on 2026-09-14; reconciled with the code and with CI on 2026-10-05, commit `68628c0`.
 
 ---
 
@@ -69,10 +69,12 @@ Run all four before calling a change done.
 
 | Command | What it proves | Today |
 |---|---|---|
-| `pnpm typecheck` | every workspace compiles | 33/33 |
-| `pnpm lint` | the ESLint baseline holds (`eslint.config.mjs`) | 18/18 |
+| `pnpm typecheck` | every workspace compiles | all 19 workspaces — green in CI |
+| `pnpm lint` | the ESLint baseline holds (`eslint.config.mjs`) | all 19 workspaces — green in CI |
 | `pnpm test` | all suites, one workspace at a time | see below |
-| `pnpm build` | production build of every workspace | 18/18 |
+| `pnpm build` | production build of every workspace | all 19 workspaces — green in CI |
+
+"Green in CI" means GitHub Actions run 37306626267, commit `68628c0`. GitHub's job logs need admin access, so per-task counts were not read from that run; on 2026-09-14, with 18 workspaces, they were typecheck 33/33, lint 18/18 and build 18/18.
 
 **One workspace or one file:**
 
@@ -89,7 +91,9 @@ pnpm --filter @jarvis/api exec vitest run test/sprint-1.1d-memory-e2e.test.ts -t
 
 On 2026-09-14 that command gave `6 passed | 7 skipped` in three consecutive runs, and the whole API suite passed 1,159 tests with 8 skipped. Both used the in-process memory store because Postgres was not running. Only the API and `@jarvis/memory` suites were re-run after the fix; the file has since also passed 13/13 against Postgres. The full repository suite remains unverified.
 
-**`@jarvis/db` tests** need PostgreSQL with pgvector. Point `DATABASE_URL` at a separate test database, never the development one: the tests insert and delete rows. On 2026-09-14 they gave 188 passed / 8 failed. The 8 are known — 7 test bugs and 1 stale test, classified in the ledger (R-4). One more test, `phase102` crash recovery, failed once in seven runs; its cause is not established. A fresh database migrates cleanly since `39b190d` (R-22).
+**`@jarvis/db` tests** need PostgreSQL with pgvector. Point `DATABASE_URL` at a separate test database, never the development one: the tests insert and delete rows. On 2026-09-14 they gave 188 passed / 8 failed. The 8 were 7 test bugs and 1 stale test, classified in the ledger (R-4) and fixed in test code on 2026-09-16. One more test, `phase102` crash recovery, failed once in seven runs that day; its cause was not established. **Today** they give 223 passed / 0 failed on a fresh throwaway pgvector database (20 files, 2026-10-05), and CI runs them on every push — see "PostgreSQL-backed tests" below. A fresh database migrates cleanly since `39b190d` (R-22).
+
+**Load-sensitive timing tests (observed 2026-10-05).** In full local runs of the `@jarvis/api` suite on Windows, two S8 MCP timing tests failed occasionally: `mcp-pilot-failures-s8` › "timeout: ToolExecutor's deadline ends the call…" in 2 of 2 full runs with a database (the 500 ms deadline fell while the server was still starting), and `mcp-integration-s8` › "is ERROR — timed out — when a running server stops answering" in 1 of 2 full runs without one. Run alone, the first passed 5 of 5. GitHub CI is green. No deterministic failure has been established, and neither test is marked flaky — ledger R-5.
 
 **Line endings.** The root `.gitattributes` (`* text=auto eol=lf`) makes every platform check text files out as LF, so `apps/api/test/google-write-reachability.test.ts` — which asserts a source snippet spanning a line break — no longer fails on a fresh Windows clone, and a `migration.sql` hashes to the same Prisma checksum everywhere. Git already stored every tracked file with LF, so nothing committed was rewritten. **A clone made before this** keeps its CRLF files on disk until it checks them out again or is renormalized (`git add --renormalize .`); in such a checkout that test still reports a false failure, and `prisma migrate` still reports a checksum mismatch on the three migrations that are CRLF there — ledger R-20.
 
@@ -103,6 +107,7 @@ On 2026-09-14 that command gave `6 passed | 7 skipped` in three consecutive runs
 | Prisma client | `pnpm --filter @jarvis/db exec prisma generate` |
 | Lint | `pnpm lint` |
 | Typecheck | `pnpm typecheck` |
+| Typecheck test files | `pnpm typecheck:tests` — the API's test files |
 | Build | `pnpm build` |
 | Tests | `pnpm --filter <name> test` for `@jarvis/api`, `@jarvis/memory`, `@jarvis/n8n` and `@jarvis/web` |
 | Migrations | `pnpm --filter @jarvis/db exec prisma migrate deploy`, against the CI database |
@@ -117,15 +122,18 @@ Those files skip themselves when they cannot reach a database, and vitest counts
 
 A new database-backed test in `apps/api` or `packages/memory` must be named `*-pg.integration.test.ts`: CI selects those files by that name. Every `@jarvis/db` test runs.
 
-The PostgreSQL steps were added on 2026-10-05 and replayed locally, in order, on a fresh container of the pinned image: 27 migrations applied; `@jarvis/db` 223/223, `@jarvis/memory` 61/61, `@jarvis/api` 25/25; nothing skipped. They have not yet run on GitHub.
+The PostgreSQL steps were added on 2026-10-05 and replayed locally, in order, on a fresh container of the pinned image: 27 migrations applied; `@jarvis/db` 223/223, `@jarvis/memory` 61/61, `@jarvis/api` 25/25; nothing skipped. Those counts are local. On GitHub the steps first ran in run 37306626267 (commit `68628c0`): the service started, every migration applied, the three database steps and the skip check passed. The skip check passing there means each report existed, held tests and skipped none; GitHub's job logs need admin access, so the exact counts were not read from GitHub.
 
 **Not covered yet:**
 
-- **`typecheck:tests`** in `apps/api` fails with 60 pre-existing errors — ledger R-18, still open. CI does not run it.
+- **Merge blocking.** `main` has no branch protection, so a failing run blocks nothing.
+- **Test files outside `apps/api`.** `typecheck:tests` exists only in that workspace, so other packages' test files are not type-checked. (Ledger R-18, the API's own 60 errors, is closed: they were fixed in `1c1c1bd` and CI gates the script.)
 - **The other workspaces' tests** — `@jarvis/agents`, `tools`, `security`, `core`, `config` and the provider packages. Run them locally with `pnpm test`.
 - **Secret scanning and dependency audits** — audit finding SEC-7.
 
-**Status:** as of 2026-09-14 the workflow has never run on GitHub. Its `run` steps were replayed locally, in order, in a clean checkout with LF line endings, no `.env`, no Turborepo cache, Node 24.16.0 and pnpm 9.0.0 — on Windows, not Ubuntu. Every step passed: lint 18/18, typecheck 33/33, build 18/18, `@jarvis/api` 1,159 passed and 8 skipped, `@jarvis/memory` 453/453, `@jarvis/n8n` 65/65, `@jarvis/web` 552/552. The three `uses:` actions — checkout, pnpm setup and Node setup — have not been exercised.
+**Status, 2026-10-05:** the workflow runs on GitHub on every push to `main` and on pull requests, since its first run on 2026-09-14 (`df1d099`). Run 37306626267, for `68628c0`, passed every step.
+
+**Historical, 2026-09-14 — before its first GitHub run:** its `run` steps were replayed locally, in order, in a clean checkout with LF line endings, no `.env`, no Turborepo cache, Node 24.16.0 and pnpm 9.0.0 — on Windows, not Ubuntu. Every step passed: lint 18/18, typecheck 33/33, build 18/18, `@jarvis/api` 1,159 passed and 8 skipped, `@jarvis/memory` 453/453, `@jarvis/n8n` 65/65, `@jarvis/web` 552/552. The three `uses:` actions — checkout, pnpm setup and Node setup — have not been exercised.
 
 ## Driving the real app
 

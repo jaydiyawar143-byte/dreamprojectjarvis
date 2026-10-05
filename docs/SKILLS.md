@@ -22,7 +22,9 @@ Both are defined in `packages/agents/src/agent-policy.ts`. Adding a capability m
 > `SKILL_UNLISTED_TOOLS`: `self.describe` (introspection, not an outcome),
 > the four `task.*` tools (JARVIS's own work queue, not your to-do list — which
 > is `tasks.list`, a different tool for a different question) and `system.echo`
-> (a test fixture). None of that changes what any of them may do.
+> (a test fixture). None of that changes what any of them may do. Since then
+> `memory.list` (S7.2 L5) and the four reviewed MCP tools (S8) have joined the
+> list, which now holds eleven entries.
 >
 > Phase S3 tells the planner which skills actually work right now, as a short
 > block of prose composed into the message. It is **orientation, not
@@ -54,7 +56,7 @@ Both are defined in `packages/agents/src/agent-policy.ts`. Adding a capability m
 > same as one you disliked. S5 only records these. Nothing reads them back into
 > how JARVIS decides anything — there is no learning here.
 
-Verified against the code on 2026-09-17.
+Verified against the code on 2026-10-05, commit `68628c0`.
 
 ---
 
@@ -75,7 +77,12 @@ Named groups keep each policy readable as a capability rather than a list of str
 | `INTEGRATION_READ_TOOLS` | `integration.list`, `integration.status`, `integration.health`, `integration.permissions`, `integration.audit`, `integration.test`, `integration.validate` | read-only |
 | `INTEGRATION_WRITE_TOOLS` | `integration.connect`, `integration.configure`, `integration.reconnect`, `integration.enable`, `integration.disable`, `integration.disconnect` | `integration.disconnect` is approval-gated; the rest write only to JARVIS's own encrypted store |
 | `CAPABILITY_TOOLS` | `capabilities.list`, `capabilities.connected`, `capabilities.integration`, `capabilities.permissions` | read-only; granted to **every** agent |
+| `SELF_TOOLS` | `self.describe` | read-only; granted to **every** agent |
+| `TASK_TOOLS` | `task.create`, `task.list`, `task.get`, `task.updateStatus` | JARVIS's own work queue (the Task Engine), not your to-do list |
+| `MEMORY_READ_TOOLS` | `memory.list` | read-only |
+| `MCP_READ_TOOLS` | derived from the reviewed `MCP_MANIFEST`: `mcp.dates.days_between`, `mcp.dates.day_of_week`, `mcp.units.convert_length`, `mcp.units.convert_temperature` | read-only; registered only while `JARVIS_MCP_ENABLED=true`; never schedulable |
 | Single tools | `n8n.trigger`, `whatsapp.send` | approval-gated |
+| Registered, on **no** allowlist | `memory.forget`, `memory.forget_all` | approval-gated; they run only for a confirmed pending action the chat route created from the user's own words |
 | `BROWSER_READ_TOOL_IDS` (in `packages/core/src/types/browser.ts`) | `browser.navigate`, `browser.inspect`, `browser.extract`, `browser.screenshot` | read-only |
 | `BROWSER_ACTION_TOOL_IDS` (same file) | `browser.click`, `browser.type`, `browser.select`, `browser.submit`, `browser.download`, `browser.upload` | every one approval-gated |
 
@@ -83,15 +90,15 @@ Named groups keep each policy readable as a capability rather than a list of str
 
 | Agent id | Registered | May call | Role floor |
 |---|---|---|---|
-| `conversational-assistant` | always | Meta read + write, Google read, analysis, maps, ambient, integration read + write, capability, Google Workspace, Google write-plan | read |
-| `meta-ads-agent` | always | Meta read + write, integration read, capability | read |
-| `knowledge-agent` | always | capability only — retrieval already happened in the orchestrator, so it holds no search tool on purpose | read |
-| `analytics-agent` | always | Meta read, Google read, analysis, integration read, capability — no writes | read |
-| `google-ads-agent` | when `google.accounts` is registered | Google read, integration read + write, capability, Google Workspace, Google write-plan | read |
-| `automation-agent` | when `n8n.trigger` is registered | `n8n.trigger`, integration read, capability | read + write |
-| `communication-agent` | when `whatsapp.send` is registered | `whatsapp.send`, integration read, capability | read + write |
-| `browser-agent` | when `browser.navigate` is registered | browser read + action, capability | read + write |
-| `location-agent` | when `maps.route` is registered (effectively always) | maps, integration read, capability | read |
+| `conversational-assistant` | always | Meta read + write, Google read, analysis, maps, ambient, integration read + write, capability, self, task, Google Workspace, Google write-plan, memory read, MCP | read |
+| `meta-ads-agent` | always | Meta read + write, integration read, capability, self | read |
+| `knowledge-agent` | always | capability and self only — retrieval already happened in the orchestrator, so it holds no search tool on purpose | read |
+| `analytics-agent` | always | Meta read, Google read, analysis, integration read, capability, self — no writes | read |
+| `google-ads-agent` | when `google.accounts` is registered | Google read, integration read + write, capability, self, Google Workspace, Google write-plan | read |
+| `automation-agent` | when `n8n.trigger` is registered | `n8n.trigger`, integration read, capability, self | read + write |
+| `communication-agent` | when `whatsapp.send` is registered | `whatsapp.send`, integration read, capability, self | read + write |
+| `browser-agent` | when `browser.navigate` is registered | browser read + action, capability, self | read + write |
+| `location-agent` | when `maps.route` is registered (effectively always) | maps, integration read, capability, self | read |
 
 Every policy sets `writesRequireApproval: true`. The allowlist decides **who may propose** a tool call; the approval boundary decides **whether it runs**. When an integration-backed agent is not registered, the router falls through to the next candidate and the request usually lands on `conversational-assistant`.
 

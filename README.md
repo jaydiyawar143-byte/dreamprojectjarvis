@@ -10,7 +10,7 @@ A conversational assistant for marketing and business work. You talk to it in pl
 | API | Node.js, Express, Socket.IO |
 | Database | PostgreSQL with pgvector, through Prisma |
 | Models and voice | OpenAI (chat, embeddings, vision, speech-to-text, text-to-speech); ElevenLabs text-to-speech |
-| Integrations | Meta Ads, Google Ads, Gmail / Drive / Calendar, Google Maps, WhatsApp Business, n8n, browser automation |
+| Integrations | Meta Ads, Google Ads, Gmail / Drive / Calendar, Google Maps, WhatsApp Business, n8n, browser automation, MCP (two reviewed, read-only tool servers; off unless `JARVIS_MCP_ENABLED=true`) |
 | Monorepo | pnpm workspaces and Turborepo |
 
 ## Repository
@@ -30,6 +30,7 @@ packages/
   ai-openai/  ai-elevenlabs/  ai-anthropic/        model and voice providers
   meta-graph/  google-ads/  google-workspace/
   whatsapp/  n8n/  browser/                        provider clients
+  mcp/                MCP runtime and the reviewed MCP servers
 docs/                 architecture, API, memory, capabilities, development
 ```
 
@@ -50,6 +51,7 @@ Then follow [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md) for the database contai
 | [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) | How the system fits together |
 | [docs/API.md](./docs/API.md) | Every HTTP route |
 | [docs/SKILLS.md](./docs/SKILLS.md) | Agents, tools, and what JARVIS can do |
+| [docs/JARVIS_CAPABILITY_MATRIX.md](./docs/JARVIS_CAPABILITY_MATRIX.md) | Every capability: status, execution path, approval, agent scope, tests |
 | [docs/MEMORY.md](./docs/MEMORY.md) | Memory and document knowledge |
 | [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md) | Setup, environment variables, quality gates |
 | [docs/CODEBASE_AUDIT.md](./docs/CODEBASE_AUDIT.md) | The 2026-09-14 audit and cleanup |
@@ -64,8 +66,12 @@ Then follow [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md) for the database contai
 
 ## Status
 
-Typecheck, lint and build pass across all 18 workspaces. B-1 — six memory end-to-end tests that failed on every run — is fixed. It was a test-harness race, not a production memory bug. The six tests pass, and the API suite passes 1,159 tests with 8 skipped. Since then the Postgres-backed tests have run: `@jarvis/db` 188 passed / 8 failed, the 8 classified as 7 test bugs and 1 stale test (ledger R-4). The full repository suite has not been run. Since 2026-09-14 the production image builds and a fresh database migrates (ledger R-22, R-23). A CI workflow is defined (`.github/workflows/ci.yml`) but has not run on GitHub yet. Details: [docs/CODEBASE_AUDIT.md](./docs/CODEBASE_AUDIT.md).
+As of 2026-10-05, commit `68628c0`. The repository has 19 workspaces: 2 apps and 17 packages.
+
+CI (`.github/workflows/ci.yml`) runs on GitHub on every push to `main` and on every pull request: lint, typecheck and build across all 19 workspaces, the typecheck of the API's test files, the `@jarvis/api`, `@jarvis/memory`, `@jarvis/n8n` and `@jarvis/web` suites, and — against a fresh pgvector database — every migration and the PostgreSQL-backed tests, failing if any of those is skipped. Run 37306626267 passed every step. CI does not block merges: `main` has no branch protection. The other workspaces' tests run only locally, and there is no secret scan or dependency audit yet.
+
+B-1 — six memory end-to-end tests that failed on every run — was fixed on 2026-09-14; it was a test-harness race, not a production memory bug. The eight `@jarvis/db` failures recorded then were test bugs and are fixed (ledger R-4). The production image builds and a fresh database migrates (ledger R-22, R-23). Details: [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md) and [docs/CODEBASE_AUDIT.md](./docs/CODEBASE_AUDIT.md).
 
 ## License
 
-Private — all rights reserved.
+Proprietary — all rights reserved.

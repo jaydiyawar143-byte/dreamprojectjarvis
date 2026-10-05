@@ -364,7 +364,7 @@ A central layer already exists — `getEnv()` and `getServerEnv()` in `packages/
 | File | `.claude/skills/run-jarvis/backups/jarvis-data-20260903-154135.sql` (603 KB) |
 | In git since | commit `7b35c4f`, 2026-09-03 |
 | Pushed | Yes — reachable from `origin/main`. **RUN** |
-| Repository visibility | **NOT VERIFIED** — the GitHub CLI is not installed here |
+| Repository visibility | **NOT VERIFIED** — the GitHub CLI is not installed here. **Update 2026-10-05:** GitHub's public API reports the repository as **public**. Without credentials, commit `7b35c4f` and pull requests 1–3 answer HTTP 200 (status codes only; no content was opened) |
 | Contents, by column name only | `User`: 29 rows — email, name, **password hash**, role, last login. `RefreshToken`: 153 rows — token hash, user agent, **IP address**. `Message`: 215 rows of chat content. `Conversation` 56, `AuditLog` 517, `Approval` 38, `MarketingAccount` 2, `ToolExecution` 18. **RUN** |
 | Real people | 6 users on `gmail.com`; the other 23 are test domains. **RUN** |
 | Depended on by | Nothing. **RUN** |
@@ -396,6 +396,8 @@ Pending write confirmations and the per-IP rate limiter live in memory. For conf
 No pipeline runs tests, secret scanning or dependency audits. SEC-1 is exactly the kind of mistake an automated secret scan catches before it leaves a laptop.
 
 **Update 2026-09-14 — partly addressed, not yet run on GitHub.** `.github/workflows/ci.yml` runs lint, typecheck, build and the `@jarvis/api`, `@jarvis/memory`, `@jarvis/n8n` and `@jarvis/web` tests. It does not yet run the Postgres-backed tests, `typecheck:tests` (ledger R-18), the other workspaces' tests, secret scanning or dependency audits. SEC-7 stays open until the secret scan exists.
+
+**Update 2026-10-05.** The workflow has run on GitHub on every push to `main` since 2026-09-14. It now also gates `typecheck:tests` for `apps/api` (since `1c1c1bd`) and the PostgreSQL-backed tests against a fresh pgvector database (since `68628c0`, run 37306626267). There is still no secret scan or dependency audit, so SEC-7 stays open.
 
 ### SEC-8 — Lint carries no security rules · LOW
 
@@ -1389,8 +1391,8 @@ There is now exactly one memory runtime path, one database client, one JWT verif
 
 | Id | Issue | Severity | Owner action |
 |---|---|---|---|
-| SEC-1 / R-16 | Purged from local history and from GitHub `main` (`ec2e895` → `a0ed04f`, verified), but GitHub still serves the old commits through `refs/pull/1`–`3`, which no push can change | **High** — the repository is private | Send the GitHub Support purge request; reset the passwords of the 6 accounts and revoke their refresh tokens; re-clone any other copy |
-| SEC-7 | No CI, so no automated secret scanning | Medium | Add CI. **Partly addressed 2026-09-14:** workflow written for lint, typecheck, build and four test suites; not yet run on GitHub; still no secret scan or dependency audit |
+| SEC-1 / R-16 | Purged from local history and from GitHub `main` (`ec2e895` → `a0ed04f`, verified), but GitHub still serves the old commits through `refs/pull/1`–`3`, which no push can change | **High** — rated on the premise that the repository is private. **Update 2026-10-05:** that premise no longer holds: GitHub reports the repository as public, and the old commits answer without credentials (status codes checked only). Ledger R-16 rates the exposure Critical; the owner actions are unchanged | Send the GitHub Support purge request; reset the passwords of the 6 accounts and revoke their refresh tokens; re-clone any other copy |
+| SEC-7 | No CI, so no automated secret scanning | Medium | Add CI. **Partly addressed 2026-09-14:** workflow written for lint, typecheck, build and four test suites; not yet run on GitHub; still no secret scan or dependency audit. **Update 2026-10-05:** runs on GitHub on every push; also gates the API's test-file typecheck and the PostgreSQL-backed tests; still no secret scan or dependency audit |
 | SEC-8 | Lint has no security rules | Low | Ratchet rules (R-14) |
 | SEC-5 | Real account identifiers in `apps/api/scripts/phase116b/state.json` | Informational | Mask if preferred |
 | SEC-6 | Per-process confirmation store and IP limiter | Informational, by design | Sticky sessions if ever scaled out |
@@ -1442,11 +1444,11 @@ How **USER → UI → API → JARVIS CORE → SKILL → TOOL / INTEGRATION → R
 Not implemented. In order:
 
 1. **Finish D-1.** History and GitHub `main` were purged on 2026-09-14. Still to do: the GitHub Support request for `refs/pull/1`–`3`, the six password resets, then deleting the local pre-purge bundle.
-2. **Review and merge** `feat/p1-3-eslint`. Its eight commits exist only locally.
+2. **Review and merge** `feat/p1-3-eslint`. Its eight commits exist only locally. **Done** — they are in `main` (`533c1e4`).
 3. **Re-clone any other copy** of this repository. Its history no longer matches GitHub and still contains the dump.
 4. **B-1 — done 2026-09-14.** No action remains. *Historically this item read "Diagnose B-1 — the six failing memory end-to-end tests — before any new memory work."* It was resolved in commit `c48a1a3` (in the current `main`): a test-harness `MockAIProvider` recording race, not a production memory bug. The suite passes 13/13 in three consecutive runs. **Optional follow-up:** PostgreSQL-backed verification of this suite is separate and remains **unverified**.
-5. **Add CI** running typecheck, lint, build, tests and a secret scan on every push.
+5. **Add CI** running typecheck, lint, build, tests and a secret scan on every push. **Partly done** (2026-10-05): CI runs typecheck, lint, build, four suites and the PostgreSQL-backed tests on every push; no secret scan yet, and it does not block merges.
 6. **Decide D-2, D-3, D-4 and D-6** — hero preview, Anthropic adapter, `MemoryEngine`, unregistered tools.
-7. **Refresh the Master Development Document and the capability matrix** to the current system.
+7. **Refresh the Master Development Document and the capability matrix** to the current system. **Partly done** (2026-10-05): the capability matrix is regenerated (version 4.0); the Master Development Document is not.
 8. **Migrate the remaining direct `process.env` reads** in `apps/api` into `packages/config`, keeping tests' ability to inject values.
 9. **Refresh model identifiers** in the AI adapters.
