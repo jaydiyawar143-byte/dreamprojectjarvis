@@ -36,11 +36,13 @@ import {
   type RateLimitPort,
 } from "../src/services/integrations/command-service.js";
 import {
-  __resetConfirmations,
-  consumeConfirmation,
-  issueConfirmation,
+  CONFIRMATION_TTL_MS,
+  createConfirmationService,
+  type ConfirmationPort,
 } from "../src/services/integrations/confirmations.js";
 import { __resetIntegrationChecks } from "../src/services/integration-registry.js";
+import type { ErrorMonitor } from "../src/services/observability/error-monitor.js";
+import { memoryConfirmationStore } from "./helpers/memory-confirmation-store.js";
 
 // ---------------------------------------------------------------------------
 
@@ -107,26 +109,57 @@ function fakeExecutor() {
   return { executor, executed };
 }
 
-function serviceWith(executor?: IToolExecutor) {
+/** A confirmation service over a fresh in-memory store. Nothing is shared between tests. */
+function freshConfirmations(now?: () => Date): ConfirmationPort {
+  return createConfirmationService(memoryConfirmationStore().store, now ? { now } : {});
+}
+
+/**
+ * `confirmations: null` builds the service with NO confirmation store, which is
+ * what a mis-wired deployment would look like.
+ */
+function serviceWith(
+  executor?: IToolExecutor,
+  options: {
+    confirmations?: ConfirmationPort | null;
+    monitor?: ErrorMonitor;
+    rateLimiter?: RateLimitPort;
+    state?: IntegrationStatePort;
+  } = {}
+) {
   const audit = auditLogger();
+  const confirmations =
+    options.confirmations === undefined ? freshConfirmations() : options.confirmations;
   const service = new IntegrationCommandService({
     // Meta connected, so executeAction gets past the connection check and the
     // test is actually exercising the write gate rather than a missing setup.
     credentials: credentialStore({ meta: { accessToken: "t", adAccountId: "act_1" } }),
-    state: stateStore(),
+    state: options.state ?? stateStore(),
     audit: audit as never,
-    rateLimiter: allowAll,
+    rateLimiter: options.rateLimiter ?? allowAll,
     googleConnections: null,
     oauthStates: null,
     googleConfig: () => null,
     mapsUsage: async () => null,
+    ...(confirmations ? { confirmations } : {}),
+    ...(options.monitor ? { monitor: options.monitor } : {}),
     ...(executor ? { executor } : {}),
   });
   return { service, audit };
 }
 
+/** An error monitor that records what it was told. */
+function recordingMonitor() {
+  const captured: Array<{ error: unknown; context?: Record<string, unknown> }> = [];
+  const monitor: ErrorMonitor = {
+    captureException: (error, options) =>
+      void captured.push({ error, ...(options?.context ? { context: options.context } : {}) }),
+    captureMessage: () => undefined,
+  };
+  return { monitor, captured };
+}
+
 beforeEach(() => {
-  __resetConfirmations();
   __resetIntegrationChecks();
 });
 
@@ -276,8 +309,9 @@ describe("a confirmation is bound to what was described", () => {
   });
 
   it("is single use", async () => {
+    const confirmations = freshConfirmations();
     const params = { campaignId: "c-1" };
-    const confirmation = issueConfirmation({
+    const confirmation = await confirmations.issue({
       userId: "u1",
       integration: "meta",
       actionId: "meta.campaign.pause",
@@ -286,14 +320,14 @@ describe("a confirmation is bound to what was described", () => {
       irreversible: true,
     });
 
-    const first = consumeConfirmation({
+    const first = await confirmations.consume({
       token: confirmation.token,
       userId: "u1",
       integration: "meta",
       actionId: "meta.campaign.pause",
       params,
     });
-    const second = consumeConfirmation({
+    const second = await confirmations.consume({
       token: confirmation.token,
       userId: "u1",
       integration: "meta",
@@ -306,8 +340,9 @@ describe("a confirmation is bound to what was described", () => {
   });
 
   it("cannot be used by a different user", async () => {
+    const confirmations = freshConfirmations();
     const params = { campaignId: "c-1" };
-    const confirmation = issueConfirmation({
+    const confirmation = await confirmations.issue({
       userId: "owner",
       integration: "meta",
       actionId: "meta.campaign.pause",
@@ -316,7 +351,7 @@ describe("a confirmation is bound to what was described", () => {
       irreversible: true,
     });
 
-    const stolen = consumeConfirmation({
+    const stolen = await confirmations.consume({
       token: confirmation.token,
       userId: "attacker",
       integration: "meta",
@@ -333,7 +368,8 @@ describe("a confirmation is bound to what was described", () => {
     // order changed the hash, a confirmation issued on one path would never
     // validate on the other — and the two-path parity would break on exactly
     // the actions that matter most.
-    const confirmation = issueConfirmation({
+    const confirmations = freshConfirmations();
+    const confirmation = await confirmations.issue({
       userId: "u1",
       integration: "meta",
       actionId: "meta.campaign.budget.update",
@@ -342,7 +378,7 @@ describe("a confirmation is bound to what was described", () => {
       irreversible: true,
     });
 
-    const consumed = consumeConfirmation({
+    const consumed = await confirmations.consume({
       token: confirmation.token,
       userId: "u1",
       integration: "meta",
@@ -353,9 +389,9 @@ describe("a confirmation is bound to what was described", () => {
     expect(consumed.ok).toBe(true);
   });
 
-  it("rejects an unknown token", () => {
+  it("rejects an unknown token", async () => {
     expect(
-      consumeConfirmation({
+      await freshConfirmations().consume({
         token: "made-up",
         userId: "u1",
         integration: "meta",
@@ -363,6 +399,225 @@ describe("a confirmation is bound to what was described", () => {
         params: {},
       })
     ).toMatchObject({ ok: false, reason: "unknown" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 13 — the confirmation is durable state now, and the gate has to stay
+// shut whenever that state cannot vouch for a write.
+// ---------------------------------------------------------------------------
+
+describe("the write gate fails closed", () => {
+  const pause = {
+    command: "executeAction" as const,
+    integration: "meta" as const,
+    actionId: "meta.campaign.pause",
+    actionParams: { campaignId: "c-77" },
+  };
+  const frontend = { userId: "u1", source: "frontend" as const };
+
+  it("refuses an external write when no confirmation store is wired", async () => {
+    const { executor, executed } = fakeExecutor();
+    const { service } = serviceWith(executor, { confirmations: null });
+
+    const result = await service.execute(pause, frontend);
+
+    expect(result.ok).toBe(false);
+    expect((result as { code: string }).code).toBe("UNSUPPORTED_COMMAND");
+    // No token is handed out for a confirmation that could never be honoured.
+    expect((result as { confirmationRequired?: unknown }).confirmationRequired).toBeUndefined();
+    expect(executed).toHaveLength(0);
+  });
+
+  it("refuses it even when a token is supplied, with no store to check it against", async () => {
+    const { executor, executed } = fakeExecutor();
+    const { service } = serviceWith(executor, { confirmations: null });
+
+    const result = await service.execute({ ...pause, confirmationToken: "anything" }, frontend);
+
+    expect(result.ok).toBe(false);
+    expect(executed).toHaveLength(0);
+  });
+
+  it("still runs a read action without a confirmation store", async () => {
+    const { executor, executed } = fakeExecutor();
+    const { service } = serviceWith(executor, { confirmations: null });
+
+    const result = await service.execute(
+      { command: "executeAction", integration: "meta", actionId: "meta.campaigns", actionParams: {} },
+      frontend
+    );
+
+    expect(result.ok).toBe(true);
+    expect(executed).toHaveLength(1);
+  });
+
+  it("does not ask for confirmation when the store cannot record one", async () => {
+    const { executor, executed } = fakeExecutor();
+    const { service, audit } = serviceWith(executor, {
+      confirmations: {
+        issue: async () => {
+          throw new Error("connect ECONNREFUSED 10.0.0.5:5432");
+        },
+        consume: async () => ({ ok: true }),
+      },
+    });
+
+    const result = await service.execute(pause, frontend);
+
+    expect(result.ok).toBe(false);
+    expect((result as { code: string }).code).toBe("INTERNAL_ERROR");
+    // The driver's text names a host and a port; none of it reaches the caller.
+    expect(JSON.stringify(result)).not.toContain("10.0.0.5");
+    expect(executed).toHaveLength(0);
+    expect(audit.rows.at(-1)).toMatchObject({ action: "integration.executeAction", result: "failure" });
+  });
+
+  it("does not run the write when the store cannot verify the token", async () => {
+    const { executor, executed } = fakeExecutor();
+    const { service } = serviceWith(executor, {
+      confirmations: {
+        issue: freshConfirmations().issue,
+        consume: async () => {
+          throw new Error("connection reset");
+        },
+      },
+    });
+
+    const result = await service.execute({ ...pause, confirmationToken: "anything" }, frontend);
+
+    expect(result.ok).toBe(false);
+    expect((result as { code: string }).code).toBe("INTERNAL_ERROR");
+    expect(executed).toHaveLength(0);
+  });
+
+  it("reports a failure nobody expected to the error monitor — once, by identifier only", async () => {
+    const { executor, executed } = fakeExecutor();
+    const { monitor, captured } = recordingMonitor();
+    const { service, audit } = serviceWith(executor, {
+      monitor,
+      confirmations: {
+        issue: freshConfirmations().issue,
+        consume: async () => {
+          throw new Error("connect ECONNREFUSED 10.0.0.5:5432");
+        },
+      },
+    });
+    // The audit trail is unreachable too: the monitor is then the ONLY record.
+    audit.log.mockRejectedValue(new Error("audit store is down"));
+
+    const result = await service.execute(
+      { ...pause, actionParams: { campaignId: "c-PRIVATE-77" }, confirmationToken: "tok-PRIVATE-88" },
+      { ...frontend, traceId: "trace-9" }
+    );
+
+    expect((result as { code: string }).code).toBe("INTERNAL_ERROR");
+    expect(executed).toHaveLength(0);
+    expect(captured).toHaveLength(1);
+    expect((captured[0]!.error as Error).message).toBe("connect ECONNREFUSED 10.0.0.5:5432");
+    expect(captured[0]!.context).toEqual({
+      component: "integrations",
+      command: "executeAction",
+      integration: "meta",
+      traceId: "trace-9",
+    });
+    // Identifiers only: nothing the user sent rides along.
+    expect(JSON.stringify(captured[0]!.context)).not.toMatch(/PRIVATE/);
+  });
+
+  // With the database down, the FIRST thing that fails is the rate limiter: it
+  // counts audit rows. A command that rejected there left the HTTP request with
+  // no answer at all. The entry point always answers.
+  it("answers — and runs nothing — when the rate limiter cannot be asked", async () => {
+    const { executor, executed } = fakeExecutor();
+    const { monitor, captured } = recordingMonitor();
+    const { service } = serviceWith(executor, {
+      monitor,
+      rateLimiter: {
+        check: async () => {
+          throw new Error("Server has closed the connection.");
+        },
+      },
+    });
+
+    const result = await service.execute(pause, frontend);
+
+    expect(result.ok).toBe(false);
+    expect((result as { code: string }).code).toBe("INTERNAL_ERROR");
+    expect((result as { confirmationRequired?: unknown }).confirmationRequired).toBeUndefined();
+    expect(executed).toHaveLength(0);
+    expect(captured).toHaveLength(1);
+    expect(captured[0]!.context).toMatchObject({ command: "executeAction", integration: "meta" });
+  });
+
+  it("answers when the list of integrations cannot be read", async () => {
+    const { monitor, captured } = recordingMonitor();
+    const broken: IntegrationStatePort = {
+      get: async () => {
+        throw new Error("Server has closed the connection.");
+      },
+      patch: async () => {
+        throw new Error("Server has closed the connection.");
+      },
+      clear: async () => undefined,
+    };
+    const { service } = serviceWith(undefined, { monitor, state: broken });
+
+    const result = await service.execute({ command: "list", integration: null }, frontend);
+
+    expect(result.ok).toBe(false);
+    expect((result as { code: string }).code).toBe("INTERNAL_ERROR");
+    expect(JSON.stringify(result)).not.toContain("closed the connection");
+    expect(captured).toHaveLength(1);
+    expect(captured[0]!.context).toEqual({ component: "integrations", command: "list" });
+  });
+
+  it("does not report an ordinary refusal to the error monitor", async () => {
+    const { executor } = fakeExecutor();
+    const { monitor, captured } = recordingMonitor();
+    const { service } = serviceWith(executor, { monitor });
+
+    // Asked without a confirmation, then confirmed with a made-up token, then by voice.
+    await service.execute(pause, frontend);
+    await service.execute({ ...pause, confirmationToken: "made-up" }, frontend);
+    const spoken = await service.execute(pause, { userId: "u1", source: "jarvis", voice: true });
+
+    expect((spoken as { message: string }).message).toMatch(/voice/i);
+    expect(captured).toHaveLength(0);
+  });
+
+  it("runs a double-submitted confirmation exactly once", async () => {
+    const { executor, executed } = fakeExecutor();
+    const { service } = serviceWith(executor);
+
+    const first = await service.execute(pause, frontend);
+    const token = (first as { confirmationRequired: { token: string } }).confirmationRequired.token;
+
+    const attempts = await Promise.all(
+      Array.from({ length: 10 }, () => service.execute({ ...pause, confirmationToken: token }, frontend))
+    );
+
+    expect(attempts.filter((attempt) => attempt.ok)).toHaveLength(1);
+    expect(executed).toHaveLength(1);
+    for (const refused of attempts.filter((attempt) => !attempt.ok)) {
+      expect((refused as { code: string }).code).toBe("CONFIRMATION_REQUIRED");
+    }
+  });
+
+  it("says a confirmation has expired, and does not run it", async () => {
+    const { executor, executed } = fakeExecutor();
+    let current = new Date("2026-10-06T08:00:00.000Z");
+    const { service } = serviceWith(executor, { confirmations: freshConfirmations(() => current) });
+
+    const first = await service.execute(pause, frontend);
+    const token = (first as { confirmationRequired: { token: string } }).confirmationRequired.token;
+
+    current = new Date(current.getTime() + CONFIRMATION_TTL_MS);
+    const late = await service.execute({ ...pause, confirmationToken: token }, frontend);
+
+    expect(late.ok).toBe(false);
+    expect((late as { message: string }).message).toMatch(/has expired/i);
+    expect(executed).toHaveLength(0);
   });
 });
 

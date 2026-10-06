@@ -205,7 +205,7 @@ Ten write planners exist and no write executors: the tools handed to the model c
 | Review granted permissions, read the integration audit trail | Implemented | as above | None | every agent except Knowledge and Browser | `integration-control-center` |
 | Connect, configure, reconnect, enable or disable an account | Implemented | as above; writes only to JARVIS's own encrypted store | — | GA, Google Ads | `integration-write-security` |
 | Disconnect an account | Approval required | as above | approval | GA, Google Ads | `integration-write-security` |
-| An integration action that writes outside JARVIS | Implemented | `IntegrationCommandService` refuses it unless the integration is connected, then demands a confirmation and hands it to `ToolExecutor` | confirmation — two minutes, single use, bound to the exact parameters; never by voice | through the integration tools and the Integrations page | `integration-write-security` |
+| An integration action that writes outside JARVIS | Implemented | `IntegrationCommandService` refuses it unless the integration is connected, then demands a confirmation and hands it to `ToolExecutor`. The confirmation is a PostgreSQL row since Phase 13, so it survives a restart and any API instance can honour it; with no store, or an unreachable one, the write is refused | confirmation — two minutes, single use, bound to the exact parameters; never by voice | through the integration tools and the Integrations page | `integration-write-security`, `confirmation-service`, `confirmation-durable-pg.integration`, `phase13-confirmation-pg.integration` |
 | Report what JARVIS can currently do | Implemented | `capabilities.*` tools, answered from the live tool registry, not from a written list | None | All | `capability-discovery`, `capability-routing-e2e` |
 | Report what JARVIS is — build, environment, model | Implemented | `self.describe`, derived from the running process | None | All | `sprint6-agent-wiring` |
 | Mistake detection and self-diagnosis | Partially implemented | JARVIS classifies its own failures and says what failed | — | — | — |
@@ -262,5 +262,5 @@ Listed because they are commonly assumed. None of these exist in this repository
 ---
 
 *Document version: 4.0 — regenerated in the Phase 12 documentation reconciliation (backlog A-7, ledger R-2): added work tasks and scheduling, memory learning and management (S7.2), evaluation (S5, S6), the write-intent gate and MCP (S8), and the Execution Path, Approval, Agent Scope and Tested columns.*
-*Verified against the repository on 2026-10-05, commit `68628c0`.*
+*Verified against the repository on 2026-10-05, commit `68628c0`. Phase 13 (2026-10-06) changed one row: an integration action's confirmation is now durable.*
 *Previous versions: 3.1 (2026-09-17, ledger P0-3 and R-33); 2.0 (2026-09-02), which described the Meta-era pipeline only.*

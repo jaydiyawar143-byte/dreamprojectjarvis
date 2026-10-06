@@ -227,6 +227,26 @@ const PUBLISHED_SECRETS: readonly string[] = [
  */
 const PUBLISHED_OPENAI_KEYS: readonly string[] = ["sk-your-openai-api-key"];
 
+/**
+ * The database URL placeholder committed in `.env.example`.
+ *
+ * It is a well-formed PostgreSQL URL, so the shape check below accepts it. A
+ * production process running on it would start, then fail at its first query.
+ */
+const PUBLISHED_DATABASE_URLS: readonly string[] = [
+  "postgresql://user:password@localhost:5432/jarvis?schema=public",
+];
+
+/** Whether a value is a PostgreSQL connection URL that names a host. */
+function isPostgresUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return (url.protocol === "postgresql:" || url.protocol === "postgres:") && url.hostname !== "";
+  } catch {
+    return false;
+  }
+}
+
 /** Rough entropy check: a long run of one repeated character is not a secret. */
 function looksLikePlaceholder(secret: string): boolean {
   const normalized = secret.trim().toLowerCase();
@@ -276,6 +296,26 @@ export function checkProductionConfig(
       field: "OPENAI_API_KEY",
       problem: "is the placeholder from .env.example, not a real key",
     });
+  }
+
+  // Phase 13 — PostgreSQL holds the confirmations as well as the approvals and
+  // the execution journal, so nothing durable works without it. A value that is
+  // plainly not a PostgreSQL URL is refused here, by name, instead of surfacing
+  // at the first query as a driver error. A MISSING value is already refused by
+  // the schema; the problem text never repeats the value, which holds a password.
+  const databaseUrl = env.DATABASE_URL?.trim();
+  if (databaseUrl) {
+    if (PUBLISHED_DATABASE_URLS.includes(databaseUrl)) {
+      problems.push({
+        field: "DATABASE_URL",
+        problem: "is the placeholder from .env.example, not a real database",
+      });
+    } else if (!isPostgresUrl(databaseUrl)) {
+      problems.push({
+        field: "DATABASE_URL",
+        problem: "must be a postgresql:// connection URL that names a host",
+      });
+    }
   }
 
   const corsOrigin = env.CORS_ORIGIN;

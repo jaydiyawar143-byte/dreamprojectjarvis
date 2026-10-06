@@ -416,6 +416,41 @@ export interface IntegrationConfirmation {
   irreversible: boolean;
 }
 
+/**
+ * A confirmation as it is stored (Phase 13).
+ *
+ * There is no token here and no parameter: the store keeps a SHA-256 of the
+ * token and the canonical hash of the parameters. A copy of the table — a
+ * backup, a dump — therefore cannot confirm anything, and holds nothing the
+ * user typed.
+ */
+export interface ConfirmationRecord {
+  id: string;
+  userId: string;
+  integration: string;
+  actionId: string;
+  paramsHash: string;
+  expiresAt: Date;
+}
+
+/**
+ * Durable confirmation state, shared by every API instance.
+ *
+ * `consume` is the whole safety property: of any number of concurrent callers
+ * presenting one token, exactly one is given the record. Everything else — who
+ * may use it, whether it has expired — is judged afterwards, by that one caller.
+ */
+export interface IConfirmationRepository {
+  create(record: Omit<ConfirmationRecord, "id"> & { tokenHash: string }): Promise<{ id: string }>;
+  /**
+   * Atomically takes the pending confirmation with this token hash out of play
+   * and returns it. Null when there is none: unknown, or already consumed.
+   */
+  consume(tokenHash: string, now: Date): Promise<ConfirmationRecord | null>;
+  /** Housekeeping: removes confirmations that expired before `cutoff`. */
+  deleteExpiredBefore(cutoff: Date): Promise<number>;
+}
+
 // ---------------------------------------------------------------------------
 // Command arguments
 // ---------------------------------------------------------------------------

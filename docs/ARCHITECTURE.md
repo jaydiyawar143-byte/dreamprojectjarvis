@@ -1,6 +1,6 @@
 # JARVIS Architecture
 
-How the system is built today. Verified against the code on 2026-10-05, commit `68628c0`.
+How the system is built today. Verified against the code on 2026-10-05, commit `68628c0`; the Phase 13 parts — durable confirmations, health, the operational log and error monitor, deployment — on 2026-10-06.
 
 - For the marketing-intelligence pipeline (analysis → recommendation → approval → outcome) and its phase-by-phase history, see [JARVIS_ARCHITECTURE.md](./JARVIS_ARCHITECTURE.md).
 - The superseded first architecture document is kept at [archive/ARCHITECTURE_LEGACY_2026-08.md](./archive/ARCHITECTURE_LEGACY_2026-08.md). It describes Fastify and Redis; neither is used.
@@ -24,7 +24,8 @@ JARVIS is a pnpm + Turborepo monorepo of 19 workspaces: 2 apps and 17 packages. 
 | Tools | `packages/tools` | Registry, `ToolExecutor`, execution journal, output sanitiser, `AnalysisGenerator` — the shared on-demand account analysis service behind both `POST /api/v1/analysis` and the `meta.analyze` tool |
 | Provider integrations | `packages/ai-openai`, `ai-elevenlabs`, `meta-graph`, `google-ads`, `google-workspace`, `whatsapp`, `n8n`, `browser`, `mcp` | One package per provider. `ai-anthropic` exists but is not wired. `mcp` is the MCP runtime and the only home of the MCP SDK ([its README](../packages/mcp/README.md)) |
 | Widget data | `apps/api/src/services/providers` | Weather, markets, geo, system monitor — used only by the API |
-| Database | `packages/db` | Prisma schema (27 models), 27 migrations, repositories, the single `PrismaClient` |
+| Database | `packages/db` | Prisma schema (28 models), 28 migrations, repositories, the single `PrismaClient` |
+| Operational log and error monitor | `apps/api/src/services/observability` | One of each per process; see Observability below |
 | Security | `packages/security` | scrypt passwords, JWT, AES-256-GCM encryption, RBAC, approvals, audit |
 | Configuration | `packages/config` | Plus a `config.ts` in each integration package ([DEVELOPMENT.md](./DEVELOPMENT.md)) |
 | Generic utilities | `packages/core/src/utils` | Parameter hashing, secret redaction, identifier masking |
@@ -83,9 +84,11 @@ Two gates stand in front of one execution authority.
 
 | Gate | Code | State | Lifetime | Bound to |
 |---|---|---|---|---|
-| Confirmation | `apps/api/src/services/integrations/confirmations.ts` | Process memory, deliberately — persisting it would create a replayable permit | 2 minutes, single use | user, integration, action, parameters |
+| Confirmation | `apps/api/src/services/integrations/confirmations.ts`, `Confirmation` table | PostgreSQL — a SHA-256 of the token and a hash of the parameters, never the token or anything the user typed | 2 minutes, single use, spent by one conditional `UPDATE` | user, integration, action, parameters |
 | Approval | `packages/security`, `Approval` table | PostgreSQL | 10 minutes, consumed atomically with the execution claim | user, tool, parameters |
 
+- A confirmation is durable since Phase 13. It used to be a Map in one process, kept out of the database so that it could not become a stored, replayable permit — at the cost that a restart lost a pending confirmation and a second API instance could not honour it. The table answers that objection rather than ignoring it: it holds no token to replay, spending is atomic so one of any number of presenters wins, and the two-minute lifetime is unchanged.
+- With no confirmation store wired, or with the store unreachable, an external write is refused. Nothing falls back to process memory.
 - Both gates hash parameters with the same canonical function, `computeParamsHash` in `packages/core`, which sorts keys at every depth.
 - The integration command service **gates** an action and hands it to `ToolExecutor`, which **executes** it. Nothing calls a provider write directly. `AGENTS.md` sets out the rules.
 - Google write tools only **plan**: they create an approval row. The write runs when a person approves that row.
@@ -145,16 +148,21 @@ the reviewed stdio server — packages/mcp/pilot: `dates` and `units`, read-only
 
 - Every request carries an id (`middleware/request-id.ts`) and produces one access-log line in morgan's combined layout, with credential-bearing query values redacted (`middleware/access-log.ts`).
 - Every tool execution is journalled (`ToolExecution`) and audited (`AuditLog`).
-- `/api/v1/health`, `/live` and `/ready` report lifecycle state truthfully during shutdown.
+- `/api/v1/health`, `/live` and `/ready` report lifecycle state truthfully during shutdown. The web app answers `/healthz` for itself. What each one means to a monitor is in [DEPLOYMENT.md](./DEPLOYMENT.md).
+- Operational events — start-up, shutdown, a failed request, a confirmation — are one JSON line each, written through `apps/api/src/services/observability/operational-log.ts`: a timestamp, the service and component, the event, and the audit system's redaction applied before the line leaves the process.
+- An error nobody handled is reported to the error monitor, `apps/api/src/services/observability/error-monitor.ts`: a request that threw and was answered `5xx`, an unhandled rejection, an integration command that failed in a way nothing expected (an unreachable confirmation store among them), a failed shutdown step. Where a report goes is a sink. The one that ships writes a `monitor_exception` log line, so nothing depends on a monitoring service; a hosted one would be another sink behind the same interface.
 
 ## Deployment
 
-One Docker image (`node:24-alpine`, runs as the `node` user) serves both the API and the web app. `docker-compose.yml` runs PostgreSQL with pgvector, the API and the web app on ports 5433, 3101 and 3100, so a local development stack on 5432, 3001 and 3000 can run beside it with its own database. The API applies migrations when it starts. CI, `.github/workflows/ci.yml`, runs on GitHub on every push to `main` and on every pull request — see [DEVELOPMENT.md](./DEVELOPMENT.md). Every tracked text file is stored and checked out with LF (`.gitattributes`), so a source snippet spanning a line break and a Prisma migration checksum mean the same thing on every platform — ledger R-20.
+One Docker image (`node:24-alpine`, runs as the `node` user) serves both the API and the web app. `docker-compose.yml` runs PostgreSQL with pgvector, the API and the web app on ports 5433, 3101 and 3100, so a local development stack on 5432, 3001 and 3000 can run beside it with its own database. The API applies migrations when it starts. All three containers have a health check, and Docker gives the API 40 seconds to stop — longer than the 30-second grace period the API gives work that is already running, so that grace period is real. Shutdown always finishes: open requests get what is left of the grace period and are then closed. How to deploy, verify and roll back is in [DEPLOYMENT.md](./DEPLOYMENT.md). CI, `.github/workflows/ci.yml`, runs on GitHub on every push to `main` and on every pull request — see [DEVELOPMENT.md](./DEVELOPMENT.md). Every tracked text file is stored and checked out with LF (`.gitattributes`), so a source snippet spanning a line break and a Prisma migration checksum mean the same thing on every platform — ledger R-20.
 
 ## Known gaps
 
 - `@jarvis/ai-anthropic` is built and not wired.
 - `MemoryEngine` is tested and not used at runtime.
+- The structured operational log covers start-up, shutdown, failed requests, confirmations, the two background loops and error reports. Everything else still writes its own JSON line without a timestamp, and the request log is text.
+- No hosted error monitor is configured. Reports are `monitor_exception` log lines until a sink for one is added.
+- The per-IP rate limiter and the provider circuit breaker are still per process. Confirmations no longer are.
 - Five tool classes are tested but never registered — including `data.csv.analyze`, which two agents are granted. See [SKILLS.md](./SKILLS.md).
 - CI does not run the other workspaces' tests, secret scanning or dependency audits, and `typecheck:tests` exists only in `apps/api`. Merges into `main` do wait for it: the active GitHub ruleset "Protect main" requires a pull request whose CI check has passed on an up-to-date branch — [DEVELOPMENT.md](./DEVELOPMENT.md).
 - Without `OPENAI_API_KEY` a development API runs with chat switched off: every message answers 503 `AI_PROVIDER_NOT_CONFIGURED`, while `GET /api/v1/agents` still lists the agents. Production refuses to start without the key — ledger R-21.

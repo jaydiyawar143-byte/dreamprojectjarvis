@@ -107,6 +107,12 @@ services:
       timeout: 5s
       retries: 12
       start_period: 40s
+    # Phase 13 — how long Docker waits between asking this container to stop
+    # and killing it. The API gives work that is already running
+    # JARVIS_SHUTDOWN_GRACE_MS (30s unless set) to finish, then releases its
+    # resources. Docker's own default is 10s, which would cut that short every
+    # time; this has to stay LONGER than the grace period, with room to spare.
+    stop_grace_period: 40s
     restart: unless-stopped
 
   web:
@@ -128,6 +134,15 @@ services:
     command: ["pnpm", "--filter", "@jarvis/web", "exec", "next", "start", "--hostname", "0.0.0.0", "--port", "3000"]
     ports:
       - "3100:3000"
+    healthcheck:
+      # Phase 13 — the web app answers for itself, and only for itself: the
+      # browser calls the API directly, so this server needs nothing behind it
+      # to serve a page. The API has its own check above.
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
     restart: unless-stopped
 
 volumes:

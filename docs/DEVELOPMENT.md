@@ -63,6 +63,8 @@ If the container already exists, `docker start jarvis-postgres` keeps its data.
 
 The two stacks are deliberately side by side. Set `AUTH_COOKIE_NAME` differently for each, because cookies ignore the port.
 
+Deploying the Docker stack, checking that it is healthy, rolling it back and monitoring it are in [DEPLOYMENT.md](./DEPLOYMENT.md).
+
 ## Quality gates
 
 Run all four before calling a change done.
@@ -89,9 +91,9 @@ pnpm --filter @jarvis/api exec vitest run test/access-log.test.ts
 pnpm --filter @jarvis/api exec vitest run test/sprint-1.1d-memory-e2e.test.ts -t "TEST (A|B|C|G|N):|TEST E & TEST F:"
 ```
 
-On 2026-09-14 that command gave `6 passed | 7 skipped` in three consecutive runs, and the whole API suite passed 1,159 tests with 8 skipped. Both used the in-process memory store because Postgres was not running. Only the API and `@jarvis/memory` suites were re-run after the fix; the file has since also passed 13/13 against Postgres. The full repository suite remains unverified.
+On 2026-09-14 that command gave `6 passed | 7 skipped` in three consecutive runs, and the whole API suite passed 1,159 tests with 8 skipped. Both used the in-process memory store because Postgres was not running. Only the API and `@jarvis/memory` suites were re-run after the fix; the file has since also passed 13/13 against Postgres. The full repository suite was run on 2026-10-06 (Phase 13), one workspace at a time: 7,668 tests passed without a database across 18 workspaces, with the 80 database-backed ones skipping themselves, and those and `@jarvis/db` then passed against a fresh database (below). None failed.
 
-**`@jarvis/db` tests** need PostgreSQL with pgvector. Point `DATABASE_URL` at a separate test database, never the development one: the tests insert and delete rows. On 2026-09-14 they gave 188 passed / 8 failed. The 8 were 7 test bugs and 1 stale test, classified in the ledger (R-4) and fixed in test code on 2026-09-16. One more test, `phase102` crash recovery, failed once in seven runs that day; its cause was not established. **Today** they give 223 passed / 0 failed on a fresh throwaway pgvector database (20 files, 2026-10-05), and CI runs them on every push — see "PostgreSQL-backed tests" below. A fresh database migrates cleanly since `39b190d` (R-22).
+**`@jarvis/db` tests** need PostgreSQL with pgvector. Point `DATABASE_URL` at a separate test database, never the development one: the tests insert and delete rows. On 2026-09-14 they gave 188 passed / 8 failed. The 8 were 7 test bugs and 1 stale test, classified in the ledger (R-4) and fixed in test code on 2026-09-16. One more test, `phase102` crash recovery, failed once in seven runs that day; its cause was not established. **Today** they give 234 passed / 0 failed on a fresh throwaway pgvector database (21 files, 2026-10-06), and CI runs them on every push — see "PostgreSQL-backed tests" below. A fresh database migrates cleanly since `39b190d` (R-22).
 
 **Load-sensitive timing tests (observed 2026-10-05).** In full local runs of the `@jarvis/api` suite on Windows, two S8 MCP timing tests failed occasionally: `mcp-pilot-failures-s8` › "timeout: ToolExecutor's deadline ends the call…" in 2 of 2 full runs with a database (the 500 ms deadline fell while the server was still starting), and `mcp-integration-s8` › "is ERROR — timed out — when a running server stops answering" in 1 of 2 full runs without one. Run alone, the first passed 5 of 5. GitHub CI is green. No deterministic failure has been established, and neither test is marked flaky — ledger R-5.
 
@@ -123,6 +125,8 @@ Those files skip themselves when they cannot reach a database, and vitest counts
 A new database-backed test in `apps/api` or `packages/memory` must be named `*-pg.integration.test.ts`: CI selects those files by that name. Every `@jarvis/db` test runs.
 
 The PostgreSQL steps were added on 2026-10-05 and replayed locally, in order, on a fresh container of the pinned image: 27 migrations applied; `@jarvis/db` 223/223, `@jarvis/memory` 61/61, `@jarvis/api` 25/25; nothing skipped. Those counts are local. On GitHub the steps first ran in run 37306626267 (commit `68628c0`): the service started, every migration applied, the three database steps and the skip check passed. The skip check passing there means each report existed, held tests and skipped none; GitHub's job logs need admin access, so the exact counts were not read from GitHub.
+
+Phase 13 (2026-10-06) added one migration and two database test files, and needed no change to the workflow: the new files are picked up by the names above. The same local replay then gave 28 migrations applied; `@jarvis/db` 234/234, `@jarvis/memory` 61/61, `@jarvis/api` 32/32; nothing skipped. Those are local counts too, taken before that change's own GitHub run.
 
 **Protected `main`.** Since 2026-10-05 the active GitHub ruleset "Protect main" applies to `main`, the default branch, and GitHub reports it as protected:
 

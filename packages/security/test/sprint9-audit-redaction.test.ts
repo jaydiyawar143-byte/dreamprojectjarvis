@@ -166,4 +166,14 @@ describe("Sprint 9.8 — the redactor itself", () => {
     const output = redactAuditParams({ count: 42, ok: true, missing: null });
     expect(output).toEqual({ count: 42, ok: true, missing: null });
   });
+
+  // Phase 13 — a write-confirmation token is a credential for one external
+  // action. It has no recognisable shape, so only its name can catch it.
+  it("removes a write-confirmation token by its name", () => {
+    const token = "V2hhdGV2ZXJUaGlzVG9rZW5Jc0l0TXVzdE5vdExlYWs";
+    const output = redactAuditParams({ body: { confirmationToken: token } });
+
+    expect(JSON.stringify(output)).not.toContain(token);
+    expect(output).toEqual({ body: { confirmationToken: "[REDACTED]" } });
+  });
 });

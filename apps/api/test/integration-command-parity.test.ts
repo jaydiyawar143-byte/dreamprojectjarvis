@@ -34,7 +34,6 @@ import {
 } from "../src/services/integrations/command-service.js";
 import { createIntegrationTools, type IntegrationCommandPort } from "@jarvis/tools";
 import { __resetIntegrationChecks } from "../src/services/integration-registry.js";
-import { __resetConfirmations } from "../src/services/integrations/confirmations.js";
 import { MASK } from "../src/services/integrations/config-validation.js";
 
 // ---------------------------------------------------------------------------
@@ -171,7 +170,6 @@ function toolNamed(service: IntegrationCommandService, id: string) {
 
 beforeEach(() => {
   __resetIntegrationChecks();
-  __resetConfirmations();
 });
 
 // ---------------------------------------------------------------------------

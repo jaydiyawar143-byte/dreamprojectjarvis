@@ -150,6 +150,7 @@ import { MCP_MANIFEST, validateMcpManifest, type McpManifest } from "@jarvis/cor
 import { McpConnection, isMcpEnabled } from "@jarvis/mcp";
 import { createMcpTools } from "@jarvis/tools";
 import { buildIntegrationCommandService } from "./integrations/build.js";
+import { errorMonitor, operationalLog } from "./observability/index.js";
 import { mcpToolUnavailable } from "./integration-registry.js";
 
 export interface Container {
@@ -937,6 +938,10 @@ export function getContainer(options?: {
     prisma,
     auditLogger,
     mcp: mcpIntegrationRuntime,
+    // Phase 13 — the command service and its confirmation store report through
+    // the process's one log and one monitor.
+    log: operationalLog,
+    monitor: errorMonitor,
   });
 
   // Capability discovery composes three things that already exist: the tool

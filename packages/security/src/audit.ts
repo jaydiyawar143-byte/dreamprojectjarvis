@@ -40,6 +40,8 @@ const SENSITIVE_PARAM_KEYS = new Set([
   "cookie",
   "Cookie",
   "sessionToken",
+  // Phase 13 — the write-confirmation token: no recognisable shape, so by name.
+  "confirmationToken",
   "codeVerifier",
   "code_verifier",
   "privateKey",

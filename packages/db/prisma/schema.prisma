@@ -91,6 +91,7 @@ model User {
   n8nWorkflows      N8nWorkflow[]
   n8nExecutions     N8nExecution[]
   tasks             Task[]
+  confirmations     Confirmation[]
 }
 
 model RefreshToken {
@@ -430,6 +431,42 @@ model OAuthState {
 
   @@index([expiresAt])
   @@map("OAuthState")
+}
+
+// Phase 13 — a pending confirmation of one external write.
+//
+// The integration command service describes a write, the user confirms it, and
+// the confirmation is spent as the write is handed to ToolExecutor. This row is
+// that confirmation, shared by every API instance and surviving a restart.
+//
+//   - `tokenHash` is the SHA-256 of the token. The token is NEVER stored, so a
+//     copy of this table cannot confirm anything.
+//   - `paramsHash` is the canonical hash of the parameters. No parameter value
+//     and no summary is stored: nothing the user typed lives here.
+//   - `consumedAt` IS the state. NULL means pending; set means spent. Spending
+//     is one conditional UPDATE on that column, which is what lets exactly one
+//     of any number of concurrent presenters win. A pending row past
+//     `expiresAt` is simply expired — that is derived, never written.
+//
+// Rows are operational state, not history: the audit log is the record, and a
+// row is deleted about a day after it expires.
+model Confirmation {
+  id          String    @id @default(cuid())
+  tokenHash   String    @unique @map("token_hash")
+  userId      String    @map("user_id")
+  /// Integration id, e.g. "meta".
+  integration String
+  actionId    String    @map("action_id")
+  paramsHash  String    @map("params_hash")
+  expiresAt   DateTime  @map("expires_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  consumedAt  DateTime? @map("consumed_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// For the clear-out of rows that expired a day ago.
+  @@index([expiresAt])
+  @@map("Confirmation")
 }
 
 // Phase 10.1 — Durable execution journal.

@@ -95,6 +95,13 @@ Plan → Explain → Confirm → Execute → Audit → Verify → Report
 - The confirmation token is bound to `(user, integration, action, params-hash)`,
   so a confirmation for one campaign cannot be replayed against another.
 - It is single-use and expires in two minutes.
+- It is stored in PostgreSQL (`Confirmation`), as a SHA-256 of the token — never
+  the token, a parameter or the summary — so it survives a restart and is shared
+  by every API instance. Spending it is ONE conditional `UPDATE`. Never read it,
+  check it in application memory and then write: two requests would both pass
+  the check.
+- If the confirmation store is missing or cannot be reached, the write is
+  refused. There is no in-memory fallback, and none may be added.
 - **A voice session cannot confirm a write at all.** Speech is a fine way to ask
   for one and not a fine way to authorize one.
 
@@ -107,6 +114,30 @@ explicit user decision. Never request every Google scope at initial login.
 
 Authorization decisions read **granted** scopes, never requested ones: Google
 may grant fewer than were asked for.
+
+### Operational logs and errors
+
+- An operational event — start-up, shutdown, a failed request, anything a
+  deployment is followed by — is written through the operational log in
+  `apps/api/src/services/observability`, not with a bare `console.log`. It adds
+  the timestamp, the service and component, and the audit system's redaction.
+- An error nobody handled is reported to the error monitor in the same folder.
+  Its context is identifiers — a component, an operation, a trace id — never a
+  token, a password, a header or a payload.
+- Neither may throw, delay a request, or become something the application needs
+  in order to run. No monitoring vendor is called from a route, a service or a
+  tool; a hosted monitor is a sink given to `createErrorMonitor`.
+
+### Deployment
+
+- [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) is the runbook: deploy, verify,
+  roll back. A change that alters how the stack is deployed, stopped or checked
+  updates it in the same change.
+- Migrations only go forward and are additive wherever possible, so that a
+  previous release can start against a newer database. Rolling back never
+  undoes a migration.
+- Every service in `docker-compose.yml` has a health check, and the API's
+  `stop_grace_period` stays longer than `JARVIS_SHUTDOWN_GRACE_MS`.
 
 ### Frontend
 
@@ -132,8 +163,9 @@ The six memory end-to-end tests that used to fail on every run (B-1 in
 `docs/CODEBASE_AUDIT.md`) pass since 2026-09-14. The cause was a race in the
 test harness, not a production memory bug. `@jarvis/db` tests need PostgreSQL
 with pgvector: point `DATABASE_URL` at a separate test database, never the
-development one. On a fresh throwaway pgvector database they give 223 passed /
-0 failed (20 files; S8.5 regression, 2026-10-05). The full repository suite has not been run since the fix.
+development one. On a fresh throwaway pgvector database they give 234 passed /
+0 failed (21 files; Phase 13, 2026-10-06). Every workspace's suite was run that
+day, one workspace at a time: 7,668 passed without a database, none failed.
 
 CI runs the PostgreSQL-backed tests against its own throwaway pgvector service,
 after applying every migration, and fails if any of them is skipped
@@ -159,6 +191,7 @@ Every capability has one home. Before creating a file, find that home.
 | Memory or knowledge behaviour | `packages/memory`; storage in `packages/db/src/repositories` | a second memory manager |
 | A database model, migration or repository | `packages/db` | a new `PrismaClient` |
 | Auth, encryption, permissions, approvals, audit | `packages/security` | an app |
+| A log line for operators, or an error report | `apps/api/src/services/observability` | a bare `console.log`, or a vendor SDK in a route |
 | An environment variable | its name in `.env.example`, its parsing in the owning package's config | a new `.env` file |
 
 ### Before creating a file
