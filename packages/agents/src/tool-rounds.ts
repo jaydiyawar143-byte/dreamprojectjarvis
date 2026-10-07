@@ -41,6 +41,7 @@ import type {
   ConversationMessage,
   ToolExecutionResult,
 } from "@jarvis/core";
+import { buildTurnMessages } from "./turn-messages.js";
 
 /**
  * One completed round: the assistant turn that asked for tools, and what came
@@ -145,8 +146,12 @@ export function budgetedEnvelopes(
  *
  *   system            the agent's prompt, dated by the caller
  *   ...history        the conversation before this turn
+ *   system            this turn's server-gathered context, when there is any
  *   user              the ORIGINAL question, not the last round's text
  *   assistant + tool  one pair per completed round, oldest first
+ *
+ * Everything up to and including `user` comes from `buildTurnMessages`, so a
+ * turn opens the same way after its tools have run as it did before.
  *
  * Replaying every round is what makes round four able to reason over round
  * one. The provider protocol requires each `tool` message to carry the
@@ -158,22 +163,13 @@ export function budgetedEnvelopes(
 export function buildRoundMessages(input: {
   systemPrompt: string;
   conversationHistory?: ConversationMessage[];
+  turnContext?: string | undefined;
   userMessage: string;
   rounds: readonly ToolRound[];
   renderEnvelope: (tr: ToolExecutionResult) => string;
   budgetChars?: number;
 }): AIMessage[] {
-  const messages: AIMessage[] = [];
-
-  if (input.systemPrompt) {
-    messages.push({ role: "system", content: input.systemPrompt });
-  }
-
-  for (const msg of input.conversationHistory ?? []) {
-    messages.push({ role: msg.role as "user" | "assistant", content: msg.content });
-  }
-
-  messages.push({ role: "user", content: input.userMessage });
+  const messages = buildTurnMessages(input);
 
   const rendered = budgetedEnvelopes(input.rounds, input.renderEnvelope, input.budgetChars);
 

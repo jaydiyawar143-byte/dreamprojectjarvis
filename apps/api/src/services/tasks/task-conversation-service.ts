@@ -3,8 +3,9 @@
 //
 // The conversational entry point to work:
 //
-//   "check digitalonebox.com"  ->  task -> plan -> execute -> a sentence
-//   "...plan banao, execute mat karo"  ->  task -> plan -> a sentence
+//   "check digitalonebox.com"  ->  plan -> task -> execute -> a sentence
+//   "...plan banao, execute mat karo"  ->  plan -> task -> a sentence
+//   nothing here can do it     ->  plan -> (no task) -> back to the assistant
 //
 // It owns the SEQUENCE and nothing else. Detection is a pure function in
 // @jarvis/agents, the task is TaskService's, the plan is TaskPlannerService's,
@@ -75,16 +76,36 @@ export class TaskConversationService {
   constructor(private readonly deps: TaskConversationDeps) {}
 
   /**
-   * Record the work, plan it, and — unless the user said not to — run it.
+   * Plan the work, record it, and — unless the user said not to — run it.
    *
-   * The task is created FIRST and always, even when planning then fails. That
-   * is deliberate: the user asked for work, and a durable record of what they
-   * asked for is worth more than a tidy table. A task whose plan failed stays
-   * PENDING with nothing run, which is exactly what happened.
+   * Returns NULL when this is not work after all: nothing here can carry it
+   * out and the user named no time. The caller then sends the turn to the
+   * assistant, which — unlike the planner — can see the conversation.
+   *
+   * WHY THE PLAN COMES FIRST. The task used to be created first and always, so
+   * a turn the planner could do nothing with — "Summarize our conversation" —
+   * left a PENDING task nobody could run and the answer "I cannot carry it out
+   * yet". A task is a record of WORK; with no executable action there is none
+   * to record, and the user's words are in the conversation either way.
+   *
+   * A TURN WITH AN EXPLICIT TIME IS NEVER HANDED BACK. The assistant answers
+   * now, and the one thing a stated time must never become is "run it now" —
+   * so that turn is still recorded and still answered here, as it always was.
    */
-  async handle(input: WorkTurnInput): Promise<WorkTurnResult> {
+  async handle(input: WorkTurnInput): Promise<WorkTurnResult | null> {
+    const title = input.goal.slice(0, MAX_TITLE);
+
+    const plan = await this.deps.planner.planTask({
+      userId: input.userId,
+      title,
+      description: input.goal,
+      ...(input.traceId ? { traceId: input.traceId } : {}),
+    });
+
+    if (!plan.executable && !input.scheduledAt) return null;
+
     const created = await this.deps.tasks.createTask(input.userId, {
-      title: input.goal.slice(0, MAX_TITLE),
+      title,
       description: input.goal,
       // The same stamp the `task.create` tool and POST /api/v1/tasks use, so
       // this task is JARVIS work and stays out of the todo surfaces.
@@ -100,17 +121,9 @@ export class TaskConversationService {
 
     const task = created.task;
 
-    const plan = await this.deps.planner.planTask({
-      userId: input.userId,
-      taskId: task.id,
-      title: task.title,
-      description: task.description,
-      ...(input.traceId ? { traceId: input.traceId } : {}),
-    });
-
     if (!plan.executable) {
-      // No action fits. The task stays PENDING — a record of something asked
-      // for and not done, which is the truthful state.
+      // A scheduled turn no action fits. The task stays PENDING — a record of
+      // something asked for and not done, which is the truthful state.
       return {
         message: `I have saved this as a task, but I cannot carry it out yet: ${plan.reason}`,
         taskId: task.id,

@@ -60,6 +60,10 @@ export type PendingActionPort = Pick<
 /**
  * The conversational work path. One method, so the route cannot reach the
  * planner or the executor directly.
+ *
+ * It answers NULL for a turn that turned out not to be work — nothing it has
+ * can carry it out. The route then gives the turn to the assistant, with the
+ * conversation history the work path never sees.
  */
 export interface TaskConversationPort {
   handle(input: {
@@ -78,7 +82,7 @@ export interface TaskConversationPort {
     execution?: unknown;
     /** Present when the turn scheduled the task instead of running it. */
     scheduledAt?: string;
-  }>;
+  } | null>;
 }
 
 export interface ChatRouterDeps {
@@ -483,11 +487,18 @@ export function createChatRouter(container: ChatRouterDeps): Router {
       // never reaches this branch and behaves exactly as it did before. Only
       // an unambiguous imperative gets here, and only one without an explicit
       // "don't execute" actually runs anything.
+      //
+      // P0 — AND ONLY WORK STAYS HERE. A turn about the conversation itself is
+      // NONE to the detector, and a turn the planner can do nothing with comes
+      // back as null. Both go on to the assistant below, with the full history:
+      // the planner is given one sentence, so it cannot answer either.
       // -----------------------------------------------------------------------
       const workRequest = detectWorkRequest(jarvisRequest.message);
+      // Saved by whichever branch reaches it first, and never twice.
+      let savedUserMessage: Awaited<ReturnType<typeof saveUserMessage>> | undefined;
 
       if (workRequest.type !== "NONE" && container.taskConversation) {
-        await saveUserMessage();
+        savedUserMessage = await saveUserMessage();
 
         // NEEDS_TIME never reaches the work path: a vague time is answered
         // with a question, not a guess, and nothing is created or run.
@@ -522,33 +533,37 @@ export function createChatRouter(container: ChatRouterDeps): Router {
           ...(req.ip ? { ipAddress: req.ip } : {}),
         });
 
-        await container.conversationRepo.addMessage({
-          conversationId,
-          role: "assistant",
-          content: result.message,
-          metadata: { traceId, taskId: result.taskId },
-        });
-
-        res.status(200).json({
-          success: true,
-          data: {
-            message: result.message,
+        if (result) {
+          await container.conversationRepo.addMessage({
             conversationId,
-            taskId: result.taskId,
-            ...(result.plan ? { plan: result.plan } : {}),
-            ...(result.execution ? { execution: result.execution } : {}),
-            ...(result.scheduledAt ? { scheduledAt: result.scheduledAt } : {}),
-          },
-          traceId,
-          timestamp: new Date().toISOString(),
-        });
-        return;
+            role: "assistant",
+            content: result.message,
+            metadata: { traceId, taskId: result.taskId },
+          });
+
+          res.status(200).json({
+            success: true,
+            data: {
+              message: result.message,
+              conversationId,
+              taskId: result.taskId,
+              ...(result.plan ? { plan: result.plan } : {}),
+              ...(result.execution ? { execution: result.execution } : {}),
+              ...(result.scheduledAt ? { scheduledAt: result.scheduledAt } : {}),
+            },
+            traceId,
+            timestamp: new Date().toISOString(),
+          });
+          return;
+        }
+        // Not work after all — nothing ran and nothing was recorded. The
+        // assistant answers it.
       }
 
       // -----------------------------------------------------------------------
       // NORMAL FLOW — route to orchestrator
       // -----------------------------------------------------------------------
-      const savedUserMessage = await saveUserMessage();
+      savedUserMessage ??= await saveUserMessage();
       // S7.2 L2 — memory provenance: a memory learned from this turn points at
       // this saved message. Server-set, like the traceId; never from the body.
       sessionContext.userMessageId = savedUserMessage.id;

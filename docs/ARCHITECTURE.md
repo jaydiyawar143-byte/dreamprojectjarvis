@@ -58,13 +58,18 @@ Browser — apps/web
    ▼
 apps/api — auth middleware → chat router, which answers here, in order:
    a reply to a pending action → a memory command → a work request (the Task Engine)
-   ▼  anything else
+   ▼  anything else — including a turn about the conversation itself, and a work
+   │  request no tool can carry out, which the Task Engine hands back
 Orchestrator — packages/agents
    ├─ memory:    embed the message, recall this user's relevant memories
    ├─ knowledge: retrieve matching passages from the user's documents
+   ├─ skills:    which of this agent's skills work right now
    └─ route:     choose a registered domain agent
    ▼
 Domain agent → model (OpenAI) → tool calls, limited to the agent's allowlist
+   the model is sent, in order: the agent's prompt · the conversation so far ·
+   what the orchestrator gathered above, as a system message of its own ·
+   the user's message exactly as typed
    ▼
 Orchestrator — the allowlist is checked again; the write-intent gate refuses
    any non-read-only call the user did not ask for (audited, never executed)
@@ -111,6 +116,7 @@ TaskExecutionService → ToolExecutor, as the user who asked
 ```
 
 - The plan is made when the task runs, not when it is scheduled, so every check runs on the actual run.
+- From chat, a `Task` is recorded only for work a tool can carry out. A request nothing can carry out is answered by the assistant instead, which — unlike the planner — sees the conversation. A request with an explicit time is always answered by the Task Engine, so that a stated time can never turn into "run it now".
 - An approval-gated tool is not run unattended: the task fails with a message to approve it on the Approvals page.
 - Scheduling is one-time only. There is no recurrence, cron or automatic retry, and a failed task is final.
 - The outcome worker (`apps/api/src/services/outcome-worker-scheduler.ts`) is the other background loop.

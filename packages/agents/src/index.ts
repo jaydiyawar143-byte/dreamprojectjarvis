@@ -30,6 +30,14 @@ export {
   DEFAULT_TOOL_RESULT_BUDGET_CHARS,
   type ToolRound,
 } from "./tool-rounds.js";
+// P0 — how a turn opens: the user's words verbatim, server-gathered context in
+// its own system message, and the transcript rules on every agent's prompt.
+export {
+  buildTurnMessages,
+  FIRST_MESSAGE_NOTE,
+  TRANSCRIPT_GROUNDING,
+  TURN_CONTEXT_HEADER,
+} from "./turn-messages.js";
 export type { PlanValidationResult } from "./tool-planner.js";
 export { PendingActionService } from "./pending-action-service.js";
 export { detectIntent, isPendingActionExpired, approvalStatusToPendingState, summarizePendingAction } from "./intent-detector.js";

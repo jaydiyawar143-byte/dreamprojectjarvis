@@ -24,6 +24,7 @@ import { sanitizeToolResult } from "@jarvis/tools";
 
 import { BaseAgent } from "./base-agent.js";
 import { buildRoundMessages, type ToolRound } from "./tool-rounds.js";
+import { buildTurnMessages } from "./turn-messages.js";
 import { withCurrentDate } from "./temporal-context.js";
 import type {
   AgentContext,
@@ -164,7 +165,8 @@ export abstract class DomainAgent extends BaseAgent {
             state.userMessage,
             state.rounds,
             input.conversationHistory,
-            systemPrompt
+            systemPrompt,
+            input.turnContext
           );
         } else {
           // No recorded assistant turn to attach the results to. Replaying the
@@ -173,14 +175,16 @@ export abstract class DomainAgent extends BaseAgent {
           messages = this.buildInitialMessages(
             input.message,
             input.conversationHistory,
-            systemPrompt
+            systemPrompt,
+            input.turnContext
           );
         }
       } else {
         messages = this.buildInitialMessages(
           input.message,
           input.conversationHistory,
-          systemPrompt
+          systemPrompt,
+          input.turnContext
         );
         this.conversationStates.delete(conversationId);
       }
@@ -253,34 +257,23 @@ export abstract class DomainAgent extends BaseAgent {
   protected buildInitialMessages(
     userMessage: string,
     conversationHistory: ConversationMessage[] | undefined,
-    systemPrompt: string
+    systemPrompt: string,
+    turnContext?: string
   ): AIMessage[] {
-    const messages: AIMessage[] = [];
-
-    if (systemPrompt) {
-      messages.push({ role: "system", content: systemPrompt });
-    }
-
-    for (const msg of conversationHistory ?? []) {
-      messages.push({
-        role: msg.role as "user" | "assistant",
-        content: msg.content,
-      });
-    }
-
-    messages.push({ role: "user", content: userMessage });
-    return messages;
+    return buildTurnMessages({ systemPrompt, conversationHistory, turnContext, userMessage });
   }
 
   protected buildToolResultMessages(
     originalUserMessage: string,
     rounds: readonly ToolRound[],
     conversationHistory: ConversationMessage[] | undefined,
-    systemPrompt: string
+    systemPrompt: string,
+    turnContext?: string
   ): AIMessage[] {
     return buildRoundMessages({
       systemPrompt,
       ...(conversationHistory ? { conversationHistory } : {}),
+      turnContext,
       userMessage: originalUserMessage,
       rounds,
       renderEnvelope: (tr) => this.buildToolResultEnvelope(tr),

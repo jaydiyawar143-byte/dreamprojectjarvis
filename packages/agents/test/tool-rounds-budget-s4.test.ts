@@ -26,6 +26,7 @@ import {
   buildRoundMessages,
   type ToolRound,
 } from "../src/tool-rounds.js";
+import { TRANSCRIPT_GROUNDING } from "../src/turn-messages.js";
 
 function result(toolId: string, callId: string, status = "completed"): ToolExecutionResult {
   return {
@@ -160,7 +161,8 @@ describe("the replayed message list", () => {
 
   it("opens with system, history and the original question", () => {
     const m = built();
-    expect(m[0]).toMatchObject({ role: "system", content: "SYS" });
+    // P0 — the agent's prompt, whole and first, with the transcript rules after it.
+    expect(m[0]).toEqual({ role: "system", content: `SYS\n\n${TRANSCRIPT_GROUNDING}` });
     expect(m[1]).toMatchObject({ role: "user", content: "earlier" });
     expect(m[2]).toMatchObject({ role: "user", content: "the original question" });
   });

@@ -40,9 +40,20 @@ export const AgentConfigSchema = z.object({
 export type AgentConfig = z.infer<typeof AgentConfigSchema>;
 
 export const AgentInputSchema = z.object({
+  /**
+   * The user's message, exactly as sent — nothing is ever prepended to it.
+   * (On a tool-result round the Orchestrator passes the agent's own last text
+   * here; agents replay the original message instead.)
+   */
   message: z.string(),
   conversationId: z.string().optional(),
   conversationHistory: z.array(ConversationMessageSchema).optional().default([]),
+  /**
+   * What the server gathered for this turn — the skill, knowledge and memory
+   * blocks. Kept apart from `message` so the model can tell what the user
+   * typed from what the system added.
+   */
+  turnContext: z.string().optional(),
   metadata: z.record(z.unknown()).optional(),
 });
 

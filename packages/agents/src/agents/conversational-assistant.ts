@@ -1,6 +1,7 @@
 import { BaseAgent } from "../base-agent.js";
 
 import { buildRoundMessages, type ToolRound } from "../tool-rounds.js";
+import { buildTurnMessages } from "../turn-messages.js";
 import { withCurrentDate } from "../temporal-context.js";
 import type {
   AgentInput,
@@ -78,10 +79,11 @@ export class ConversationalAssistant extends BaseAgent {
           messages = this.buildToolResultMessages(
             state.userMessage,
             state.rounds,
-            input.conversationHistory
+            input.conversationHistory,
+            input.turnContext
           );
         } else {
-          messages = this.buildInitialMessages(input.message, input.conversationHistory);
+          messages = this.buildInitialMessages(input.message, input.conversationHistory, input.turnContext);
           this.conversationStates.set(conversationId, {
             userMessage: input.message,
             rounds: [],
@@ -89,7 +91,7 @@ export class ConversationalAssistant extends BaseAgent {
           });
         }
       } else {
-        messages = this.buildInitialMessages(input.message, input.conversationHistory);
+        messages = this.buildInitialMessages(input.message, input.conversationHistory, input.turnContext);
         this.conversationStates.delete(conversationId);
       }
 
@@ -149,45 +151,33 @@ export class ConversationalAssistant extends BaseAgent {
     }
   }
 
-  private buildInitialMessages(userMessage: string, conversationHistory?: ConversationMessage[]): AIMessage[] {
-    const messages: AIMessage[] = [];
-
-    if (this.providerSystemPrompt) {
-      messages.push({
-        role: "system",
-        // Dated per turn. Without this the model has no idea what "last 7
-        // days" means and reaches for a date out of its training era.
-        content: withCurrentDate(this.providerSystemPrompt),
-      });
-    }
-
-    if (conversationHistory && conversationHistory.length > 0) {
-      for (const msg of conversationHistory) {
-        messages.push({
-          role: msg.role as "user" | "assistant",
-          content: msg.content,
-        });
-      }
-    }
-
-    messages.push({
-      role: "user",
-      content: userMessage,
+  private buildInitialMessages(
+    userMessage: string,
+    conversationHistory?: ConversationMessage[],
+    turnContext?: string
+  ): AIMessage[] {
+    return buildTurnMessages({
+      // Dated per turn. Without this the model has no idea what "last 7 days"
+      // means and reaches for a date out of its training era.
+      systemPrompt: this.providerSystemPrompt ? withCurrentDate(this.providerSystemPrompt) : "",
+      conversationHistory,
+      turnContext,
+      userMessage,
     });
-
-    return messages;
   }
 
   private buildToolResultMessages(
     originalUserMessage: string,
     rounds: readonly ToolRound[],
-    conversationHistory?: ConversationMessage[]
+    conversationHistory?: ConversationMessage[],
+    turnContext?: string
   ): AIMessage[] {
     return buildRoundMessages({
       // Dated per turn. Without this the model has no idea what "last 7 days"
       // means and reaches for a date out of its training era.
       systemPrompt: this.providerSystemPrompt ? withCurrentDate(this.providerSystemPrompt) : "",
       ...(conversationHistory ? { conversationHistory } : {}),
+      turnContext,
       userMessage: originalUserMessage,
       rounds,
       renderEnvelope: (tr) => this.buildToolResultEnvelope(tr),

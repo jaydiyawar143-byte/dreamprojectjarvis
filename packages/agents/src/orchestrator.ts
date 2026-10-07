@@ -77,7 +77,10 @@ import {
  * ---------------------------------------------------------------------------
  */
 export interface KnowledgeInjection {
-  /** The prompt, with the knowledge block prepended when there was one. */
+  /**
+   * What it was applied to, with the knowledge block prepended when there was
+   * one. Since P0 that is the turn's context, never the user's message.
+   */
   message: string;
   /** The passages the block was built from, in the order they were used. */
   chunks: RetrievedChunk[];
@@ -235,23 +238,26 @@ export class Orchestrator implements IOrchestrator {
       // database round trips in front of every single turn, on the critical
       // path of a person waiting for an answer out loud.
       //
-      // The composed prompt is BYTE-IDENTICAL to what serial execution
-      // produced: knowledge block, then memory block, then the message.
+      // The composed context is BYTE-IDENTICAL to what serial execution
+      // produced: knowledge block, then memory block.
       // ---------------------------------------------------------------------
-      const [withMemory, knowledgeResult, skillBlock] = await Promise.all([
-        this.injectMemoryContext(request.message, context.auth.userId),
+      const [memory, knowledgeResult, skillBlock] = await Promise.all([
+        this.recallMemoryBlock(request.message, context.auth.userId),
         this.retrieveKnowledgeContext(request.message, context.auth.userId),
         this.buildSkillBlock(context.auth.userId, policy),
       ]);
 
-      const knowledge = knowledgeResult.applyTo(withMemory.message);
+      const knowledge = knowledgeResult.applyTo(memory.block);
       // S3 — the skill block is the OUTERMOST prefix, ahead of knowledge and
       // memory. Those two are about this request; this is standing orientation
-      // about what works right now, and reads as a preamble to both. Empty
-      // string when there is no provider or nothing to say, which is why this
-      // is a concatenation rather than a branch: with no port the string is
-      // byte-identical to what every existing prompt test pins.
-      const userMessage = skillBlock + knowledge.message;
+      // about what works right now, and reads as a preamble to both.
+      //
+      // P0 — NONE OF THIS IS THE USER'S MESSAGE. The three blocks used to be
+      // concatenated in front of it, and a model asked to quote the user's
+      // previous message quoted them. They now travel as `turnContext`, which
+      // the agent sends as its own system message, and `message` is what the
+      // user sent and nothing else. "" when there is nothing to add.
+      const turnContext = (skillBlock + knowledge.message).trim();
 
       if (process.env.NODE_ENV === "development") {
         console.log(JSON.stringify({
@@ -266,9 +272,10 @@ export class Orchestrator implements IOrchestrator {
       }
 
       let currentInput: AgentInput = {
-        message: userMessage,
+        message: request.message,
         conversationId: context.conversationId,
         conversationHistory: request.conversationHistory ?? [],
+        ...(turnContext ? { turnContext } : {}),
         metadata: request.metadata,
       };
 
@@ -373,8 +380,8 @@ export class Orchestrator implements IOrchestrator {
           }
           // S7.2 L5 — the memories this reply was built on, by id, so "that's
           // wrong" can name its target instead of guessing. Never in the prompt.
-          if (withMemory.memoryIds.length > 0) {
-            responseMetadata.recalledMemoryIds = withMemory.memoryIds;
+          if (memory.memoryIds.length > 0) {
+            responseMetadata.recalledMemoryIds = memory.memoryIds;
           }
           if (pendingActionData) {
             responseMetadata.pendingAction = pendingActionData;
@@ -469,6 +476,7 @@ export class Orchestrator implements IOrchestrator {
           message: output.message,
           conversationId: context.conversationId,
           conversationHistory: request.conversationHistory ?? [],
+          ...(turnContext ? { turnContext } : {}),
           metadata: {
             ...request.metadata,
             toolResults,
@@ -543,24 +551,25 @@ export class Orchestrator implements IOrchestrator {
     }
   }
 
-  private async injectMemoryContext(
+  /** The `<user_memories>` block for this message, or "" when nothing was recalled. */
+  private async recallMemoryBlock(
     userMessage: string,
     userId: string,
-  ): Promise<{ message: string; memoryIds: string[] }> {
-    const untouched = { message: userMessage, memoryIds: [] };
-    if (!this.memoryStore) return untouched;
+  ): Promise<{ block: string; memoryIds: string[] }> {
+    const none = { block: "", memoryIds: [] };
+    if (!this.memoryStore) return none;
 
     try {
       const isAvailable = await this.isMemoryAvailable();
-      if (!isAvailable) return untouched;
+      if (!isAvailable) return none;
 
       const memories = await this.recallMemories(userMessage, userId);
-      if (memories.length === 0) return untouched;
+      if (memories.length === 0) return none;
 
       const block = this.formatMemoryBlock(memories);
-      return { message: block.text + "\n\n" + userMessage, memoryIds: block.ids };
+      return { block: block.text, memoryIds: block.ids };
     } catch {
-      return untouched;
+      return none;
     }
   }
 
@@ -694,7 +703,7 @@ export class Orchestrator implements IOrchestrator {
    * an enhancement, and no failure in it may take down a conversation that
    * would otherwise have worked.
    *
-   * @param message  the message to prepend onto, memory block included
+   * @param message  the context to prepend onto — the memory block, or ""
    * @param query    the original user text, used as the retrieval query
    */
   /**
@@ -709,8 +718,9 @@ export class Orchestrator implements IOrchestrator {
   /**
    * The skill block for this turn, or "" — Skill System V1, S3.
    *
-   * SEMANTIC CONTEXT ONLY. What comes back is prose prepended to the message.
-   * It does not touch `providerTools`, which the agent still receives in full,
+   * SEMANTIC CONTEXT ONLY. What comes back is prose for the turn's context
+   * message — never the user's own. It does not touch `providerTools`, which
+   * the agent still receives in full,
    * and it is not consulted by `executeTools`, which re-checks every call
    * against `policy.allowedTools` regardless of what this said. A skill named
    * here is not thereby authorized; a tool absent from here is not thereby
@@ -1061,8 +1071,8 @@ export class Orchestrator implements IOrchestrator {
     policy: AgentPolicy | undefined,
     /**
      * The ORIGINAL user turn, verbatim. Used by the write-intent gate, which
-     * must judge the message the user actually sent — never the composed
-     * prompt (`userMessage`) and never text the model generated mid-turn.
+     * must judge the message the user actually sent — never the context the
+     * server gathered for the turn and never text the model generated mid-turn.
      */
     userMessage: string
   ): Promise<{ results: ToolExecutionResult[]; pendingAction?: Record<string, unknown> }> {

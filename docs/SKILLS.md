@@ -27,7 +27,8 @@ Both are defined in `packages/agents/src/agent-policy.ts`. Adding a capability m
 > list, which now holds eleven entries.
 >
 > Phase S3 tells the planner which skills actually work right now, as a short
-> block of prose composed into the message. It is **orientation, not
+> block of prose sent in a system message of its own, directly ahead of the
+> user's message and never inside it. It is **orientation, not
 > permission**: the tool definitions offered to the model are unchanged, and
 > every tool call is still checked against `agent-policy.ts` afterwards. A tool
 > named in that block is not thereby authorized, and a tool missing from it is

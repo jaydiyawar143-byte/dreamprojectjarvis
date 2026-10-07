@@ -46,7 +46,11 @@ import { ToolPlanValidator } from "@jarvis/agents";
 
 export interface TaskPlanInput {
   userId: string;
-  taskId: string;
+  /**
+   * Absent when the plan is a feasibility check made BEFORE a task exists —
+   * the conversational path only records work it can actually carry out.
+   */
+  taskId?: string;
   title: string;
   description?: string | null;
   traceId?: string;
