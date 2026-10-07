@@ -288,6 +288,14 @@ Plan → Explain → Confirm → Execute → Audit → Verify → Report
   B. It is single-use and expires in two minutes.
 - Parameter key order does not affect the hash, so a confirmation issued to the
   UI validates for the agent and vice versa.
+- The confirmation is a row in PostgreSQL (`Confirmation`, Phase 13), so it
+  survives a restart and any API instance can honour one another issued. The
+  row holds a SHA-256 of the token and the hash of the parameters — never the
+  token, a parameter or the summary. Spending it is one conditional `UPDATE`,
+  so a double-submitted confirmation runs the write once.
+- If the confirmation store is not wired or cannot be reached, the write is
+  refused: **405** when there is no store, **500** when it did not answer.
+  Nothing is confirmed from process memory instead.
 - **A voice session cannot confirm a write at all.** No token is even issued —
   speech is a fine way to ask for a write and not a fine way to authorize one.
 - Execution then goes through `ToolExecutor`: permission check, approval gate,
@@ -351,8 +359,11 @@ forget.
   provider clients are not. Marked `implemented: false` in the catalogue.
 - **Health checks are cached in memory for 10 minutes**, per user, and lost on
   restart. That is correct: after a restart, nothing has been verified.
-- **Confirmation tokens are in memory.** Persisting them would create a durable,
-  replayable write permit — the opposite of what they are for.
+- **Confirmations last two minutes and are single use.** They are stored in
+  PostgreSQL since Phase 13, as a hash that cannot be replayed; before that they
+  were in process memory and were lost on a restart. A confirmation pending
+  during a deployment or a rollback across that change is not recognised by the
+  other release, and the user is asked again.
 - **`google-maps` API restrictions are not read back from Google.** Verifying
   them would cost a request per API; the UI states the required restriction
   instead.

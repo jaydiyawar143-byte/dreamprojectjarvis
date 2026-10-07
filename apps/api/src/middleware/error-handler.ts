@@ -26,6 +26,12 @@
 import type { Response, NextFunction, RequestHandler } from "express";
 import { JarvisError } from "@jarvis/core";
 
+import {
+  errorMonitor,
+  operationalLog,
+  writeRecord,
+  type ErrorMonitor,
+} from "../services/observability/index.js";
 import type { TracedRequest } from "./request-id.js";
 
 /**
@@ -86,6 +92,8 @@ export function notFoundHandler() {
 interface ErrorHandlerOptions {
   /** Overridden in tests. */
   log?: (line: Record<string, unknown>) => void;
+  /** Told about every failure that is the server's fault. Overridden in tests. */
+  monitor?: ErrorMonitor;
 }
 
 /**
@@ -95,10 +103,16 @@ interface ErrorHandlerOptions {
  * written for a caller. Anything else is reported as INTERNAL_ERROR with a
  * fixed message, because an arbitrary throw's message can contain a connection
  * string, a file path or a provider's raw response.
+ *
+ * Phase 13 — the detail that is logged goes through the operational log, which
+ * takes the secrets out of it, and a failure with a 5xx status is also reported
+ * to the error monitor. A 4xx is the caller's mistake and is not.
  */
 export function errorHandler(options: ErrorHandlerOptions = {}) {
   const log =
-    options.log ?? ((line: Record<string, unknown>) => console.log(JSON.stringify(line)));
+    options.log ??
+    ((line: Record<string, unknown>) => writeRecord(operationalLog.child("http"), line));
+  const monitor = options.monitor ?? errorMonitor;
 
   return (error: unknown, req: TracedRequest, res: Response, next: NextFunction): void => {
     // Headers already sent means a response was streaming when it failed;
@@ -126,6 +140,19 @@ export function errorHandler(options: ErrorHandlerOptions = {}) {
       stack: error instanceof Error ? error.stack : undefined,
     });
 
+    if (status >= 500) {
+      monitor.captureException(error, {
+        context: {
+          component: "http",
+          traceId: req.traceId,
+          method: req.method,
+          path: req.path,
+          status,
+          code,
+        },
+      });
+    }
+
     res.status(status).json({
       success: false,
       error: { code, message },
@@ -142,25 +169,47 @@ export function errorHandler(options: ErrorHandlerOptions = {}) {
  * knowing about, but killing a healthy process that is mid-way through other
  * requests turns one bug into an outage. The shutdown controller remains the
  * only thing that ends this process deliberately.
+ *
+ * Phase 13 — each is also reported to the error monitor as `fatal`: nothing in
+ * the application caught it, which is the kind of failure worth being woken for.
  */
 export function installProcessErrorHandlers(
-  log: (line: Record<string, unknown>) => void = (line) => console.log(JSON.stringify(line))
+  options: {
+    log?: (line: Record<string, unknown>) => void;
+    monitor?: ErrorMonitor;
+    /** The emitter the handlers are attached to. The process, except in tests. */
+    target?: Pick<NodeJS.Process, "on">;
+  } = {}
 ): void {
-  process.on("unhandledRejection", (reason) => {
+  const log =
+    options.log ??
+    ((line: Record<string, unknown>) => writeRecord(operationalLog.child("process"), line));
+  const monitor = options.monitor ?? errorMonitor;
+  const target = options.target ?? process;
+
+  target.on("unhandledRejection", (reason: unknown) => {
     log({
       level: "error",
       event: "unhandled_rejection",
       message: reason instanceof Error ? reason.message : String(reason),
       stack: reason instanceof Error ? reason.stack : undefined,
     });
+    monitor.captureException(reason, {
+      severity: "fatal",
+      context: { component: "process", origin: "unhandled_rejection" },
+    });
   });
 
-  process.on("uncaughtException", (error) => {
+  target.on("uncaughtException", (error: Error) => {
     log({
       level: "error",
       event: "uncaught_exception",
       message: error.message,
       stack: error.stack,
+    });
+    monitor.captureException(error, {
+      severity: "fatal",
+      context: { component: "process", origin: "uncaught_exception" },
     });
   });
 }

@@ -82,6 +82,7 @@ import {
   startTaskSchedulerLoop,
   type TaskSchedulerLoop,
 } from "./services/task-scheduler-loop.js";
+import { errorMonitor, operationalLog } from "./services/observability/index.js";
 
 const env = loadEnvironment();
 
@@ -108,12 +109,12 @@ const container = getContainer({
 });
 
 const startupRecovery = await runStartupRecovery(container.executionJournal);
-console.log(
-  `[startup] recovery complete ${JSON.stringify({
-    staleExecutingRecovered: startupRecovery.staleExecutingRecovered,
-    staleReconcilingRecovered: startupRecovery.staleReconcilingRecovered,
-  })}`
-);
+// Phase 13 — startup and shutdown write through the operational log: one JSON
+// line each, timestamped, so a deployment can be followed from its log.
+operationalLog.child("startup").info("startup_recovery_complete", {
+  staleExecutingRecovered: startupRecovery.staleExecutingRecovered,
+  staleReconcilingRecovered: startupRecovery.staleReconcilingRecovered,
+});
 
 const app: Express = express();
 const httpServer: Server = createServer(app);
@@ -638,6 +639,16 @@ const jarvisShutdown = createShutdownController({
     await prisma.$disconnect();
   },
   graceMs: env.SHUTDOWN_GRACE_MS,
+  // Phase 13 — "shutdown initiated" becomes the event `shutdown_initiated`, and
+  // a step that failed is also reported to the error monitor.
+  log: (message, meta) => {
+    const event = message.replace(/\s+/g, "_");
+    const shutdownLog = operationalLog.child("shutdown");
+    if (message.endsWith("error")) shutdownLog.error(event, meta);
+    else shutdownLog.info(event, meta);
+  },
+  onError: (error, stage) =>
+    errorMonitor.captureException(error, { context: { component: "shutdown", stage } }),
   onStopped: () => process.exit(0),
 });
 
@@ -647,6 +658,11 @@ httpServer.listen(env.PORT, () => {
   console.log(
     `JARVIS API running on port ${env.PORT} [${env.NODE_ENV}] state=${lifecycle.getState() satisfies LifecycleState}`
   );
+  operationalLog.child("startup").info("api_started", {
+    port: env.PORT,
+    environment: env.NODE_ENV,
+    state: lifecycle.getState(),
+  });
 
   // -------------------------------------------------------------------------
   // Phase 11.7B at runtime — the outcome measurement sweep.
@@ -668,6 +684,7 @@ httpServer.listen(env.PORT, () => {
       worker: new OutcomeWorker(container.executor, new PrismaOutcomeRepository(prisma)),
       lifecycle,
       intervalMs: outcomeIntervalMs,
+      log: (level, event, meta) => operationalLog.child("outcome-worker")[level](event, meta),
     });
   }
 
@@ -690,6 +707,7 @@ httpServer.listen(env.PORT, () => {
     scheduler: container.taskScheduler,
     lifecycle,
     intervalMs: env.TASK_SCHEDULER_INTERVAL_MS,
+    log: (level, event, meta) => operationalLog.child("task-scheduler")[level](event, meta),
   });
 
   // -------------------------------------------------------------------------

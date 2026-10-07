@@ -18,6 +18,7 @@ import { AgentRegistry } from "../src/registry.js";
 import { AGENT_IDS } from "../src/agent-policy.js";
 import { MetaAdsAgent } from "../src/agents/meta-ads-agent.js";
 import { KnowledgeAgent } from "../src/agents/knowledge-agent.js";
+import { TURN_CONTEXT_HEADER } from "../src/turn-messages.js";
 import { AnalyticsAgent } from "../src/agents/analytics-agent.js";
 import { AutomationAgent } from "../src/agents/automation-agent.js";
 import { CommunicationAgent } from "../src/agents/communication-agent.js";
@@ -250,9 +251,18 @@ describe("Sprint 6.2-6.7 — specialized agents", () => {
         sessionFor("user-1")
       );
 
-      const userMsg = provider.requests.at(-1)!.messages.find((m) => m.role === "user");
-      expect(userMsg?.content).toContain("<knowledge_base>");
-      expect(userMsg?.content).toContain("18 days of paid leave");
+      // P0 — the passages arrive in the turn's context message, directly ahead
+      // of a user message that is the user's question and nothing else.
+      const messages = provider.requests.at(-1)!.messages;
+      const context = String(messages.at(-2)!.content);
+      expect(messages.at(-2)!.role).toBe("system");
+      expect(context.startsWith(TURN_CONTEXT_HEADER)).toBe(true);
+      expect(context).toContain("<knowledge_base>");
+      expect(context).toContain("18 days of paid leave");
+      expect(messages.at(-1)).toEqual({
+        role: "user",
+        content: "how much leave do I get according to my handbook?",
+      });
     });
 
     it("reuses the existing RAG pipeline rather than holding its own tool", async () => {
@@ -307,9 +317,9 @@ describe("Sprint 6.2-6.7 — specialized agents", () => {
         sessionFor("user-1")
       );
 
-      const userMsg = provider.requests.at(-1)!.messages.find((m) => m.role === "user");
-      expect(userMsg?.content).toContain("source: Refund Policy");
-      expect(userMsg?.content).toContain("page: 2");
+      const context = String(provider.requests.at(-1)!.messages.at(-2)!.content);
+      expect(context).toContain("source: Refund Policy");
+      expect(context).toContain("page: 2");
     });
 
     it("injects nothing when retrieval finds nothing", async () => {
@@ -324,8 +334,13 @@ describe("Sprint 6.2-6.7 — specialized agents", () => {
         sessionFor("user-1")
       );
 
-      const userMsg = provider.requests.at(-1)!.messages.find((m) => m.role === "user");
-      expect(userMsg?.content).not.toContain("<knowledge_base>");
+      // No context message at all — the agent's own prompt, then the question.
+      // (The prompt itself names the block, so "the tag appears nowhere" is not
+      // the claim; "nothing was added for this turn" is.)
+      const messages = provider.requests.at(-1)!.messages;
+      expect(messages.map((m) => m.role)).toEqual(["system", "user"]);
+      expect(String(messages[0]!.content)).not.toContain(TURN_CONTEXT_HEADER);
+      expect(messages[1]!.content).toBe("what does my handbook say about pensions?");
     });
 
     it("is instructed to separate retrieved fact from its own reasoning", () => {

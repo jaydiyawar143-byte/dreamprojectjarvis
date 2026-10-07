@@ -1,6 +1,7 @@
 import { maskIdentifier } from "@jarvis/core";
 
 import { buildRoundMessages, type ToolRound } from "../tool-rounds.js";
+import { buildTurnMessages } from "../turn-messages.js";
 import { BaseAgent } from "../base-agent.js";
 import { withCurrentDate } from "../temporal-context.js";
 import type {
@@ -256,10 +257,11 @@ export class MetaAdsAgent extends BaseAgent {
             state.userMessage,
             state.rounds,
             input.conversationHistory,
-            fullSystemPrompt
+            fullSystemPrompt,
+            input.turnContext
           );
         } else {
-          messages = this.buildInitialMessages(input.message, input.conversationHistory, fullSystemPrompt);
+          messages = this.buildInitialMessages(input.message, input.conversationHistory, fullSystemPrompt, input.turnContext);
           this.conversationStates.set(conversationId, {
             userMessage: input.message,
             rounds: [],
@@ -267,7 +269,7 @@ export class MetaAdsAgent extends BaseAgent {
           });
         }
       } else {
-        messages = this.buildInitialMessages(input.message, input.conversationHistory, fullSystemPrompt);
+        messages = this.buildInitialMessages(input.message, input.conversationHistory, fullSystemPrompt, input.turnContext);
         this.conversationStates.delete(conversationId);
       }
 
@@ -334,42 +336,26 @@ export class MetaAdsAgent extends BaseAgent {
     }
   }
 
-  private buildInitialMessages(userMessage: string, conversationHistory?: ConversationMessage[], systemPrompt?: string): AIMessage[] {
-    const messages: AIMessage[] = [];
-
-    if (systemPrompt) {
-      messages.push({
-        role: "system",
-        content: systemPrompt,
-      });
-    }
-
-    if (conversationHistory && conversationHistory.length > 0) {
-      for (const msg of conversationHistory) {
-        messages.push({
-          role: msg.role as "user" | "assistant",
-          content: msg.content,
-        });
-      }
-    }
-
-    messages.push({
-      role: "user",
-      content: userMessage,
-    });
-
-    return messages;
+  private buildInitialMessages(
+    userMessage: string,
+    conversationHistory: ConversationMessage[] | undefined,
+    systemPrompt: string,
+    turnContext?: string
+  ): AIMessage[] {
+    return buildTurnMessages({ systemPrompt, conversationHistory, turnContext, userMessage });
   }
 
   private buildToolResultMessages(
     originalUserMessage: string,
     rounds: readonly ToolRound[],
     conversationHistory: ConversationMessage[] | undefined,
-    systemPrompt: string
+    systemPrompt: string,
+    turnContext?: string
   ): AIMessage[] {
     return buildRoundMessages({
       systemPrompt,
       ...(conversationHistory ? { conversationHistory } : {}),
+      turnContext,
       userMessage: originalUserMessage,
       rounds,
       renderEnvelope: (tr) => this.buildToolResultEnvelope(tr),

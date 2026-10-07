@@ -121,6 +121,59 @@ const INFORMATION_SIGNALS =
 const TASK_CREATION_SIGNALS =
   /(\bcreate\s+a?\s*task\b|\bmake\s+a?\s*task\b|\badd\s+a?\s*task\b|\btask\s+(banao|bana\s+do|create\s+karo)\b|\bremember\s+(this|that)\s+as\s+a?\s*task\b|\bnote\s+this\s+down\b)/i;
 
+/**
+ * A turn ABOUT the conversation — "summarize our conversation", "check what I
+ * asked earlier", "analyze the current conversation and identify the latest
+ * test".
+ *
+ * WHY THIS IS NOT WORK. The work path plans from the goal alone: the planner is
+ * handed one sentence and a tool catalogue, and no history. A request that
+ * points back into the conversation cannot be planned from there by anything —
+ * the only component that can see what was said is the assistant. Sending it
+ * to the planner produced a task called "Summarize our conversation" and the
+ * answer "I cannot carry it out yet"; that was the reported defect.
+ *
+ * So this is not a judgement that the verb is harmless. It is a statement
+ * about WHERE the subject of the sentence lives. The result is NONE, the
+ * detector's safe direction, and the assistant path keeps every gate it has.
+ *
+ * WHAT COUNTS AS A REFERENCE, deliberately narrow:
+ *
+ *   - the conversation itself: "this / our / the current conversation", "this
+ *     chat", "the conversation so far"
+ *   - a turn in it, by position: "my previous message", "your last reply",
+ *     "the latest test". With `the`, the words `response` and `request` are
+ *     left out — "check the latest response of example.com" is about a website.
+ *   - what someone said or did: "what I asked", "what you just did", "what we
+ *     discussed"
+ *   - the same in Hinglish: "pichla message", "hamari baatcheet", "maine pehle
+ *     kya kaha"
+ */
+const ORDINAL = "last|previous|prior|earlier|first|second|third|fourth|fifth|latest|most\\s+recent|preceding";
+const SAID_OR_DID =
+  "said|say|asked|ask|told|tell|wrote|write|typed|sent|mentioned|discussed|talked|replied|answered|did|do|tested|ran";
+
+const CONVERSATION_SIGNALS = new RegExp(
+  [
+    // The conversation itself.
+    "\\b(?:this|our|the|current|ongoing|whole|entire|above|previous|earlier)\\s+(?:conversation|discussion)\\b",
+    "\\b(?:this|our)\\s+(?:chat|thread|session|transcript)\\b",
+    "\\b(?:conversation|chat|discussion)\\s+(?:so\\s+far|history|above|till\\s+now|until\\s+now|transcript)\\b",
+    // A turn in it, by position.
+    `\\b(?:my|your|our)\\s+(?:very\\s+)?(?:${ORDINAL})\\s+(?:message|question|reply|response|answer|request|prompt|query|instruction|statement|test|action|turn)s?\\b`,
+    `\\bthe\\s+(?:very\\s+)?(?:${ORDINAL})\\s+(?:message|question|reply|answer|prompt|turn|test|action)s?\\b`,
+    // What someone said or did.
+    `\\bwhat\\s+(?:did\\s+|have\\s+)?(?:i|you|we)\\s+(?:just\\s+|already\\s+)?(?:${SAID_OR_DID})\\b`,
+    "\\bwe\\s+(?:just\\s+|have\\s+|had\\s+)?(?:discussed|talked\\s+about|spoke\\s+about|covered|went\\s+over)\\b",
+    "\\b(?:i|you)\\s+(?:just\\s+|already\\s+)?(?:said|asked|told|mentioned)\\b",
+    // Hinglish.
+    "\\b(?:pichhl[aie]|pichl[aie]|pehl[aie]\\s+wal[aie]|upar\\s+wal[aie]|aakhri|akhri|last|previous)\\s+(?:message|sawaal|sawal|question|jawaab|jawab|reply|baat|test)\\b",
+    "\\b(?:hamari|humari|hamaari|apni|is|yeh|ye)\\s+(?:baat\\s?cheet|conversation|chat)\\b",
+    "\\b(?:maine|mene|meine|humne|hamne|tumne|aapne)\\s+(?:abhi\\s+|pehle\\s+|upar\\s+)?kya\\s+(?:kaha|poocha|pucha|puchha|bola|likha|kiya|bheja)\\b",
+  ].join("|"),
+  "i"
+);
+
 const MAX_GOAL = 500;
 
 /**
@@ -192,6 +245,7 @@ function withoutSchedulePhrase(message: string, matched: string): string {
  *
  *   1. no action word at all      -> NONE  (protects every informational turn)
  *   2. "create a task"            -> NONE  (the existing tool owns that)
+ *   2b. about the conversation    -> NONE  (only the assistant can see it)
  *   3. explicit "don't execute"   -> PLAN_ONLY
  *   4. interrogative opener       -> NONE  (a question about doing, not an order)
  *   5. trailing question mark     -> NONE  (asking, not instructing)
@@ -219,6 +273,12 @@ export function detectWorkRequest(message: string, now: Date = new Date()): Work
 
   // 2. Recording a task is not performing one.
   if (TASK_CREATION_SIGNALS.test(trimmed)) return { type: "NONE" };
+
+  // 2b. A turn about the conversation belongs to the one component that can
+  //     see the conversation. Before PLAN_ONLY on purpose: "summarize our
+  //     conversation, don't execute anything" is still a question about the
+  //     conversation, and a plan made without the conversation answers nothing.
+  if (CONVERSATION_SIGNALS.test(trimmed)) return { type: "NONE" };
 
   const goal = trimmed.slice(0, MAX_GOAL);
 

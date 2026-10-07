@@ -67,6 +67,9 @@ export {
   type IntegrationState,
 } from "./repositories/integration-state-repository.js";
 
+// Phase 13 — durable confirmation state for external writes.
+export { PrismaConfirmationRepository } from "./repositories/confirmation-repository.js";
+
 // S7 Step 8 — the controlled Memory vector backfill. Operator-driven only
 // (apps/api/scripts/s7-memory-backfill); nothing in the runtime calls it.
 export {

@@ -214,6 +214,70 @@ describe("R-21 — OPENAI_API_KEY in production", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Phase 13 — the database URL.
+//
+// PostgreSQL now holds confirmations as well as approvals and the execution
+// journal, so a production process that cannot reach it can do nothing safely.
+// A value that is plainly not a PostgreSQL URL is refused here, by name, before
+// anything is wired — rather than at the first query, with a driver's error.
+// A MISSING value is the schema's to report; these are about a wrong one.
+// ---------------------------------------------------------------------------
+
+describe("Phase 13 — DATABASE_URL in production", () => {
+  it("REFUSES the exact placeholder committed in .env.example", () => {
+    const example = readFileSync(resolve(__dirname, "../../../.env.example"), "utf8");
+    const match = /^DATABASE_URL="?([^"\n]+)"?$/m.exec(example);
+    expect(match, ".env.example should still declare DATABASE_URL").toBeTruthy();
+
+    expect(fieldsIn({ ...SAFE, DATABASE_URL: match![1] })).toContain("DATABASE_URL");
+  });
+
+  it.each([
+    ["a bare host and port", "localhost:5432/jarvis"],
+    ["another database", "mysql://app:pw@db.internal:3306/jarvis"],
+    ["a web address", "https://db.example/jarvis"],
+    ["a URL with no host", "postgresql:///jarvis"],
+    ["free text", "the production database"],
+  ])("REFUSES %s", (_label, url) => {
+    expect(fieldsIn({ ...SAFE, DATABASE_URL: url })).toContain("DATABASE_URL");
+  });
+
+  it.each([
+    ["postgresql://", "postgresql://app:pw@db.internal:5432/jarvis?schema=public"],
+    ["postgres://", "postgres://app:pw@db.internal/jarvis"],
+    ["a compose service name", "postgresql://jarvis:jarvis@postgres:5432/jarvis?schema=public"],
+  ])("accepts a %s URL", (_label, url) => {
+    expect(fieldsIn({ ...SAFE, DATABASE_URL: url })).not.toContain("DATABASE_URL");
+  });
+
+  it("never repeats the URL or its password back in the problem text", () => {
+    for (const url of [
+      "mysql://app:S3cr3t-Pa55@db.internal:3306/jarvis",
+      "postgresql://user:password@localhost:5432/jarvis?schema=public",
+    ]) {
+      const problems = checkProductionConfig({ ...SAFE, DATABASE_URL: url });
+      expect(problems.length).toBeGreaterThan(0);
+      for (const problem of problems) {
+        expect(problem.problem).not.toContain("S3cr3t-Pa55");
+        expect(problem.problem).not.toContain("password@");
+        expect(problem.problem).not.toContain("db.internal");
+      }
+    }
+  });
+
+  it("leaves a missing value to the schema, which already refuses it", () => {
+    const { DATABASE_URL: _absent, ...withoutUrl } = SAFE;
+    expect(fieldsIn(withoutUrl)).not.toContain("DATABASE_URL");
+  });
+
+  it("does not apply outside production", () => {
+    expect(
+      checkProductionConfig({ ...SAFE, NODE_ENV: "development", DATABASE_URL: "the database" })
+    ).toEqual([]);
+  });
+});
+
 describe("Sprint 9.12 — problems are reported together", () => {
   it("reports every failing field at once rather than one per boot", () => {
     const problems = checkProductionConfig({

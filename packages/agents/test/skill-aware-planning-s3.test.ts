@@ -28,6 +28,7 @@ import { AgentRegistry } from "../src/registry.js";
 import { AGENT_IDS, AGENT_POLICIES } from "../src/agent-policy.js";
 import { ConversationalAssistant } from "../src/agents/conversational-assistant.js";
 import { MetaAdsAgent } from "../src/agents/meta-ads-agent.js";
+import { TURN_CONTEXT_HEADER } from "../src/turn-messages.js";
 import {
   FakePermissionChecker,
   GatingApprovalService,
@@ -119,7 +120,14 @@ describe("Skill System V1 — S3 skill-aware planning", () => {
     });
   }
 
-  /** One turn. Returns the message the provider actually saw. */
+  /**
+   * One turn. Returns what the SERVER added for the model — the body of the
+   * turn's context message — or "" when it added nothing.
+   *
+   * P0: the block no longer rides inside the user's message, so every turn
+   * also proves the other half here: the last thing the model reads is the
+   * user's text and nothing else, with the context directly ahead of it.
+   */
   async function turn(
     overrides: Record<string, unknown>,
     message = "how are my campaigns doing?",
@@ -127,9 +135,16 @@ describe("Skill System V1 — S3 skill-aware planning", () => {
   ): Promise<string> {
     provider.pushText("done");
     await orchestrator(overrides).process({ message, agentId }, sessionFor("user-1"));
-    const request = provider.requests[provider.requests.length - 1]!;
-    const last = request.messages[request.messages.length - 1]!;
-    return typeof last.content === "string" ? last.content : "";
+    const { messages } = provider.requests[provider.requests.length - 1]!;
+
+    expect(messages.at(-1)).toEqual({ role: "user", content: message });
+
+    const contexts = messages.filter(
+      (m) => m.role === "system" && String(m.content).startsWith(TURN_CONTEXT_HEADER)
+    );
+    if (contexts.length === 0) return "";
+    expect(contexts).toEqual([messages.at(-2)]);
+    return String(contexts[0]!.content).slice(TURN_CONTEXT_HEADER.length).trimStart();
   }
 
   // -------------------------------------------------------------------------
@@ -137,9 +152,8 @@ describe("Skill System V1 — S3 skill-aware planning", () => {
   // -------------------------------------------------------------------------
 
   describe("G. with no port, S3 is not there", () => {
-    it("produces a prompt byte-identical to the pre-S3 one", async () => {
-      const withoutS3 = await turn({});
-      expect(withoutS3).toBe("how are my campaigns doing?");
+    it("adds nothing to what the model is sent", async () => {
+      expect(await turn({})).toBe("");
     });
 
     it("adds no call, no log and no failure path", async () => {
@@ -194,19 +208,19 @@ describe("Skill System V1 — S3 skill-aware planning", () => {
   // -------------------------------------------------------------------------
 
   describe("what the model is told", () => {
-    it("prepends the skill block ahead of the user's message", async () => {
+    it("sends the skill block ahead of the user's message, in a message of its own", async () => {
+      // `turn` has already checked where it sits and that the user's message
+      // is untouched; this is what it says.
       const message = await turn({ skillContext: port.returns(ADVERTISING, WORKSPACE) });
 
+      expect(message.startsWith("WHAT YOU CAN ACTUALLY DO RIGHT NOW:")).toBe(true);
       expect(message).toContain("Business and advertising");
       expect(message).toContain("Email, files and calendar");
-      expect(message.endsWith("how are my campaigns doing?")).toBe(true);
-      expect(message.indexOf("Business and advertising")).toBeLessThan(
-        message.indexOf("how are my campaigns doing?")
-      );
+      expect(message).not.toContain("how are my campaigns doing?");
     });
 
     it("leaves the prompt alone when there are no skills to describe", async () => {
-      expect(await turn({ skillContext: port.returns() })).toBe("how are my campaigns doing?");
+      expect(await turn({ skillContext: port.returns() })).toBe("");
     });
 
     it("carries no raw tool id into the prompt", async () => {
@@ -328,8 +342,7 @@ describe("Skill System V1 — S3 skill-aware planning", () => {
 
   describe("H. a failing capability report is not the user's problem", () => {
     it("falls back to no context and finishes the turn normally", async () => {
-      const message = await turn({ skillContext: port.fails() });
-      expect(message).toBe("how are my campaigns doing?");
+      expect(await turn({ skillContext: port.fails() })).toBe("");
     });
 
     it("still executes tools after the failure", async () => {

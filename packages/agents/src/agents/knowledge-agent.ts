@@ -2,8 +2,8 @@
 // Sprint 6.3 — Knowledge / Research Agent.
 //
 // This agent does NOT retrieve. The Orchestrator has already embedded the query
-// through the Sprint 3.5 retriever and injected the matching passages into the
-// message as a `<knowledge_base>` block before this agent ever runs, so the
+// through the Sprint 3.5 retriever and supplied the matching passages as a
+// `<knowledge_base>` block in the turn's context before this agent ever runs, so the
 // whole RAG pipeline — extraction, chunking, embeddings, pgvector search, page
 // and section provenance — is reused untouched.
 //

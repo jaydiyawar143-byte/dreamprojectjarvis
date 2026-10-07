@@ -418,7 +418,17 @@ function harness(modelOutput: string = PLAN_STATUS, perms: IPermissionChecker = 
     now: () => clock.now,
   });
 
-  const conversation = new TaskConversationService({ tasks, planner, execution, scheduler });
+  const conversationService = new TaskConversationService({ tasks, planner, execution, scheduler });
+  // Every turn in this file is one the work path takes. It hands back (null)
+  // only an UNSCHEDULED turn nothing can carry out — task-conversation-v11
+  // covers that — so a null here is a failure, and it fails loudly.
+  const conversation = {
+    async handle(input: Parameters<TaskConversationService["handle"]>[0]) {
+      const result = await conversationService.handle(input);
+      if (!result) throw new Error("expected the work path to take this turn");
+      return result;
+    },
+  };
 
   /** A second process over the SAME rows — the restart scenario. */
   const restart = () =>

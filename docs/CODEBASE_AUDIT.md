@@ -391,6 +391,8 @@ Why removing the file is not enough: it stays readable in every clone and in Git
 
 Pending write confirmations and the per-IP rate limiter live in memory. For confirmations this is deliberate and correct — the file header explains that persisting them would create a durable, replayable write permit. **READ.** If the API is ever run as several instances, it needs sticky sessions.
 
+**Update 2026-10-06 (Phase 13).** Confirmations are no longer per-process. They are rows in PostgreSQL (`Confirmation`), shared by every instance and surviving a restart. The objection above is answered rather than dropped: the table holds a SHA-256 of the token, never the token, so a stored row cannot be replayed; spending one is a single conditional `UPDATE`, so exactly one of any number of presenters wins; and the two-minute lifetime is unchanged. Confirmations therefore no longer need sticky sessions. The per-IP rate limiter is still in memory, so that half of this finding stands.
+
 ### SEC-7 — No continuous integration · MEDIUM
 
 No pipeline runs tests, secret scanning or dependency audits. SEC-1 is exactly the kind of mistake an automated secret scan catches before it leaves a laptop.
@@ -558,7 +560,7 @@ Recorded transparently, per `docs/DOCUMENTATION_PROTOCOL.md`.
 | Earlier statement | Correction | Evidence |
 |---|---|---|
 | Web audit page, 2026-09-14: "roughly 2,300 tests" | **4,609** passing outside `@jarvis/db`, plus 196 there | **RUN** baseline, §3 |
-| Web audit page: "persist the confirmation store" (S-1) | Wrong. The store is in memory by deliberate design; persisting it would create a replayable write permit | **READ** `confirmations.ts:21-25` |
+| Web audit page: "persist the confirmation store" (S-1) | Wrong. The store is in memory by deliberate design; persisting it would create a replayable write permit. **Update 2026-10-06 (Phase 13):** this correction is itself superseded. The owner's roadmap adopted S-1, and the store is now PostgreSQL. The replay concern was real and is met differently — the table holds only a SHA-256 of the token, so nothing stored can be replayed (see SEC-6) | **READ** `confirmations.ts:21-25` at the time; `confirmations.ts` and `confirmation-repository.ts` now |
 | Web audit page: "16 packages … 27 models, 9 enums" | 11 enums | **READ** `schema.prisma` |
 | Ledger §8.1: memory e2e "flaky, 13/13 in isolation" | 6 of 13 fail deterministically | **RUN** ×3 |
 | Ledger R-3: "no shared card primitive" | `widget-shell.tsx` is one, used by 7 of 8 widgets | **RUN** |
@@ -1395,7 +1397,7 @@ There is now exactly one memory runtime path, one database client, one JWT verif
 | SEC-7 | No CI, so no automated secret scanning | Medium | Add CI. **Partly addressed 2026-09-14:** workflow written for lint, typecheck, build and four test suites; not yet run on GitHub; still no secret scan or dependency audit. **Update 2026-10-05:** runs on GitHub on every push; also gates the API's test-file typecheck and the PostgreSQL-backed tests; still no secret scan or dependency audit |
 | SEC-8 | Lint has no security rules | Low | Ratchet rules (R-14) |
 | SEC-5 | Real account identifiers in `apps/api/scripts/phase116b/state.json` | Informational | Mask if preferred |
-| SEC-6 | Per-process confirmation store and IP limiter | Informational, by design | Sticky sessions if ever scaled out |
+| SEC-6 | Per-process confirmation store and IP limiter | Informational, by design | Sticky sessions if ever scaled out. **Update 2026-10-06 (Phase 13):** the confirmation store is now PostgreSQL and shared by every instance; only the per-IP limiter is still per-process |
 
 **Resolved in this cleanup:** SEC-2 (access log), SEC-3 (confirmation hash), SEC-4 (template), and SEC-1 in part — no longer tracked, purged from history and from GitHub `main`.
 

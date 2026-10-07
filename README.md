@@ -54,6 +54,7 @@ Then follow [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md) for the database contai
 | [docs/JARVIS_CAPABILITY_MATRIX.md](./docs/JARVIS_CAPABILITY_MATRIX.md) | Every capability: status, execution path, approval, agent scope, tests |
 | [docs/MEMORY.md](./docs/MEMORY.md) | Memory and document knowledge |
 | [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md) | Setup, environment variables, quality gates |
+| [docs/DEPLOYMENT.md](./docs/DEPLOYMENT.md) | The runbook: deploy, check health, roll back, monitor |
 | [docs/CODEBASE_AUDIT.md](./docs/CODEBASE_AUDIT.md) | The 2026-09-14 audit and cleanup |
 | [docs/JARVIS_USER_MANUAL.md](./docs/JARVIS_USER_MANUAL.md) | Using JARVIS |
 

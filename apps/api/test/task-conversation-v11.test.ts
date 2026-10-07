@@ -280,8 +280,16 @@ function harness(modelOutput: string, perms: IPermissionChecker = { hasPermissio
   return { store, tasks, planner, execution, conversation, executeSpy, web, gated, provider };
 }
 
-const turn = (h: ReturnType<typeof harness>, goal: string, planOnly = false, userId = ALICE) =>
+/** The raw answer: a result when the work path takes the turn, null when it hands it back. */
+const handle = (h: ReturnType<typeof harness>, goal: string, planOnly = false, userId = ALICE) =>
   h.conversation.handle({ userId, role: ROLE, goal, planOnly });
+
+/** A turn the work path is expected to take. */
+const turn = async (...args: Parameters<typeof handle>) => {
+  const result = await handle(...args);
+  if (!result) throw new Error("expected the work path to take this turn");
+  return result;
+};
 
 // ---------------------------------------------------------------------------
 
@@ -333,12 +341,13 @@ describe("Task Planner V1.1 — every safety layer still applies", () => {
       JSON.stringify({ executable: true, toolId: "system.secretOps", params: {}, reason: "nope" })
     );
 
-    const result = await turn(h, "Check the secret ops");
+    // Refused by the planner's own allowlist check: the work path does not
+    // take the turn at all, so nothing runs and nothing is recorded as work.
+    expect(await handle(h, "Check the secret ops")).toBeNull();
 
-    expect(result.plan).toMatchObject({ executable: false });
+    expect(h.provider.seen).toHaveLength(1);
     expect(h.executeSpy).not.toHaveBeenCalled();
-    expect(h.store.rows.get(result.taskId)!.status).toBe("PENDING");
-    expect(result.message).toMatch(/cannot carry it out/i);
+    expect(h.store.rows.size).toBe(0);
   });
 
   it("7. invalid parameters are refused by the tool's own validation", async () => {
@@ -346,11 +355,11 @@ describe("Task Planner V1.1 — every safety layer still applies", () => {
       JSON.stringify({ executable: true, toolId: "web.fetch", params: {}, reason: "no url" })
     );
 
-    const result = await turn(h, "Check the website");
+    expect(await handle(h, "Check the website")).toBeNull();
 
-    expect(result.plan).toMatchObject({ executable: false });
     expect(h.executeSpy).not.toHaveBeenCalled();
     expect(h.web.calls).toBe(0);
+    expect(h.store.rows.size).toBe(0);
   });
 
   it("8. an approval-gated tool still stops at the approval gate", async () => {
@@ -398,16 +407,29 @@ describe("Task Planner V1.1 — every safety layer still applies", () => {
     expect(crossRead.ok).toBe(false);
   });
 
-  it("a refused plan leaves a durable record of what was asked for", async () => {
+  it("a turn nothing here can carry out is handed back, not kept as a task", async () => {
+    // P0. This used to be saved as a PENDING task and answered "I cannot carry
+    // it out yet" — which is how "Summarize our conversation" became a task
+    // nobody could run. With no executable action there is no work to record:
+    // the caller sends the turn to the assistant, which can see the
+    // conversation. (A turn with an explicit TIME is different and is still
+    // answered here — scheduler-v1 holds that down.)
     const h = harness(JSON.stringify({ executable: false, reason: "Nothing here can do that." }));
 
-    const result = await turn(h, "Check the moon landing telemetry");
+    expect(await handle(h, "Check the moon landing telemetry")).toBeNull();
 
-    // The task exists and is PENDING: asked for, not done.
-    const task = h.store.rows.get(result.taskId)!;
-    expect(task.status).toBe("PENDING");
-    expect(task.title).toMatch(/moon landing/i);
-    expect(result.message).toMatch(/Nothing here can do that/);
+    expect(h.store.rows.size).toBe(0);
+    expect(h.executeSpy).not.toHaveBeenCalled();
+  });
+
+  it("the planner is still asked with the user's own words, title and description", async () => {
+    // Planning now happens before the task exists, so it reads the goal rather
+    // than the saved row. What the model is asked must not have changed.
+    const h = harness(PLAN_WEB_FETCH);
+    await turn(h, "Check digitalonebox.com");
+
+    const asked = h.provider.seen[0]!.messages[1]!.content;
+    expect(asked).toBe("Task title:\nCheck digitalonebox.com\n\nTask description:\nCheck digitalonebox.com");
   });
 
   it("the model never sees an ungranted tool", async () => {

@@ -25,6 +25,7 @@ import {
 } from "@jarvis/security";
 import {
   type PrismaClient,
+  PrismaConfirmationRepository,
   PrismaCredentialRepository,
   PrismaGoogleConnectionRepository,
   PrismaIntegrationStateRepository,
@@ -38,7 +39,9 @@ import {
 import type { IToolExecutor, IntegrationUsage } from "@jarvis/core";
 import { DbBackedRateLimiter } from "../rate-limiter.js";
 import { getMapsUsageGuard } from "../maps-usage-guard.js";
+import type { ErrorMonitor, OperationalLog } from "../observability/index.js";
 import { IntegrationCommandService, type CredentialPort, type IntegrationCommandDeps } from "./command-service.js";
+import { createConfirmationService } from "./confirmations.js";
 
 export interface BuildInput {
   prisma: PrismaClient;
@@ -47,6 +50,10 @@ export interface BuildInput {
   executor?: IToolExecutor;
   /** S8.5 — the MCP runtime the container built, for the integration health check. */
   mcp?: IntegrationCommandDeps["mcp"];
+  /** Phase 13 — where the confirmation service writes its operational lines. */
+  log?: OperationalLog;
+  /** Phase 13 — told when a command fails in a way nothing expected. */
+  monitor?: ErrorMonitor;
 }
 
 /**
@@ -156,6 +163,14 @@ export function buildIntegrationCommandService(
     oauthStates: new PrismaOAuthStateRepository(input.prisma),
     googleConfig,
     mapsUsage,
+    // Phase 13 — confirmations are PostgreSQL rows on the SAME client, so every
+    // instance shares them and a restart loses none. Always wired: there is no
+    // in-process store to fall back to, in any environment.
+    confirmations: createConfirmationService(
+      new PrismaConfirmationRepository(input.prisma),
+      input.log ? { log: input.log } : {}
+    ),
+    ...(input.monitor ? { monitor: input.monitor } : {}),
     ...(input.executor ? { executor: input.executor } : {}),
     ...(input.mcp ? { mcp: input.mcp } : {}),
   });

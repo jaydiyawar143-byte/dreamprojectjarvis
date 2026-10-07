@@ -82,7 +82,8 @@ import {
   isWhatsAppConfigured,
 } from "./environment.js";
 import { maskConfig, validateConfig, type ValidationIssue } from "./config-validation.js";
-import { consumeConfirmation, issueConfirmation } from "./confirmations.js";
+import type { ConfirmationPort } from "./confirmations.js";
+import type { ErrorMonitor } from "../observability/error-monitor.js";
 import {
   getIntegration as describeIntegration,
   invalidateChecks,
@@ -152,6 +153,18 @@ export interface IntegrationCommandDeps {
   mapsUsage: () => Promise<IntegrationUsage | null>;
   /** S8.5 — the MCP runtime, handed to the health registry as it is. Absent: switched off. */
   mcp?: IntegrationDeps["mcp"];
+  /**
+   * Phase 13 — where a write confirmation is recorded and spent: PostgreSQL,
+   * shared by every instance. Absent means NO external write can be confirmed,
+   * so every one is refused. There is no in-process fallback.
+   */
+  confirmations?: ConfirmationPort;
+  /**
+   * Phase 13 — told when a command fails in a way nothing here expected,
+   * including a confirmation store that cannot be reached. Never told about a
+   * refusal: that is an answer, not an error.
+   */
+  monitor?: ErrorMonitor;
   /**
    * The ONE execution authority. Bound after construction by `setExecutor`,
    * because the tool registry it is built from must contain the integration
@@ -288,7 +301,11 @@ export class IntegrationCommandService {
     const { command } = input;
 
     if (command === "list") {
-      return this.handleList(context);
+      try {
+        return await this.handleList(context);
+      } catch (error) {
+        return this.failedUnexpectedly(error, command, null, context);
+      }
     }
 
     const id = input.integration;
@@ -321,29 +338,59 @@ export class IntegrationCommandService {
       return refusal;
     }
 
-    const throttled = await this.checkRateLimit(command, id, context);
-    if (throttled) {
-      await this.audit(command, id, context, throttled);
-      return throttled;
-    }
-
+    // Phase 13 — the rate limit is asked INSIDE the try. It counts rows in the
+    // database, so with the database down it is the first thing to fail; outside
+    // the try that rejected this call and left the HTTP request unanswered.
     try {
+      const throttled = await this.checkRateLimit(command, id, context);
+      if (throttled) {
+        await this.audit(command, id, context, throttled);
+        return throttled;
+      }
+
       const result = await this.dispatch(command, id, descriptor, input, context);
       await this.audit(command, id, context, result);
       return result;
     } catch (error) {
-      // An exception here is a bug or an unreachable provider. Neither message
-      // is safe to forward verbatim — a thrown fetch error can carry a URL with
-      // a key in its query string.
-      const result = fail(
-        command,
-        id,
-        "INTERNAL_ERROR",
-        "The command could not be completed. The server log has the detail."
-      );
-      await this.audit(command, id, context, result, safeMessage(error, "unknown"));
-      return result;
+      return this.failedUnexpectedly(error, command, id, context);
     }
+  }
+
+  /**
+   * The answer to a failure nothing here expected: a bug, or something this
+   * depends on — the database, a provider — that could not be reached.
+   *
+   * `execute` always answers. Its callers treat a result as the whole story, so
+   * a call that rejected instead left an HTTP request with no response at all.
+   *
+   * The message is never forwarded: a thrown fetch error can carry a URL with a
+   * key in its query string. Phase 13 — it is reported to the error monitor
+   * FIRST, by identifier only. The audit row below is lost when the database is
+   * the thing that failed, and the caller is told "the server log has the
+   * detail": this makes that true.
+   */
+  private async failedUnexpectedly(
+    error: unknown,
+    command: IntegrationCommand,
+    id: IntegrationId | null,
+    context: IntegrationCommandContext
+  ): Promise<IntegrationCommandResult> {
+    this.deps.monitor?.captureException(error, {
+      context: {
+        component: "integrations",
+        command,
+        ...(id ? { integration: id } : {}),
+        ...(context.traceId ? { traceId: context.traceId } : {}),
+      },
+    });
+    const result = fail(
+      command,
+      id,
+      "INTERNAL_ERROR",
+      "The command could not be completed. The server log has the detail."
+    );
+    if (id) await this.audit(command, id, context, result, safeMessage(error, "unknown"));
+    return result;
   }
 
   /** Says WHY a verb is unavailable, which is more useful than "unsupported". */
@@ -1332,14 +1379,28 @@ export class IntegrationCommandService {
         );
       }
 
+      // Phase 13 — with nowhere to record a confirmation there is nothing that
+      // could vouch for this write, so it is refused before a token is handed
+      // out. A deployment wired without the store cannot write externally.
+      const confirmations = this.deps.confirmations;
+      if (!confirmations) {
+        return fail(
+          "executeAction",
+          id,
+          "UNSUPPORTED_COMMAND",
+          `"${action.label}" changes something outside JARVIS, and this deployment has nowhere to record a confirmation for it, so it was not run.`
+        );
+      }
+
       if (!input.confirmationToken) {
-        const confirmation = issueConfirmation({
+        const confirmation = await confirmations.issue({
           userId: context.userId,
           integration: id,
           actionId,
           params,
           summary: this.describeWrite(descriptor, action.label, params),
           irreversible: true,
+          ...(context.traceId ? { traceId: context.traceId } : {}),
         });
         return fail(
           "executeAction",
@@ -1350,12 +1411,15 @@ export class IntegrationCommandService {
         );
       }
 
-      const consumed = consumeConfirmation({
+      // A store that cannot be asked rejects here. `execute` turns that into a
+      // refusal, so an unreachable database never lets a write through.
+      const consumed = await confirmations.consume({
         token: input.confirmationToken,
         userId: context.userId,
         integration: id,
         actionId,
         params,
+        ...(context.traceId ? { traceId: context.traceId } : {}),
       });
       if (!consumed.ok) {
         return fail(

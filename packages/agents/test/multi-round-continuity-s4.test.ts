@@ -311,7 +311,7 @@ describe("S4 — earlier tool results stay available", () => {
   // -------------------------------------------------------------------------
 
   describe("I. the S3 skill block is untouched", () => {
-    it("still prefixes the question, and survives every round", async () => {
+    it("still comes directly ahead of the question, and survives every round", async () => {
       const contexts: SkillContext[] = [
         {
           id: "advertising",
@@ -332,9 +332,14 @@ describe("S4 — earlier tool results stay available", () => {
         skillContext: { forAgent: async () => contexts },
       }).process({ message: "how are ads doing?", agentId: AGENT_IDS.general }, sessionFor("user-1"));
 
+      // P0 — ahead of the question as a message of its own, on every round;
+      // the question itself is the user's words and nothing else.
       for (let round = 0; round < 3; round++) {
-        const user = messagesAt(round).filter((m) => m.role === "user");
-        expect(user[user.length - 1]!.content).toContain("Business and advertising");
+        const messages = messagesAt(round);
+        const question = messages.map((m) => m.role).lastIndexOf("user");
+        expect(messages[question]!.content).toBe("how are ads doing?");
+        expect(messages[question - 1]!.role).toBe("system");
+        expect(messages[question - 1]!.content).toContain("Business and advertising");
       }
     });
   });
