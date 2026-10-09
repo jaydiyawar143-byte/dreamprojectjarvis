@@ -19,29 +19,63 @@
 // RISK. Nothing leaves JARVIS, but a forgotten memory is gone for good:
 // HIGH_IMPACT, not LOW_IMPACT. Permission is only "read" on purpose — every
 // role may forget its OWN memories.
+//
+// Phase 14 adds two tools, built by their own factories so the three above
+// stay exactly as they were:
+//
+//   memory.correct        HIGH_IMPACT, approval-gated, on no allowlist. One
+//                         memory id at the version the user was shown, and the
+//                         id of the saved USER message holding the new value.
+//                         Never the value: a parameter is never memory text.
+//   memory.purge_expired  LOW_IMPACT, no parameters, on no allowlist. Deletes
+//                         the calling user's memories that expired more than
+//                         the grace period ago. Run only by the retention
+//                         sweep; the policy, not a person, is its approval.
 // ---------------------------------------------------------------------------
 
 import { BaseTool } from "../base-tool.js";
 import type {
   ExecutionJournalPort,
   IApprovalConsumptionPort,
+  MemoryCorrectionOutcome,
+  MemoryCorrectionTarget,
   MemoryForgetScope,
   MemoryView,
   ToolContext,
   ToolParameter,
   ToolResult,
 } from "@jarvis/core";
-import { BLOCKED_STATUSES, MEMORY_FORGET_LIMIT, MEMORY_TOOL_IDS, computeParamsHash } from "@jarvis/core";
+import {
+  BLOCKED_STATUSES,
+  MEMORY_CORRECT_TOOL_ID,
+  MEMORY_FORGET_LIMIT,
+  MEMORY_PURGE_TOOL_ID,
+  MEMORY_TOOL_IDS,
+  computeParamsHash,
+} from "@jarvis/core";
 import { withSafeTerminalTransitions } from "../execution-journal.js";
 
 /** What the tools may do. Implemented over MemoryManagementService at the composition root. */
 export interface MemoryToolPort {
-  list(userId: string, options: { includeExpired: boolean; limit?: number }): Promise<{ memories: MemoryView[]; total: number; hasMore: boolean }>;
+  /**
+   * `conversationId` (Phase 14) is the conversation the tool was called in.
+   * The port resolves that conversation's project and lists only what it may
+   * see: personal memories plus its own project's. No parameter names a
+   * project, so a model cannot ask for another one.
+   */
+  list(
+    userId: string,
+    options: { includeExpired: boolean; limit?: number; conversationId?: string }
+  ): Promise<{ memories: MemoryView[]; total: number; hasMore: boolean }>;
   forget(
     userId: string,
     targets: Array<{ id: string; version: string }>
   ): Promise<{ status: "FORGOTTEN" | "STALE" | "NOT_FOUND" | "NOTHING_TO_FORGET"; deleted: number; notFound?: number; stale?: number }>;
   forgetAll(userId: string, scope: MemoryForgetScope): Promise<{ status: "FORGOTTEN" | "NOTHING_TO_FORGET"; deleted: number }>;
+  /** Phase 14 — replace one memory with the statement in a saved USER message. Absent: correction is unavailable. */
+  correct?(userId: string, target: MemoryCorrectionTarget, context: { traceId?: string }): Promise<MemoryCorrectionOutcome>;
+  /** Phase 14 — delete this user's long-expired memories; resolves to how many. Absent: retention is unavailable. */
+  purgeExpired?(userId: string): Promise<number>;
 }
 
 const MEMORY_ID = /^[A-Za-z0-9_-]{1,64}$/;
@@ -85,6 +119,8 @@ export class MemoryListTool extends BaseTool {
     const result = await this.memories.list(context.userId, {
       ...(params.limit !== undefined ? { limit: params.limit as number } : {}),
       includeExpired: params.includeExpired === true,
+      // Phase 14 — from the execution context, never from a parameter.
+      ...(context.conversationId ? { conversationId: context.conversationId } : {}),
     });
     return this.success(result);
   }
@@ -246,6 +282,117 @@ export class MemoryForgetAllTool extends MemoryDeleteTool {
     await this.journal.markSucceeded(authorized.executionId);
     return this.success({ forgotten: outcome.deleted, scope });
   }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 14 — memory.correct
+// ---------------------------------------------------------------------------
+
+const CORRECTION_REFUSALS: Readonly<Record<Exclude<MemoryCorrectionOutcome["status"], "CORRECTED">, { code: string; message: string }>> = {
+  NOT_FOUND: { code: "NOT_FOUND", message: "That memory no longer exists, so there was nothing to change." },
+  STALE: { code: "STALE_TARGET", message: "That memory changed after you chose it, so nothing was changed. Ask again to see it as it is now." },
+  NOT_LEARNABLE: { code: "NOT_LEARNABLE", message: "That can't be saved as a memory, so nothing was changed." },
+  BLOCKED: { code: "LEARNING_BLOCKED", message: "Learning is paused or that message was excluded, so nothing was changed." },
+  SOURCE_NOT_FOUND: { code: "SOURCE_NOT_FOUND", message: "I couldn't find the message with the new value, so nothing was changed." },
+  ALREADY_APPLIED: { code: "ALREADY_APPLIED", message: "That correction was already applied." },
+  FAILED: { code: "MEMORY_CORRECT_FAILED", message: "The memory could not be changed. Nothing was changed." },
+};
+
+export class MemoryCorrectTool extends MemoryDeleteTool {
+  constructor(memories: MemoryToolPort, journal: ExecutionJournalPort, approvals?: IApprovalConsumptionPort) {
+    super(
+      MEMORY_CORRECT_TOOL_ID,
+      "Correct a memory",
+      "Replace one memory the user chose with the statement they wrote and confirmed. Never offered to agents.",
+      [
+        { name: "memoryId", type: "string", description: "The id of the memory to change", required: true },
+        { name: "version", type: "string", description: "The version (changedAt) the memory was shown at", required: true },
+        { name: "sourceMessageId", type: "string", description: "The id of the saved user message holding the new value", required: true },
+      ],
+      memories,
+      journal,
+      approvals
+    );
+  }
+
+  validate(params: Record<string, unknown>): boolean {
+    const { memoryId, version, sourceMessageId } = params;
+    return (
+      onlyKeys(params, ["memoryId", "version", "sourceMessageId"]) &&
+      typeof memoryId === "string" &&
+      MEMORY_ID.test(memoryId) &&
+      typeof version === "string" &&
+      VERSION.test(version) &&
+      typeof sourceMessageId === "string" &&
+      MEMORY_ID.test(sourceMessageId)
+    );
+  }
+
+  async execute(params: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
+    if (!this.memories.correct) return this.failure("Memory correction is not available on this server.");
+    const authorized = await this.authorize(params, context);
+    if (!authorized.ok) return this.failure(authorized.error);
+
+    let outcome: MemoryCorrectionOutcome;
+    try {
+      outcome = await this.memories.correct(
+        context.userId,
+        { id: params.memoryId as string, version: params.version as string, sourceMessageId: params.sourceMessageId as string },
+        { ...(context.traceId ? { traceId: context.traceId } : {}) }
+      );
+    } catch {
+      return this.fail(authorized.executionId, CORRECTION_REFUSALS.FAILED.code, CORRECTION_REFUSALS.FAILED.message);
+    }
+    if (outcome.status !== "CORRECTED") {
+      const refusal = CORRECTION_REFUSALS[outcome.status] ?? CORRECTION_REFUSALS.FAILED;
+      return this.fail(authorized.executionId, refusal.code, refusal.message);
+    }
+    await this.journal.markSucceeded(authorized.executionId);
+    return this.success({ corrected: 1 });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 14 — memory.purge_expired
+// ---------------------------------------------------------------------------
+
+export class MemoryPurgeExpiredTool extends BaseTool {
+  constructor(private readonly memories: MemoryToolPort) {
+    super(
+      MEMORY_PURGE_TOOL_ID,
+      "Purge expired memories",
+      "Delete the current user's memories that expired more than the retention grace period ago. Run by the retention sweep; never offered to agents.",
+      "system",
+      [],
+      false,
+      ["read"],
+      "LOW_IMPACT"
+    );
+  }
+
+  /** No parameters at all: nothing a caller sends can widen what is deleted. */
+  validate(params: Record<string, unknown>): boolean {
+    return Object.keys(params).length === 0;
+  }
+
+  async execute(_params: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
+    if (!this.memories.purgeExpired) return this.failure("Memory retention is not available on this server.");
+    try {
+      return this.success({ purged: await this.memories.purgeExpired(context.userId) });
+    } catch {
+      return this.failure("Expired memories could not be purged. Nothing was deleted.");
+    }
+  }
+}
+
+/** Phase 14 — the correction tool, registered beside the three below. */
+export function createMemoryCorrectionTool(memories: MemoryToolPort, journal: ExecutionJournalPort, approvals?: IApprovalConsumptionPort): BaseTool {
+  return new MemoryCorrectTool(memories, journal, approvals);
+}
+
+/** Phase 14 — the retention tool, registered beside the three below. */
+export function createMemoryRetentionTool(memories: MemoryToolPort): BaseTool {
+  return new MemoryPurgeExpiredTool(memories);
 }
 
 /** list, forget, forget_all — in that order. */

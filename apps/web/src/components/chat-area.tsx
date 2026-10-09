@@ -3,6 +3,7 @@
 import { useChatStore } from "@/lib/chat-store";
 import { MessageList } from "./message-list";
 import { MessageInput } from "./message-input";
+import { ProjectPicker } from "./project-picker";
 import { AlertCircle, X, RefreshCw } from "lucide-react";
 
 export function ChatArea() {
@@ -42,6 +43,8 @@ export function ChatArea() {
           <div className="text-center">
             <h2 className="text-2xl font-semibold text-gray-300 mb-2">JARVIS</h2>
             <p className="text-gray-500">How can I help you today?</p>
+            {/* Phase 14 — a NEW conversation may be started in one of the user's projects. */}
+            <ProjectPicker />
           </div>
         </div>
       ) : (

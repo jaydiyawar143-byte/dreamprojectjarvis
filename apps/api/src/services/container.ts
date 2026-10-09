@@ -111,12 +111,17 @@ import {
   type TaskRecord,
   PrismaIntegrationStateRepository,
   PrismaPreferenceRepository,
+  PrismaProjectRepository,
 } from "@jarvis/db";
-import { MemoryExtractionService, KnowledgeRetrievalService, MemoryManagementService } from "@jarvis/memory";
+import { MemoryExtractionService, KnowledgeRetrievalService, MemoryManagementService, MemoryRetentionSweep } from "@jarvis/memory";
+import { createMemoryToolPort } from "./memory-tool-port.js";
+import type { MemoryCorrectionCheckPort } from "../routes/memory-commands.js";
 import { IntegrationCommandService } from "./integrations/command-service.js";
 import { createIntegrationTools, type IntegrationCommandPort } from "@jarvis/tools";
 import {
   createCapabilityTools,
+  createMemoryCorrectionTool,
+  createMemoryRetentionTool,
   createMemoryTools,
   createSelfTools,
   createTaskTools,
@@ -146,7 +151,8 @@ import {
   type ProviderChainEvent,
 } from "@jarvis/core";
 // S8.4 — MCP: the reviewed manifest, the runtime and the tool adapter.
-import { MCP_MANIFEST, validateMcpManifest, type McpManifest } from "@jarvis/core";
+import { MCP_MANIFEST, MEMORY_PURGE_TOOL_ID, validateMcpManifest, type McpManifest } from "@jarvis/core";
+import { randomUUID } from "node:crypto";
 import { McpConnection, isMcpEnabled } from "@jarvis/mcp";
 import { createMcpTools } from "@jarvis/tools";
 import { buildIntegrationCommandService } from "./integrations/build.js";
@@ -277,6 +283,15 @@ export interface Container {
    * manage what is stored even when learning is off for lack of a key.
    */
   memoryManagement: MemoryManagementService;
+  /** Phase 14 — the user's own projects: the scope a memory may belong to. */
+  projects: PrismaProjectRepository;
+  /**
+   * Phase 14 — whether a statement may replace a memory, answered by the
+   * memory writer. Absent when no writer is configured (no OPENAI_API_KEY).
+   */
+  memoryCorrections?: MemoryCorrectionCheckPort;
+  /** Phase 14 — the bounded retention sweep. `index.ts` decides when it runs. */
+  memoryRetention: MemoryRetentionSweep;
   knowledgeRepo?: PrismaKnowledgeRepository;
   /**
    * Sprint 3.7 — knowledge retriever wired into the orchestrator for RAG.
@@ -1080,12 +1095,38 @@ export function getContainer(options?: {
   const memoryRepository = new PrismaMemoryRepository(prisma);
   const memoryManagement = new MemoryManagementService({
     store: memoryRepository,
-    control: new PrismaPreferenceRepository(prisma, "prefs:memory"),
+    // Phase 14 — "unreadable": a stored control document that is not valid
+    // JSON is reported as PRESENT BUT UNREADABLE, which the contract reads as
+    // paused. It used to be reported as absent — learning on, every veto gone.
+    control: new PrismaPreferenceRepository(prisma, "prefs:memory", "unreadable"),
     audit: auditLogger,
   });
-  for (const tool of createMemoryTools(memoryManagement, executionJournal, approvalRepo)) {
+
+  // ---------------------------------------------------------------------------
+  // Phase 14 — the tools' port, projects, correction and retention.
+  //
+  // Still ONE repository and ONE management service. The port only joins
+  // them: `memory.list` is scoped to the conversation it is called in, and
+  // `memory.correct` carries a confirmed correction to the memory writer —
+  // built further down, hence the reference — which decides and writes.
+  //
+  // `memory.correct` and `memory.purge_expired` are registered here and
+  // granted to NO agent, like the two deleting tools: the first runs only for
+  // a pending action the user confirmed, the second only for the retention
+  // sweep. Both run through ToolExecutor.
+  // ---------------------------------------------------------------------------
+  const projectRepo = new PrismaProjectRepository(prisma);
+  const memoryWriter: { current: MemoryExtractionService | null } = { current: null };
+  const memoryToolPort = createMemoryToolPort({
+    memoryManagement,
+    conversations: conversationRepo,
+    corrector: () => memoryWriter.current,
+  });
+  for (const tool of createMemoryTools(memoryToolPort, executionJournal, approvalRepo)) {
     toolRegistry.register(tool);
   }
+  toolRegistry.register(createMemoryCorrectionTool(memoryToolPort, executionJournal, approvalRepo));
+  toolRegistry.register(createMemoryRetentionTool(memoryToolPort));
 
   // ---------------------------------------------------------------------------
   // S8.4 — MCP. Off unless JARVIS_MCP_ENABLED=true; the reviewed manifest is
@@ -1487,7 +1528,7 @@ export function getContainer(options?: {
 
     // MemoryExtractionService reuses the same OpenAIAdapter already wired for
     // the ConversationalAssistant — no second AI client is created.
-    memoryExtractor = new MemoryExtractionService({
+    const writer = new MemoryExtractionService({
       aiProvider: adapter,
       store: memoryStore,
       embeddingProvider,
@@ -1495,6 +1536,9 @@ export function getContainer(options?: {
       // model reads a turn and again just before anything is written.
       learningControl: { get: (userId) => memoryManagement.learningControl(userId) },
     });
+    memoryExtractor = writer;
+    // Phase 14 — the same instance corrects: there is one memory writer.
+    memoryWriter.current = writer;
 
     console.log(JSON.stringify({
       level: "info",
@@ -1515,6 +1559,7 @@ export function getContainer(options?: {
     memoryStore = null;
     embeddingProvider = null;
     memoryExtractor = null;
+    memoryWriter.current = null;
   }
 
   // ---------------------------------------------------------------------------
@@ -1600,6 +1645,9 @@ export function getContainer(options?: {
           memoryStore,
           embeddingProvider,
           ...(memoryExtractor !== null ? { memoryExtractor } : {}),
+          // Phase 14 — a memory learned from a message the user vetoed is not
+          // recalled, and controls that cannot be read recall nothing.
+          memoryControl: { get: (userId: string) => memoryManagement.learningControl(userId) },
         }
       : {}),
     // Sprint 3.7: RAG context injection. Absent when no provider is configured.
@@ -1609,6 +1657,30 @@ export function getContainer(options?: {
   });
 
   const recommendationRepo = new PrismaRecommendationRepository(prisma);
+
+  // ---------------------------------------------------------------------------
+  // Phase 14 — the retention sweep.
+  //
+  // It reads user ids and nothing else, and it deletes nothing itself: each
+  // user's long-expired memories are purged by `memory.purge_expired`, run
+  // through the SAME ToolExecutor as every other tool — permission check,
+  // audit row and all — as that user. A refused or failed run is a failure of
+  // that one user's purge and is counted, never retried in a loop.
+  // ---------------------------------------------------------------------------
+  const memoryRetention = new MemoryRetentionSweep({
+    candidates: (before, limit) => memoryRepository.usersWithExpiredMemories(before, limit),
+    purge: async (userId) => {
+      const run = await toolExecutor.execute({
+        toolId: MEMORY_PURGE_TOOL_ID,
+        params: {},
+        userId,
+        role: "member",
+        traceId: randomUUID(),
+      });
+      if (run.status !== "completed" || !run.result?.success) throw new Error("memory.purge_expired did not complete");
+      return Number((run.result.data as { purged?: unknown } | undefined)?.purged ?? 0);
+    },
+  });
 
   // The execution authority, bound once now that it exists. An integration
   // action requested by EITHER path therefore still runs through the permission
@@ -1675,6 +1747,12 @@ export function getContainer(options?: {
     memoryExtractor,
     // S7.2 L5 — the chat route's memory commands read it through a narrow port.
     memoryManagement,
+    // Phase 14 — projects, the correction check and the retention sweep.
+    projects: projectRepo,
+    ...(memoryWriter.current
+      ? { memoryCorrections: { check: (input: Parameters<MemoryCorrectionCheckPort["check"]>[0]) => memoryWriter.current!.checkCorrection(input) } }
+      : {}),
+    memoryRetention,
     knowledgeRepo,
     knowledgeRetriever,
     // Core V1 — the first persistent work primitive, and self-knowledge.

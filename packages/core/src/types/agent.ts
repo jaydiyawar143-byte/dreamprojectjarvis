@@ -1,7 +1,6 @@
 import { z } from "zod";
 import type { ITool, ToolPermission } from "./tool.js";
 import type { AuditEntry } from "./common.js";
-import type { IMemoryStore } from "./memory.js";
 import { ConversationMessageSchema } from "./conversation.js";
 
 export const AgentCategorySchema = z.enum([
@@ -88,7 +87,12 @@ export interface AgentContext {
   userId: string;
   conversationId?: string;
   traceId: string;
-  memoryManager: IMemoryStore;
+  // Phase 14 — there is no memory store here, on purpose. An agent used to be
+  // handed the raw store (`memoryManager`): store, update, delete and
+  // deleteAll, with none of the learning gate, provenance, validation,
+  // evidence, user controls or confirmation in front of them. No agent used
+  // it; now none can. Recall reaches an agent as turn context, and an agent
+  // reads memories only through the `memory.list` tool.
   toolRegistry: ToolRegistry;
   auditLogger: AuditLogger;
 }

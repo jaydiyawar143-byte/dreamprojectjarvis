@@ -19,7 +19,12 @@ import {
   executeApprovedGoogleWrite,
   isGoogleWriteApprovalAction,
 } from "../services/google/execute-approved-action.js";
-import { guardMemoryConfirmation, handleMemoryCommand, type MemoryCommandPort } from "./memory-commands.js";
+import {
+  guardMemoryConfirmation,
+  handleMemoryCommand,
+  type MemoryCommandPort,
+  type MemoryCorrectionCheckPort,
+} from "./memory-commands.js";
 
 /**
  * The four pending-action operations a chat turn performs.
@@ -108,6 +113,18 @@ export interface ChatRouterDeps {
    * ToolExecutor. Absent: every message flows exactly as before.
    */
   memoryManagement?: MemoryCommandPort;
+  /**
+   * Phase 14 — the user's own projects, for one question: does this project
+   * belong to this user? Asked once, when a conversation is created with a
+   * `projectId`. Absent: no conversation can be put in a project.
+   */
+  projects?: { findOwned(userId: string, projectId: string): Promise<{ id: string } | null> };
+  /**
+   * Phase 14 — whether a statement may replace a memory. Answered by the
+   * memory writer; the route decides nothing about learning. Absent: "that's
+   * wrong" only ever offers to forget, as before.
+   */
+  memoryCorrections?: MemoryCorrectionCheckPort;
 }
 
 export function createChatRouter(container: ChatRouterDeps): Router {
@@ -163,10 +180,38 @@ export function createChatRouter(container: ChatRouterDeps): Router {
 
       let conversationId = jarvisRequest.conversationId;
 
+      // -----------------------------------------------------------------------
+      // Phase 14 — THE ACTIVE PROJECT IS THE CONVERSATION'S.
+      //
+      // A request may name a project only when it creates the conversation,
+      // and only one of the user's OWN projects: another user's id is the same
+      // "not found" as an unknown one. From then on the project is read from
+      // the conversation row, here, on every turn — so no later request can
+      // put a conversation, or a memory, into a different project. A request
+      // that names a different one is refused rather than ignored.
+      // -----------------------------------------------------------------------
+      let projectId: string | null = null;
+      const projectNotFound = () =>
+        res.status(404).json({
+          success: false,
+          error: { code: "PROJECT_NOT_FOUND", message: "Project not found or access denied" },
+          traceId,
+          timestamp: new Date().toISOString(),
+        });
+
       if (!conversationId) {
+        if (jarvisRequest.projectId) {
+          const project = await container.projects?.findOwned(authContext.userId, jarvisRequest.projectId);
+          if (!project) {
+            projectNotFound();
+            return;
+          }
+          projectId = project.id;
+        }
         const conversation = await container.conversationRepo.create({
           userId: authContext.userId,
           agentId: jarvisRequest.agentId,
+          ...(projectId ? { projectId } : {}),
         });
         conversationId = conversation.id;
       } else {
@@ -186,9 +231,24 @@ export function createChatRouter(container: ChatRouterDeps): Router {
           });
           return;
         }
+        projectId = existing.projectId ?? null;
+        if (jarvisRequest.projectId && jarvisRequest.projectId !== projectId) {
+          res.status(409).json({
+            success: false,
+            error: {
+              code: "PROJECT_MISMATCH",
+              message: "This conversation belongs to a different project. Start a new conversation to use another project.",
+            },
+            traceId,
+            timestamp: new Date().toISOString(),
+          });
+          return;
+        }
       }
 
       sessionContext.conversationId = conversationId;
+      // Server-set, like the traceId: from the conversation row, never the body.
+      if (projectId) sessionContext.projectId = projectId;
 
       // -----------------------------------------------------------------------
       // REQUEST-TO-TRACE EVIDENCE (S6 prerequisite, PD-2).
@@ -448,6 +508,11 @@ export function createChatRouter(container: ChatRouterDeps): Router {
           memories: container.memoryManagement,
           ...(container.pendingActionService ? { pendingActions: container.pendingActionService } : {}),
           saveUserMessage,
+          // Phase 14 — the conversation's scope, this turn's own words, and
+          // the writer's answer to "may this replace a memory?".
+          projectId,
+          message: jarvisRequest.message,
+          ...(container.memoryCorrections ? { corrections: container.memoryCorrections } : {}),
         });
 
         if (memoryTurn) {

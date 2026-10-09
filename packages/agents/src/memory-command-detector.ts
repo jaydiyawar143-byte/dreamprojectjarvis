@@ -88,6 +88,43 @@ const RESUME: readonly RegExp[] = [
   /^(?:phir se|fir se|dobara) yaad rakhna shuru kar(?:o| do)$/,
 ];
 
+// ---------------------------------------------------------------------------
+// Phase 14 — a correction that carries its new value.
+//
+//   "That's wrong. I prefer light mode."   "No, that's wrong — I prefer …"
+//   "change that to I prefer light mode"   "change 2 to I prefer light mode"
+//   "ye galat hai, mujhe … pasand hai"
+//
+// The marker must END before the new value begins — a full stop, a comma, a
+// dash — so "that's wrong about the capital, it's Paris" is still ordinary
+// conversation. The value is returned in the user's OWN words and casing; it
+// is never rewritten here. Recognising one decides nothing: the chat route
+// still needs a memory behind the last reply (or a numbered list), the
+// statement must be learnable on its own, and the user must confirm.
+// ---------------------------------------------------------------------------
+
+const WRONG = "(?:no,? )?(?:that|this|it)(?:'s| is| was) (?:wrong|incorrect|outdated|not (?:true|right|correct)(?: anymore)?|no longer (?:true|right|correct))";
+const BREAK = "\\s*[.,;:!\u2014\u2013-]+\\s*";
+
+const CORRECT_WITH: readonly RegExp[] = [
+  new RegExp(`^${WRONG}${BREAK}(.+)$`, "i"),
+  new RegExp(`^(?:ye|yeh|woh|wo) (?:galat|glt) hai${BREAK}(.+)$`, "i"),
+  /^(?:change|correct|update|replace) (?:that|this|it|(?:that|this) (?:memory|preference|fact)) (?:to|with)[:,]? (.+)$/i,
+];
+
+const CORRECT_SELECTION = /^(?:change|correct|update|replace) (?:memory |number |no\.? ?|#)?(\d{1,3}) (?:to|with)[:,]? (.+)$/i;
+
+/** The message with its spacing and quotes tidied, and the user's own casing kept. */
+function tidy(message: string): string {
+  return message
+    .normalize("NFKC")
+    .replace(/[\u2018\u2019\u02BC]/g, "'")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^(?:(?:hey|ok|okay) )?jarvis[,:!]? /i, "")
+    .replace(/^please /i, "");
+}
+
 /** A new value, stated as a command. Learned by L1 → L4 like any statement; never a deletion. */
 const REPLACE = /^(?:change|update|set|switch) my (?:[a-z]+ ){0,3}(?:preference|default|setting)s?(?: [a-z]+){0,3} (?:to|from) .+$/;
 
@@ -114,6 +151,18 @@ export function detectMemoryCommand(message: string): MemoryCommand {
   if (matches(FORGET_THIS, text)) return { kind: "FORGET", target: { kind: "THIS" } };
   if (matches(VETO, text)) return { kind: "VETO", target: { kind: "PREVIOUS_MESSAGE" } };
   if (matches(CORRECT, text)) return { kind: "CORRECT", target: { kind: "LAST_REPLY" } };
+
+  // Phase 14 — a correction with its new value, in the user's own words.
+  const original = tidy(message);
+  const numbered = CORRECT_SELECTION.exec(original);
+  if (numbered && Number(numbered[1]) > 0 && numbered[2]!.trim().length > 0) {
+    return { kind: "CORRECT", target: { kind: "SELECTION", positions: [Number(numbered[1])] }, statement: numbered[2]!.trim() };
+  }
+  for (const pattern of CORRECT_WITH) {
+    const statement = pattern.exec(original)?.[1]?.trim();
+    if (statement) return { kind: "CORRECT", target: { kind: "LAST_REPLY" }, statement };
+  }
+
   if (matches(PAUSE, text)) return { kind: "LEARNING_PAUSE" };
   if (matches(RESUME, text)) return { kind: "LEARNING_RESUME" };
   if (matches(LIST, text)) return { kind: "LIST" };

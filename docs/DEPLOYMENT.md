@@ -162,6 +162,16 @@ docker compose logs api --since 10m
 {"timestamp":"…","level":"info","service":"jarvis-api","component":"confirmations","event":"confirmation_consumed","confirmationId":"…",…}
 ```
 
+### Memory: project scope and retention
+
+Since Phase 14, memory can belong to a project and expired memories are purged. After a deploy, check that the migration arrived — `20261008120000_phase14_memory_project_scope` adds the `Project` table and a nullable `projectId` column to `Memory` and `Conversation`, and rewrites no existing row:
+
+```bash
+docker compose exec postgres psql -U jarvis -d jarvis -c '\d "Project"' -c 'SELECT count(*) AS memories, count("projectId") AS in_a_project FROM "Memory"'
+```
+
+Every memory that existed before the deploy has no project: it is personal, exactly as before. The retention sweep starts with the API (`memory_retention_started` in the log, then `memory_retention_sweep_completed` with counts) and runs every `JARVIS_MEMORY_RETENTION_INTERVAL_MS` — six hours unless set; `0` switches the purge off, in which case expired memories stay hidden from recall but are never deleted. The first sweep after this deploy deletes memories that expired more than 30 days ago; nothing that has not expired, and nothing without an expiry date, is ever touched by it.
+
 ## 8. After the deployment
 
 Look at what the API said while starting:

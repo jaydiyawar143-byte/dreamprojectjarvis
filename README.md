@@ -64,6 +64,7 @@ Then follow [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md) for the database contai
 - Anything that changes state outside JARVIS is planned, shown to you, confirmed or approved, executed once, journalled and audited.
 - Approvals are bound to the exact parameters you saw and expire; a voice session cannot approve a write.
 - Four roles control who can use which tools.
+- What JARVIS remembers about you comes only from your own words, belongs to you (and, when you choose, to one of your projects), and is yours to see, correct, forget or pause — in chat or on the Memory screen. A memory is changed or deleted only after you confirm it.
 
 ## Status
 
@@ -72,6 +73,8 @@ As of 2026-10-05, commit `68628c0`. The repository has 19 workspaces: 2 apps and
 CI (`.github/workflows/ci.yml`) runs on GitHub on every push to `main` and on every pull request: lint, typecheck and build across all 19 workspaces, the typecheck of the API's test files, the `@jarvis/api`, `@jarvis/memory`, `@jarvis/n8n` and `@jarvis/web` suites, and — against a fresh pgvector database — every migration and the PostgreSQL-backed tests, failing if any of those is skipped. Run 37306626267 passed every step. `main` is protected by the active GitHub ruleset "Protect main": a change reaches it only through a pull request, and only after the required check "Lint, typecheck, build and tests" — this CI job — has passed on a branch that is up to date with `main`. Force pushes and deleting `main` are blocked. CI therefore blocks merges into `main`; other branches are not protected. No pull request has been merged through the ruleset yet. The other workspaces' tests run only locally, and there is no secret scan or dependency audit yet.
 
 B-1 — six memory end-to-end tests that failed on every run — was fixed on 2026-09-14; it was a test-harness race, not a production memory bug. The eight `@jarvis/db` failures recorded then were test bugs and are fixed (ledger R-4). The production image builds and a fresh database migrates (ledger R-22, R-23). Details: [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md) and [docs/CODEBASE_AUDIT.md](./docs/CODEBASE_AUDIT.md).
+
+Phase 14 — memory reliability and personalization — was added on 2026-10-08: project-scoped memory, ranked recall, confidence levels, correction, retention, a memory API and screen, and a quality evaluation that runs in CI. A second, real race behind the memory end-to-end test was fixed in the repository; the database-backed API tests then passed 30 consecutive runs on fresh databases. Details and known limitations: [docs/MEMORY.md](./docs/MEMORY.md#phase-14--reliability-and-personalization).
 
 ## License
 

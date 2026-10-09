@@ -93,6 +93,18 @@ pnpm --filter @jarvis/api exec vitest run test/sprint-1.1d-memory-e2e.test.ts -t
 
 On 2026-09-14 that command gave `6 passed | 7 skipped` in three consecutive runs, and the whole API suite passed 1,159 tests with 8 skipped. Both used the in-process memory store because Postgres was not running. Only the API and `@jarvis/memory` suites were re-run after the fix; the file has since also passed 13/13 against Postgres. The full repository suite was run on 2026-10-06 (Phase 13), one workspace at a time: 7,668 tests passed without a database across 18 workspaces, with the 80 database-backed ones skipping themselves, and those and `@jarvis/db` then passed against a fresh database (below). None failed.
 
+**Phase 14 (2026-10-08) — the same file, a second race.** With PostgreSQL it still failed occasionally: `PrismaMemoryRepository.list()` read its page and its total as two statements, so a memory committed between them gave a total of 1 beside an empty page. Fixed in the repository (one REPEATABLE READ batch transaction) and pinned by `packages/db/test/memory-list-coherence-p14-pg.integration.test.ts`; [MEMORY.md](./MEMORY.md#b-1--resolved) has the details. The suite now uses PostgreSQL only when `DATABASE_URL` is a separate test database (never port 5432 or 5433 — it used to write its fixture users into the development database when that was running), and with `JARVIS_REQUIRE_POSTGRES=1` it fails instead of falling back to its in-process store.
+
+**The Phase 14 memory end-to-end test** is `apps/api/test/phase14-memory-e2e-pg.integration.test.ts`: state a preference, recall it, correct it, list it, forget it through `ToolExecutor`, project isolation, expiry and the retention sweep — on the production classes and PostgreSQL. It has no in-memory fallback: with a database configured but unreachable it **fails**; with none configured it is reported as skipped, and `JARVIS_REQUIRE_POSTGRES=1` turns that into a failure too.
+
+```bash
+# A throwaway pgvector database on a spare port — never 5432 or 5433.
+DATABASE_URL=postgresql://USER:PASSWORD@127.0.0.1:5436/DB?schema=public JARVIS_REQUIRE_POSTGRES=1 \
+  pnpm --filter @jarvis/api exec vitest run phase14-memory-e2e sprint-1.1d-memory-e2e
+```
+
+**Memory quality evaluation.** `pnpm --filter @jarvis/memory eval` runs the evaluation dataset through the production extraction service and the real repository and prints a report — extraction precision and recall, forbidden-memory rate, retrieval relevance, control compliance, correction and project-isolation pass rates, and the relevance-weight comparison. It needs the same throwaway `DATABASE_URL` and calls no model provider. `MEMORY_EVAL_REPORT=<file>` also saves it as JSON. The real-embedding evaluation is separate and opt-in — `JARVIS_MEMORY_EVAL_REAL_EMBEDDINGS=1` with `OPENAI_API_KEY` set; it sends 30 invented sentences in one embeddings request and is never run by CI. Both are described in [MEMORY.md](./MEMORY.md#quality-evaluation).
+
 **`@jarvis/db` tests** need PostgreSQL with pgvector. Point `DATABASE_URL` at a separate test database, never the development one: the tests insert and delete rows. On 2026-09-14 they gave 188 passed / 8 failed. The 8 were 7 test bugs and 1 stale test, classified in the ledger (R-4) and fixed in test code on 2026-09-16. One more test, `phase102` crash recovery, failed once in seven runs that day; its cause was not established. **Today** they give 234 passed / 0 failed on a fresh throwaway pgvector database (21 files, 2026-10-06), and CI runs them on every push — see "PostgreSQL-backed tests" below. A fresh database migrates cleanly since `39b190d` (R-22).
 
 **Load-sensitive timing tests (observed 2026-10-05).** In full local runs of the `@jarvis/api` suite on Windows, two S8 MCP timing tests failed occasionally: `mcp-pilot-failures-s8` › "timeout: ToolExecutor's deadline ends the call…" in 2 of 2 full runs with a database (the 500 ms deadline fell while the server was still starting), and `mcp-integration-s8` › "is ERROR — timed out — when a running server stops answering" in 1 of 2 full runs without one. Run alone, the first passed 5 of 5. GitHub CI is green. No deterministic failure has been established, and neither test is marked flaky — ledger R-5.
@@ -112,8 +124,10 @@ On 2026-09-14 that command gave `6 passed | 7 skipped` in three consecutive runs
 | Typecheck test files | `pnpm typecheck:tests` — the API's test files |
 | Build | `pnpm build` |
 | Tests | `pnpm --filter <name> test` for `@jarvis/api`, `@jarvis/memory`, `@jarvis/n8n` and `@jarvis/web` |
+| Memory contracts (Phase 14) | `vitest run memory learning` in `@jarvis/core`, `vitest run memory-tools` in `@jarvis/tools`, `vitest run memory` in `@jarvis/agents` — by file name; those workspaces' other tests are still not gated |
 | Migrations | `pnpm --filter @jarvis/db exec prisma migrate deploy`, against the CI database |
 | PostgreSQL tests | `vitest run` for all of `@jarvis/db`; `vitest run pg.integration` for `@jarvis/memory`; `vitest run pg.integration sprint-1.1d-memory-e2e` for `@jarvis/api` |
+| Memory quality evaluation (Phase 14) | `vitest run memory-quality-eval-p14-pg` in `@jarvis/memory`, against the CI database — its own gate, with the report in the log |
 | Skip check | `node .github/scripts/assert-no-skipped-tests.mjs` on the PostgreSQL tests' JSON reports |
 
 Any failure fails the run. Each test step runs once the build has passed, even if an earlier test step failed, so one run lists every failing suite.
@@ -127,6 +141,8 @@ A new database-backed test in `apps/api` or `packages/memory` must be named `*-p
 The PostgreSQL steps were added on 2026-10-05 and replayed locally, in order, on a fresh container of the pinned image: 27 migrations applied; `@jarvis/db` 223/223, `@jarvis/memory` 61/61, `@jarvis/api` 25/25; nothing skipped. Those counts are local. On GitHub the steps first ran in run 37306626267 (commit `68628c0`): the service started, every migration applied, the three database steps and the skip check passed. The skip check passing there means each report existed, held tests and skipped none; GitHub's job logs need admin access, so the exact counts were not read from GitHub.
 
 Phase 13 (2026-10-06) added one migration and two database test files, and needed no change to the workflow: the new files are picked up by the names above. The same local replay then gave 28 migrations applied; `@jarvis/db` 234/234, `@jarvis/memory` 61/61, `@jarvis/api` 32/32; nothing skipped. Those are local counts too, taken before that change's own GitHub run.
+
+Phase 14 (2026-10-08) added one migration and seven database test files, picked up by the names above, and changed the workflow in three places: the memory-contract step and the evaluation step in the table, and `JARVIS_REQUIRE_POSTGRES=1` on the three PostgreSQL test steps, so the two memory end-to-end tests fail rather than fall back or skip if the database cannot be reached. No step calls a model provider. The same local replay gave 29 migrations applied; `@jarvis/db` 269/269 (23 files), `@jarvis/memory` 89/89 (9 files), `@jarvis/api` 44/44 (5 files); the memory-contract step 614 + 73 + 162; nothing skipped. The database-backed API files and the memory end-to-end test were then run 30 times in a row on the final code, each on a brand-new container with every migration applied from scratch: all passed. One earlier failure of that loop is not explained — see [MEMORY.md](./MEMORY.md#b-1--resolved). Those are local counts, taken on Windows with Node 24 on 2026-10-09; the changed workflow has not run on GitHub yet.
 
 **Protected `main`.** Since 2026-10-05 the active GitHub ruleset "Protect main" applies to `main`, the default branch, and GitHub reports it as protected:
 

@@ -36,6 +36,40 @@ export interface MemoryRecord {
   createdAt: Date;
   updatedAt: Date;
   expiresAt?: Date;
+  /**
+   * Phase 14 — the project this memory belongs to. Absent: a PERSONAL memory.
+   * Set once, by the server, from the conversation it was learned in; no
+   * update ever changes it.
+   */
+  projectId?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 14 — project scope
+//
+// A memory is personal (no project) or belongs to exactly one project of its
+// owner. Every filter below is applied TOGETHER with the user id, never
+// instead of it.
+// ---------------------------------------------------------------------------
+
+/**
+ * Which of ONE user's memories a read may see.
+ *   VISIBLE_IN  what a conversation may use: personal memories, plus those of
+ *               its own project. `projectId: null` — no active project — is
+ *               personal memories only.
+ *   PERSONAL    memories with no project.
+ *   PROJECT     memories of exactly that project.
+ * Absent on a list request: every memory the user owns. That is the owner's
+ * own management view; it is never what a model is shown.
+ */
+export type MemoryScopeFilter =
+  | { kind: "VISIBLE_IN"; projectId: string | null }
+  | { kind: "PERSONAL" }
+  | { kind: "PROJECT"; projectId: string };
+
+/** The exact scope a memory is stored in: one project, or `null` for personal. */
+export interface MemoryExactScope {
+  projectId: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -55,6 +89,8 @@ export interface MemoryStoreRequest {
     sourceMessageId?: string;
     metadata?: Record<string, unknown>;
     expiresAt?: Date;
+    /** Phase 14 — the project scope. Absent: personal. */
+    projectId?: string;
     /**
      * S7 — the content's embedding. When present, the store writes it to the
      * vector column AND to `metadata.embedding` in the same transaction as the
@@ -82,6 +118,12 @@ export interface MemoryRecallRequest {
    * similarity floor, never an importance floor. Absent: no floor.
    */
   minSimilarity?: number;
+  /**
+   * Phase 14 — the conversation's active project. Recall returns personal
+   * memories plus that project's. Absent or null: PERSONAL MEMORIES ONLY — a
+   * project memory is never recalled without its own project being active.
+   */
+  projectId?: string | null;
 }
 
 export interface MemoryRecallResult {
@@ -89,6 +131,9 @@ export interface MemoryRecallResult {
   semanticScore: number;
   recencyScore: number;
   finalScore: number;
+  /** Phase 14 — the other two parts of `finalScore` (see memory-relevance.ts). */
+  confidenceScore?: number;
+  importanceScore?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -137,6 +182,14 @@ export interface MemoryListRequest {
   limit?: number;
   offset?: number;
   includeExpired?: boolean;
+  /** Phase 14 — project scope. Absent: every memory the user owns. */
+  scope?: MemoryScopeFilter;
+  /** Phase 14 — only memories whose content contains this text (case-insensitive). */
+  search?: string;
+  /** Phase 14 — only memories learned from this saved USER message. */
+  sourceMessageId?: string;
+  /** Phase 14 — only memories that expired before this instant (retention). */
+  expiredBefore?: Date;
 }
 
 export interface MemoryListResult {
@@ -160,15 +213,27 @@ export interface IMemoryStore {
   delete(request: MemoryDeleteRequest): Promise<number>;
   deleteAll(userId: string): Promise<number>;
   update(request: MemoryUpdateRequest): Promise<MemoryRecord>;
+  /**
+   * `scope` (Phase 14) — only memories stored in exactly that scope. Absent:
+   * every memory the user owns, as before.
+   */
   findSimilar(
     userId: string,
     embedding: number[],
     threshold?: number,
-    limit?: number
+    limit?: number,
+    scope?: MemoryExactScope
   ): Promise<MemoryRecord[]>;
   count(userId: string): Promise<number>;
   isAvailable(): Promise<boolean>;
 }
+
+/**
+ * Phase 14 — everything the orchestrator may do with memory: ask whether it is
+ * available, recall, and read the bounded fallback list. It cannot store,
+ * update or delete — those are not on the type it is given.
+ */
+export type MemoryRecallPort = Pick<IMemoryStore, "isAvailable" | "recall" | "list">;
 
 // ---------------------------------------------------------------------------
 // Memory Candidate (output of extraction, input to store pipeline)
@@ -187,6 +252,8 @@ export interface MemoryCandidate {
   sourceTraceId?: string;
   metadata?: Record<string, unknown>;
   expiresAt?: Date;
+  /** Phase 14 — the project the turn belongs to; absent for a personal memory. */
+  projectId?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -225,6 +292,12 @@ export interface MemoryExtractionRequest {
   /** Not used for provenance: a memory's source is the USER message it cites (S7.2 L2). */
   lastMessageId?: string;
   expiryDays?: number;
+  /**
+   * Phase 14 — the project of the conversation this turn belongs to, taken by
+   * the server from the conversation row. What is learned from the turn is
+   * stored in that project. Absent: learned as a personal memory.
+   */
+  projectId?: string;
 }
 
 export interface MemoryExtractionResult {

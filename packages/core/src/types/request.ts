@@ -4,6 +4,12 @@ import { ConversationMessageSchema } from "./conversation.js";
 export const JarvisRequestSchema = z.object({
   message: z.string().min(1, "Message cannot be empty"),
   conversationId: z.string().optional(),
+  /**
+   * Phase 14 — the project a NEW conversation belongs to. Read only when the
+   * conversation is created, and only after it is checked against the user's
+   * own projects; from then on the project is the conversation's.
+   */
+  projectId: z.string().min(1).max(64).optional(),
   agentId: z.string().optional(),
   conversationHistory: z.array(ConversationMessageSchema).optional(),
   metadata: z.record(z.unknown()).optional(),

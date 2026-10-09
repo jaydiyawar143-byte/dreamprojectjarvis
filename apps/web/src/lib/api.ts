@@ -298,7 +298,13 @@ export async function sendChatMessage(
   conversationId?: string,
   agentId?: string,
   activeSurfaceKeys?: string[],
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  /**
+   * Phase 14 — the project a NEW conversation belongs to. The server reads it
+   * only when it creates the conversation, and only after checking it is one
+   * of this user's own; a conversation's project never changes afterwards.
+   */
+  projectId?: string
 ): Promise<
   ApiResponse<{
     message: string;
@@ -315,6 +321,7 @@ export async function sendChatMessage(
       message,
       conversationId,
       agentId,
+      ...(projectId && !conversationId ? { projectId } : {}),
       // Which contextual surfaces are on screen RIGHT NOW.
       //
       // Only the browser knows: a surface may have closed itself on an idle
@@ -2491,4 +2498,127 @@ export async function getGoogleWriteDetail(
   approvalId: string
 ): Promise<ApiResponse<GoogleWriteDetail>> {
   return request(`/integrations/google/writes/${encodeURIComponent(approvalId)}`);
+}
+
+// ---------------------------------------------------------------------------
+// Phase 14 — memory and projects.
+//
+// What JARVIS remembers about the signed-in user, as its owner manages it. The
+// server returns no vector, no raw metadata and no message, conversation or
+// trace id — there is nothing here to hide client-side.
+//
+// FORGETTING AND CORRECTING ARE REQUESTS. Each returns a pending action and
+// the conversation it waits in; nothing changes until that action is
+// confirmed with the existing `confirmPendingAction`, which is the same
+// confirmation — and the same execution path — a chat "yes" uses. There is no
+// call in this file that deletes or edits a memory directly, because the API
+// has no such endpoint.
+// ---------------------------------------------------------------------------
+
+export type MemoryConfidenceLevel = "HIGH" | "MEDIUM" | "LOW";
+
+export interface MemoryItem {
+  id: string;
+  type: string;
+  content: string;
+  summary?: string;
+  createdAt: string;
+  updatedAt: string;
+  /** Present when the memory expires; absent for one that never does. */
+  expiresAt?: string;
+  expired: boolean;
+  /** Derived from how often, and in how many conversations, the user said it. */
+  confidence: number;
+  confidenceLevel: MemoryConfidenceLevel;
+  /** `null` for a personal memory. */
+  projectId: string | null;
+  projectName?: string;
+  /** Learned before sources were recorded. */
+  legacy: boolean;
+  provenance: {
+    source: "USER" | "LEGACY";
+    statements: number;
+    conversations: number;
+    firstStatedAt?: string;
+    lastStatedAt?: string;
+    revisions: number;
+  };
+}
+
+export interface MemoryPage {
+  memories: MemoryItem[];
+  total: number;
+  hasMore: boolean;
+  limit: number;
+  offset: number;
+}
+
+export interface MemoryStatus {
+  learningPaused: boolean;
+  vetoedSources: number;
+  active: number;
+  expired: number;
+  retention: { days: number; purgeGraceDays: number };
+  correctionAvailable: boolean;
+}
+
+/** A change that is waiting for the user to confirm it. */
+export interface MemoryRequest {
+  pendingAction: { id: string; toolId: string; action: string; expiresAt: string } & Record<string, unknown>;
+  conversationId: string;
+  /** What will happen, in words, exactly as the chat would say it. */
+  summary: string;
+}
+
+export interface ProjectItem {
+  id: string;
+  name: string;
+  description: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export async function listMemories(
+  options: { limit?: number; offset?: number; project?: string; q?: string; includeExpired?: boolean } = {}
+): Promise<ApiResponse<MemoryPage>> {
+  const qs = new URLSearchParams();
+  if (options.limit !== undefined) qs.set("limit", String(options.limit));
+  if (options.offset) qs.set("offset", String(options.offset));
+  if (options.project && options.project !== "all") qs.set("project", options.project);
+  if (options.q?.trim()) qs.set("q", options.q.trim());
+  if (options.includeExpired) qs.set("includeExpired", "true");
+  const query = qs.toString();
+  return request(`/memories${query ? `?${query}` : ""}`);
+}
+
+export async function getMemoryStatus(): Promise<ApiResponse<MemoryStatus>> {
+  return request("/memories/status");
+}
+
+export async function setMemoryLearning(action: "pause" | "resume"): Promise<ApiResponse<MemoryStatus>> {
+  return request(`/memories/learning/${action}`, { method: "POST" });
+}
+
+/** Asks for a memory to be forgotten. Nothing is deleted until the returned action is confirmed. */
+export async function requestMemoryForget(id: string): Promise<ApiResponse<MemoryRequest>> {
+  return request(`/memories/${encodeURIComponent(id)}/forget`, { method: "POST" });
+}
+
+/** Asks for a memory to be changed to `statement`. Nothing changes until the returned action is confirmed. */
+export async function requestMemoryCorrection(id: string, statement: string): Promise<ApiResponse<MemoryRequest>> {
+  return request(`/memories/${encodeURIComponent(id)}/correction`, {
+    method: "POST",
+    body: JSON.stringify({ statement }),
+  });
+}
+
+export async function listProjects(): Promise<ApiResponse<{ projects: ProjectItem[] }>> {
+  return request("/projects");
+}
+
+export async function createProject(name: string, description?: string): Promise<ApiResponse<{ project: ProjectItem }>> {
+  return request("/projects", {
+    method: "POST",
+    body: JSON.stringify({ name, ...(description?.trim() ? { description: description.trim() } : {}) }),
+  });
 }

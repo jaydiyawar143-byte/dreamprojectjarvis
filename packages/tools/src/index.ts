@@ -214,6 +214,8 @@ export type { TaskPort, TaskView } from "./tools/task-tools.js";
 // S7.2 L5 — memory tools. `memory.list` is read-only; the two deleting tools
 // are approval-gated and granted to no agent.
 export { MemoryListTool, MemoryForgetTool, MemoryForgetAllTool, createMemoryTools } from "./tools/memory-tools.js";
+// Phase 14 — correction (approval-gated) and the retention purge. On no agent's allowlist.
+export { MemoryCorrectTool, MemoryPurgeExpiredTool, createMemoryCorrectionTool, createMemoryRetentionTool } from "./tools/memory-tools.js";
 export type { MemoryToolPort } from "./tools/memory-tools.js";
 // S8.3 — reviewed MCP tools as ITools, over core's McpCallPort. Not registered anywhere yet.
 export { McpTool, createMcpTools } from "./tools/mcp-tools.js";

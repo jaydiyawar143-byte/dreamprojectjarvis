@@ -89,6 +89,20 @@ const baseEnvSchema = z.object({
     .max(3600000)
     .default(60000),
 
+  // Phase 14 — how often the memory retention sweep looks for memories that
+  // expired more than the grace period ago. 0 disables the sweep entirely;
+  // expired memories then stay hidden but are never deleted.
+  //
+  // Six hours by default: nothing depends on a purge being prompt — an expired
+  // memory is already invisible to recall the moment it expires — so the only
+  // cost of a long interval is rows kept a little longer.
+  JARVIS_MEMORY_RETENTION_INTERVAL_MS: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(86400000)
+    .default(21600000),
+
   // Task Engine V2.2 - how old a scheduler claim must be before it is treated
   // as abandoned and re-armed. 0 disables claim recovery.
   //

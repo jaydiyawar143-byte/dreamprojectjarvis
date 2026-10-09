@@ -12,6 +12,7 @@ import {
   Activity,
   BookOpen,
   Bot,
+  Brain,
   CheckSquare,
   Globe,
   Inbox,
@@ -53,6 +54,8 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { href: "/opportunities", label: "Opportunities", icon: Inbox, available: true },
       { href: "/knowledge", label: "Knowledge Base", icon: BookOpen, available: true },
+      // Phase 14 — what JARVIS remembers about the user, and their controls over it.
+      { href: "/memory", label: "Memory", icon: Brain, available: true },
       { href: "/meta-ads", label: "Meta Ads", icon: Megaphone, available: true },
       // Phase 12 — real read-only Gmail, Drive and Calendar. The page reports
       // its own live connection state, so on a deployment with no Google OAuth

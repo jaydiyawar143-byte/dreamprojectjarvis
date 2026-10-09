@@ -1,6 +1,6 @@
 # Memory and Knowledge
 
-How JARVIS remembers facts about a user and answers from their documents. Verified against the code on 2026-09-14; the memory write, recall and backfill sections were updated for S7 on 2026-09-27, the backfill safety rules on 2026-09-28, and the learning gate (S7.2 L1–L1c), memory provenance (S7.2 L2) and validation with learning scope (S7.2 L3) were added on 2026-09-29, and evidence and corroboration (S7.2 L4) with its negation safety patch (L4.1), and memory management (S7.2 L5), on 2026-09-30.
+How JARVIS remembers facts about a user and answers from their documents. Verified against the code on 2026-09-14; the memory write, recall and backfill sections were updated for S7 on 2026-09-27, the backfill safety rules on 2026-09-28, and the learning gate (S7.2 L1–L1c), memory provenance (S7.2 L2) and validation with learning scope (S7.2 L3) were added on 2026-09-29, and evidence and corroboration (S7.2 L4) with its negation safety patch (L4.1), and memory management (S7.2 L5), on 2026-09-30. Phase 14 — project scope, the relevance score, confidence levels, correction, retention, the memory API and screen, and the quality evaluation — was added on 2026-10-08; see [Phase 14](#phase-14--reliability-and-personalization).
 
 ---
 
@@ -14,7 +14,7 @@ How JARVIS remembers facts about a user and answers from their documents. Verifi
 | Vector column | `Memory.embedding vector(1536)` | `KnowledgeChunk.embedding vector(1536)` |
 | Read by | the orchestrator, before each reply | the orchestrator, before each reply |
 
-Both are scoped to one user in every query.
+Both are scoped to one user in every query. Since Phase 14 a memory is also either **personal** or belongs to **one project** of that user; a project's memories are used only in that project's conversations.
 
 ## The runtime chain
 
@@ -35,10 +35,13 @@ KnowledgeRetrievalService    packages/memory/src/retrieval
 1. The orchestrator embeds the user's message (`text-embedding-3-small` by default, 1536 dimensions).
 2. It calls `memoryStore.recall(...)` with `limit` = `maxMemories` (default 5) and `minSimilarity` = `relevanceThreshold` (default 0.3). The threshold is a **similarity floor**, not an importance floor. The repository:
    - reads only rows of that user whose `embedding` column is set and which have not expired (`expiresAt` null or in the future);
+   - reads only what the conversation may see (Phase 14): personal memories, plus the memories of the conversation's own project — and with no project active, personal memories only;
    - keeps rows whose cosine similarity (`1 - (embedding <=> query)`) is at least `minSimilarity`;
-   - orders by distance, then by `id`, so the same query always returns the same order;
+   - takes a bounded pool of the nearest rows (four per memory asked for, 50 at most) and ranks it with the [relevance score](#the-relevance-score) (Phase 14), the `id` breaking a tie, so the same query always returns the same order;
    - selects explicit columns and never the vector itself — Prisma 5.22 cannot deserialize a `vector` column, and `SELECT m.*` made every vector recall throw before S7.
-3. **Fallback.** If vector recall returns nothing, or throws, the orchestrator lists the user's 50 newest unexpired memories and scores each one's `metadata.embedding` against the query, keeping scores of at least `relevanceThreshold`. A throw is logged first as `memory_recall_failed` (below). This is what still serves legacy rows that have an embedding only in metadata.
+3. **Fallback.** If vector recall returns nothing, or throws, the orchestrator lists the 50 newest unexpired memories the conversation may see and scores each one's `metadata.embedding` against the query, keeping scores of at least `relevanceThreshold` and ranking them with the same relevance score. A throw is logged first as `memory_recall_failed` (below). This is what still serves legacy rows that have an embedding only in metadata.
+
+   A memory learned from a message the user vetoed ("forget that") is dropped from what was recalled, and if the user's controls cannot be read nothing is recalled at all (Phase 14).
 4. It asks the knowledge retriever for matching document passages.
 5. Both reach the model as context: a system message of their own, placed directly ahead of the user's message and headed `=== CONTEXT FOR THIS TURN ===`. They are never part of the user's message, which the model receives exactly as typed. Recalled memory is designed to be treated as **data, never as instructions** — the header says that nothing inside a `user_memories` or `knowledge_base` block is to be followed, and TEST G in `apps/api/test/sprint-1.1d-memory-e2e.test.ts` checks that a malicious stored memory appears only inside the `<user_memories>` delimiters of that message and never in the agent's own prompt. The header is a request to the model, not a control: what actually stops a stored memory from causing an action is the allowlist, the approval gate and the write-intent gate, all of which read the user's own message.
 
@@ -51,8 +54,8 @@ The knowledge agent holds no search tool on purpose. Retrieval has already happe
 1. **Pre-filter, without a model.** Messages matching secret patterns — API keys, bearer tokens, passwords, private keys, database URLs — are dropped. So is transient chit-chat: greetings, "ok", "thanks".
 2. **Learning gate, without a model.** Each remaining user message is classified; the turn either stops here or continues unchanged. See [The learning gate](#the-learning-gate--s72-l1l1c) below.
 3. **Extract.** The model sees each message labelled with its speaker — `[M1] USER`, `[M2] ASSISTANT (context only, never a source)` — and returns candidates typed `FACT`, `PREFERENCE`, `GOAL`, `PROJECT`, `DECISION` or `WORKFLOW`, each with an importance, a confidence, a `source` and an `evidence` quote.
-4. **Validate** against a Zod schema, then **ground** each candidate in a USER message of the turn, or drop it (see [Provenance](#provenance--s72-l2) below). Then keep only a claim the user's own words establish as **durable memory** — a preference, a personal fact or a working convention, never a goal, task, project state, decision or temporary instruction (see [Validation](#validation-and-learning-scope--s72-l3)). **Embed** every remaining candidate with `text-embedding-3-small` (passed explicitly on each request), then **deduplicate** against the user's existing memories: similarity of 0.95 or more, or text overlap above 0.85, is a duplicate — no new row, but it **corroborates** the existing memory; 0.7 or more merges it into the existing memory as a **revision**. See [Evidence](#evidence-and-corroboration--s72-l4).
-5. **Store** each new memory with its evidence and an expiry — 90 days by default, refreshed whenever new user evidence arrives.
+4. **Validate** against a Zod schema, then **ground** each candidate in a USER message of the turn, or drop it (see [Provenance](#provenance--s72-l2) below). Then keep only a claim the user's own words establish as **durable memory** — a preference, a personal fact or a working convention, never a goal, task, project state, decision or temporary instruction (see [Validation](#validation-and-learning-scope--s72-l3)). **Embed** every remaining candidate with `text-embedding-3-small` (passed explicitly on each request), then **deduplicate** against the user's existing memories **of the same scope** — the newest 100, plus each candidate's ten nearest neighbours by vector, however old (Phase 14): similarity of 0.95 or more, or text overlap above 0.85, is a duplicate — no new row, but it **corroborates** the existing memory; 0.7 or more merges it into the existing memory as a **revision**. See [Evidence](#evidence-and-corroboration--s72-l4).
+5. **Store** each new memory with its evidence and an expiry — 90 days by default, refreshed whenever new user evidence arrives — in the project of the conversation it was said in, or as a personal memory when that conversation has none.
 
 ### The learning gate — S7.2 L1–L1c
 
@@ -431,6 +434,7 @@ The user's own control over what JARVIS remembers: list, forget, correct, veto, 
 | FORGET | "forget 2", "forget 1 and 3", "forget this memory", "ye memory bhool jao" | Resolved to ids from the list shown, from what the user's last message taught, or from the one memory the last reply used. Otherwise it asks. |
 | FORGET_ALL | "forget everything you remember about me", "delete all my memories", "forget my old memories" (legacy only) | Counted, then proposed as a STRICT action. |
 | CORRECT | "that's wrong", "that's no longer true", "ye galat hai" | Only when the last reply was built on a memory: one → its forgetting is proposed; several → the user picks by number. Otherwise it is ordinary conversation, answered by the assistant. |
+| CORRECT, with the new value (Phase 14) | "that's wrong. I prefer light mode", "change that to …", "change 2 to …" | The memory is **changed**, not forgotten — see [Correction](#correction). Only when a memory is behind the last reply (or a numbered list was shown) and the new value could be learned on its own; otherwise ordinary conversation. |
 | VETO | "forget that", "don't remember what I just said" | A veto is recorded for the user's previous message at once; what it had already taught is offered for forgetting. |
 | LEARNING_PAUSE / RESUME | "stop remembering things about me" / "start remembering again" | The user's learning flag. Nothing is deleted. |
 | REPLACE | "change my preference to professional tone" | An ordinary statement: answered and learned by L1 → L4. |
@@ -459,7 +463,7 @@ resolve to ids — from what the user was shown or said; never text, never simil
 **Learning controls.** One JSON document per user in the existing `UserSetting` table, key `prefs:memory`: `{ v: 1, learningPaused, vetoedSourceMessageIds }`, keeping the newest 200 vetoes. MemoryExtractionService reads it twice: before the model reads a turn, and again just before anything is written. A pause or "forget that" that arrives while the model is extracting therefore still stops it.
 
 - **Blocked means nothing:** no new row, no corroboration, no revision, no expiry refresh, no evidence. `memory_learning_blocked` is logged with a reason and a count.
-- **Fail closed:** unreadable controls learn nothing, and only `memory_learning_control_failed` is logged. A document that parses but is malformed reads as paused.
+- **Fail closed:** unreadable controls learn nothing, and only `memory_learning_control_failed` is logged. A document that parses but is malformed reads as paused. So does one that is **not valid JSON at all** (Phase 14): the store used to report that as "no document", which read as learning on with every veto gone.
 - **Separate from L1c:** the L1c per-turn veto is unchanged.
 
 **The safe view.** Id, type, content, summary, created and changed (the version) times, expiry, evidence count, first and last seen, revisions, and a legacy flag. Never the metadata, a source, conversation or trace id, the vector, or any confidence.
@@ -474,9 +478,9 @@ resolve to ids — from what the user was shown or said; never text, never simil
 
 - **Voice.** It cannot confirm because the browser sends no transcript while an action waits; the server cannot tell voice from typing.
 - **Two tiny windows.** A veto that lands in the milliseconds between extraction's final check and its write can lose to it. Likewise, the version check and the delete are separate statements.
-- **Scans.** Lookups by source message, and legacy scans, read the newest 1000 memories.
+- **Scans.** The legacy scan reads the newest 1000 memories. A lookup by source message is a filtered query since Phase 14, not a scan.
 - **What forgetting does not reach:** the chat message a memory came from, and copies in database backups.
-- **Later work:** topic vetoes, supersession history, consent for sensitive data, a memory screen and REST endpoints.
+- **Later work:** topic vetoes, supersession history, consent for sensitive data. (The memory screen and REST endpoints arrived in Phase 14.)
 
 **Tests.**
 
@@ -494,9 +498,206 @@ resolve to ids — from what the user was shown or said; never text, never simil
 | `apps/api/test/chat-memory-l5.test.ts` | The chat branch: order, proposals, confirmation, collisions, veto, correct, pause |
 | `apps/api/test/memory-l5-pg.integration.test.ts` | End to end on the production classes: chat → approval → ToolExecutor → the row gone |
 
+## Phase 14 — reliability and personalization
+
+Added on 2026-10-08. Nothing above was replaced: L1–L5 run exactly as before, `MemoryExtractionService` is still the only writer, and a memory is still deleted only through `ToolExecutor`.
+
+### Project memory
+
+A **project** is a name owned by one user (`Project`: id, userId, name, description, timestamps). It is a scope for memory and nothing else — no members, no tasks, no settings.
+
+| `Memory.projectId` | Meaning | Used in |
+|---|---|---|
+| null | a **personal** memory | every conversation of its owner |
+| a project id | a **project** memory | conversations of that project only |
+
+**The active project is the conversation's.** `POST /api/v1/chat` may carry `projectId` only on the request that creates a conversation, and only one of the caller's own projects — another user's is the same `404 PROJECT_NOT_FOUND` as an unknown one. It is stored on the conversation row and read from that row on every later turn; a request naming a different project is refused with `409 PROJECT_MISMATCH`. No project is ever chosen automatically: a conversation without one is personal, and in it no project memory is recalled or learned.
+
+- **Learned in scope.** What a turn teaches is stored in its conversation's project. No model and no request body chooses it.
+- **Recalled in scope.** Personal memories plus the active project's. Never another project's, never another user's.
+- **Deduplicated in scope.** A statement is compared only with memories of the same scope, so it can never corroborate or overwrite a memory of another scope. The same statement made personally and in a project is two memories.
+- **Listed in scope.** "show my memories" and the `memory.list` tool show what the conversation may see — a list is saved in the conversation's history, which the model reads later. The memory screen shows everything the user owns.
+- **Enforced by the database.** `Memory` references `Project` by `(projectId, userId)`, so a memory naming a project its own user does not own cannot be stored at all.
+
+What L3 means by "project state" is unchanged: "the client prefers a formal tone" is still not a memory. A project memory is the user's own durable statement — "I prefer a playful tone" — made in a project conversation.
+
+### The relevance score
+
+```
+finalScore = 0.70 × semantic + 0.10 × recency + 0.10 × confidence + 0.10 × importance
+```
+
+| Part | What it is | Range |
+|---|---|---|
+| semantic | cosine similarity of the memory to the user's message | 0–1 |
+| recency | `0.5 ^ (whole days since the user last stated it ÷ 30)` | 0–1 |
+| confidence | the evidence-derived confidence (below); 0.50 at most for a memory with no evidence | 0–0.95 |
+| importance | the stored importance | 0–1 |
+
+Defined once, in `packages/core/src/memory-relevance.ts`, and used by the vector path and the fallback alike. The weights sum to 1, so the score is in [0, 1].
+
+- **The similarity floor comes first.** A memory below `MEMORY_SIMILARITY_FLOOR` (0.30) is not recalled whatever its other signals; the floor is applied to `semantic` alone, before scoring.
+- **Relevance decides.** The three secondary parts move the score by at most 0.30, so a memory more similar by 0.43 or more always ranks first.
+- **The rest breaks ties** between memories about equally similar to the question — the case cosine cannot order, and the one that matters after a preference changed.
+
+The weights are the ones the evaluation supports: on its ranked cases the shipped weights are right every time, cosine alone is right half the time, and removing any one part, or weighting the secondary parts more heavily, each fails exactly one case (see [Quality evaluation](#quality-evaluation)).
+
+### Confidence levels
+
+The stored number is still L4's: a direct statement 0.70, an endorsement 0.55, +0.10 for each further conversation, never above 0.95. Phase 14 uses it and names it:
+
+| Level | Confidence | Meaning |
+|---|---|---|
+| High | 0.80 and above | stated directly, in two or more conversations |
+| Medium | 0.60–0.79 | stated directly once, or endorsed in two conversations |
+| Low | below 0.60 | endorsed once, or an older memory with no recorded evidence |
+
+It ranks recall (10% of the score) and is shown on the memory screen and in the API. A memory **without** v1 evidence predates L4 — its stored number was the extraction model's — so it is capped at 0.50: no model's number ever ranks a memory or reaches a level above Low.
+
+### Correction
+
+"That's wrong. I prefer light mode." replaces the memory with the user's own words.
+
+```
+target   a memory id, resolved from what the last reply was built on, or from a
+         numbered list ("change 2 to …") — never text, never similarity
+value    the statement the user wrote, verbatim — no model reads or rewrites it
+check    the writer's own L1 gate, L2 source check and L3 validation: a value
+         that would not be learned on its own is not a correction
+propose  a HIGH_IMPACT pending action, memory.correct:
+         { memoryId, version, sourceMessageId } — ids only, never the words
+confirm  "yes", or the on-screen Confirm button. Voice cannot confirm.
+execute  ToolExecutor → memory.correct → MemoryExtractionService.correct():
+         an L4 REVISE of that one memory — content, vector, provenance,
+         evidence and expiry together, in one transaction
+```
+
+- The memory keeps its id, type, importance and project. Its evidence restarts with the correction message, its revision count goes up, and its confidence is derived again (0.70).
+- **Refused, with nothing written:** another user's memory (`NOT_FOUND`), a memory that changed since it was shown (`STALE`), a value that is not learnable — a task, a goal, a secret, a grant of authority (`NOT_LEARNABLE`), learning paused or the source vetoed (`BLOCKED`), the same message applied twice (`ALREADY_APPLIED`).
+- With a value that is not learnable, or no memory behind the last reply, "that's wrong. …" is ordinary conversation, exactly as before.
+- Audited as `memory.correct`: the memory's id and the outcome, never the old or the new words.
+
+### Retention
+
+The policy is one constant, `MEMORY_RETENTION` in `packages/core/src/memory-retention.ts`.
+
+| | |
+|---|---|
+| Default retention | a learned memory expires **90 days** after the user last stated it; stating it again, a revision or a correction starts the period over |
+| What expiry does | hides the memory **at once**: never recalled, never deduplicated against, not in the default list |
+| Purge | **30 days** after expiry the row is hard-deleted by the retention sweep |
+| What never expires | a memory with no expiry date — rows from before expiry existed. They stay until the user forgets them |
+| The user's controls | pausing learning changes no expiry; forgetting deletes at once, whatever the expiry |
+
+The sweep runs in the API process every `JARVIS_MEMORY_RETENTION_INTERVAL_MS` (six hours by default; 0 disables it), started after the server is listening, never overlapping, stopped when shutdown begins. Each sweep visits at most 50 users and deletes at most 200 memories for each; the rest waits for the next one. It deletes nothing itself: for each user it runs the `memory.purge_expired` tool through `ToolExecutor`, as that user. The tool takes no parameters, the purge re-checks every row against the cutoff before deleting it, and it is audited as `memory.retention_purge` with a count.
+
+### User controls: the API and the screen
+
+`apps/api/src/routes/memory.ts` is a second way of reaching the one service the chat commands already use, under the same rules. See [API.md](./API.md) for the routes.
+
+- **Reading:** a page of the caller's memories — content, type, confidence and level, created and updated times, expiry, project, and a provenance summary (how many times and in how many conversations it was stated, and how often its wording changed). Paged, searchable, filterable by project.
+- **Pause and resume** learning.
+- **Forget and correct are requests.** Each creates the same pending action the chat creates and returns it; nothing changes until it is confirmed through the existing `POST /api/v1/pending-actions/:id/confirm`. There is no endpoint that deletes or edits a memory directly.
+- **Never returned:** the vector, the raw metadata, a message, conversation or trace id, another user's memory.
+
+The screen is `/memory` in the web app ("Memory" in the sidebar). A new conversation can be started in a project from the Assistant page.
+
+The screen's requests wait in one conversation of the user's own, titled "Memory controls": a confirmation needs a conversation to belong to, and a correction's new value is saved there as a user message so the corrected memory points at a real saved message.
+
+### Quality evaluation
+
+`packages/memory/test/eval/` holds a version-controlled dataset (29 extraction cases, 10 retrieval cases, every sentence invented) and a harness that runs it through the production `MemoryExtractionService` and the real repository on PostgreSQL.
+
+```bash
+pnpm --filter @jarvis/memory eval                      # needs DATABASE_URL (a throwaway database)
+MEMORY_EVAL_REPORT=report.json pnpm --filter @jarvis/memory eval
+```
+
+Two stand-ins keep it deterministic. The **extraction model** is an eager one that proposes every user message as a memory — or, where a case scripts it, something worse — so what is measured is what the gates let through from a model that proposes everything. The **embeddings** are a bag-of-words hash, so every similarity in the dataset can be read off the page.
+
+Result on 2026-10-08 (dataset `2026-10-08.1`):
+
+| Metric | Result |
+|---|---|
+| Extraction precision | 100% — 9 of 9 memories stored were ones that should be |
+| Extraction recall | 81.8% — 9 of 11; the two misses are the declared gaps below |
+| Forbidden-memory rate | 0% — 0 of 9 (secrets, JARVIS's own words, vetoed statements, a grant of authority) |
+| Retrieval relevance | 100% — 10 of 10 cases |
+| Control compliance | 100% — 7 checks |
+| Correction pass rate | 100% — 16 checks |
+| Project isolation | 100% — 10 checks |
+| Confidence compliance | 100% — 2 checks |
+
+| Relevance weights (semantic/recency/confidence/importance) | Top-1 accuracy |
+|---|---|
+| shipped 0.7/0.1/0.1/0.1 | 100% |
+| cosine only | 50% |
+| without recency, without confidence, without importance | 83.3% each |
+| secondary-heavy 0.4/0.2/0.2/0.2 | 83.3% |
+
+CI asserts these as floors. The two recall misses are known gaps kept in the dataset on purpose: a convention stated as "we" ("We publish on Mondays", "My team reviews every campaign on Fridays") is held back by L1b as not clearly the user's own.
+
+**Real embeddings — opt-in.** `packages/memory/test/memory-quality-eval-real-embeddings-p14.test.ts` asks the real embedding model about the thresholds. It runs only with `JARVIS_MEMORY_EVAL_REAL_EMBEDDINGS=1` and `OPENAI_API_KEY` set, sends 30 invented sentences in one request, and never runs in CI. Result on 2026-10-08 with `text-embedding-3-small`:
+
+| Pair | Similarity | Dedup band |
+|---|---|---|
+| identical restatement | 1.000 | corroborate |
+| paraphrased restatement (4 pairs) | 0.883–0.927 | revise |
+| contradiction (4 pairs) | 0.817–0.873 | revise |
+| unrelated (4 pairs) | 0.169–0.253 | new |
+
+| Similarity floor | Answering memories kept | Other memories kept |
+|---|---|---|
+| 0.25 | 100% | 17.9% |
+| **0.30 (shipped)** | **87.5%** | **3.6%** |
+| 0.35 | 75% | 0% |
+
+The answering memory ranked first for all 8 questions. Both thresholds were kept as they are: 0.70 sits in the wide gap between unrelated (≤ 0.25) and related (≥ 0.82) statements, and 0.30 is where lowering the floor starts admitting five times as many irrelevant memories for one more relevant one. The sample is small — 13 pairs and 8 questions — so this is a check, not a calibration study.
+
+### Security boundaries
+
+- **One writer.** Only `MemoryExtractionService` creates or changes a memory; only `MemoryManagementService` deletes one, reached only through the memory tools. Pinned by `packages/memory/test/memory-architecture-p14.test.ts`.
+- **No arbitrary model write.** No tool writes a memory. Extraction's candidates pass L1–L4; a correction involves no model at all.
+- **Agents hold no memory store.** `AgentContext` no longer carries one, and the orchestrator is typed against a read-only port (`recall`, `list`, `isAvailable`).
+- **No deletion or confirmation bypass.** `memory.forget`, `memory.forget_all` and `memory.correct` are approval-gated and on no agent's allowlist; no route runs them. `memory.purge_expired` is on no allowlist either and can reach only rows past the retention cutoff.
+- **Scope beside ownership.** Every project filter is written beside the user filter, never instead of it, and the database refuses a memory in someone else's project.
+- **Controls fail closed.** Unreadable or corrupt controls: nothing is learned, nothing is recalled, and a correction is blocked.
+
+### Tests
+
+| File | What it covers |
+|---|---|
+| `packages/core/test/memory-relevance-p14.test.ts` | The score (bounds, monotonicity, dominance, tie-breaks), recency, confidence levels, the owner's view, the retention policy |
+| `packages/db/test/memory-list-coherence-p14-pg.integration.test.ts` | `list()` returns one coherent page and total (the E2E race, reproduced) |
+| `packages/db/test/memory-project-scope-p14-pg.integration.test.ts` | The isolation matrix (two users, three projects), the foreign key, ranking, the list filters, corrupt controls |
+| `packages/memory/test/memory-phase14-pg.integration.test.ts` | Duplicates (exact, semantic, near, contradiction, unrelated, older than the newest 100), the retention purge and sweep, the owner's view |
+| `packages/memory/test/memory-quality-eval-p14-pg.integration.test.ts` | The quality evaluation and the weight comparison |
+| `packages/memory/test/memory-quality-eval-real-embeddings-p14.test.ts` | The opt-in real-embedding evaluation |
+| `packages/memory/test/memory-architecture-p14.test.ts` | One writer, one deleter, one store, no shortcut in a route |
+| `packages/tools/test/memory-tools-p14.test.ts` | `memory.correct`, `memory.purge_expired`, the scope of `memory.list` |
+| `packages/agents/test/memory-phase14.test.ts` | The correction detector, the agent boundary, scoped and veto-aware recall, policy |
+| `apps/api/test/memory-api-p14.test.ts` | The memory and project routes, the chat's project and correction turns, the tools' port, the sweep's scheduler |
+| `apps/api/test/phase14-memory-e2e-pg.integration.test.ts` | The whole journey on PostgreSQL with the production classes; fails if PostgreSQL is unreachable |
+| `apps/web/test/memory-page.test.tsx`, `memory-api-client.test.ts` | The memory screen, the project picker, what the browser sends |
+
+### Known limitations
+
+- **Project state is still not memory.** L3 is unchanged, so "the client prefers a formal tone" is not stored even in a project conversation. A project memory is the user's own durable statement made in that project.
+- **A paraphrase revises; it does not corroborate.** With real embeddings a reworded restatement scores about 0.88–0.93 — below the 0.95 corroboration threshold — so the stored wording is replaced and its evidence restarts. Embedding similarity cannot tell a paraphrase from a contradiction (their ranges overlap), which is why both are treated the same way.
+- **A contradiction replaces without history.** The previous wording is not kept; the evidence records only that there was a revision and which message it replaced.
+- **Team conventions are missed.** "We publish on Mondays" is not learned (extraction recall 81.8% on the dataset).
+- **Whatever is said in a project conversation is that project's.** A personal fact stated there ("my name is …") is not used elsewhere. A memory cannot be moved between scopes, and a project cannot be renamed or deleted.
+- **Pasted text is the user's.** Something pasted into a message is treated as the user's own statement.
+- **The fallback scan is kept.** It still runs whenever vector recall finds nothing, because rows from before S7 are served only by it; and the embedding is still stored twice (the vector column and `metadata.embedding`).
+- **No vector index.** Recall scans a user's own rows; nothing measured so far needs more.
+- **Memory content is stored as plain text**, and forgetting does not reach the chat message a memory came from, database backups, or the `_Memory_v1_backup` table an early migration left behind.
+- **The evaluation is small and deterministic.** It proves the gates and the ranking logic. It does not measure how well the real extraction model writes candidates.
+
+## Writing, failures and documents
+
 ### The write path
 
-There is one: `MemoryExtractionService` → `PrismaMemoryRepository.store` / `update`. Each write puts the same embedding in two places, in **one transaction**: `metadata.embedding` (read by the fallback) and the `embedding` vector column (read by vector recall). If the vector cannot be written, the row is not written either.
+There is one: `MemoryExtractionService` → `PrismaMemoryRepository.store` / `update`. A correction (Phase 14) is the same writer's `correct()`; `packages/memory/test/memory-architecture-p14.test.ts` fails if anything else ever creates, changes or deletes a memory. Each write puts the same embedding in two places, in **one transaction**: `metadata.embedding` (read by the fallback) and the `embedding` vector column (read by vector recall). If the vector cannot be written, the row is not written either.
 
 Before anything is written, the repository refuses an embedding that is not exactly 1536 finite numbers, and the service checks each vector the provider returns, one candidate at a time. Each new memory is stored in its own call, so one bad vector costs only its own candidate.
 
@@ -650,7 +851,7 @@ Until 2026-09-15 the API never reached the memory wiring without a key: `apps/ap
 
 | Code | Status |
 |---|---|
-| `packages/memory/src/memory-engine.ts` — `MemoryEngine` | A working, tested facade that production does not use. Whether it becomes the single entry point or is removed is an open decision (D-4 in `CODEBASE_AUDIT.md`). |
+| `packages/memory/src/memory-engine.ts` — `MemoryEngine` | A working, tested facade that production does not use. Whether it becomes the single entry point or is removed is an open decision (D-4 in `CODEBASE_AUDIT.md`). Since Phase 14 a test fails if production ever constructs it: it would be a second writer. |
 Two non-functional stubs, `MemoryManager` and `KnowledgeBase`, used to sit in this package: one discarded what it was asked to store, the other stored nothing it was asked to ingest. Nothing referenced them, and they were deleted on 2026-09-14 together with the deprecated `MemoryManager` interface in `@jarvis/core`. **Do not recreate them.** New memory behaviour goes into the runtime chain above, and nothing should be built on `MemoryEngine` until D-4 is decided.
 
 ## B-1 — resolved
@@ -668,3 +869,13 @@ pnpm --filter @jarvis/api exec vitest run test/sprint-1.1d-memory-e2e.test.ts -t
 ```
 
 `6 passed | 7 skipped` in each of three consecutive runs. The whole file passed 13 of 13, the four API memory suites 58 of 58, and `@jarvis/memory` 453 of 453. On 2026-09-14 the file also passed 13 of 13 in three runs against Postgres, on a dedicated test database (`memory backend: prisma-memory`). **Not verified since the fix:** the full repository suite.
+
+**Phase 14 (2026-10-08) — a second, real race, fixed in the repository.** With PostgreSQL the same file still failed now and then (twice in eight runs during the Phase 14 audit, both on a freshly migrated database): `TypeError: Cannot read properties of undefined (reading 'type')`. `PrismaMemoryRepository.list()` read its page and its total as two separate statements, each with its own snapshot, so a memory committed between them gave `total: 1` beside an empty page — and the test waited for the total, then read the page. `list()` now reads both inside one REPEATABLE READ transaction. `packages/db/test/memory-list-coherence-p14-pg.integration.test.ts` reproduces the race — deterministically, and against a writer running flat out (34 of 400 reads disagreed before the fix, none after).
+
+It is a **batch** transaction, and that matters. The first version of the fix used an interactive one, which is just as coherent but waits only two seconds for a database connection before throwing `P2028`: measured on PostgreSQL, 4,000 simultaneous `list()` calls began failing after about 2.5 seconds. A burst of reads, or one stalled moment on a busy machine, could therefore make `list()` throw where the two plain statements never could. A batch is one round trip and waits for a connection like any other query. The same test file pins that shape.
+
+Two more things changed in the test file, and nothing in what it asserts. It now uses PostgreSQL only when `DATABASE_URL` is a separate test database, never port 5432 or 5433: the Prisma client reads `packages/db/.env` on import, so the suite used to write its fixture users into the development database whenever that was running. And with `JARVIS_REQUIRE_POSTGRES=1` — set in CI's database steps — it fails instead of falling back to the in-process store.
+
+**Verified 2026-10-09, on the final code:** every database-backed API test file together with this one, each run on a brand-new PostgreSQL container with all 29 migrations applied from scratch: 30 consecutive runs, all passed (5 files, 44 tests each).
+
+**One failure is not explained.** Before the change to a batch transaction, the same loop passed 64 of 65 runs. The one failure — three tests in one file — came ten minutes after the development machine woke from a fifteen-hour suspend, and its output was not kept, so which file failed is not known. The interactive transaction's two-second limit is a failure it could have been; that was not proven. It has not recurred in the runs above. If it does, the loop now keeps the full output and the clock readings of any failing run.

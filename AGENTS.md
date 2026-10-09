@@ -115,6 +115,35 @@ explicit user decision. Never request every Google scope at initial login.
 Authorization decisions read **granted** scopes, never requested ones: Google
 may grant fewer than were asked for.
 
+### Memory
+
+The contract is in [`docs/MEMORY.md`](docs/MEMORY.md); these are the parts a
+change must not break. `packages/memory/test/memory-architecture-p14.test.ts`
+fails when one of the first three does.
+
+- **One writer.** Only `MemoryExtractionService` creates or changes a memory —
+  extraction after a reply, and a confirmed correction. Never add a tool, a
+  route or a service method that writes one. The L1–L4 learning contracts in
+  `packages/core` have that one consumer, and their tests pin it.
+- **One way to delete.** `MemoryManagementService`, reached only through the
+  memory tools, which `ToolExecutor` runs. Forgetting and correcting are
+  HIGH_IMPACT pending actions the user confirms; no route deletes or edits a
+  memory, and none may be added.
+- **Agents hold no memory store.** `AgentContext` carries none and the
+  orchestrator is typed against a read-only port. An agent's only memory tool
+  is `memory.list`. `memory.forget`, `memory.forget_all`, `memory.correct` and
+  `memory.purge_expired` stay on no agent's allowlist.
+- **Scope beside ownership.** A memory is personal or belongs to one project of
+  its owner. Every project filter is written beside the user filter, never
+  instead of it. The active project is the conversation's, read from the
+  conversation row — never from a request body after the conversation exists.
+- **Parameters are ids, never memory text.** A pending action, an approval and
+  an audit row hold ids, versions and counts. The words stay in the message.
+- **The controls fail closed.** Unreadable or corrupt controls: nothing is
+  learned and nothing is recalled.
+- **Retention deletes only what the policy says** (`MEMORY_RETENTION` in
+  `packages/core`): bounded, one user at a time, through `memory.purge_expired`.
+
 ### Operational logs and errors
 
 - An operational event — start-up, shutdown, a failed request, anything a
@@ -163,9 +192,14 @@ The six memory end-to-end tests that used to fail on every run (B-1 in
 `docs/CODEBASE_AUDIT.md`) pass since 2026-09-14. The cause was a race in the
 test harness, not a production memory bug. `@jarvis/db` tests need PostgreSQL
 with pgvector: point `DATABASE_URL` at a separate test database, never the
-development one. On a fresh throwaway pgvector database they give 234 passed /
-0 failed (21 files; Phase 13, 2026-10-06). Every workspace's suite was run that
-day, one workspace at a time: 7,668 passed without a database, none failed.
+development one. On a fresh throwaway pgvector database they give 269 passed /
+0 failed (23 files; Phase 14, 2026-10-09). Every workspace's suite was run that
+day, one workspace at a time: 8,066 passed without a database, none failed.
+
+The two memory end-to-end tests (`sprint-1.1d-memory-e2e`, and
+`phase14-memory-e2e-pg.integration`, which has no in-memory fallback at all)
+fail rather than fall back or skip when `JARVIS_REQUIRE_POSTGRES=1` is set and
+no separate test database is reachable. CI sets it in its database steps.
 
 CI runs the PostgreSQL-backed tests against its own throwaway pgvector service,
 after applying every migration, and fails if any of them is skipped

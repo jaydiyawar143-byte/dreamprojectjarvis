@@ -53,6 +53,8 @@ export {
   type UpdateTaskInput,
 } from "./repositories/task-repository.js";
 export { PrismaPreferenceRepository } from "./repositories/preference-repository.js";
+// Phase 14 — projects: the scope a memory may belong to.
+export { PrismaProjectRepository } from "./repositories/project-repository.js";
 export {
   PrismaMapsUsageRepository,
   currentPeriod,

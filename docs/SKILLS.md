@@ -84,6 +84,7 @@ Named groups keep each policy readable as a capability rather than a list of str
 | `MCP_READ_TOOLS` | derived from the reviewed `MCP_MANIFEST`: `mcp.dates.days_between`, `mcp.dates.day_of_week`, `mcp.units.convert_length`, `mcp.units.convert_temperature` | read-only; registered only while `JARVIS_MCP_ENABLED=true`; never schedulable |
 | Single tools | `n8n.trigger`, `whatsapp.send` | approval-gated |
 | Registered, on **no** allowlist | `memory.forget`, `memory.forget_all` | approval-gated; they run only for a confirmed pending action the chat route created from the user's own words |
+| Registered, on **no** allowlist (Phase 14) | `memory.correct`, `memory.purge_expired` | `memory.correct` is approval-gated and runs only for a pending action the user confirmed; `memory.purge_expired` takes no parameters and is run only by the retention sweep. Both through `ToolExecutor` |
 | `BROWSER_READ_TOOL_IDS` (in `packages/core/src/types/browser.ts`) | `browser.navigate`, `browser.inspect`, `browser.extract`, `browser.screenshot` | read-only |
 | `BROWSER_ACTION_TOOL_IDS` (same file) | `browser.click`, `browser.type`, `browser.select`, `browser.submit`, `browser.download`, `browser.upload` | every one approval-gated |
 

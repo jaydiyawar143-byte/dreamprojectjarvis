@@ -15,19 +15,32 @@
 //     shown. A target that changed since is STALE and nothing is deleted.
 //   - The audit trail holds ids and counts only — never content, never a
 //     source message, conversation or trace id.
+//
+// Phase 14 adds, on the same store and under the same rules: the owner's
+// detailed view for the memory screen and API, project scope on every read a
+// conversation makes, the status of the controls, and the retention purge.
+// It still never learns — a correction is written by MemoryExtractionService;
+// this service only records that one happened.
 // ---------------------------------------------------------------------------
 
 import type {
   AuditEntry,
   IMemoryStore,
+  MemoryCorrectionStatus,
+  MemoryDetail,
   MemoryForgetScope,
   MemoryLearningControl,
   MemoryRecord,
+  MemoryScopeFilter,
   MemoryView,
 } from "@jarvis/core";
 import {
   JarvisError,
   MEMORY_FORGET_LIMIT,
+  MEMORY_RETENTION,
+  isPurgeable,
+  memoryPurgeCutoff,
+  toMemoryDetail,
   parseMemoryLearningControl,
   serializeMemoryLearningControl,
   toMemoryView,
@@ -65,10 +78,37 @@ export { MEMORY_FORGET_LIMIT };
 // 1000 memories; add an indexed query if a user ever holds more.
 const SCAN_LIMIT = 1000;
 
+/** The most memories one page of the owner's list may hold. */
+export const MEMORY_PAGE_LIMIT = 50;
+
+export interface MemoryListOptions {
+  includeExpired?: boolean;
+  limit?: number;
+  offset?: number;
+  /** Phase 14 — project scope. Absent: every memory the user owns. */
+  scope?: MemoryScopeFilter;
+  /** Phase 14 — only memories whose content contains this text. */
+  search?: string;
+}
+
+/** Phase 14 — what the memory screen shows above the list. */
+export interface MemoryStatus {
+  learningPaused: boolean;
+  /** Messages the user said not to learn from. */
+  vetoedSources: number;
+  /** Memories in use: not expired. */
+  active: number;
+  /** Expired, hidden, and waiting for the retention sweep. */
+  expired: number;
+  retention: { days: number; purgeGraceDays: number };
+}
+
 export interface MemoryManagementServiceConfig {
   store: IMemoryStore;
   control: MemoryControlStore;
   audit: MemoryAuditPort;
+  /** The clock, for expiry and retention. Defaults to the system clock. */
+  now?: () => Date;
 }
 
 export class MemoryManagementService {
@@ -80,15 +120,47 @@ export class MemoryManagementService {
 
   async list(
     userId: string,
-    options: { includeExpired?: boolean; limit?: number; offset?: number } = {}
+    options: MemoryListOptions = {}
   ): Promise<{ memories: MemoryView[]; total: number; hasMore: boolean }> {
-    const result = await this.deps.store.list({
-      userId,
-      includeExpired: options.includeExpired ?? false,
-      limit: options.limit ?? 20,
-      offset: options.offset ?? 0,
-    });
+    const result = await this.page(userId, options);
     return { memories: result.memories.map(toMemoryView), total: result.total, hasMore: result.hasMore };
+  }
+
+  /**
+   * Phase 14 — the same page as list(), as the owner manages it: with
+   * confidence, project and a provenance summary. `projectNames` (id → name,
+   * of this user's own projects) only labels; it never widens what is read.
+   */
+  async details(
+    userId: string,
+    options: MemoryListOptions = {},
+    projectNames?: ReadonlyMap<string, string>
+  ): Promise<{ memories: MemoryDetail[]; total: number; hasMore: boolean }> {
+    const result = await this.page(userId, options);
+    const now = this.now();
+    return { memories: result.memories.map((m) => toMemoryDetail(m, now, projectNames)), total: result.total, hasMore: result.hasMore };
+  }
+
+  /** Phase 14 — one of the user's own memories, or null. A foreign id is null too. */
+  async detail(userId: string, memoryId: string, projectNames?: ReadonlyMap<string, string>): Promise<MemoryDetail | null> {
+    const record = await this.deps.store.getById(userId, memoryId);
+    return record ? toMemoryDetail(record, this.now(), projectNames) : null;
+  }
+
+  /** Phase 14 — the state of the user's controls and how much is stored. */
+  async status(userId: string): Promise<MemoryStatus> {
+    const [control, active, all] = await Promise.all([
+      this.learningControl(userId),
+      this.deps.store.list({ userId, includeExpired: false, limit: 1 }),
+      this.deps.store.list({ userId, includeExpired: true, limit: 1 }),
+    ]);
+    return {
+      learningPaused: control.learningPaused,
+      vetoedSources: control.vetoedSourceMessageIds.length,
+      active: active.total,
+      expired: Math.max(0, all.total - active.total),
+      retention: { days: MEMORY_RETENTION.defaultDays, purgeGraceDays: MEMORY_RETENTION.purgeGraceDays },
+    };
   }
 
   /** The user's own memories among `ids`, in that order. Anything else is simply absent. */
@@ -103,7 +175,12 @@ export class MemoryManagementService {
 
   /** What one of the user's own messages taught (L2 provenance). */
   async fromSourceMessage(userId: string, messageId: string): Promise<MemoryView[]> {
-    return (await this.scan(userId)).filter((m) => m.sourceMessageId === messageId).map(toMemoryView);
+    // Phase 14 — asked of the store by source message, instead of reading the
+    // user's newest 1000 memories to find a handful. The filter below stays:
+    // a store that ignored the request must still never return another
+    // message's memories.
+    const result = await this.deps.store.list({ userId, includeExpired: true, limit: SCAN_LIMIT, sourceMessageId: messageId });
+    return result.memories.filter((m) => m.sourceMessageId === messageId).map(toMemoryView);
   }
 
   /** How many memories a forget-all of `scope` would remove — expired ones included. */
@@ -187,6 +264,41 @@ export class MemoryManagementService {
     await this.record(userId, "memory.veto", "success", {});
   }
 
+  // -------------------------------------------------------------------------
+  // Phase 14 — retention and correction records
+  // -------------------------------------------------------------------------
+
+  /**
+   * Deletes this user's memories that expired more than the grace period ago
+   * — at most MEMORY_RETENTION.sweepBatch of them. Reached only through the
+   * `memory.purge_expired` tool, for the retention sweep.
+   *
+   * Nothing here can delete a memory that is still in use: the store is asked
+   * for rows expired before the cutoff, and every row it returns is checked
+   * against the cutoff AGAIN before its id is deleted — so a store that
+   * ignored the filter deletes nothing it should not. Deletion is by id, for
+   * this user only.
+   */
+  async purgeExpired(userId: string): Promise<number> {
+    const cutoff = memoryPurgeCutoff(this.now());
+    const result = await this.deps.store.list({
+      userId,
+      includeExpired: true,
+      expiredBefore: cutoff,
+      limit: MEMORY_RETENTION.sweepBatch,
+    });
+    const ids = result.memories.filter((m) => m.userId === userId && isPurgeable(m.expiresAt, cutoff)).map((m) => m.id);
+    if (ids.length === 0) return 0;
+    const deleted = await this.deps.store.delete({ userId, memoryIds: ids });
+    await this.record(userId, "memory.retention_purge", "success", { deleted });
+    return deleted;
+  }
+
+  /** A correction's outcome: the memory's id and the status. Never the old or the new words. */
+  async recordCorrection(userId: string, memoryId: string, status: MemoryCorrectionStatus): Promise<void> {
+    await this.record(userId, "memory.correct", status === "CORRECTED" ? "success" : "rejected", { memoryIds: [memoryId], status });
+  }
+
   /**
    * A memory command that ended without a deletion — proposed, ambiguous,
    * nothing to act on. Kind, outcome and a count; never the words.
@@ -196,6 +308,21 @@ export class MemoryManagementService {
   }
 
   // -------------------------------------------------------------------------
+
+  private now(): Date {
+    return this.deps.now ? this.deps.now() : new Date();
+  }
+
+  private page(userId: string, options: MemoryListOptions) {
+    return this.deps.store.list({
+      userId,
+      includeExpired: options.includeExpired ?? false,
+      limit: Math.max(1, Math.min(options.limit ?? 20, MEMORY_PAGE_LIMIT)),
+      offset: Math.max(0, options.offset ?? 0),
+      ...(options.scope ? { scope: options.scope } : {}),
+      ...(options.search ? { search: options.search } : {}),
+    });
+  }
 
   private async scan(userId: string): Promise<MemoryRecord[]> {
     return (await this.deps.store.list({ userId, includeExpired: true, limit: SCAN_LIMIT })).memories;

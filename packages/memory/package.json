@@ -15,7 +15,8 @@
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "lint": "eslint src/"
+    "lint": "eslint src/",
+    "eval": "vitest run memory-quality-eval"
   },
   "dependencies": {
     "@jarvis/ai-openai": "workspace:*",

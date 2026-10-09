@@ -46,7 +46,9 @@ export type MemoryCommand =
   | { kind: "NONE" | "LIST" | "REPLACE" | "LEARNING_PAUSE" | "LEARNING_RESUME" }
   | { kind: "FORGET"; target: { kind: "SELECTION"; positions: number[] } | { kind: "THIS" } }
   | { kind: "FORGET_ALL"; scope: MemoryForgetScope }
-  | { kind: "CORRECT"; target: { kind: "LAST_REPLY" } }
+  // Phase 14 — `statement`: the new value, in the user's own words ("that's
+  // wrong. I prefer light mode", "change 2 to …"). Absent: only "that's wrong".
+  | { kind: "CORRECT"; target: { kind: "LAST_REPLY" } | { kind: "SELECTION"; positions: number[] }; statement?: string }
   | { kind: "VETO"; target: { kind: "PREVIOUS_MESSAGE" } };
 
 /**
@@ -137,17 +139,25 @@ function counter(value: unknown): value is number {
   return Number.isInteger(value) && (value as number) >= 0;
 }
 
-/** The counts and dates of v1 evidence, read for display only — never for a learning decision. */
-function evidenceSummary(value: unknown): { count: number; revisions: number; firstSeenAt: string; lastSeenAt: string } | null {
+/** The counts and dates of v1 evidence, read for display and ranking only — never for a learning decision. */
+export function memoryEvidenceSummary(
+  value: unknown
+): { count: number; conversations: number; revisions: number; firstSeenAt: string; lastSeenAt: string } | null {
   if (typeof value !== "object" || value === null) return null;
   const e = value as Record<string, unknown>;
   if (e.v !== 1 || !counter(e.count) || !counter(e.revisions)) return null;
   if (typeof e.firstSeenAt !== "string" || typeof e.lastSeenAt !== "string") return null;
-  return { count: e.count, revisions: e.revisions, firstSeenAt: e.firstSeenAt, lastSeenAt: e.lastSeenAt };
+  return {
+    count: e.count,
+    conversations: counter(e.conversations) ? e.conversations : 0,
+    revisions: e.revisions,
+    firstSeenAt: e.firstSeenAt,
+    lastSeenAt: e.lastSeenAt,
+  };
 }
 
 export function toMemoryView(record: MemoryRecord): MemoryView {
-  const evidence = evidenceSummary(record.metadata?.evidence);
+  const evidence = memoryEvidenceSummary(record.metadata?.evidence);
   return {
     id: record.id,
     type: record.type,

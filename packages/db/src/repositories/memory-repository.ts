@@ -12,6 +12,10 @@ import {
   type MemoryListResult,
   type MemoryRecord,
   type MemoryType,
+  type MemoryExactScope,
+  type MemoryScopeFilter,
+  rankMemories,
+  scoreMemoryRelevance,
 } from "@jarvis/core";
 
 const SECRET_PATTERNS = [
@@ -43,6 +47,7 @@ function toMemoryRecord(row: {
   createdAt: Date;
   updatedAt: Date;
   expiresAt: Date | null;
+  projectId?: string | null;
 }): MemoryRecord {
   return {
     id: row.id,
@@ -61,6 +66,7 @@ function toMemoryRecord(row: {
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     expiresAt: row.expiresAt ?? undefined,
+    ...(row.projectId ? { projectId: row.projectId } : {}),
   };
 }
 
@@ -98,7 +104,40 @@ const MEMORY_EMBEDDING_DIMENSIONS = 1536;
 /** Every column except the vector — the only safe projection for raw reads. */
 const MEMORY_COLUMNS = `m."id", m."userId", m."type", m."content", m."summary", m."importance",
        m."confidence", m."accessCount", m."lastAccessedAt", m."metadata", m."sourceType",
-       m."sourceConversationId", m."sourceMessageId", m."createdAt", m."updatedAt", m."expiresAt"`;
+       m."sourceConversationId", m."sourceMessageId", m."createdAt", m."updatedAt", m."expiresAt",
+       m."projectId"`;
+
+// ---------------------------------------------------------------------------
+// Phase 14 — project scope and relevance.
+//
+// SCOPE. A memory is personal (`projectId` NULL) or belongs to one project of
+// its owner. Every scope clause below is written BESIDE the `userId` clause of
+// its query, never instead of it, so a project id can only ever select among
+// rows the caller's own user already owns: naming another user's project
+// selects nothing.
+//
+// RELEVANCE. recall() takes a bounded pool of the nearest rows from the
+// database and orders it with the one score in core (memory-relevance.ts), so
+// the vector path and the orchestrator's fallback rank identically.
+// ---------------------------------------------------------------------------
+
+/** How many nearest rows recall() scores for each memory it may return. */
+const RECALL_POOL_FACTOR = 4;
+/** The most rows one recall ever reads, whatever limit was asked for. */
+const RECALL_POOL_MAX = 50;
+/** The longest search text list() accepts. */
+const SEARCH_MAX_LENGTH = 200;
+
+/** What a conversation may see: personal memories, plus those of its own project. */
+function visibleInClause(projectId: string | null | undefined, placeholder: string): string {
+  return projectId ? `AND (m."projectId" IS NULL OR m."projectId" = ${placeholder})` : `AND m."projectId" IS NULL`;
+}
+
+function scopeWhere(scope: MemoryScopeFilter): Prisma.MemoryWhereInput {
+  if (scope.kind === "PERSONAL") return { projectId: null };
+  if (scope.kind === "PROJECT") return { projectId: scope.projectId };
+  return scope.projectId ? { OR: [{ projectId: null }, { projectId: scope.projectId }] } : { projectId: null };
+}
 
 /** Rejects, before any write, a vector the column could not hold. */
 function assertStorableEmbedding(embedding: unknown, position: number): asserts embedding is number[] {
@@ -185,6 +224,10 @@ function createData(
     sourceConversationId: mem.sourceConversationId ?? null,
     sourceMessageId: mem.sourceMessageId ?? null,
     expiresAt: mem.expiresAt ?? null,
+    // Phase 14 — set here and nowhere else: no update ever moves a memory
+    // between scopes. The (projectId, userId) foreign key refuses a project
+    // this user does not own.
+    projectId: mem.projectId ?? null,
   };
 }
 
@@ -316,15 +359,42 @@ export class PrismaMemoryRepository implements IMemoryStore {
       ];
     }
 
-    const [memories, total] = await Promise.all([
-      this.prisma.memory.findMany({
-        where,
-        orderBy: { createdAt: "desc" },
-        skip: offset,
-        take: limit,
-      }),
-      this.prisma.memory.count({ where }),
-    ]);
+    // Phase 14 — each of these narrows the user's own rows further.
+    if (request.scope) where.AND = [scopeWhere(request.scope)];
+    if (request.sourceMessageId) where.sourceMessageId = request.sourceMessageId;
+    if (request.expiredBefore) where.expiresAt = { lt: request.expiredBefore };
+    // The text is matched literally: `%`, `_` and `\` are escaped, so a search
+    // for "%" finds a percent sign rather than every memory.
+    const search = request.search?.trim().slice(0, SEARCH_MAX_LENGTH).replace(/[\\%_]/g, "\\$&");
+    if (search) where.content = { contains: search, mode: "insensitive" };
+
+    // Phase 14 — ONE snapshot for the page and the total.
+    //
+    // They used to be two independent statements. Under READ COMMITTED each
+    // statement sees whatever has committed by the time IT starts, so a write
+    // landing between them produced an answer that was never true: a total of
+    // 1 beside an empty page. REPEATABLE READ fixes the snapshot at the first
+    // statement, and a read-only transaction at that level can never fail
+    // with a serialization error.
+    //
+    // A BATCH transaction, deliberately — not an interactive one. Both give
+    // one snapshot; but an interactive transaction waits only two seconds for
+    // a connection and then throws (P2028), so a burst of reads, or one
+    // stalled moment on a busy machine, turned "wait a little" into a failed
+    // list(). The batch is one round trip and waits for a connection exactly
+    // as the two separate statements always did.
+    const [memories, total] = await this.prisma.$transaction(
+      [
+        this.prisma.memory.findMany({
+          where,
+          orderBy: { createdAt: "desc" },
+          skip: offset,
+          take: limit,
+        }),
+        this.prisma.memory.count({ where }),
+      ],
+      { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead }
+    );
 
     return {
       memories: memories.map(toMemoryRecord),
@@ -360,8 +430,16 @@ export class PrismaMemoryRepository implements IMemoryStore {
       params.push(request.minSimilarity);
     }
 
+    // Phase 14 — the conversation's project, beside the userId clause below.
+    let scopeClause = visibleInClause(null, "");
+    if (request.projectId) {
+      scopeClause = visibleInClause(request.projectId, `$${paramIdx++}`);
+      params.push(request.projectId);
+    }
+
+    // Phase 14 — a bounded pool of the nearest rows, ranked below.
     const limitPlaceholder = `$${paramIdx++}`;
-    params.push(limit);
+    params.push(Math.min(RECALL_POOL_MAX, Math.max(limit, limit * RECALL_POOL_FACTOR)));
 
     // S7 — explicit columns only (never the vector, which Prisma cannot
     // deserialize), expired rows excluded, and ties broken by id so the same
@@ -372,6 +450,7 @@ export class PrismaMemoryRepository implements IMemoryStore {
        WHERE m."userId" = $2
          AND m."embedding" IS NOT NULL
          AND (m."expiresAt" IS NULL OR m."expiresAt" > now())
+         ${scopeClause}
          ${typeClause}
          ${importanceClause}
          ${similarityClause}
@@ -380,22 +459,13 @@ export class PrismaMemoryRepository implements IMemoryStore {
       ...params
     );
 
-    const now = Date.now();
-
-    return rows.map((row) => {
-      const semanticScore = Number(row.semanticScore) || 0;
-      const hoursSinceAccess = row.lastAccessedAt
-        ? (now - row.lastAccessedAt.getTime()) / (1000 * 60 * 60)
-        : 168;
-      const recencyScore = Math.exp(-hoursSinceAccess / 168);
-
-      return {
-        memory: toMemoryRecord(row),
-        semanticScore,
-        recencyScore,
-        finalScore: semanticScore * 0.7 + recencyScore * 0.3,
-      };
-    });
+    // Phase 14 — the similarity floor above decided WHICH rows may be used;
+    // the relevance score decides their order and which `limit` are returned.
+    const now = new Date();
+    return rankMemories(
+      rows.map((row) => scoreMemoryRelevance(toMemoryRecord(row), Number(row.semanticScore) || 0, now)),
+      limit
+    );
   }
 
   async delete(request: MemoryDeleteRequest): Promise<number> {
@@ -482,9 +552,24 @@ export class PrismaMemoryRepository implements IMemoryStore {
     userId: string,
     embedding: number[],
     threshold = 0.5,
-    limit = 10
+    limit = 10,
+    scope?: MemoryExactScope
   ): Promise<MemoryRecord[]> {
     const embStr = embeddingToSql(embedding);
+
+    // Phase 14 — exactly one scope, when the caller names one: a statement
+    // made in a project is compared with that project's memories only, and a
+    // personal one with personal memories only.
+    const params: unknown[] = [embStr, userId, threshold, limit];
+    let scopeClause = "";
+    if (scope) {
+      if (scope.projectId === null) {
+        scopeClause = `AND m."projectId" IS NULL`;
+      } else {
+        scopeClause = `AND m."projectId" = $5`;
+        params.push(scope.projectId);
+      }
+    }
 
     // S7 — the same safe shape as recall(): explicit columns, no expired rows,
     // a similarity floor and an id tie-breaker.
@@ -495,15 +580,30 @@ export class PrismaMemoryRepository implements IMemoryStore {
          AND m."embedding" IS NOT NULL
          AND (m."expiresAt" IS NULL OR m."expiresAt" > now())
          AND (1 - (m."embedding" <=> $1::vector)) >= $3
+         ${scopeClause}
        ORDER BY m."embedding" <=> $1::vector, m."id"
        LIMIT $4`,
-      embStr,
-      userId,
-      threshold,
-      limit
+      ...params
     );
 
     return rows.map(toMemoryRecord);
+  }
+
+  /**
+   * Phase 14 — the users who hold a memory that expired before `before`, at
+   * most `limit` of them. Ids only: this is the one read here that is not
+   * scoped to a user, and it exists for the retention sweep alone, which then
+   * purges each of those users separately, by that user's id.
+   */
+  async usersWithExpiredMemories(before: Date, limit: number): Promise<string[]> {
+    const rows = await this.prisma.memory.findMany({
+      where: { expiresAt: { lt: before } },
+      distinct: ["userId"],
+      select: { userId: true },
+      orderBy: { userId: "asc" },
+      take: Math.max(0, Math.min(limit, 500)),
+    });
+    return rows.map((row) => row.userId);
   }
 
   async count(userId: string): Promise<number> {

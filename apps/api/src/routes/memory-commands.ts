@@ -12,10 +12,18 @@
 //   → the user confirms (typed "yes", or the on-screen button; never voice)
 //   → ToolExecutor runs memory.forget / memory.forget_all.
 // Targets are never memory text, never a similarity search.
+//
+// Phase 14 — a CORRECTION is proposed the same way, as `memory.correct`: the
+// memory's id and version, and the id of the saved USER message holding the
+// new value. The words themselves are never a parameter. And everything a
+// conversation is shown is what that conversation may see: personal memories
+// plus its own project's — a list is saved in the conversation's history,
+// which the model reads on later turns.
 // ---------------------------------------------------------------------------
 
 import type { ConversationMessage, IntentResult, MemoryCommand, MemoryView, PendingAction } from "@jarvis/core";
 import {
+  MEMORY_CORRECT_TOOL_ID,
   MEMORY_FORGET_LIMIT,
   MEMORY_STRICT_CONFIRMATION,
   MEMORY_TOOL_IDS,
@@ -50,6 +58,21 @@ interface Context {
   memories: MemoryCommandPort;
   pendingActions?: Pick<PendingActionService, "createPendingAction">;
   saveUserMessage: () => Promise<unknown>;
+  /** Phase 14 — the project of this conversation; absent or null for a personal one. */
+  projectId?: string | null;
+  /** Phase 14 — this turn's message, as the user typed it. */
+  message?: string;
+  /** Phase 14 — decides whether a statement may replace a memory. Absent: no corrections here. */
+  corrections?: MemoryCorrectionCheckPort;
+}
+
+/**
+ * Phase 14 — the one question the chat route may ask about a correction: may
+ * this statement, from this saved USER message, be stored as a memory? The
+ * answer comes from the memory writer (L1–L3); nothing is decided here.
+ */
+export interface MemoryCorrectionCheckPort {
+  check(input: { statement: string; userMessage: string; conversationId: string; messageId: string; traceId?: string }): { ok: boolean };
 }
 
 const SELECTION_HINT = "To forget one, say “forget 2” (or “forget 1 and 3”).";
@@ -130,12 +153,41 @@ export async function handleMemoryCommand(ctx: Context): Promise<MemoryTurn | nu
 
   if (command.kind === "CORRECT" && !ctx.pendingActionActive) {
     const shown = selectionOf(lastReply);
-    const ids = shown && shown.length === 1 ? [shown[0]!.id] : recalledOf(lastReply);
+    let ids: string[];
+    if (command.target.kind === "SELECTION") {
+      // Phase 14 — "change 2 to …": a position in the list the last reply showed.
+      if (!shown) return null; // no list shown: not about memories
+      const position = command.target.positions[0]!;
+      if (position > shown.length) {
+        await ctx.saveUserMessage();
+        await memories.recordCommand(userId, command.kind, "AMBIGUOUS", 0);
+        return { reply: `I only showed ${shown.length} ${shown.length === 1 ? "memory" : "memories"}. To change one, say “change 2 to …”.`, metadata: {} };
+      }
+      ids = [shown[position - 1]!.id];
+    } else {
+      ids = shown && shown.length === 1 ? [shown[0]!.id] : recalledOf(lastReply);
+    }
     targets = await memories.views(userId, ids);
     if (targets.length === 0) return null; // no memory behind the last reply: ordinary conversation
+
+    // Phase 14 — a correction that carries a new value is only a correction
+    // when that value could be learned on its own. Anything else — "that's
+    // wrong, sorry", a fact about the world — is ordinary conversation, exactly
+    // as it was before corrections existed. The ids are placeholders: the
+    // answer does not depend on them, and nothing has been saved yet.
+    if (command.statement !== undefined) {
+      const learnable =
+        ctx.corrections?.check({
+          statement: command.statement,
+          userMessage: ctx.message ?? command.statement,
+          conversationId: ctx.conversationId,
+          messageId: "unsaved",
+        }).ok ?? false;
+      if (!learnable || !ctx.pendingActions) return null;
+    }
   }
 
-  await ctx.saveUserMessage();
+  const saved = await ctx.saveUserMessage();
 
   if (ctx.pendingActionActive && command.kind !== "LIST" && command.kind !== "LEARNING_PAUSE" && command.kind !== "LEARNING_RESUME" && command.kind !== "VETO") {
     await memories.recordCommand(userId, command.kind, "BLOCKED_BY_PENDING_ACTION", 0);
@@ -163,15 +215,31 @@ export async function handleMemoryCommand(ctx: Context): Promise<MemoryTurn | nu
     case "FORGET_ALL":
       return forgetAllTurn(ctx, command.scope);
 
-    case "CORRECT":
+    case "CORRECT": {
+      const statement = command.statement;
       if (targets!.length > 1) {
         await memories.recordCommand(userId, command.kind, "AMBIGUOUS", targets!.length);
+        const ask = statement !== undefined ? `Which one should I change? Say “change 2 to ${statement}”.` : `Which one is wrong? ${SELECTION_HINT}`;
         return {
-          reply: ["My last answer used these memories:", ...numbered(targets!), "", `Which one is wrong? ${SELECTION_HINT}`].join("\n"),
+          reply: ["My last answer used these memories:", ...numbered(targets!), "", ask].join("\n"),
           metadata: selectionMetadata(targets!),
         };
       }
+      // Phase 14 — with a new value, the memory is changed, not forgotten.
+      const sourceMessageId = (saved as { id?: unknown } | null | undefined)?.id;
+      if (statement !== undefined && typeof sourceMessageId === "string" && ctx.pendingActions) {
+        const turn = await proposeMemoryCorrection(ctx.pendingActions, {
+          conversationId: ctx.conversationId,
+          userId,
+          memory: targets![0]!,
+          statement,
+          sourceMessageId,
+        });
+        await memories.recordCommand(userId, command.kind, "PROPOSED", 1);
+        return turn;
+      }
       return propose(ctx, targets!);
+    }
 
     case "FORGET": {
       if (command.target.kind === "SELECTION") {
@@ -205,7 +273,9 @@ async function thisMemory(ctx: Context, lastReply: ConversationMessage | undefin
 }
 
 async function listTurn(ctx: Context): Promise<MemoryTurn> {
-  const [{ memories: views, total }, control] = await Promise.all([ctx.memories.list(ctx.userId, { limit: MEMORY_FORGET_LIMIT }), ctx.memories.learningControl(ctx.userId)]);
+  // Phase 14 — what this conversation may see: personal memories, plus its own project's.
+  const scope = { kind: "VISIBLE_IN" as const, projectId: ctx.projectId ?? null };
+  const [{ memories: views, total }, control] = await Promise.all([ctx.memories.list(ctx.userId, { limit: MEMORY_FORGET_LIMIT, scope }), ctx.memories.learningControl(ctx.userId)]);
   const paused = control.learningPaused ? "\n\nLearning is paused — say “start remembering again” to turn it back on." : "";
   if (views.length === 0) return { reply: `I don't have any memories about you yet.${paused}`, metadata: {} };
   const more = total > views.length ? `\nShowing the newest ${views.length} of ${total}.` : "";
@@ -285,6 +355,63 @@ async function propose(ctx: Context, views: MemoryView[], lead?: string): Promis
   return { reply, metadata: {}, pendingAction: pendingShape(pendingAction, reply) };
 }
 
+/**
+ * Phase 14 — a HIGH_IMPACT pending action that changes exactly this memory, at
+ * exactly this version, to the statement in exactly this saved USER message.
+ *
+ * Shared by the chat route and the memory API, so a correction asked for on
+ * the memory screen is proposed, confirmed and executed exactly as one typed
+ * in chat. The statement appears in the reply the user reads; the action's
+ * parameters hold ids only.
+ */
+export async function proposeMemoryCorrection(
+  pendingActions: Pick<PendingActionService, "createPendingAction">,
+  input: { conversationId: string; userId: string; memory: MemoryView; statement: string; sourceMessageId: string }
+): Promise<MemoryTurn> {
+  const reply = [
+    "I'll change this memory:",
+    `1. ${input.memory.content}`,
+    "",
+    "to:",
+    `“${input.statement}”`,
+    "",
+    "Reply “yes” to change it, or “no” to keep it. (With voice, use the on-screen buttons — voice can't confirm this.)",
+  ].join("\n");
+  const { pendingAction } = await pendingActions.createPendingAction({
+    conversationId: input.conversationId,
+    userId: input.userId,
+    toolId: MEMORY_CORRECT_TOOL_ID,
+    action: "Correct 1 memory",
+    params: { memoryId: input.memory.id, version: input.memory.changedAt, sourceMessageId: input.sourceMessageId },
+    riskLevel: "HIGH_IMPACT",
+  });
+  return { reply, metadata: {}, pendingAction: pendingShape(pendingAction, reply) };
+}
+
+/** Phase 14 — the same forget proposal the chat makes, for the memory API. */
+export async function proposeMemoryForget(
+  pendingActions: Pick<PendingActionService, "createPendingAction">,
+  input: { conversationId: string; userId: string; memories: MemoryView[] }
+): Promise<MemoryTurn> {
+  const chosen = input.memories.slice(0, MEMORY_FORGET_LIMIT);
+  const n = chosen.length;
+  const reply = [
+    n === 1 ? "I'll forget this memory:" : `I'll forget these ${n} memories:`,
+    ...numbered(chosen),
+    "",
+    "Reply “yes” to forget it, or “no” to keep it. (With voice, use the on-screen buttons — voice can't confirm this.)",
+  ].join("\n");
+  const { pendingAction } = await pendingActions.createPendingAction({
+    conversationId: input.conversationId,
+    userId: input.userId,
+    toolId: MEMORY_TOOL_IDS.forget,
+    action: n === 1 ? "Forget 1 memory" : `Forget ${n} memories`,
+    params: { memoryIds: chosen.map((v) => v.id), versions: chosen.map((v) => v.changedAt) },
+    riskLevel: "HIGH_IMPACT",
+  });
+  return { reply, metadata: {}, pendingAction: pendingShape(pendingAction, reply) };
+}
+
 async function unavailable(ctx: Context, kind: string): Promise<MemoryTurn> {
   await ctx.memories.recordCommand(ctx.userId, kind, "CONFIRMATION_UNAVAILABLE", 0);
   return { reply: "I can't forget memories here: confirmations aren't available on this server.", metadata: {} };
@@ -302,7 +429,8 @@ async function unavailable(ctx: Context, kind: string): Promise<MemoryTurn> {
  * Every other action passes through untouched.
  */
 export function guardMemoryConfirmation(message: string, pending: PendingAction, intent: IntentResult): { intent: IntentResult } | { reply: string } {
-  if (!isDestructiveMemoryTool(pending.toolId)) return { intent };
+  // Phase 14 — a correction overwrites, so it is guarded like a deletion.
+  if (!isDestructiveMemoryTool(pending.toolId) && pending.toolId !== MEMORY_CORRECT_TOOL_ID) return { intent };
   if (memoryToolConfirmation(pending.toolId) === "STRICT") {
     if (isStrictMemoryConfirmation(message)) return { intent: { type: "CONFIRM", confidence: 1 } };
     if (intent.type === "CONFIRM") {
