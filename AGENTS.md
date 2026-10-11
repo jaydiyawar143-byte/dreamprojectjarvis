@@ -104,6 +104,12 @@ Plan → Explain → Confirm → Execute → Audit → Verify → Report
   refused. There is no in-memory fallback, and none may be added.
 - **A voice session cannot confirm a write at all.** Speech is a fine way to ask
   for one and not a fine way to authorize one.
+- **A pending action is answered by its id.** `POST /api/v1/pending-actions/:id/confirm`,
+  `/reject` and `/modify` act only when `:id` is the action waiting in that
+  conversation. Any other id — replaced, used, expired, unknown — gets `409
+  PENDING_ACTION_MISMATCH` (or `404` when nothing waits) and changes nothing, so
+  a screen still showing an older request can never answer a newer one. A
+  memory action can never be modified.
 
 ### Google scopes
 
@@ -140,7 +146,8 @@ fails when one of the first three does.
 - **Parameters are ids, never memory text.** A pending action, an approval and
   an audit row hold ids, versions and counts. The words stay in the message.
 - **The controls fail closed.** Unreadable or corrupt controls: nothing is
-  learned and nothing is recalled.
+  learned and nothing is recalled. Recall reads them through `recallControl`,
+  which refuses a corrupt document; a valid pause stops learning only.
 - **Retention deletes only what the policy says** (`MEMORY_RETENTION` in
   `packages/core`): bounded, one user at a time, through `memory.purge_expired`.
 
@@ -192,9 +199,10 @@ The six memory end-to-end tests that used to fail on every run (B-1 in
 `docs/CODEBASE_AUDIT.md`) pass since 2026-09-14. The cause was a race in the
 test harness, not a production memory bug. `@jarvis/db` tests need PostgreSQL
 with pgvector: point `DATABASE_URL` at a separate test database, never the
-development one. On a fresh throwaway pgvector database they give 269 passed /
-0 failed (23 files; Phase 14, 2026-10-09). Every workspace's suite was run that
-day, one workspace at a time: 8,066 passed without a database, none failed.
+development one. On a fresh throwaway pgvector database they give 272 passed /
+0 failed (23 files; Phase 14 audit fixes, 2026-10-11). Every workspace's suite
+was run that day, one workspace at a time: 8,135 passed without a database,
+none failed.
 
 The two memory end-to-end tests (`sprint-1.1d-memory-e2e`, and
 `phase14-memory-e2e-pg.integration`, which has no in-memory fallback at all)

@@ -44,6 +44,7 @@ import { MemoryExtractionService, MemoryManagementService } from "@jarvis/memory
 import { createChatRouter } from "../src/routes/chat.js";
 import { createMemoryRouter, MEMORY_SCREEN_CONVERSATION_TITLE } from "../src/routes/memory.js";
 import { createProjectsRouter } from "../src/routes/projects.js";
+import { createPendingActionsRouter } from "../src/routes/pending-actions.js";
 import { correctionStatementOf, createMemoryToolPort } from "../src/services/memory-tool-port.js";
 import { startMemoryRetentionSweep } from "../src/services/memory-retention-scheduler.js";
 
@@ -286,6 +287,8 @@ function world(options: { rows?: MemoryRecord[]; withCorrections?: boolean; with
   app.use("/memories", createMemoryRouter({ tokenService, memoryManagement, projects, conversationRepo: conversations.store, ...pending, ...corrections }));
   app.use("/projects", createProjectsRouter({ tokenService, projects }));
   app.use("/chat", createChatRouter({ tokenService, conversationRepo: conversations.store, orchestrator, executor, googleWrites: null, memoryManagement, projects, ...pending, ...corrections }));
+  // Audit F2 — the existing confirmation endpoints, exactly as the screen calls them.
+  app.use("/pending-actions", createPendingActionsRouter({ tokenService, executor, toolRegistry: { get: (id: string) => ({ id }) }, googleWrites: null, ...pending } as never));
   app.use((_req, res) => res.status(404).json({ success: false, error: { code: "NOT_FOUND", message: "No such route" } }));
   const server = app.listen(0);
   servers.push(server);
@@ -402,7 +405,7 @@ describe("Phase 14 API — GET /memories/:id and /status", () => {
 
   it("status reports the controls, the counts and the retention policy", async () => {
     const reply = await world().call("GET", "/memories/status");
-    expect(reply.body.data).toEqual({ learningPaused: false, vetoedSources: 0, active: 4, expired: 1, retention: { days: 90, purgeGraceDays: 30 }, correctionAvailable: true });
+    expect(reply.body.data).toEqual({ learningPaused: false, controlsReadable: true, vetoedSources: 0, active: 4, expired: 1, retention: { days: 90, purgeGraceDays: 30 }, correctionAvailable: true });
   });
 });
 
@@ -535,6 +538,37 @@ describe("Phase 14 API — POST /memories/:id/correction is a request, not an ed
     expect((await world({ withCorrections: false }).call("POST", "/memories/m-1/correction", { statement: "I prefer light mode" })).status).toBe(503);
     expect((await world({ withPending: false }).call("POST", "/memories/m-1/correction", { statement: "I prefer light mode" })).status).toBe(503);
     expect((await world({ withCorrections: false }).call("GET", "/memories/status")).body.data!.correctionAvailable).toBe(false);
+  });
+});
+
+describe("Audit F2 — on the Memory screen, Confirm and Cancel answer the request they show", () => {
+  it("a screen still showing an earlier request cannot confirm or cancel the later one; the later one's own Confirm runs only it", async () => {
+    const env = world();
+    // Tab A asks to forget m-1; tab B then asks to correct m-2, which replaces it.
+    const first = await env.call("POST", "/memories/m-1/forget");
+    const second = await env.call("POST", "/memories/m-2/correction", { statement: "I prefer light mode" });
+    expect(second.status).toBe(202);
+    const conversationId = second.body.data!.conversationId;
+    expect(first.body.data!.conversationId).toBe(conversationId);
+
+    // Tab A still shows "forget m-1" and presses Confirm.
+    const stale = await env.call("POST", `/pending-actions/${first.body.data!.pendingAction.id}/confirm`, { conversationId });
+    expect(stale.status).toBe(409);
+    expect(stale.body.error?.code).toBe("PENDING_ACTION_MISMATCH");
+    expect(env.executed).toEqual([]);
+    expect(pendingApprovals(env).map((a) => a.toolId)).toEqual(["memory.correct"]);
+
+    // …or Cancel: the correction tab B is showing keeps waiting.
+    const staleCancel = await env.call("POST", `/pending-actions/${first.body.data!.pendingAction.id}/reject`, { conversationId });
+    expect(staleCancel.status).toBe(409);
+    expect(pendingApprovals(env).map((a) => a.toolId)).toEqual(["memory.correct"]);
+
+    // Tab B's own Confirm runs the correction it shows, and nothing else.
+    const own = await env.call("POST", `/pending-actions/${second.body.data!.pendingAction.id}/confirm`, { conversationId });
+    expect(own.status).toBe(200);
+    expect(env.executed).toHaveLength(1);
+    expect(env.executed[0]).toMatchObject({ toolId: "memory.correct", params: { memoryId: "m-2" }, approvalId: second.body.data!.pendingAction.id });
+    expect(env.memoryStore.writes).toEqual([]);
   });
 });
 

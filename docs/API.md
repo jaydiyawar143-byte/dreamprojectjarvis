@@ -59,7 +59,7 @@ Tool parameters, free-text audit fields and the assistant's reply text are never
 | Router | Mount | Endpoints |
 |---|---|---|
 | `approvals.ts` | `/api/v1/approvals` | `GET /`, `GET /:id`, `POST /:id/approve`, `POST /:id/reject` |
-| `pending-actions.ts` | `/api/v1/pending-actions` | `GET /`, `POST /:id/confirm`, `POST /:id/reject`, `POST /:id/modify` |
+| `pending-actions.ts` | `/api/v1/pending-actions` | `GET /`, `POST /:id/confirm`, `POST /:id/reject`, `POST /:id/modify` — `:id` must be the action waiting in the conversation (`409 PENDING_ACTION_MISMATCH` otherwise; nothing changes) |
 | `recommendations.ts` | `/api/v1/recommendations` | `GET /`, `GET /:id`, `POST /:id/execute` |
 | `outcomes.ts` | `/api/v1` | `GET /recommendations/:id/outcome`, `GET /outcomes/:id` |
 | `opportunities.ts` | `/api/v1/opportunities` | `GET /`, `GET /:id` |
@@ -80,8 +80,8 @@ Added 2026-10-08 (Phase 14). The memory screen's API: a second way of reaching t
 
 | Method | Path | What it does |
 |---|---|---|
-| GET | `/` | A page of the caller's memories. `?limit=1..50` (default 20) · `?offset=` · `?project=all\|personal\|<project id>` · `?q=<text>` · `?includeExpired=true` |
-| GET | `/status` | `learningPaused`, `vetoedSources`, `active`, `expired`, `retention { days, purgeGraceDays }`, `correctionAvailable` |
+| GET | `/` | A page of the caller's memories, newest first (ties by id). `?limit=1..50` (default 20) · `?offset=` · `?project=all\|personal\|<project id>` · `?q=<text>` · `?includeExpired=true` |
+| GET | `/status` | `learningPaused`, `controlsReadable` (false: the stored controls are corrupt — nothing is learned or recalled), `vetoedSources`, `active`, `expired`, `retention { days, purgeGraceDays }`, `correctionAvailable` |
 | GET | `/:id` | One memory |
 | POST | `/learning/pause` | Stop learning. Deletes nothing |
 | POST | `/learning/resume` | Start learning again |
@@ -89,7 +89,7 @@ Added 2026-10-08 (Phase 14). The memory screen's API: a second way of reaching t
 | POST | `/:id/correction` | **Asks** for it to be changed. Body `{ statement }`, 1–500 characters: `202` with `{ pendingAction, conversationId, summary }` |
 
 - **A memory is returned as:** `id`, `type`, `content`, `confidence` (0–0.95) and `confidenceLevel` (`HIGH` / `MEDIUM` / `LOW`), `createdAt`, `updatedAt`, `expiresAt`, `expired`, `projectId` (null for a personal memory) and `projectName`, `legacy`, and `provenance` — `source` (`USER` / `LEGACY`), `statements`, `conversations`, `firstStatedAt`, `lastStatedAt`, `revisions`. Never the vector, the raw metadata, or a message, conversation or trace id.
-- **Forgetting and correcting change nothing by themselves.** Each creates the same HIGH_IMPACT pending action the chat creates (`memory.forget`, `memory.correct`); the caller confirms it with `POST /api/v1/pending-actions/:id/confirm` and `{ conversationId }`, or cancels it with `/reject`. A new request cancels one that was never confirmed. **There is no `DELETE`, `PUT` or `PATCH` on a memory.**
+- **Forgetting and correcting change nothing by themselves.** Each creates the same HIGH_IMPACT pending action the chat creates (`memory.forget`, `memory.correct`); the caller confirms it with `POST /api/v1/pending-actions/:id/confirm` and `{ conversationId }`, or cancels it with `/reject`. A new request cancels one that was never confirmed, and the old request's id then gets `409 PENDING_ACTION_MISMATCH` — it can never confirm or cancel the new one. A memory action cannot be modified (`409 PENDING_ACTION_NOT_MODIFIABLE`). **There is no `DELETE`, `PUT` or `PATCH` on a memory.**
 - **`404 MEMORY_NOT_FOUND` / `404 PROJECT_NOT_FOUND`:** not the caller's, or does not exist — the same answer for both.
 - **`422 MEMORY_NOT_LEARNABLE`:** the statement could not be stored as a memory on its own (a task, a goal, a secret, a grant of authority, a question). Nothing is saved or proposed.
 - **`400 INVALID_REQUEST`:** a bad `limit`, `offset` or `statement`. **`503`:** confirmations, or the memory writer, are not available on this deployment.

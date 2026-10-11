@@ -112,6 +112,27 @@ describe("Phase 14 — memory.correct takes ids and a version, never words", () 
   });
 });
 
+describe("Audit F8 — a refusal names the action that was refused", () => {
+  it("a correction without an approval talks about changing a memory, never about forgetting one", async () => {
+    const { correct, calls } = setup();
+    const result = await correct.execute(CORRECT, ctx());
+
+    expect(result.success).toBe(false);
+    expect(result.error).toBe("Changing a memory needs your confirmation.");
+    expect(result.error).not.toMatch(/forget/i);
+    expect(calls).toEqual([]);
+  });
+
+  it("the forgetting tools keep their own wording", async () => {
+    const { memoryPort } = port();
+    const journal = new MemoryExecutionJournal();
+    const [, forget, forgetAll] = createMemoryTools(memoryPort, journal, new MemoryApprovalConsumer(journal));
+
+    expect((await forget!.execute({ memoryIds: ["mem-1"], versions: [V1] }, ctx())).error).toBe("Forgetting a memory needs your confirmation.");
+    expect((await forgetAll!.execute({ scope: "ALL" }, ctx())).error).toBe("Forgetting a memory needs your confirmation.");
+  });
+});
+
 describe("Phase 14 — memory.correct runs only with a consumed approval", () => {
   it("corrects for the calling user, passing ids only, and consumes the approval", async () => {
     const { correct, calls, approvals, journal } = setup();

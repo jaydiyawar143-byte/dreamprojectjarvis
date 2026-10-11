@@ -372,6 +372,47 @@ describe("Phase 14 — the retention sweep is bounded", () => {
 // The owner's view
 // ---------------------------------------------------------------------------
 
+describe.skipIf(!dbUp)("Audit F1 — corrupt controls in the real settings table (PostgreSQL)", () => {
+  const management = () =>
+    new MemoryManagementService({ store: repo(), control: new db!.PrismaPreferenceRepository(prisma!, "prefs:memory", "unreadable"), audit: { log: async () => undefined } });
+
+  it("text that is not JSON: learning reads it as paused, recall is refused, and the status says so", async () => {
+    const user = await newUser("f1-corrupt");
+    await prisma!.userSetting.create({ data: { userId: user, key: "prefs:memory", value: "{not json" } });
+    const memory = management();
+
+    expect((await memory.learningControl(user)).learningPaused).toBe(true);
+    await expect(memory.recallControl(user)).rejects.toThrow(/could not be read/);
+    expect(await memory.status(user)).toMatchObject({ learningPaused: true, controlsReadable: false });
+  });
+
+  it("a valid pause saved by the service itself: recall reads it, with its vetoes", async () => {
+    const user = await newUser("f1-paused");
+    const memory = management();
+    await memory.vetoSource(user, "msg-vetoed");
+    await memory.pauseLearning(user);
+
+    expect(await memory.recallControl(user)).toEqual({ learningPaused: true, vetoedSourceMessageIds: ["msg-vetoed"] });
+    expect(await memory.status(user)).toMatchObject({ learningPaused: true, controlsReadable: true, vetoedSources: 1 });
+  });
+
+  it("no row at all: the defaults, for recall too", async () => {
+    const user = await newUser("f1-absent");
+    expect(await management().recallControl(user)).toEqual({ learningPaused: false, vetoedSourceMessageIds: [] });
+  });
+
+  it("the user's own pause or resume replaces a corrupt document with readable controls (the vetoes it held could not be read)", async () => {
+    const user = await newUser("f1-repair");
+    await prisma!.userSetting.create({ data: { userId: user, key: "prefs:memory", value: "not json at all" } });
+    const memory = management();
+
+    await memory.resumeLearning(user);
+
+    expect(await memory.recallControl(user)).toEqual({ learningPaused: false, vetoedSourceMessageIds: [] });
+    expect((await memory.status(user)).controlsReadable).toBe(true);
+  });
+});
+
 describe.skipIf(!dbUp)("Phase 14 — the owner's view of their memories (PostgreSQL)", () => {
   it("lists details with confidence, project and provenance — paged, searchable, scoped", async () => {
     const u = await newUser("details");
@@ -421,7 +462,7 @@ describe.skipIf(!dbUp)("Phase 14 — the owner's view of their memories (Postgre
     await stored(u, "expired", new Date(Date.now() - DAY));
 
     const { service } = management();
-    expect(await service.status(u)).toEqual({ learningPaused: false, vetoedSources: 0, active: 2, expired: 1, retention: { days: 90, purgeGraceDays: 30 } });
+    expect(await service.status(u)).toEqual({ learningPaused: false, controlsReadable: true, vetoedSources: 0, active: 2, expired: 1, retention: { days: 90, purgeGraceDays: 30 } });
 
     await service.pauseLearning(u);
     await service.vetoSource(u, "msg-1");

@@ -194,18 +194,35 @@ function nonBlank(value: unknown): value is string {
 }
 
 /**
+ * Audit F1 (Phase 14) — a stored document that is PRESENT but cannot be
+ * trusted: not a v1 object, a pause that is not a boolean, or vetoes that are
+ * not all ids. Absent (null/undefined) is not malformed — it is a user with no
+ * settings yet. A valid document is not malformed, paused or not.
+ *
+ * Learning reads a malformed document as a pause (parseMemoryLearningControl);
+ * recall must not read it at all, because its vetoes cannot be relied on.
+ */
+export function isMalformedMemoryLearningControl(doc: unknown): boolean {
+  if (doc === null || doc === undefined) return false;
+  if (typeof doc !== "object" || Array.isArray(doc)) return true;
+  const d = doc as Record<string, unknown>;
+  return d.v !== 1 || typeof d.learningPaused !== "boolean" || !Array.isArray(d.vetoedSourceMessageIds) || !d.vetoedSourceMessageIds.every(nonBlank);
+}
+
+/**
  * The stored document, read fail-closed. Absent means the defaults: learning
  * on, no vetoes. Present but unreadable means paused: when the user's own
- * setting cannot be read, nothing is learned.
+ * setting cannot be read, nothing is learned. (Recall is stricter — see
+ * isMalformedMemoryLearningControl.)
  */
 export function parseMemoryLearningControl(doc: unknown): MemoryLearningControl {
   if (doc === null || doc === undefined) return { learningPaused: false, vetoedSourceMessageIds: [] };
   const d = typeof doc === "object" ? (doc as Record<string, unknown>) : {};
   const ids = Array.isArray(d.vetoedSourceMessageIds) ? d.vetoedSourceMessageIds : null;
-  if (d.v !== 1 || typeof d.learningPaused !== "boolean" || !ids || !ids.every(nonBlank)) {
+  if (isMalformedMemoryLearningControl(doc)) {
     return { learningPaused: true, vetoedSourceMessageIds: (ids ?? []).filter(nonBlank) };
   }
-  return { learningPaused: d.learningPaused, vetoedSourceMessageIds: ids.slice(-MEMORY_VETO_LIMIT) };
+  return { learningPaused: d.learningPaused as boolean, vetoedSourceMessageIds: ids!.slice(-MEMORY_VETO_LIMIT) };
 }
 
 export function serializeMemoryLearningControl(control: MemoryLearningControl): Record<string, unknown> {

@@ -5,7 +5,7 @@ import type {
   ITool,
   ToolExecutionResult,
 } from "@jarvis/core";
-import { APPROVAL_TTL_MS, computeParamsHash, isDestructiveMemoryTool } from "@jarvis/core";
+import { APPROVAL_TTL_MS, MEMORY_CORRECT_TOOL_ID, computeParamsHash, isDestructiveMemoryTool } from "@jarvis/core";
 import type { PendingAction, PendingActionState } from "@jarvis/core";
 
 export interface PendingActionServiceConfig {
@@ -37,12 +37,40 @@ export interface PendingActionResult {
   message: string;
 }
 
+/**
+ * Why an answer to a pending action changed nothing.
+ *   NOT_FOUND  nothing is waiting in this conversation
+ *   MISMATCH   something is waiting, but not the action the caller named
+ *   FAILED     the approval could not be moved
+ */
+export type PendingActionRefusal = "NOT_FOUND" | "MISMATCH" | "FAILED";
+
 export interface ConfirmResult {
   success: boolean;
   pendingAction?: PendingAction;
   executionResult?: ToolExecutionResult;
   message: string;
+  /** Set when `success` is false. */
+  reason?: PendingActionRefusal;
 }
+
+/**
+ * A modification that must not happen: the caller named an action that is not
+ * the one waiting (MISMATCH), or the waiting action may never be modified
+ * (NOT_MODIFIABLE). Nothing was changed.
+ */
+export class PendingActionConflictError extends Error {
+  constructor(
+    readonly reason: "MISMATCH" | "NOT_MODIFIABLE",
+    message: string
+  ) {
+    super(message);
+    this.name = "PendingActionConflictError";
+  }
+}
+
+export const PENDING_ACTION_MISMATCH_MESSAGE =
+  "That is no longer the action waiting for your confirmation, so nothing was changed. Answer the latest request instead.";
 
 export interface ModifyResult {
   pendingAction: PendingAction;
@@ -130,22 +158,44 @@ export class PendingActionService {
   }
 
   /**
+   * The action waiting in this conversation — and, when the caller names the
+   * action it is answering (`actionId`), only if it is that one.
+   *
+   * Audit F2 (Phase 14). A screen still showing an older request — a second
+   * tab, a stale card — used to answer whatever was waiting by then, so "forget
+   * X" on screen could confirm "correct Y". An answer now names its action, and
+   * any other id changes nothing. A caller that names none (a typed "yes" in
+   * the chat, which answers the request just shown in that conversation, or a
+   * new request replacing an old one) behaves as before.
+   */
+  private async waitingAction(
+    conversationId: string,
+    userId: string,
+    actionId?: string
+  ): Promise<{ pending: PendingAction } | { refusal: PendingActionRefusal; message: string }> {
+    const pending = await this.getActivePendingAction(conversationId, userId);
+    if (!pending) return { refusal: "NOT_FOUND", message: "No pending action found for this conversation." };
+    if (actionId !== undefined && pending.id !== actionId) return { refusal: "MISMATCH", message: PENDING_ACTION_MISMATCH_MESSAGE };
+    return { pending };
+  }
+
+  /**
    * Confirm a pending action. Transitions the approval to APPROVED.
    * Does NOT execute the tool — the caller is responsible for execution.
+   * With `actionId`, only that action is confirmed (see waitingAction).
    */
   async confirmPendingAction(
     conversationId: string,
-    userId: string
+    userId: string,
+    actionId?: string
   ): Promise<ConfirmResult> {
-    const pending = await this.getActivePendingAction(conversationId, userId);
-    if (!pending) {
-      return {
-        success: false,
-        message: "No pending action found for this conversation.",
-      };
+    const found = await this.waitingAction(conversationId, userId, actionId);
+    if ("refusal" in found) {
+      return { success: false, reason: found.refusal, message: found.message };
     }
+    const { pending } = found;
 
-    // Transition to APPROVED
+    // Transition to APPROVED — this action's own approval, by its id.
     const result = await this.config.approvalRepo.updateStatus(
       pending.approvalId,
       "approved"
@@ -154,6 +204,7 @@ export class PendingActionService {
     if (!result) {
       return {
         success: false,
+        reason: "FAILED",
         message: "Failed to approve the pending action.",
       };
     }
@@ -170,18 +221,18 @@ export class PendingActionService {
 
   /**
    * Reject a pending action. Transitions the approval to REJECTED.
+   * With `actionId`, only that action is rejected (see waitingAction).
    */
   async rejectPendingAction(
     conversationId: string,
-    userId: string
-  ): Promise<{ success: boolean; message: string }> {
-    const pending = await this.getActivePendingAction(conversationId, userId);
-    if (!pending) {
-      return {
-        success: false,
-        message: "No pending action found for this conversation.",
-      };
+    userId: string,
+    actionId?: string
+  ): Promise<{ success: boolean; message: string; reason?: PendingActionRefusal }> {
+    const found = await this.waitingAction(conversationId, userId, actionId);
+    if ("refusal" in found) {
+      return { success: false, reason: found.refusal, message: found.message };
     }
+    const { pending } = found;
 
     const result = await this.config.approvalRepo.updateStatus(
       pending.approvalId,
@@ -191,6 +242,7 @@ export class PendingActionService {
     if (!result) {
       return {
         success: false,
+        reason: "FAILED",
         message: "Failed to reject the pending action.",
       };
     }
@@ -208,17 +260,21 @@ export class PendingActionService {
   async modifyPendingAction(
     conversationId: string,
     userId: string,
-    newParams: Record<string, unknown>
+    newParams: Record<string, unknown>,
+    actionId?: string
   ): Promise<ModifyResult> {
-    const pending = await this.getActivePendingAction(conversationId, userId);
-    if (!pending) {
-      throw new Error("No pending action found for this conversation.");
+    const found = await this.waitingAction(conversationId, userId, actionId);
+    if ("refusal" in found) {
+      if (found.refusal === "MISMATCH") throw new PendingActionConflictError("MISMATCH", found.message);
+      throw new Error(found.message);
     }
+    const { pending } = found;
 
     // S7.2 L5 — a memory action names exactly the memories the user was
-    // shown. It can be confirmed or cancelled, never re-targeted.
-    if (isDestructiveMemoryTool(pending.toolId)) {
-      throw new Error("A memory action cannot be changed. Cancel it and ask again.");
+    // shown. It can be confirmed or cancelled, never re-targeted. Phase 14:
+    // that includes a correction, whose memory and source message are ids.
+    if (isDestructiveMemoryTool(pending.toolId) || pending.toolId === MEMORY_CORRECT_TOOL_ID) {
+      throw new PendingActionConflictError("NOT_MODIFIABLE", "A memory action cannot be changed. Cancel it and ask again.");
     }
 
     // Merge params: old params + new overrides

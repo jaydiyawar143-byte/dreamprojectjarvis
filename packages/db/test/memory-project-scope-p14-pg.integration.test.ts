@@ -389,6 +389,66 @@ describe.skipIf(!dbUp)("Phase 14 — list filters and expired-user lookup (Postg
     expect(await repo().usersWithExpiredMemories(cutoff, 0)).toEqual([]);
     expect((await repo().usersWithExpiredMemories(cutoff, 1)).length).toBeLessThanOrEqual(1);
   });
+
+  it("Audit F3 — the lookup is ONE bounded query: distinct users and a LIMIT in the SQL, never every expired row", async () => {
+    const many = await newUser("sweep-many");
+    await prisma!.memory.createMany({
+      data: Array.from({ length: 30 }, (_, i) => ({ userId: many, type: "FACT" as const, content: `long expired ${i}`, importance: 0.5, confidence: 0.7, expiresAt: new Date(Date.now() - 60 * DAY) })),
+    });
+    const logged = new PrismaClient({ log: [{ emit: "event", level: "query" }] });
+    const sql: string[] = [];
+    logged.$on("query", (event) => sql.push(event.query));
+    try {
+      const found = await new PrismaMemoryRepository(logged).usersWithExpiredMemories(new Date(Date.now() - 30 * DAY), 2);
+      expect(found.length).toBeGreaterThan(0);
+      expect(found.length).toBeLessThanOrEqual(2);
+      expect(new Set(found).size).toBe(found.length);
+      expect(sql).toHaveLength(1);
+      expect(sql[0]).toMatch(/SELECT DISTINCT/i);
+      expect(sql[0]).toMatch(/\bLIMIT\b/i);
+    } finally {
+      await logged.$disconnect();
+    }
+  });
+
+  it("Audit F3 — after a cursor it continues in id order, so repeated sweeps reach every user", async () => {
+    const users = [await newUser("cursor-a"), await newUser("cursor-b"), await newUser("cursor-c")].sort();
+    for (const user of users) await learn(user, "long expired", { expiresAt: new Date(Date.now() - 40 * DAY) });
+    const cutoff = new Date(Date.now() - 30 * DAY);
+
+    const all = await repo().usersWithExpiredMemories(cutoff, 500);
+    expect(all.filter((id) => users.includes(id))).toEqual(users);
+    expect([...all].sort()).toEqual(all);
+
+    const after = await repo().usersWithExpiredMemories(cutoff, 500, users[0]);
+    expect(after).not.toContain(users[0]);
+    expect(after).toEqual(expect.arrayContaining([users[1], users[2]]));
+    expect(after.every((id) => id > users[0]!)).toBe(true);
+    expect(await repo().usersWithExpiredMemories(cutoff, 500, all.at(-1))).toEqual([]);
+  });
+
+  it("Audit F5 — memories created at the same instant page in one fixed order: every one exactly once", async () => {
+    const user = await newUser("same-instant");
+    const instant = new Date("2026-10-01T10:00:00.000Z");
+    await prisma!.memory.createMany({
+      data: Array.from({ length: 7 }, (_, i) => ({ userId: user, type: "FACT" as const, content: `same instant ${i}`, importance: 0.5, confidence: 0.7, createdAt: instant })),
+    });
+
+    const seen: string[] = [];
+    for (let offset = 0; offset < 7; offset += 2) {
+      const page = await repo().list({ userId: user, limit: 2, offset });
+      seen.push(...page.memories.map((m) => m.id));
+      // Something changes a row between two pages, as a corroboration would.
+      if (offset === 0) await prisma!.memory.update({ where: { id: page.memories[0]!.id }, data: { content: "same instant, changed" } });
+    }
+
+    expect(seen).toHaveLength(7);
+    expect(new Set(seen).size).toBe(7);
+    // The order is fixed and documented: newest first, then by id, descending.
+    const whole = (await repo().list({ userId: user, limit: 50 })).memories.map((m) => m.id);
+    expect(whole).toEqual([...whole].sort().reverse());
+    expect(seen).toEqual(whole);
+  });
 });
 
 // ---------------------------------------------------------------------------

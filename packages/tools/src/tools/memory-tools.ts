@@ -132,6 +132,8 @@ export class MemoryListTool extends BaseTool {
 
 abstract class MemoryDeleteTool extends BaseTool {
   protected readonly journal: ExecutionJournalPort;
+  /** What a run without an approval is told. Audit F8: each tool names its own action. */
+  protected readonly needsConfirmation: string = "Forgetting a memory needs your confirmation.";
 
   constructor(
     id: string,
@@ -155,7 +157,7 @@ abstract class MemoryDeleteTool extends BaseTool {
     params: Record<string, unknown>,
     context: ToolContext
   ): Promise<{ ok: true; executionId: string } | { ok: false; error: string }> {
-    if (!context.approvalId) return { ok: false, error: "Forgetting a memory needs your confirmation." };
+    if (!context.approvalId) return { ok: false, error: this.needsConfirmation };
     if (!this.approvals) return { ok: false, error: "Approval verification unavailable" };
     const paramsHash = computeParamsHash(params);
 
@@ -299,6 +301,8 @@ const CORRECTION_REFUSALS: Readonly<Record<Exclude<MemoryCorrectionOutcome["stat
 };
 
 export class MemoryCorrectTool extends MemoryDeleteTool {
+  protected override readonly needsConfirmation = "Changing a memory needs your confirmation.";
+
   constructor(memories: MemoryToolPort, journal: ExecutionJournalPort, approvals?: IApprovalConsumptionPort) {
     super(
       MEMORY_CORRECT_TOOL_ID,

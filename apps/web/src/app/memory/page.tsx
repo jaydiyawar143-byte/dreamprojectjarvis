@@ -69,6 +69,13 @@ interface Waiting {
   request: MemoryRequest;
 }
 
+/**
+ * The server's answer when the request on screen is no longer the one waiting
+ * (audit F2): it was replaced, used or expired. Nothing was changed, and there
+ * is nothing left for this panel to confirm or cancel.
+ */
+const NO_LONGER_WAITING = new Set(["PENDING_ACTION_MISMATCH", "PENDING_ACTION_NOT_FOUND"]);
+
 export default function MemoryPage() {
   const [page, setPage] = useState<MemoryPageData | null>(null);
   const [status, setStatus] = useState<MemoryStatus | null>(null);
@@ -144,8 +151,21 @@ export default function MemoryPage() {
 
   async function confirm() {
     if (!waiting) return;
-    const result = await act(() => confirmPendingAction(waiting.request.pendingAction.id, waiting.request.conversationId), "The change could not be confirmed.");
-    if (!result) return;
+    setBusy(true);
+    setNotice(null);
+    setActionError(null);
+    const res = await confirmPendingAction(waiting.request.pendingAction.id, waiting.request.conversationId);
+    setBusy(false);
+    if (!res.success || !res.data) {
+      setActionError(res.error?.message ?? "The change could not be confirmed.");
+      // Not waiting any more: drop the panel. Any other failure keeps it — the request may still be waiting.
+      if (NO_LONGER_WAITING.has(res.error?.code ?? "")) {
+        setWaiting(null);
+        await load();
+      }
+      return;
+    }
+    const result = res.data;
     const execution = result.executionResult as { status?: string; error?: string; result?: { success?: boolean; error?: string } } | undefined;
     if (execution?.status === "completed" && execution.result?.success) {
       setNotice(waiting.kind === "forget" ? "The memory was forgotten." : "The memory was changed.");
@@ -156,11 +176,24 @@ export default function MemoryPage() {
     await load();
   }
 
+  /** Audit F4 — "Cancelled" only when the server says it cancelled this request. */
   async function cancel() {
     if (!waiting) return;
-    await act(() => rejectPendingActionApi(waiting.request.pendingAction.id, waiting.request.conversationId), "Could not cancel the request.");
-    setWaiting(null);
-    setNotice("Cancelled. Nothing was changed.");
+    setBusy(true);
+    setNotice(null);
+    setActionError(null);
+    const res = await rejectPendingActionApi(waiting.request.pendingAction.id, waiting.request.conversationId);
+    setBusy(false);
+    if (res.success) {
+      setWaiting(null);
+      setNotice("Cancelled. Nothing was changed.");
+      return;
+    }
+    setActionError(res.error?.message ?? "Could not cancel the request. It may still be waiting — try again.");
+    if (NO_LONGER_WAITING.has(res.error?.code ?? "")) {
+      setWaiting(null);
+      await load();
+    }
   }
 
   async function addProject() {
@@ -206,6 +239,13 @@ export default function MemoryPage() {
             loading={loading && !status}
           />
         </PanelGrid>
+
+        {status && !status.controlsReadable && (
+          <ErrorState
+            title="Your memory settings could not be read"
+            message="To be safe, JARVIS is not learning anything new or using what it remembers. Pausing or resuming learning saves fresh settings; any “don't remember that” choices stored in the old settings could not be recovered."
+          />
+        )}
 
         {notice && (
           <p role="status" className="rounded border border-sys-ok/35 bg-sys-ok/10 px-3 py-2 text-sm text-sys-text">

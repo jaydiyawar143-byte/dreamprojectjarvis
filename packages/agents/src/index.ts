@@ -39,7 +39,12 @@ export {
   TURN_CONTEXT_HEADER,
 } from "./turn-messages.js";
 export type { PlanValidationResult } from "./tool-planner.js";
-export { PendingActionService } from "./pending-action-service.js";
+export {
+  PendingActionService,
+  PendingActionConflictError,
+  PENDING_ACTION_MISMATCH_MESSAGE,
+  type PendingActionRefusal,
+} from "./pending-action-service.js";
 export { detectIntent, isPendingActionExpired, approvalStatusToPendingState, summarizePendingAction } from "./intent-detector.js";
 
 // Sprint 6 — server-authoritative agent policy and routing.

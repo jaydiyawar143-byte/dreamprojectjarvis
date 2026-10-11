@@ -172,6 +172,15 @@ describe("Phase 14 — the routes hold no shortcut", () => {
   });
 });
 
+describe("Audit F1 — the container reads the controls strictly for recall", () => {
+  it("recall reads recallControl (corrupt controls recall nothing); learning reads learningControl (corrupt reads as paused)", () => {
+    const container = code("apps/api/src/services/container.ts");
+    expect(container).toMatch(/memoryControl:\s*\{\s*get:\s*\(userId: string\)\s*=>\s*memoryManagement\.recallControl\(userId\)\s*\}/);
+    expect(container).not.toMatch(/memoryControl:\s*\{[^}]*learningControl/);
+    expect(container).toMatch(/learningControl:\s*\{\s*get:\s*\(userId\)\s*=>\s*memoryManagement\.learningControl\(userId\)\s*\}/);
+  });
+});
+
 describe("Phase 14 — the orchestrator and the agents cannot write memory", () => {
   it("the orchestrator is typed against the read-only memory port", () => {
     const types = code("packages/core/src/types/orchestrator.ts");

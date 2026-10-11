@@ -7,17 +7,30 @@
 //   POST   /api/v1/pending-actions/:id/modify          modify pending action params
 //
 // Security: same auth middleware as approvals. Identity from JWT, never from body.
+//
+// Audit F2 (Phase 14) — `:id` IS THE ACTION BEING ANSWERED. Confirm, reject
+// and modify act only when it is the action waiting in the conversation. Any
+// other id — one that was superseded, already used, or never existed — gets
+// 409 PENDING_ACTION_MISMATCH (or 404 when nothing is waiting) and changes
+// nothing: no approval moves and no tool runs. A screen still showing an older
+// request can no longer answer a newer one.
 // ---------------------------------------------------------------------------
 
 import { Router } from "express";
 import type { Response } from "express";
 import { randomUUID } from "crypto";
+import { PendingActionConflictError, type PendingActionRefusal } from "@jarvis/agents";
 import { createAuthMiddleware, type AuthenticatedRequest } from "../middleware/auth.js";
 import type { Container } from "../services/container.js";
 import {
   executeApprovedGoogleWrite,
   isGoogleWriteApprovalAction,
 } from "../services/google/execute-approved-action.js";
+
+/** How a refused answer is reported: a different action waiting is a conflict, nothing waiting is not found. */
+function refusalOf(reason: PendingActionRefusal | undefined): { status: number; code: string } {
+  return reason === "MISMATCH" ? { status: 409, code: "PENDING_ACTION_MISMATCH" } : { status: 404, code: "PENDING_ACTION_NOT_FOUND" };
+}
 
 export function createPendingActionsRouter(container: Container): Router {
   const router = Router();
@@ -117,13 +130,15 @@ export function createPendingActionsRouter(container: Container): Router {
 
       const result = await container.pendingActionService.confirmPendingAction(
         conversationId,
-        req.auth.userId
+        req.auth.userId,
+        String(req.params.id)
       );
 
       if (!result.success) {
-        res.status(404).json({
+        const refusal = refusalOf(result.reason);
+        res.status(refusal.status).json({
           success: false,
-          error: { code: "PENDING_ACTION_NOT_FOUND", message: result.message },
+          error: { code: refusal.code, message: result.message },
           traceId,
           timestamp: new Date().toISOString(),
         });
@@ -230,13 +245,15 @@ export function createPendingActionsRouter(container: Container): Router {
 
       const result = await container.pendingActionService.rejectPendingAction(
         conversationId,
-        req.auth.userId
+        req.auth.userId,
+        String(req.params.id)
       );
 
-      res.status(result.success ? 200 : 404).json({
+      const refusal = refusalOf(result.reason);
+      res.status(result.success ? 200 : refusal.status).json({
         success: result.success,
         data: result.success ? { message: result.message } : undefined,
-        error: result.success ? undefined : { code: "PENDING_ACTION_NOT_FOUND", message: result.message },
+        error: result.success ? undefined : { code: refusal.code, message: result.message },
         traceId,
         timestamp: new Date().toISOString(),
       });
@@ -290,7 +307,8 @@ export function createPendingActionsRouter(container: Container): Router {
       const result = await container.pendingActionService.modifyPendingAction(
         conversationId,
         req.auth.userId,
-        newParams
+        newParams,
+        String(req.params.id)
       );
 
       res.status(200).json({
@@ -303,6 +321,18 @@ export function createPendingActionsRouter(container: Container): Router {
         timestamp: new Date().toISOString(),
       });
     } catch (error) {
+      if (error instanceof PendingActionConflictError) {
+        res.status(409).json({
+          success: false,
+          error: {
+            code: error.reason === "MISMATCH" ? "PENDING_ACTION_MISMATCH" : "PENDING_ACTION_NOT_MODIFIABLE",
+            message: error.message,
+          },
+          traceId,
+          timestamp: new Date().toISOString(),
+        });
+        return;
+      }
       res.status(500).json({
         success: false,
         error: { code: "INTERNAL_ERROR", message: "Internal server error" },

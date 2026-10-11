@@ -387,7 +387,10 @@ export class PrismaMemoryRepository implements IMemoryStore {
       [
         this.prisma.memory.findMany({
           where,
-          orderBy: { createdAt: "desc" },
+          // Audit F5 — newest first, then by id: rows created in one
+          // transaction share createdAt, and without the id two pages could
+          // repeat one memory and skip another.
+          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
           skip: offset,
           take: limit,
         }),
@@ -591,18 +594,30 @@ export class PrismaMemoryRepository implements IMemoryStore {
 
   /**
    * Phase 14 — the users who hold a memory that expired before `before`, at
-   * most `limit` of them. Ids only: this is the one read here that is not
-   * scoped to a user, and it exists for the retention sweep alone, which then
-   * purges each of those users separately, by that user's id.
+   * most `limit` of them, in id order, after `after` when given. Ids only: this
+   * is the one read here that is not scoped to a user, and it exists for the
+   * retention sweep alone, which then purges each of those users separately,
+   * by that user's id.
+   *
+   * Audit F3 — ONE bounded query. Prisma's `distinct` is applied in memory, so
+   * the first version read every expired row of every user to return a few
+   * ids. DISTINCT and LIMIT are now in the SQL. The cursor lets the sweep move
+   * on past users it has visited (see MemoryRetentionSweep).
+   *
+   * `before` is passed as UTC text and cast to `timestamp`, the column's own
+   * type, which is how Prisma stores a DateTime — so the comparison does not
+   * depend on the database session's time zone.
    */
-  async usersWithExpiredMemories(before: Date, limit: number): Promise<string[]> {
-    const rows = await this.prisma.memory.findMany({
-      where: { expiresAt: { lt: before } },
-      distinct: ["userId"],
-      select: { userId: true },
-      orderBy: { userId: "asc" },
-      take: Math.max(0, Math.min(limit, 500)),
-    });
+  async usersWithExpiredMemories(before: Date, limit: number, after?: string): Promise<string[]> {
+    const bounded = Number.isFinite(limit) ? Math.max(0, Math.min(Math.floor(limit), 500)) : 0;
+    if (bounded === 0) return [];
+    const rows = await this.prisma.$queryRaw<Array<{ userId: string }>>`
+      SELECT DISTINCT m."userId"
+      FROM "Memory" m
+      WHERE m."expiresAt" < ${before.toISOString()}::timestamp
+      ${after === undefined ? Prisma.empty : Prisma.sql`AND m."userId" > ${after}`}
+      ORDER BY m."userId" ASC
+      LIMIT ${bounded}`;
     return rows.map((row) => row.userId);
   }
 

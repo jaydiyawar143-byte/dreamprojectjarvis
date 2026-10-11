@@ -93,7 +93,7 @@ function createMockPrisma() {
         take,
       }: {
         where: Record<string, unknown>;
-        orderBy?: Record<string, string>;
+        orderBy?: Record<string, string> | Array<Record<string, string>>;
         skip?: number;
         take?: number;
       }) => {
@@ -118,9 +118,13 @@ function createMockPrisma() {
           return true;
         });
 
-        if (orderBy?.createdAt === "desc") {
+        // Audit F5 — list() orders by createdAt, then id, both descending.
+        const order = Array.isArray(orderBy) ? orderBy : orderBy ? [orderBy] : [];
+        if (order[0]?.createdAt === "desc") {
           rows = rows.sort(
-            (a, b) => b.createdAt.getTime() - a.createdAt.getTime()
+            (a, b) =>
+              b.createdAt.getTime() - a.createdAt.getTime() ||
+              (order[1]?.id === "desc" ? (a.id < b.id ? 1 : a.id > b.id ? -1 : 0) : 0)
           );
         }
 

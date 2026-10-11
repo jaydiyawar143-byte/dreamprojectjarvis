@@ -38,6 +38,7 @@ import {
   JarvisError,
   MEMORY_FORGET_LIMIT,
   MEMORY_RETENTION,
+  isMalformedMemoryLearningControl,
   isPurgeable,
   memoryPurgeCutoff,
   toMemoryDetail,
@@ -94,6 +95,12 @@ export interface MemoryListOptions {
 /** Phase 14 — what the memory screen shows above the list. */
 export interface MemoryStatus {
   learningPaused: boolean;
+  /**
+   * Audit F1 — false when the stored controls are present but corrupt. Nothing
+   * is then learned AND nothing is recalled, until the user pauses or resumes
+   * learning, which saves fresh controls.
+   */
+  controlsReadable: boolean;
   /** Messages the user said not to learn from. */
   vetoedSources: number;
   /** Memories in use: not expired. */
@@ -149,13 +156,15 @@ export class MemoryManagementService {
 
   /** Phase 14 — the state of the user's controls and how much is stored. */
   async status(userId: string): Promise<MemoryStatus> {
-    const [control, active, all] = await Promise.all([
-      this.learningControl(userId),
+    const [doc, active, all] = await Promise.all([
+      this.deps.control.get(userId),
       this.deps.store.list({ userId, includeExpired: false, limit: 1 }),
       this.deps.store.list({ userId, includeExpired: true, limit: 1 }),
     ]);
+    const control = parseMemoryLearningControl(doc);
     return {
       learningPaused: control.learningPaused,
+      controlsReadable: !isMalformedMemoryLearningControl(doc),
       vetoedSources: control.vetoedSourceMessageIds.length,
       active: active.total,
       expired: Math.max(0, all.total - active.total),
@@ -243,9 +252,27 @@ export class MemoryManagementService {
   // Learning controls
   // -------------------------------------------------------------------------
 
-  /** The user's controls, read fail-closed. Throws when the store cannot be read. */
+  /**
+   * The user's controls as LEARNING reads them, fail-closed: a corrupt
+   * document reads as paused. Throws when the store cannot be read.
+   */
   async learningControl(userId: string): Promise<MemoryLearningControl> {
     return parseMemoryLearningControl(await this.deps.control.get(userId));
+  }
+
+  /**
+   * Audit F1 (Phase 14) — the user's controls as RECALL reads them. The same
+   * document, except that a corrupt one is an error, not a pause: its vetoes
+   * cannot be trusted, so the orchestrator recalls nothing (it treats a throw
+   * as "controls unreadable"). A valid pause is returned as it is — pausing
+   * stops learning, never recall. Absent: the defaults.
+   */
+  async recallControl(userId: string): Promise<MemoryLearningControl> {
+    const doc = await this.deps.control.get(userId);
+    if (isMalformedMemoryLearningControl(doc)) {
+      throw new JarvisError("MEMORY_ERROR", "The user's memory controls could not be read", { reason: "CONTROLS_UNREADABLE" });
+    }
+    return parseMemoryLearningControl(doc);
   }
 
   async pauseLearning(userId: string): Promise<void> {

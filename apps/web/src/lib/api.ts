@@ -2555,6 +2555,11 @@ export interface MemoryPage {
 
 export interface MemoryStatus {
   learningPaused: boolean;
+  /**
+   * Audit F1 — false when the stored controls are corrupt: nothing is learned
+   * and nothing is recalled until the user pauses or resumes learning.
+   */
+  controlsReadable: boolean;
   vetoedSources: number;
   active: number;
   expired: number;

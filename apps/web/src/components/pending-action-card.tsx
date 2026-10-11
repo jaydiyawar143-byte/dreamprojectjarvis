@@ -59,6 +59,10 @@ function toolDisplayName(toolId: string): string {
     "meta.adset.budget.update": "Update Ad Set Budget",
     "meta.ad.pause": "Pause Ad",
     "meta.ad.resume": "Resume Ad",
+    // Audit F7 — memory actions, in words.
+    "memory.correct": "Correct Memory",
+    "memory.forget": "Forget Memory",
+    "memory.forget_all": "Forget All Memories",
   };
   return map[normalized] ?? toolId;
 }
@@ -122,14 +126,24 @@ export function PendingActionCard({
       const res = await confirmPendingAction(pendingAction.id, conversationId);
 
       if (res.success) {
-        setUi("completed");
-        if (res.data?.executionResult?.status === "completed") {
+        // Audit F2 — success only when the server ran THIS action and it
+        // succeeded. Approved but not run, or run and failed, is not success.
+        const execution = res.data?.executionResult as
+          | { status?: string; error?: unknown; result?: { success?: boolean; error?: unknown } }
+          | undefined;
+        if (execution?.status === "completed" && execution.result?.success !== false) {
+          setUi("completed");
           setMessage("Executed successfully!");
-        } else if (res.data?.executionResult?.status === "failed") {
-          setUi("failed");
-          setMessage(String(res.data.executionResult.error) || "Execution failed.");
         } else {
-          setMessage("Confirmed and executed.");
+          setUi("failed");
+          const reason = execution?.result?.error ?? execution?.error;
+          setMessage(
+            typeof reason === "string" && reason.length > 0
+              ? reason
+              : execution
+                ? "It did not complete."
+                : "Approved, but nothing was run."
+          );
         }
         onConfirmed?.();
         return;

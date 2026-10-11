@@ -70,6 +70,7 @@ const STATUS = (over: Partial<api.MemoryStatus> = {}): api.MemoryStatus => ({
   expired: 1,
   retention: { days: 90, purgeGraceDays: 30 },
   correctionAvailable: true,
+  controlsReadable: true,
   ...over,
 });
 
@@ -286,6 +287,73 @@ describe("Memory screen — forgetting is a request the user confirms", () => {
 
     expect(await screen.findByText("That memory changed after you chose it, so nothing was forgotten.")).toBeTruthy();
     expect(screen.queryByText("The memory was forgotten.")).toBeNull();
+  });
+});
+
+describe("Audit F4 / F2 — the screen reports only what the server confirmed", () => {
+  const ask = async () => {
+    mocked.requestMemoryForget.mockResolvedValue(ok(REQUEST("memory.forget", "I'll forget this memory:\n1. I prefer dark mode")));
+    render(<MemoryPage />);
+    fireEvent.click(button(await item("I prefer dark mode"), "Forget"));
+    return screen.findByTestId("memory-confirmation");
+  };
+
+  it("a Cancel the server could not carry out says so, keeps the request on screen, and never says “Cancelled”", async () => {
+    mocked.rejectPendingActionApi.mockResolvedValue(refused("NETWORK_ERROR", "Network request failed"));
+    fireEvent.click(button(await ask(), "Cancel"));
+
+    expect(await screen.findByText("Network request failed")).toBeTruthy();
+    expect(screen.queryByText("Cancelled. Nothing was changed.")).toBeNull();
+    // It may still be waiting on the server: it stays, with its buttons.
+    expect(button(screen.getByTestId("memory-confirmation"), "Cancel")).toBeTruthy();
+  });
+
+  it("a Cancel for a request that is no longer waiting says so — not “Cancelled” — and the stale request leaves the screen", async () => {
+    mocked.rejectPendingActionApi.mockResolvedValue(refused("PENDING_ACTION_NOT_FOUND", "No pending action found for this conversation."));
+    fireEvent.click(button(await ask(), "Cancel"));
+
+    expect(await screen.findByText("No pending action found for this conversation.")).toBeTruthy();
+    expect(screen.queryByText("Cancelled. Nothing was changed.")).toBeNull();
+    await waitFor(() => expect(screen.queryByTestId("memory-confirmation")).toBeNull());
+  });
+
+  it("a Confirm for a request that is no longer the one waiting (409) shows the server's words, claims nothing, and clears it", async () => {
+    mocked.confirmPendingAction.mockResolvedValue(
+      refused("PENDING_ACTION_MISMATCH", "That is no longer the action waiting for your confirmation, so nothing was changed. Answer the latest request instead.")
+    );
+    fireEvent.click(button(await ask(), "Confirm"));
+
+    expect(await screen.findByText(/no longer the action waiting/)).toBeTruthy();
+    expect(screen.queryByText("The memory was forgotten.")).toBeNull();
+    await waitFor(() => expect(screen.queryByTestId("memory-confirmation")).toBeNull());
+    expect(mocked.confirmPendingAction).toHaveBeenCalledWith("pa-1", "conv-memory");
+  });
+
+  it("a Confirm the server could not be reached for keeps the request on screen and claims nothing", async () => {
+    mocked.confirmPendingAction.mockResolvedValue(refused("NETWORK_ERROR", "Network request failed"));
+    fireEvent.click(button(await ask(), "Confirm"));
+
+    expect(await screen.findByText("Network request failed")).toBeTruthy();
+    expect(screen.queryByText("The memory was forgotten.")).toBeNull();
+    expect(screen.getByTestId("memory-confirmation")).toBeTruthy();
+  });
+});
+
+describe("Audit F1 — corrupt memory controls are shown, not hidden behind “Paused”", () => {
+  it("warns that nothing is learned or used, and how to save fresh settings", async () => {
+    mocked.getMemoryStatus.mockResolvedValue(ok(STATUS({ learningPaused: true, controlsReadable: false })));
+    render(<MemoryPage />);
+
+    expect(await screen.findByText(/memory settings could not be read/i)).toBeTruthy();
+    expect(screen.getByText(/not learning anything new or using what it remembers/i)).toBeTruthy();
+  });
+
+  it("readable controls show no such warning", async () => {
+    mocked.getMemoryStatus.mockResolvedValue(ok(STATUS({ learningPaused: true })));
+    render(<MemoryPage />);
+
+    await screen.findAllByTestId("memory-item");
+    expect(screen.queryByText(/memory settings could not be read/i)).toBeNull();
   });
 });
 

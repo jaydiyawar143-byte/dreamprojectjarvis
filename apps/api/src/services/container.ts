@@ -1646,8 +1646,9 @@ export function getContainer(options?: {
           embeddingProvider,
           ...(memoryExtractor !== null ? { memoryExtractor } : {}),
           // Phase 14 — a memory learned from a message the user vetoed is not
-          // recalled, and controls that cannot be read recall nothing.
-          memoryControl: { get: (userId: string) => memoryManagement.learningControl(userId) },
+          // recalled, and controls that cannot be read — or are corrupt
+          // (audit F1) — recall nothing. A valid pause does not stop recall.
+          memoryControl: { get: (userId: string) => memoryManagement.recallControl(userId) },
         }
       : {}),
     // Sprint 3.7: RAG context injection. Absent when no provider is configured.
@@ -1668,7 +1669,7 @@ export function getContainer(options?: {
   // that one user's purge and is counted, never retried in a loop.
   // ---------------------------------------------------------------------------
   const memoryRetention = new MemoryRetentionSweep({
-    candidates: (before, limit) => memoryRepository.usersWithExpiredMemories(before, limit),
+    candidates: (before, limit, after) => memoryRepository.usersWithExpiredMemories(before, limit, after),
     purge: async (userId) => {
       const run = await toolExecutor.execute({
         toolId: MEMORY_PURGE_TOOL_ID,
