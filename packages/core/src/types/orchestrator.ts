@@ -1,7 +1,8 @@
 import type { JarvisRequest, JarvisResponse } from "./request.js";
 import type { SkillContext } from "./skill.js";
 import type { SessionContext } from "./context.js";
-import type { IMemoryStore } from "./memory.js";
+import type { MemoryRecallPort } from "./memory.js";
+import type { MemoryLearningControl } from "../memory-management.js";
 import type { IMemoryExtractor } from "./memory.js";
 import type { IEmbeddingProvider } from "./embedding-provider.js";
 import type { ITool } from "./tool.js";
@@ -78,8 +79,19 @@ export interface OrchestratorConfig {
   maxToolExecutions?: number;
   maxOrchestrationDepth?: number;
   defaultTimeoutMs?: number;
-  /** Memory store for recall. If undefined, memory is disabled. */
-  memoryStore?: IMemoryStore;
+  /**
+   * Memory for recall. If undefined, memory is disabled.
+   *
+   * Phase 14 — a READ-ONLY surface. The orchestrator recalls; it never
+   * stores, updates or deletes, and it hands agents no memory object at all.
+   */
+  memoryStore?: MemoryRecallPort;
+  /**
+   * Phase 14 — the user's own memory controls. When given, a memory learned
+   * from a message the user vetoed is never recalled, and controls that
+   * cannot be read recall nothing. Absent: recall is exactly as before.
+   */
+  memoryControl?: { get(userId: string): Promise<MemoryLearningControl> };
   /** Memory extractor for async extraction after response. If undefined, extraction is disabled. */
   memoryExtractor?: IMemoryExtractor;
   /** Embedding provider for query embedding during recall. Required if memoryStore is provided. */

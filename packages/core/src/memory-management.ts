@@ -46,7 +46,9 @@ export type MemoryCommand =
   | { kind: "NONE" | "LIST" | "REPLACE" | "LEARNING_PAUSE" | "LEARNING_RESUME" }
   | { kind: "FORGET"; target: { kind: "SELECTION"; positions: number[] } | { kind: "THIS" } }
   | { kind: "FORGET_ALL"; scope: MemoryForgetScope }
-  | { kind: "CORRECT"; target: { kind: "LAST_REPLY" } }
+  // Phase 14 — `statement`: the new value, in the user's own words ("that's
+  // wrong. I prefer light mode", "change 2 to …"). Absent: only "that's wrong".
+  | { kind: "CORRECT"; target: { kind: "LAST_REPLY" } | { kind: "SELECTION"; positions: number[] }; statement?: string }
   | { kind: "VETO"; target: { kind: "PREVIOUS_MESSAGE" } };
 
 /**
@@ -137,17 +139,25 @@ function counter(value: unknown): value is number {
   return Number.isInteger(value) && (value as number) >= 0;
 }
 
-/** The counts and dates of v1 evidence, read for display only — never for a learning decision. */
-function evidenceSummary(value: unknown): { count: number; revisions: number; firstSeenAt: string; lastSeenAt: string } | null {
+/** The counts and dates of v1 evidence, read for display and ranking only — never for a learning decision. */
+export function memoryEvidenceSummary(
+  value: unknown
+): { count: number; conversations: number; revisions: number; firstSeenAt: string; lastSeenAt: string } | null {
   if (typeof value !== "object" || value === null) return null;
   const e = value as Record<string, unknown>;
   if (e.v !== 1 || !counter(e.count) || !counter(e.revisions)) return null;
   if (typeof e.firstSeenAt !== "string" || typeof e.lastSeenAt !== "string") return null;
-  return { count: e.count, revisions: e.revisions, firstSeenAt: e.firstSeenAt, lastSeenAt: e.lastSeenAt };
+  return {
+    count: e.count,
+    conversations: counter(e.conversations) ? e.conversations : 0,
+    revisions: e.revisions,
+    firstSeenAt: e.firstSeenAt,
+    lastSeenAt: e.lastSeenAt,
+  };
 }
 
 export function toMemoryView(record: MemoryRecord): MemoryView {
-  const evidence = evidenceSummary(record.metadata?.evidence);
+  const evidence = memoryEvidenceSummary(record.metadata?.evidence);
   return {
     id: record.id,
     type: record.type,
@@ -184,18 +194,35 @@ function nonBlank(value: unknown): value is string {
 }
 
 /**
+ * Audit F1 (Phase 14) — a stored document that is PRESENT but cannot be
+ * trusted: not a v1 object, a pause that is not a boolean, or vetoes that are
+ * not all ids. Absent (null/undefined) is not malformed — it is a user with no
+ * settings yet. A valid document is not malformed, paused or not.
+ *
+ * Learning reads a malformed document as a pause (parseMemoryLearningControl);
+ * recall must not read it at all, because its vetoes cannot be relied on.
+ */
+export function isMalformedMemoryLearningControl(doc: unknown): boolean {
+  if (doc === null || doc === undefined) return false;
+  if (typeof doc !== "object" || Array.isArray(doc)) return true;
+  const d = doc as Record<string, unknown>;
+  return d.v !== 1 || typeof d.learningPaused !== "boolean" || !Array.isArray(d.vetoedSourceMessageIds) || !d.vetoedSourceMessageIds.every(nonBlank);
+}
+
+/**
  * The stored document, read fail-closed. Absent means the defaults: learning
  * on, no vetoes. Present but unreadable means paused: when the user's own
- * setting cannot be read, nothing is learned.
+ * setting cannot be read, nothing is learned. (Recall is stricter — see
+ * isMalformedMemoryLearningControl.)
  */
 export function parseMemoryLearningControl(doc: unknown): MemoryLearningControl {
   if (doc === null || doc === undefined) return { learningPaused: false, vetoedSourceMessageIds: [] };
   const d = typeof doc === "object" ? (doc as Record<string, unknown>) : {};
   const ids = Array.isArray(d.vetoedSourceMessageIds) ? d.vetoedSourceMessageIds : null;
-  if (d.v !== 1 || typeof d.learningPaused !== "boolean" || !ids || !ids.every(nonBlank)) {
+  if (isMalformedMemoryLearningControl(doc)) {
     return { learningPaused: true, vetoedSourceMessageIds: (ids ?? []).filter(nonBlank) };
   }
-  return { learningPaused: d.learningPaused, vetoedSourceMessageIds: ids.slice(-MEMORY_VETO_LIMIT) };
+  return { learningPaused: d.learningPaused as boolean, vetoedSourceMessageIds: ids!.slice(-MEMORY_VETO_LIMIT) };
 }
 
 export function serializeMemoryLearningControl(control: MemoryLearningControl): Record<string, unknown> {

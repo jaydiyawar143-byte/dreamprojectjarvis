@@ -409,6 +409,10 @@ describe("navigation model", () => {
     expect(intelligence.items.map((i) => i.label)).toEqual([
       "Opportunities",
       "Knowledge Base",
+      // Phase 14 — what JARVIS remembers about the user. Beside the knowledge
+      // base because both are what it knows: one from documents, one from the
+      // user's own words.
+      "Memory",
       "Meta Ads",
       // Phase 12 — real read-only Gmail, Drive and Calendar. Filed under
       // Intelligence because it is a source JARVIS reads FROM, alongside the

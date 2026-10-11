@@ -174,6 +174,13 @@ export {
 // memories, the safe view, what each command needs before anything is
 // deleted, and the learning controls (pause, per-message veto).
 export * from "./memory-management.js";
+// Phase 14 — memory reliability and personalization. Pure: the relevance score
+// and confidence levels, the correction contract's names, the retention
+// policy, and projects with the owner's view of a memory.
+export * from "./memory-relevance.js";
+export * from "./memory-correction.js";
+export * from "./memory-retention.js";
+export * from "./memory-detail.js";
 // S8.1 — the MCP contract. Pure: the reviewed manifest of MCP servers and
 // tools (empty, so MCP is off), the fingerprint that pins a reviewed listing,
 // and the fail-closed validator. Nothing registers an MCP tool yet.

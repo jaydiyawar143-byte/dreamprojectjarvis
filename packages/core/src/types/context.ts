@@ -28,6 +28,12 @@ export const SessionContextSchema = z.object({
    * Set by the server only, never from a request body; memory provenance.
    */
   userMessageId: z.string().optional(),
+  /**
+   * Phase 14 — the project of this turn's conversation. Set by the server
+   * only, from the conversation row; never from a request body. Absent: a
+   * personal conversation, in which no project memory is used or learned.
+   */
+  projectId: z.string().optional(),
 });
 
 export type SessionContext = z.infer<typeof SessionContextSchema>;

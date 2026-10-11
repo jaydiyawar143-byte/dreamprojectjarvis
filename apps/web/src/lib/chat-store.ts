@@ -59,6 +59,13 @@ interface ChatState {
    * the late answer is appended to whatever the user is reading.
    */
   conversationEpoch: number;
+  /**
+   * Phase 14 — the project the NEXT new conversation will belong to; null is a
+   * personal conversation. It is sent only with the message that creates a
+   * conversation: an existing conversation keeps the project it was made in.
+   */
+  newConversationProjectId: string | null;
+  setNewConversationProject: (projectId: string | null) => void;
 
   loadConversations: () => Promise<void>;
   selectConversation: (id: string) => Promise<void>;
@@ -111,6 +118,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
+  newConversationProjectId: null,
+  setNewConversationProject: (projectId) => set({ newConversationProjectId: projectId }),
+
   newConversation: () => {
     set((state) => ({
       activeConversationId: null,
@@ -145,13 +155,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     // The surfaces already on screen go WITH the message, so the server can
     // update one instead of opening a duplicate.
-    const res = await sendChatMessage(
-      content,
-      activeConversationId ?? undefined,
-      undefined,
-      useSurfaceStore.getState().activeContextKeys(),
-      options.signal
-    );
+    // Phase 14 — a project is named only when this message STARTS a conversation.
+    const project = activeConversationId ? null : get().newConversationProjectId;
+    const res = project
+      ? await sendChatMessage(content, undefined, undefined, useSurfaceStore.getState().activeContextKeys(), options.signal, project)
+      : await sendChatMessage(
+          content,
+          activeConversationId ?? undefined,
+          undefined,
+          useSurfaceStore.getState().activeContextKeys(),
+          options.signal
+        );
 
     // -----------------------------------------------------------------------
     // Whether this reply is still the one being waited for.

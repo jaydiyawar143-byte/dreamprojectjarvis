@@ -19,6 +19,8 @@ export const ConversationSchema = z.object({
   title: z.string().nullable(),
   userId: z.string(),
   agentId: z.string().nullable(),
+  /** Phase 14 — the project this conversation belongs to. Absent or null: personal. */
+  projectId: z.string().nullable().optional(),
   messages: z.array(ConversationMessageSchema).optional(),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
@@ -35,6 +37,8 @@ export interface CreateConversationInput {
   userId: string;
   title?: string;
   agentId?: string;
+  /** Phase 14 — already checked to be one of this user's own projects. */
+  projectId?: string;
 }
 
 /**

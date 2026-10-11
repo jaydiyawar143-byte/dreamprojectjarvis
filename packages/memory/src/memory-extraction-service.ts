@@ -17,11 +17,15 @@ import type {
   LearningValidationResult,
   ProvenanceCitation,
   ProvenanceSource,
+  MemoryCorrectionOutcome,
+  MemoryExactScope,
 } from "@jarvis/core";
 import {
   ExtractionResultSchema,
   JarvisError,
   LEARNING_RULES,
+  MEMORY_CORRECTION_MAX_LENGTH,
+  MEMORY_DEDUP_THRESHOLDS,
   decideLearningCandidate,
   hasNegationConflict,
   isLearningBlocked,
@@ -185,6 +189,24 @@ function isoOf(date: unknown): string | undefined {
   return date instanceof Date && Number.isFinite(date.getTime()) ? date.toISOString() : undefined;
 }
 
+/** Phase 14 — one confirmed correction, as the composition root hands it over. */
+export interface MemoryCorrectionRequest {
+  userId: string;
+  /** The memory to change, and the version (`changedAt`) the user was shown. */
+  memoryId: string;
+  version: string;
+  /** The new value: the user's own words, verbatim. */
+  statement: string;
+  /** The saved USER message the statement is part of, and its own ids. */
+  userMessage: string;
+  conversationId: string;
+  messageId: string;
+  traceId?: string;
+}
+
+/** Phase 14 — whether a statement may replace a memory, and the provenance it would carry. */
+export type MemoryCorrectionCheck = { ok: true; provenance: LearningProvenance } | { ok: false; reason: string };
+
 // S7.2 L3 — results that mean the validator was handed a broken input. L2
 // makes them impossible, so they are treated as a failure, not a rejection.
 const VALIDATION_FAILURE_RULES: ReadonlySet<string> = new Set(["MALFORMED_INPUT", "PROVENANCE_MISSING"]);
@@ -330,7 +352,7 @@ export class MemoryExtractionService implements IMemoryExtractor {
     this.embeddingProvider = config.embeddingProvider;
     this.embeddingModel = config.embeddingModel ?? "text-embedding-3-small";
     this.extractionModel = config.extractionModel ?? config.aiProvider.defaultModel;
-    this.deduplicationThreshold = config.deduplicationThreshold ?? 0.7;
+    this.deduplicationThreshold = config.deduplicationThreshold ?? MEMORY_DEDUP_THRESHOLDS.revise;
     this.maxRetries = config.maxRetries ?? 2;
     this.retryDelayMs = config.retryDelayMs ?? 1000;
     this.expiryDays = config.expiryDays ?? 90;
@@ -392,6 +414,11 @@ export class MemoryExtractionService implements IMemoryExtractor {
         ? new Date(Date.now() + this.expiryDays * 86400000)
         : undefined;
 
+    // Phase 14 — the scope of everything this turn teaches: the project of
+    // the conversation it was said in, as the server read it from the
+    // conversation row. No model and no request body chooses it.
+    const scope: MemoryExactScope = { projectId: request.projectId ?? null };
+
     const enriched = supported.map(({ candidate, provenance, evidenceKind }) => ({
       ...candidate,
       evidenceKind,
@@ -399,11 +426,12 @@ export class MemoryExtractionService implements IMemoryExtractor {
       sourceConversationId: provenance.sourceConversationId,
       sourceMessageId: provenance.sourceMessageId,
       ...(provenance.sourceTraceId ? { sourceTraceId: provenance.sourceTraceId } : {}),
+      ...(scope.projectId ? { projectId: scope.projectId } : {}),
       expiresAt,
     }));
 
     // S7.2 L4 — null: the evidence contract failed and nothing was written.
-    const deduplicated = await this.deduplicateAndStore(enriched, request.userId);
+    const deduplicated = await this.deduplicateAndStore(enriched, request.userId, scope);
     if (!deduplicated) return this.emptyResult(start);
     const { accepted, duplicatesSkipped } = deduplicated;
 
@@ -687,13 +715,14 @@ export class MemoryExtractionService implements IMemoryExtractor {
   private async deduplicateAndStore(
     candidates: EvidencedCandidate[],
     userId: string,
+    scope: MemoryExactScope = { projectId: null },
   ): Promise<{ accepted: MemoryCandidate[]; duplicatesSkipped: number } | null> {
     if (candidates.length === 0) {
       return { accepted: [], duplicatesSkipped: 0 };
     }
 
     const embeddings = await this.embedCandidates(candidates);
-    const existingMemories = await this.fetchExistingMemories(userId);
+    const existingMemories = await this.fetchExistingMemories(userId, scope, embeddings);
 
     // S7 — plans in CANDIDATE ORDER. Each new memory carries its OWN
     // embedding (skipped or dropped candidates never shift another's vector),
@@ -749,7 +778,7 @@ export class MemoryExtractionService implements IMemoryExtractor {
       }
 
       // S7.2 L4 — a duplicate is no longer just skipped: it corroborates.
-      if (bestScore >= 0.95 && bestMatch && !bestConflicts) {
+      if (bestScore >= MEMORY_DEDUP_THRESHOLDS.corroborate && bestMatch && !bestConflicts) {
         duplicatesSkipped++;
         plans.push({ kind: "corroborate", candidate, existing: bestMatch });
         continue;
@@ -1049,15 +1078,47 @@ export class MemoryExtractionService implements IMemoryExtractor {
   // Fetch existing memories for dedup
   // -----------------------------------------------------------------------
 
+  /**
+   * The memories a candidate is compared with.
+   *
+   * Phase 14 — ONE SCOPE. A statement made in a project is compared with that
+   * project's memories only, and a personal one with personal memories only,
+   * so a statement can never corroborate — or, worse, overwrite — a memory of
+   * another scope.
+   *
+   * Phase 14 — NOT ONLY THE NEWEST 100. The newest 100 were all dedup ever
+   * saw, so restating an older memory created a second copy of it. Each
+   * candidate's nearest stored neighbours (at or above the merge threshold,
+   * ten at most) are now added by vector search, however old they are. The
+   * read stays bounded: 100 rows plus ten per candidate. If the vector search
+   * is unavailable the newest 100 are used alone, exactly as before.
+   */
   private async fetchExistingMemories(
     userId: string,
+    scope: MemoryExactScope = { projectId: null },
+    embeddings: ReadonlyArray<number[] | null> = [],
   ): Promise<MemoryRecord[]> {
     const result = await this.store.list({
       userId,
       limit: 100,
       includeExpired: false,
+      scope: scope.projectId ? { kind: "PROJECT", projectId: scope.projectId } : { kind: "PERSONAL" },
     });
-    return result.memories;
+
+    const byId = new Map(result.memories.map((memory) => [memory.id, memory]));
+    for (const embedding of embeddings) {
+      if (!embedding) continue;
+      let neighbours: MemoryRecord[];
+      try {
+        neighbours = await this.store.findSimilar(userId, embedding, this.deduplicationThreshold, 10, scope);
+      } catch {
+        neighbours = [];
+      }
+      for (const neighbour of neighbours ?? []) {
+        if (!byId.has(neighbour.id)) byId.set(neighbour.id, neighbour);
+      }
+    }
+    return [...byId.values()];
   }
 
   // -----------------------------------------------------------------------
@@ -1146,6 +1207,8 @@ export class MemoryExtractionService implements IMemoryExtractor {
               sourceConversationId: candidate.sourceConversationId,
               sourceMessageId: candidate.sourceMessageId,
               expiresAt: candidate.expiresAt,
+              // Phase 14 — the project of the turn; absent for a personal memory.
+              ...(candidate.projectId ? { projectId: candidate.projectId } : {}),
               // S7.2 L2 — the source trace has no column; it lives beside the embedding.
               metadata: {
                 embedding,
@@ -1174,6 +1237,177 @@ export class MemoryExtractionService implements IMemoryExtractor {
     }
 
     return stored;
+  }
+
+  // -----------------------------------------------------------------------
+  // Phase 14 — correction
+  // -----------------------------------------------------------------------
+
+  /**
+   * Whether `statement` may replace a memory. Deterministic, no I/O, no
+   * model; it never throws.
+   *
+   *   L1  the statement, as the user's own, must be ACCEPTed
+   *   L2  it must really be in the saved message, which must be a USER
+   *       message with a conversation id and a message id
+   *   L3  it must be VALID with scope MEMORY — a durable preference, personal
+   *       fact or working convention, not a goal, a task or project state
+   *
+   * The statement is the claim, its own evidence and the user's own sentence:
+   * nothing is paraphrased, so nothing can exceed what was said.
+   */
+  checkCorrection(input: {
+    statement: string;
+    userMessage: string;
+    conversationId: string;
+    messageId: string;
+    traceId?: string;
+  }): MemoryCorrectionCheck {
+    try {
+      const statement = typeof input.statement === "string" ? input.statement.trim() : "";
+      if (statement.length === 0) return { ok: false, reason: "EMPTY" };
+      if (statement.length > MEMORY_CORRECTION_MAX_LENGTH) return { ok: false, reason: "TOO_LONG" };
+      if (containsSecret(statement)) return { ok: false, reason: "CONTAINS_SECRET" };
+
+      const gate = validLearningVerdict(decideLearningCandidate({ statement, statedBy: "USER" }));
+      if (!gate) return { ok: false, reason: "GATE_FAILED" };
+      if (gate.decision !== "ACCEPT") return { ok: false, reason: gate.rule };
+
+      const resolution = resolveUserProvenance({ source: "M1", evidence: statement }, [
+        {
+          ref: "M1",
+          sourceType: "USER",
+          statement: input.userMessage,
+          sourceConversationId: input.conversationId,
+          sourceMessageId: input.messageId,
+          ...(input.traceId ? { sourceTraceId: input.traceId } : {}),
+        },
+      ]);
+      if (!resolution.accepted) return { ok: false, reason: resolution.reason };
+
+      const answer: unknown = validateLearningCandidate({
+        claim: statement,
+        evidence: statement,
+        userMessage: statement,
+        provenance: resolution.provenance,
+      });
+      if (!isLearningValidationResult(answer)) return { ok: false, reason: "VALIDATION_FAILED" };
+      if (answer.decision !== "VALID" || answer.scope !== "MEMORY") return { ok: false, reason: answer.rule };
+
+      return { ok: true, provenance: resolution.provenance };
+    } catch {
+      return { ok: false, reason: "CHECK_FAILED" };
+    }
+  }
+
+  /**
+   * Replaces one memory's content with the user's own statement.
+   *
+   * Reached only for a confirmed pending action, through the `memory.correct`
+   * tool. It is an L4 REVISE of that one memory: the same write a merge makes
+   * — content, vector, provenance, evidence and expiry together, in one
+   * transaction — with the target chosen by id instead of by similarity, and
+   * no model anywhere in it.
+   *
+   * FAILS CLOSED at every step, and a refusal writes nothing at all:
+   *   - the user's controls are read before anything else and again just
+   *     before the write (paused, vetoed or unreadable: BLOCKED);
+   *   - the memory must be this user's, at the version they were shown;
+   *   - the statement must pass checkCorrection();
+   *   - no valid embedding, or evidence that cannot be resolved: FAILED.
+   *
+   * The memory keeps its type, its importance and its project. Only the
+   * content-free `memory_correction` event is logged.
+   */
+  async correct(request: MemoryCorrectionRequest): Promise<MemoryCorrectionOutcome> {
+    const done = (status: MemoryCorrectionOutcome["status"]): MemoryCorrectionOutcome => {
+      console.log(JSON.stringify({ event: "memory_correction", status }));
+      return { status };
+    };
+
+    const allowed = await this.learningAllowed(request.userId, [request.messageId]);
+    if (!allowed || !allowed[0]) return done("BLOCKED");
+
+    const existing = await this.store.getById(request.userId, request.memoryId);
+    if (!existing) return done("NOT_FOUND");
+    if (existing.updatedAt.toISOString() !== request.version) return done("STALE");
+
+    const check = this.checkCorrection(request);
+    if (!check.ok) return done("NOT_LEARNABLE");
+    const statement = request.statement.trim();
+
+    const [embedding] = await this.embedCandidates([
+      { type: existing.type, content: statement, importance: existing.importance, confidence: 0 },
+    ]);
+    if (!embedding) return done("FAILED");
+
+    let l4: EvidenceOutcome | null;
+    try {
+      l4 = evidenceOutcome(
+        resolveLearningEvidence(
+          {
+            kind: "REVISE",
+            evidenceKind: "DIRECT",
+            sourceMessageId: check.provenance.sourceMessageId,
+            conversationId: check.provenance.sourceConversationId,
+            ...(check.provenance.sourceTraceId ? { traceId: check.provenance.sourceTraceId } : {}),
+            occurredAt: new Date().toISOString(),
+          },
+          existing.metadata?.evidence,
+          {
+            memorySource: {
+              messageId: existing.sourceMessageId,
+              conversationId: existing.sourceConversationId,
+              createdAt: isoOf(existing.createdAt),
+            },
+          },
+        ),
+      );
+    } catch {
+      l4 = null;
+    }
+    if (!l4) {
+      console.log(JSON.stringify({ event: "memory_learning_evidence_failed" }));
+      return done("FAILED");
+    }
+    // This message already replaced the memory: a retry, a replay.
+    if (!l4.changed) return done("ALREADY_APPLIED");
+
+    // The controls again, just before the write, as extraction does.
+    const stillAllowed = await this.learningAllowed(request.userId, [request.messageId]);
+    if (!stillAllowed || !stillAllowed[0]) return done("BLOCKED");
+
+    try {
+      await this.mergeMemory(
+        {
+          type: existing.type,
+          content: statement,
+          // The old summary described the old content.
+          summary: "",
+          importance: existing.importance,
+          // Derived from the new evidence, never inherited and never a model's.
+          confidence: l4.confidence,
+          sourceType: check.provenance.sourceType,
+          sourceConversationId: check.provenance.sourceConversationId,
+          sourceMessageId: check.provenance.sourceMessageId,
+          ...(check.provenance.sourceTraceId ? { sourceTraceId: check.provenance.sourceTraceId } : {}),
+        },
+        existing,
+        request.userId,
+        embedding,
+        {
+          evidence: l4.evidence,
+          // No model took part; the number kept beside the evidence stays as it was.
+          modelConfidence: (existing.metadata?.modelConfidence as number | undefined) ?? existing.confidence,
+          ...(l4.refreshExpiry ? { expiresAt: new Date(Date.now() + this.expiryDays * 86400000) } : {}),
+        },
+      );
+    } catch (error) {
+      if (!isEmbeddingStorageFailure(error)) throw error;
+      this.reportEmbeddingFailure({ stage: "persist", reason: "storage_rejected", operation: "merge", candidateCount: 1, error });
+      return done("FAILED");
+    }
+    return done("CORRECTED");
   }
 
   // -----------------------------------------------------------------------

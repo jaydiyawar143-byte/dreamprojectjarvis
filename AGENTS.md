@@ -104,6 +104,19 @@ Plan → Explain → Confirm → Execute → Audit → Verify → Report
   refused. There is no in-memory fallback, and none may be added.
 - **A voice session cannot confirm a write at all.** Speech is a fine way to ask
   for one and not a fine way to authorize one.
+- **A pending action is answered by its id.** `POST /api/v1/pending-actions/:id/confirm`,
+  `/reject` and `/modify` act only when `:id` is the action waiting in that
+  conversation. Any other id — replaced, used, expired, unknown — gets `409
+  PENDING_ACTION_MISMATCH` (or `404` when nothing waits) and changes nothing, so
+  a screen still showing an older request can never answer a newer one. A
+  memory action can never be modified.
+- **One answer wins.** Confirming, cancelling or changing a pending action is
+  ONE conditional `UPDATE` in PostgreSQL (`decideApproval`, `fromPendingOnly`)
+  that applies only while the action is still waiting. Of two answers that
+  arrive together — two tabs, two API instances — exactly one wins; the other
+  gets `409 PENDING_ACTION_ALREADY_RESOLVED` and changes nothing. A cancelled
+  action can never be approved, so it never runs. Never resolve an approval
+  with a read followed by an unconditional write.
 
 ### Google scopes
 
@@ -114,6 +127,36 @@ explicit user decision. Never request every Google scope at initial login.
 
 Authorization decisions read **granted** scopes, never requested ones: Google
 may grant fewer than were asked for.
+
+### Memory
+
+The contract is in [`docs/MEMORY.md`](docs/MEMORY.md); these are the parts a
+change must not break. `packages/memory/test/memory-architecture-p14.test.ts`
+fails when one of the first three does.
+
+- **One writer.** Only `MemoryExtractionService` creates or changes a memory —
+  extraction after a reply, and a confirmed correction. Never add a tool, a
+  route or a service method that writes one. The L1–L4 learning contracts in
+  `packages/core` have that one consumer, and their tests pin it.
+- **One way to delete.** `MemoryManagementService`, reached only through the
+  memory tools, which `ToolExecutor` runs. Forgetting and correcting are
+  HIGH_IMPACT pending actions the user confirms; no route deletes or edits a
+  memory, and none may be added.
+- **Agents hold no memory store.** `AgentContext` carries none and the
+  orchestrator is typed against a read-only port. An agent's only memory tool
+  is `memory.list`. `memory.forget`, `memory.forget_all`, `memory.correct` and
+  `memory.purge_expired` stay on no agent's allowlist.
+- **Scope beside ownership.** A memory is personal or belongs to one project of
+  its owner. Every project filter is written beside the user filter, never
+  instead of it. The active project is the conversation's, read from the
+  conversation row — never from a request body after the conversation exists.
+- **Parameters are ids, never memory text.** A pending action, an approval and
+  an audit row hold ids, versions and counts. The words stay in the message.
+- **The controls fail closed.** Unreadable or corrupt controls: nothing is
+  learned and nothing is recalled. Recall reads them through `recallControl`,
+  which refuses a corrupt document; a valid pause stops learning only.
+- **Retention deletes only what the policy says** (`MEMORY_RETENTION` in
+  `packages/core`): bounded, one user at a time, through `memory.purge_expired`.
 
 ### Operational logs and errors
 
@@ -163,9 +206,15 @@ The six memory end-to-end tests that used to fail on every run (B-1 in
 `docs/CODEBASE_AUDIT.md`) pass since 2026-09-14. The cause was a race in the
 test harness, not a production memory bug. `@jarvis/db` tests need PostgreSQL
 with pgvector: point `DATABASE_URL` at a separate test database, never the
-development one. On a fresh throwaway pgvector database they give 234 passed /
-0 failed (21 files; Phase 13, 2026-10-06). Every workspace's suite was run that
-day, one workspace at a time: 7,668 passed without a database, none failed.
+development one. On a fresh throwaway pgvector database they give 276 passed /
+0 failed (24 files; atomic approval fix, 2026-10-11). Every workspace's suite
+was run that day, one workspace at a time: 8,142 passed without a database,
+none failed.
+
+The two memory end-to-end tests (`sprint-1.1d-memory-e2e`, and
+`phase14-memory-e2e-pg.integration`, which has no in-memory fallback at all)
+fail rather than fall back or skip when `JARVIS_REQUIRE_POSTGRES=1` is set and
+no separate test database is reachable. CI sets it in its database steps.
 
 CI runs the PostgreSQL-backed tests against its own throwaway pgvector service,
 after applying every migration, and fails if any of them is skipped

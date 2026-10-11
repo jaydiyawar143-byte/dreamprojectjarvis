@@ -479,6 +479,40 @@ For system diagrams, see [Diagrams](./diagrams/).
 
 ---
 
+## Phase 14 — What JARVIS Remembers About You, and Your Control Over It
+
+*Added 2026-10-08. Status: implemented, verified by automated tests against PostgreSQL, and user-accessible — in chat and on the Memory screen.*
+
+JARVIS learns lasting things you tell it about yourself — a preference, a fact about you, a way you work — and uses them in later conversations. It learns only from **your own words**: never from its own replies, never a password or key, never a one-off instruction, and never when you say "don't save this".
+
+**See it.** Open **Memory** in the sidebar, or type "show my memories". Each memory shows what it says, how confident JARVIS is (High, Medium or Low — from how often, and in how many conversations, you said it), when it was learned and last updated, when it expires, and which project it belongs to.
+
+**Correct it.** Before Phase 14, saying "that's wrong" only offered to forget the memory. Now you can give the right value:
+
+> **You:** Which mode should the dashboard use?
+> **JARVIS:** (answers using "I prefer dark mode")
+> **You:** That's wrong. I prefer light mode.
+> **JARVIS:** I'll change this memory: 1. I prefer dark mode — to: "I prefer light mode". Reply "yes" to change it, or "no" to keep it.
+> **You:** yes
+
+The memory now says what you typed, word for word. You can also say "change 2 to …" after listing your memories, or press **Correct** on the Memory screen. Nothing changes until you confirm, and voice cannot confirm.
+
+**Forget it.** "forget 2", "forget everything you remember about me", or **Forget** on the Memory screen — each asks you to confirm first.
+
+**Pause it.** "stop remembering things about me" or **Pause learning** on the Memory screen. What is already remembered stays; nothing new is saved until you resume.
+
+**Keep projects apart.** Create a project on the Memory screen, then choose it when you start a new conversation on the Assistant page. What you say in that conversation is remembered **in that project only**; it is not used in another project or in a personal conversation. What you say in a personal conversation is used everywhere. A conversation's project is fixed when it starts.
+
+**How long it lasts.** A memory expires 90 days after you last said it — saying it again, or correcting it, starts the 90 days over. Once expired it is no longer used, and it is deleted 30 days later.
+
+**What it cannot do yet.**
+
+- It does not learn facts about a client or a project ("the client prefers a formal tone") — only things you say about yourself and how you work.
+- It does not learn a habit you describe as "we" ("we publish on Mondays"). Say "I publish on Mondays".
+- If you repeat something in different words, the memory's wording is replaced with the newer one rather than counted as said twice.
+- A memory cannot be moved from one project to another, and a project cannot be renamed or deleted.
+- Forgetting a memory does not delete the chat message it came from.
+
 ## Glossary
 
 | Term | Definition |

@@ -1,6 +1,6 @@
 # JARVIS Architecture
 
-How the system is built today. Verified against the code on 2026-10-05, commit `68628c0`; the Phase 13 parts — durable confirmations, health, the operational log and error monitor, deployment — on 2026-10-06.
+How the system is built today. Verified against the code on 2026-10-05, commit `68628c0`; the Phase 13 parts — durable confirmations, health, the operational log and error monitor, deployment — on 2026-10-06; the Phase 14 parts — project-scoped memory, the memory API and screen, correction and retention — on 2026-10-08.
 
 - For the marketing-intelligence pipeline (analysis → recommendation → approval → outcome) and its phase-by-phase history, see [JARVIS_ARCHITECTURE.md](./JARVIS_ARCHITECTURE.md).
 - The superseded first architecture document is kept at [archive/ARCHITECTURE_LEGACY_2026-08.md](./archive/ARCHITECTURE_LEGACY_2026-08.md). It describes Fastify and Redis; neither is used.
@@ -61,7 +61,8 @@ apps/api — auth middleware → chat router, which answers here, in order:
    ▼  anything else — including a turn about the conversation itself, and a work
    │  request no tool can carry out, which the Task Engine hands back
 Orchestrator — packages/agents
-   ├─ memory:    embed the message, recall this user's relevant memories
+   ├─ memory:    embed the message, recall this user's relevant memories —
+   │             personal ones, plus those of the conversation's own project
    ├─ knowledge: retrieve matching passages from the user's documents
    ├─ skills:    which of this agent's skills work right now
    └─ route:     choose a registered domain agent
@@ -80,8 +81,20 @@ ToolExecutor — packages/tools
 Tool → port → provider package → provider API
    ▼
 Result, with secrets stripped → agent → reply to the browser
-   └─ afterwards: extract durable memories from the turn
+   └─ afterwards: extract durable memories from the turn, into the
+                  conversation's project (or as personal memories)
 ```
+
+## Memory
+
+One chain, described in [MEMORY.md](./MEMORY.md). What holds across all of it:
+
+- **One writer, one deleter.** `MemoryExtractionService` (`packages/memory`) is the only code that creates or changes a memory — extraction after a reply, and a confirmed correction. `MemoryManagementService` is the only code that deletes one, and it is reached only through the memory tools, which `ToolExecutor` runs. `packages/memory/test/memory-architecture-p14.test.ts` fails if a second path appears.
+- **Scope.** A memory is personal or belongs to one project of its owner (`Memory.projectId`). The active project is a property of the **conversation**, fixed when it is created from one of the user's own projects, and read from the conversation row on every turn. Every scope filter is written beside the user filter; the database itself refuses a memory in a project its user does not own.
+- **Recall is ranked by one score** — `0.70 × similarity + 0.10 × recency + 0.10 × confidence + 0.10 × importance`, in `packages/core/src/memory-relevance.ts` — after a similarity floor that no other signal can lift a memory over.
+- **The orchestrator reads memory; it cannot write it.** It is typed against a read-only port, and agents are handed no memory store at all. An agent's only memory tool is the read-only `memory.list`.
+- **The user's controls** — list, forget, correct, veto, pause — are reachable from chat and from the memory API (`/api/v1/memories`) and screen (`/memory`), through the same service. Forgetting and correcting are pending actions the user confirms; there is no endpoint that deletes or edits a memory.
+- **Retention.** A learned memory expires 90 days after the user last stated it and is hidden at once; a bounded sweep, started by the API after it is listening, purges rows 30 days after expiry through the `memory.purge_expired` tool.
 
 ## Writes that leave JARVIS
 
@@ -166,6 +179,7 @@ One Docker image (`node:24-alpine`, runs as the `node` user) serves both the API
 
 - `@jarvis/ai-anthropic` is built and not wired.
 - `MemoryEngine` is tested and not used at runtime.
+- Memory, after Phase 14: project *state* is still not learned (only the user's own durable statements are, in whichever project they were made); a reworded restatement replaces a memory instead of adding to its evidence; a contradiction replaces without keeping the old wording; memory content is stored as plain text; there is no vector index; and a project cannot be renamed or deleted. See [MEMORY.md](./MEMORY.md#known-limitations).
 - The structured operational log covers start-up, shutdown, failed requests, confirmations, the two background loops and error reports. Everything else still writes its own JSON line without a timestamp, and the request log is text.
 - No hosted error monitor is configured. Reports are `monitor_exception` log lines until a sink for one is added.
 - The per-IP rate limiter and the provider circuit breaker are still per process. Confirmations no longer are.

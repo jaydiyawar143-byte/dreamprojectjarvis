@@ -214,12 +214,19 @@ export class PrismaApprovalRepository implements IApprovalRepository {
    * status='PENDING' AND expiresAt > now AND userId matches: exactly one
    * concurrent caller transitions the row; every loser observes the new
    * state and is classified deterministically.
+   *
+   * `fromPendingOnly` (pending actions — the chat's Confirm / Cancel / Modify):
+   * a reject, too, applies only while the approval is still PENDING. A
+   * confirmed pending action is approved and run in the same request, so a
+   * cancel arriving after the approval could never veto it — only contradict
+   * it. Without the option a reject may still veto an approved approval that
+   * has not been consumed (the Approvals page's documented behaviour).
    */
   async decideApproval(
     id: string,
     userId: string,
     decision: "approve" | "reject",
-    options?: { now?: Date }
+    options?: { now?: Date; fromPendingOnly?: boolean }
   ): Promise<
     | { outcome: "approved" | "rejected" }
     | { outcome: "not_found" }
@@ -259,11 +266,14 @@ export class PrismaApprovalRepository implements IApprovalRepository {
     } else if (expired && row.status !== "APPROVED") {
       // Rejecting an already-expired pending approval is a no-op fact.
       return { outcome: "expired" };
+    } else if (options?.fromPendingOnly && row.status === "APPROVED") {
+      // Already confirmed: a pending action is no longer waiting to be cancelled.
+      return { outcome: "conflict", currentState: "APPROVED" };
     }
 
     const target = decision === "approve" ? "APPROVED" : "REJECTED";
     const guardStates: ("PENDING" | "APPROVED")[] =
-      decision === "approve"
+      decision === "approve" || options?.fromPendingOnly
         ? ["PENDING"]
         : ["PENDING", "APPROVED"]; // reject may still veto a not-yet-consumed approval
 

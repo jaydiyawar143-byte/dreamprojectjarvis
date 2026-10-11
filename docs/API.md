@@ -1,6 +1,6 @@
 # JARVIS HTTP API
 
-Everything below is served by `apps/api` under `/api/v1`. Verified against the code on 2026-09-17.
+Everything below is served by `apps/api` under `/api/v1`. Verified against the code on 2026-09-17; the memory and project routes were added in Phase 14, on 2026-10-08.
 
 - **Mounts:** `apps/api/src/index.ts` · **Handlers:** `apps/api/src/routes/*.ts`
 - **Authentication:** unless a table says otherwise, send `Authorization: Bearer <access token>`. Data is always scoped to that token's user; a user id in a body or path is ignored.
@@ -59,7 +59,7 @@ Tool parameters, free-text audit fields and the assistant's reply text are never
 | Router | Mount | Endpoints |
 |---|---|---|
 | `approvals.ts` | `/api/v1/approvals` | `GET /`, `GET /:id`, `POST /:id/approve`, `POST /:id/reject` |
-| `pending-actions.ts` | `/api/v1/pending-actions` | `GET /`, `POST /:id/confirm`, `POST /:id/reject`, `POST /:id/modify` |
+| `pending-actions.ts` | `/api/v1/pending-actions` | `GET /`, `POST /:id/confirm`, `POST /:id/reject`, `POST /:id/modify` — `:id` must be the action waiting in the conversation (`409 PENDING_ACTION_MISMATCH` otherwise; nothing changes). Answers that arrive together for the same action are resolved by one conditional write: exactly one wins, the others get `409 PENDING_ACTION_ALREADY_RESOLVED` and change nothing |
 | `recommendations.ts` | `/api/v1/recommendations` | `GET /`, `GET /:id`, `POST /:id/execute` |
 | `outcomes.ts` | `/api/v1` | `GET /recommendations/:id/outcome`, `GET /outcomes/:id` |
 | `opportunities.ts` | `/api/v1/opportunities` | `GET /`, `GET /:id` |
@@ -73,6 +73,39 @@ Tool parameters, free-text audit fields and the assistant's reply text are never
 ### Knowledge — `/api/v1/knowledge` · `knowledge.ts`
 
 `POST /documents`, `POST /images`, `GET /documents`, `GET /documents/:id`, `GET /documents/:id/chunks`, `DELETE /documents/:id`, `POST /search`
+
+### Memory — `/api/v1/memories` · `memory.ts`
+
+Added 2026-10-08 (Phase 14). The memory screen's API: a second way of reaching the one service the chat's memory commands use. See [MEMORY.md](./MEMORY.md#user-controls-the-api-and-the-screen).
+
+| Method | Path | What it does |
+|---|---|---|
+| GET | `/` | A page of the caller's memories, newest first (ties by id). `?limit=1..50` (default 20) · `?offset=` · `?project=all\|personal\|<project id>` · `?q=<text>` · `?includeExpired=true` |
+| GET | `/status` | `learningPaused`, `controlsReadable` (false: the stored controls are corrupt — nothing is learned or recalled), `vetoedSources`, `active`, `expired`, `retention { days, purgeGraceDays }`, `correctionAvailable` |
+| GET | `/:id` | One memory |
+| POST | `/learning/pause` | Stop learning. Deletes nothing |
+| POST | `/learning/resume` | Start learning again |
+| POST | `/:id/forget` | **Asks** for the memory to be forgotten: `202` with `{ pendingAction, conversationId, summary }` |
+| POST | `/:id/correction` | **Asks** for it to be changed. Body `{ statement }`, 1–500 characters: `202` with `{ pendingAction, conversationId, summary }` |
+
+- **A memory is returned as:** `id`, `type`, `content`, `confidence` (0–0.95) and `confidenceLevel` (`HIGH` / `MEDIUM` / `LOW`), `createdAt`, `updatedAt`, `expiresAt`, `expired`, `projectId` (null for a personal memory) and `projectName`, `legacy`, and `provenance` — `source` (`USER` / `LEGACY`), `statements`, `conversations`, `firstStatedAt`, `lastStatedAt`, `revisions`. Never the vector, the raw metadata, or a message, conversation or trace id.
+- **Forgetting and correcting change nothing by themselves.** Each creates the same HIGH_IMPACT pending action the chat creates (`memory.forget`, `memory.correct`); the caller confirms it with `POST /api/v1/pending-actions/:id/confirm` and `{ conversationId }`, or cancels it with `/reject`. A new request cancels one that was never confirmed, and the old request's id then gets `409 PENDING_ACTION_MISMATCH` — it can never confirm or cancel the new one. A memory action cannot be modified (`409 PENDING_ACTION_NOT_MODIFIABLE`). **There is no `DELETE`, `PUT` or `PATCH` on a memory.**
+- **`404 MEMORY_NOT_FOUND` / `404 PROJECT_NOT_FOUND`:** not the caller's, or does not exist — the same answer for both.
+- **`422 MEMORY_NOT_LEARNABLE`:** the statement could not be stored as a memory on its own (a task, a goal, a secret, a grant of authority, a question). Nothing is saved or proposed.
+- **`400 INVALID_REQUEST`:** a bad `limit`, `offset` or `statement`. **`503`:** confirmations, or the memory writer, are not available on this deployment.
+
+### Projects — `/api/v1/projects` · `projects.ts`
+
+Added 2026-10-08 (Phase 14). A project is a scope for memory: a name, owned by the caller.
+
+| Method | Path | What it does |
+|---|---|---|
+| GET | `/` | The caller's own projects, by name |
+| POST | `/` | Creates one. Body `{ name, description? }`; `201`. A duplicate name, an empty or over-long name, or more than 100 projects: `400 INVALID_REQUEST` |
+
+There is no rename and no delete: deleting a project deletes its memories, and nothing in Phase 14 asks for that.
+
+**A conversation's project.** `POST /api/v1/chat` accepts `projectId` on the request that **creates** a conversation. It must be one of the caller's own projects (`404 PROJECT_NOT_FOUND` otherwise) and is then fixed: a later request that names a different project gets `409 PROJECT_MISMATCH`.
 
 ### Dashboard
 

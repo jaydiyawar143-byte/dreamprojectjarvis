@@ -25,9 +25,17 @@ export class PrismaPreferenceRepository {
    * the command-center document; S7.2 L5 keeps the user's memory-learning
    * controls in a second row, `prefs:memory`, of the same table.
    */
+  /**
+   * `onCorrupt` (Phase 14) says what a stored value that is not a JSON object
+   * means. "absent" — the default, right for the dashboard — degrades to
+   * defaults. "unreadable" returns an empty document instead: the row EXISTS,
+   * so a reader that fails closed (the memory-learning controls) must see
+   * "present but unreadable", never "the user has no settings".
+   */
   constructor(
     private prisma: PrismaClient,
-    private readonly key = KEY
+    private readonly key = KEY,
+    private readonly onCorrupt: "absent" | "unreadable" = "absent"
   ) {}
 
   /**
@@ -40,12 +48,14 @@ export class PrismaPreferenceRepository {
     const row = await this.prisma.userSetting.findUnique({
       where: { userId_key: { userId, key: this.key } },
     });
-    if (!row?.value) return null;
+    if (!row) return null;
+    const corrupt = this.onCorrupt === "unreadable" ? {} : null;
+    if (!row.value) return corrupt;
     try {
       const parsed = JSON.parse(row.value) as unknown;
-      return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
+      return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : corrupt;
     } catch {
-      return null;
+      return corrupt;
     }
   }
 

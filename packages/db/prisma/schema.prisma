@@ -92,6 +92,7 @@ model User {
   n8nExecutions     N8nExecution[]
   tasks             Task[]
   confirmations     Confirmation[]
+  projects          Project[]
 }
 
 model RefreshToken {
@@ -115,12 +116,38 @@ model Conversation {
   title     String?
   userId    String
   agentId   String?
+  // Phase 14 — the project this conversation belongs to; null is personal.
+  // Set once, at creation, from one of the user's OWN projects.
+  projectId String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   user     User      @relation(fields: [userId], references: [id])
   agent    Agent?    @relation(fields: [agentId], references: [id])
+  project  Project?  @relation(fields: [projectId], references: [id], onDelete: SetNull)
   messages Message[]
+}
+
+// Phase 14 — the smallest thing that can give a memory a scope: a name, owned
+// by one user. Not a project-management system: no members, tasks or settings.
+//
+// `@@unique([id, userId])` exists for one reason: `Memory` references a
+// project by BOTH columns, so the database itself refuses a memory that names
+// a project its own user does not own.
+model Project {
+  id          String   @id @default(cuid())
+  userId      String
+  name        String
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  memories      Memory[]
+  conversations Conversation[]
+
+  @@unique([userId, name])
+  @@unique([id, userId])
 }
 
 model Message {
@@ -168,12 +195,20 @@ model Memory {
   // (DEFAULT CURRENT_TIMESTAMP); @updatedAt keeps client-side freshness.
   updatedAt            DateTime                     @default(now()) @updatedAt
   expiresAt            DateTime?
+  // Phase 14 — null: a PERSONAL memory. Otherwise the one project, of the same
+  // user, that this memory belongs to. Deleting a project deletes its
+  // memories; it never turns them into personal ones.
+  projectId            String?
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project Project? @relation(fields: [projectId, userId], references: [id, userId], onDelete: Cascade)
 
   @@index([userId])
   @@index([userId, type])
   @@index([userId, createdAt])
+  @@index([userId, projectId])
+  // The retention sweep finds expired rows across users by this.
+  @@index([expiresAt])
 }
 
 model KnowledgeDocument {

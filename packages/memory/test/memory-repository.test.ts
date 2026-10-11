@@ -93,7 +93,7 @@ function createMockPrisma() {
         take,
       }: {
         where: Record<string, unknown>;
-        orderBy?: Record<string, string>;
+        orderBy?: Record<string, string> | Array<Record<string, string>>;
         skip?: number;
         take?: number;
       }) => {
@@ -118,9 +118,13 @@ function createMockPrisma() {
           return true;
         });
 
-        if (orderBy?.createdAt === "desc") {
+        // Audit F5 — list() orders by createdAt, then id, both descending.
+        const order = Array.isArray(orderBy) ? orderBy : orderBy ? [orderBy] : [];
+        if (order[0]?.createdAt === "desc") {
           rows = rows.sort(
-            (a, b) => b.createdAt.getTime() - a.createdAt.getTime()
+            (a, b) =>
+              b.createdAt.getTime() - a.createdAt.getTime() ||
+              (order[1]?.id === "desc" ? (a.id < b.id ? 1 : a.id > b.id ? -1 : 0) : 0)
           );
         }
 
@@ -191,8 +195,17 @@ function createMockPrisma() {
   };
 }
 
+// Phase 14 — list() reads its page and its total inside one transaction, so
+// this fake offers one, as the real client does: a batch (an array of
+// operations) or a callback. Nothing else changed here.
+function withTransaction<T extends object>(client: T): T {
+  return Object.assign(client, {
+    $transaction: async (work: Array<Promise<unknown>> | ((tx: T) => unknown)) => (Array.isArray(work) ? Promise.all(work) : work(client)),
+  });
+}
+
 function createRepo() {
-  const mockPrisma = createMockPrisma() as never;
+  const mockPrisma = withTransaction(createMockPrisma()) as never;
   return new PrismaMemoryRepository(mockPrisma);
 }
 

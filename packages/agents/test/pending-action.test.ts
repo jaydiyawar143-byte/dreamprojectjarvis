@@ -53,6 +53,18 @@ function createMockApprovalRepo() {
       }
       return approval;
     },
+    // The conditional write (PrismaApprovalRepository.decideApproval): only a
+    // waiting approval changes; any other answer is told what happened instead.
+    async decideApproval(id: string, _userId: string, decision: "approve" | "reject") {
+      const approval = store.get(id);
+      if (!approval) return { outcome: "not_found" };
+      if (approval.status === "consumed") return { outcome: "already_consumed" };
+      if (approval.status === "rejected") return { outcome: "already_rejected" };
+      if (approval.status !== "pending") return { outcome: "conflict", currentState: approval.status.toUpperCase() };
+      approval.status = decision === "approve" ? "approved" : "rejected";
+      approval.resolvedAt = new Date().toISOString();
+      return { outcome: approval.status };
+    },
     async findPendingByConversationId(conversationId: string, _userId: string): Promise<Approval | null> {
       for (const a of store.values()) {
         if (a.conversationId === conversationId && a.status === "pending") {

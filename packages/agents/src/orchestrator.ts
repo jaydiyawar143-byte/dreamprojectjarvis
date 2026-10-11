@@ -13,26 +13,20 @@ import type {
   ToolExecutionSummary,
   ToolExecutionEntry,
   ToolExecutionStatus,
-  IMemoryStore,
   IMemoryExtractor,
   IEmbeddingProvider,
   IToolApprovalService,
-  MemoryStoreRequest,
-  MemoryRecallRequest,
   MemoryRecallResult,
-  MemoryDeleteRequest,
-  MemoryUpdateRequest,
-  MemoryListRequest,
-  MemoryListResult,
-  MemoryRecord,
   MemoryContextConfig,
   ITool,
   IKnowledgeRetriever,
   KnowledgeContextConfig,
   IPermissionChecker,
   RetrievedChunk,
+  MemoryRecallPort,
+  MemoryLearningControl,
 } from "@jarvis/core";
-import { JarvisError, decideSurface, classifyToolFailures, toClientErrorDetails } from "@jarvis/core";
+import { JarvisError, decideSurface, classifyToolFailures, toClientErrorDetails, rankMemories, scoreMemoryRelevance, MEMORY_SIMILARITY_FLOOR } from "@jarvis/core";
 import type { SurfaceDecision } from "@jarvis/core";
 import type { AgentPolicy, AgentResolution, ISkillContextProvider } from "@jarvis/core";
 import { renderSkillContext } from "@jarvis/core";
@@ -91,7 +85,7 @@ export interface KnowledgeInjection {
 
 const DEFAULT_MAX_TOOL_EXECUTIONS = 10;
 const DEFAULT_MAX_ORCHESTRATION_DEPTH = 5;
-const DEFAULT_RELEVANCE_THRESHOLD = 0.3;
+const DEFAULT_RELEVANCE_THRESHOLD = MEMORY_SIMILARITY_FLOOR;
 const DEFAULT_MAX_MEMORIES = 5;
 const DEFAULT_CONTEXT_BUDGET_CHARS = 2000;
 
@@ -114,27 +108,11 @@ function safeErrorCode(error: unknown): string | undefined {
   return typeof code === "string" && /^[A-Z0-9_]{1,40}$/.test(code) ? code : undefined;
 }
 
-const createNoopMemoryStore = (): IMemoryStore => ({
-  id: "noop-memory",
-  name: "Noop Memory Store",
-  store: async (_request: MemoryStoreRequest): Promise<MemoryRecord[]> => [],
-  getById: async (): Promise<MemoryRecord | null> => null,
-  recall: async (_request: MemoryRecallRequest): Promise<MemoryRecallResult[]> => [],
-  list: async (_request: MemoryListRequest): Promise<MemoryListResult> => ({ memories: [], total: 0, hasMore: false }),
-  delete: async (_request: MemoryDeleteRequest): Promise<number> => 0,
-  deleteAll: async (): Promise<number> => 0,
-  update: async (_request: MemoryUpdateRequest): Promise<MemoryRecord> => {
-    throw new JarvisError("MEMORY_ERROR", "No memory store configured");
-  },
-  findSimilar: async (): Promise<MemoryRecord[]> => [],
-  count: async (): Promise<number> => 0,
-  isAvailable: async (): Promise<boolean> => false,
-});
-
 export class Orchestrator implements IOrchestrator {
   private readonly maxToolExecutions: number;
   private readonly maxOrchestrationDepth: number;
-  private readonly memoryStore: IMemoryStore | null;
+  private readonly memoryStore: MemoryRecallPort | null;
+  private readonly memoryControl: { get(userId: string): Promise<MemoryLearningControl> } | null;
   private readonly memoryExtractor: IMemoryExtractor | null;
   private readonly embeddingProvider: IEmbeddingProvider | null;
   private readonly memoryConfig: Required<MemoryContextConfig>;
@@ -159,6 +137,7 @@ export class Orchestrator implements IOrchestrator {
     this.maxToolExecutions = config.maxToolExecutions ?? DEFAULT_MAX_TOOL_EXECUTIONS;
     this.maxOrchestrationDepth = config.maxOrchestrationDepth ?? DEFAULT_MAX_ORCHESTRATION_DEPTH;
     this.memoryStore = config.memoryStore ?? null;
+    this.memoryControl = config.memoryControl ?? null;
     this.memoryExtractor = config.memoryExtractor ?? null;
     this.embeddingProvider = config.embeddingProvider ?? null;
     this.memoryConfig = {
@@ -202,7 +181,8 @@ export class Orchestrator implements IOrchestrator {
         userId: context.auth.userId,
         conversationId: context.conversationId,
         traceId: context.traceId,
-        memoryManager: this.memoryStore ?? createNoopMemoryStore(),
+        // Phase 14 — no memory store: an agent gets recalled memory as turn
+        // context and reads its user's memories only through `memory.list`.
         // Sprint 6.9 — least privilege. The agent sees only the tools its
         // policy grants, so an agent that looks a tool up directly (the Meta
         // and Google agents both preload account context this way) cannot
@@ -242,7 +222,7 @@ export class Orchestrator implements IOrchestrator {
       // produced: knowledge block, then memory block.
       // ---------------------------------------------------------------------
       const [memory, knowledgeResult, skillBlock] = await Promise.all([
-        this.recallMemoryBlock(request.message, context.auth.userId),
+        this.recallMemoryBlock(request.message, context.auth.userId, context.projectId ?? null),
         this.retrieveKnowledgeContext(request.message, context.auth.userId),
         this.buildSkillBlock(context.auth.userId, policy),
       ]);
@@ -551,10 +531,17 @@ export class Orchestrator implements IOrchestrator {
     }
   }
 
-  /** The `<user_memories>` block for this message, or "" when nothing was recalled. */
+  /**
+   * The `<user_memories>` block for this message, or "" when nothing was recalled.
+   *
+   * Phase 14 — `projectId` is the project of this turn's conversation, read by
+   * the chat route from the conversation row. Personal memories are recalled
+   * in every conversation; a project's memories only in that project's.
+   */
   private async recallMemoryBlock(
     userMessage: string,
     userId: string,
+    projectId: string | null = null,
   ): Promise<{ block: string; memoryIds: string[] }> {
     const none = { block: "", memoryIds: [] };
     if (!this.memoryStore) return none;
@@ -563,7 +550,16 @@ export class Orchestrator implements IOrchestrator {
       const isAvailable = await this.isMemoryAvailable();
       if (!isAvailable) return none;
 
-      const memories = await this.recallMemories(userMessage, userId);
+      // The recall and the user's controls, together: neither waits for the other.
+      const [recalled, vetoed] = await Promise.all([
+        this.recallMemories(userMessage, userId, projectId),
+        this.vetoedSources(userId),
+      ]);
+      // Phase 14 — controls that cannot be read recall nothing (fail closed).
+      if (vetoed === null) return none;
+      // A memory learned from a message the user said not to learn from is
+      // not used, even before they confirm forgetting it.
+      const memories = recalled.filter((r) => !r.memory.sourceMessageId || !vetoed.has(r.memory.sourceMessageId));
       if (memories.length === 0) return none;
 
       const block = this.formatMemoryBlock(memories);
@@ -573,9 +569,21 @@ export class Orchestrator implements IOrchestrator {
     }
   }
 
+  /** The source messages the user vetoed; an empty set without controls; null when they cannot be read. */
+  private async vetoedSources(userId: string): Promise<ReadonlySet<string> | null> {
+    if (!this.memoryControl) return new Set();
+    try {
+      return new Set((await this.memoryControl.get(userId)).vetoedSourceMessageIds);
+    } catch {
+      console.log(JSON.stringify({ level: "warn", event: "memory_recall_blocked", reason: "CONTROLS_UNREADABLE" }));
+      return null;
+    }
+  }
+
   private async recallMemories(
     query: string,
     userId: string,
+    projectId: string | null = null,
   ): Promise<MemoryRecallResult[]> {
     if (!this.memoryStore) return [];
 
@@ -586,6 +594,8 @@ export class Orchestrator implements IOrchestrator {
       const queryEmbedding = await this.getQueryEmbedding(query);
       if (queryEmbedding && queryEmbedding.length > 0) {
         try {
+          // Phase 14 — the store returns its results already ranked by the
+          // one relevance score (core, memory-relevance.ts).
           const results = await this.memoryStore.recall({
             userId,
             query,
@@ -594,6 +604,7 @@ export class Orchestrator implements IOrchestrator {
             // S7 — the relevance threshold is a SIMILARITY floor, the same one
             // the fallback below applies. It is not an importance floor.
             minSimilarity: this.memoryConfig.relevanceThreshold,
+            projectId,
           });
           if (results && results.length > 0) {
             return results;
@@ -616,14 +627,18 @@ export class Orchestrator implements IOrchestrator {
         }
       }
 
+      // The fallback: the newest 50, in the same scope, scored the same way.
+      // It is what still serves rows that have an embedding only in metadata.
       const listResult = await this.memoryStore.list({
         userId,
         limit: 50,
         includeExpired: false,
+        scope: { kind: "VISIBLE_IN", projectId },
       });
 
       if (listResult.memories.length === 0) return [];
 
+      const now = new Date();
       const results: MemoryRecallResult[] = [];
       for (const memory of listResult.memories) {
         const embedding = (memory.metadata?.embedding as number[]) ?? null;
@@ -631,28 +646,20 @@ export class Orchestrator implements IOrchestrator {
 
         if (!queryEmbedding) continue;
 
+        // A store that ignored the scope must still never leak a project's memory.
+        if (memory.projectId && memory.projectId !== projectId) continue;
+
         let dot = 0;
         for (let i = 0; i < Math.min(queryEmbedding.length, embedding.length); i++) {
           dot += queryEmbedding[i] * embedding[i];
         }
 
         if (dot >= this.memoryConfig.relevanceThreshold) {
-          const hoursSinceAccess = memory.lastAccessedAt
-            ? (Date.now() - memory.lastAccessedAt.getTime()) / (1000 * 60 * 60)
-            : 168;
-          const recencyScore = Math.exp(-hoursSinceAccess / 168);
-
-          results.push({
-            memory,
-            semanticScore: dot,
-            recencyScore,
-            finalScore: dot * 0.7 + recencyScore * 0.3,
-          });
+          results.push(scoreMemoryRelevance(memory, dot, now));
         }
       }
 
-      results.sort((a, b) => b.finalScore - a.finalScore);
-      return results.slice(0, this.memoryConfig.maxMemories);
+      return rankMemories(results, this.memoryConfig.maxMemories);
     } catch {
       return [];
     }
@@ -876,6 +883,8 @@ export class Orchestrator implements IOrchestrator {
         ],
         conversationId: context.conversationId,
         expiryDays: this.memoryConfig.extractionExpiryDays,
+        // Phase 14 — what this turn teaches belongs to its conversation's project.
+        ...(context.projectId ? { projectId: context.projectId } : {}),
       });
     } catch {
       // Extraction failure must not affect the response
@@ -1058,7 +1067,6 @@ export class Orchestrator implements IOrchestrator {
         userId: context.auth.userId,
         conversationId: context.conversationId,
         traceId: context.traceId,
-        memoryManager: this.memoryStore ?? createNoopMemoryStore(),
         toolRegistry: this.scopeRegistryForAgent(policy),
         auditLogger: this.auditLogger,
       });

@@ -445,7 +445,15 @@ describe("Sprint 1.1D: Full Memory E2E Validation Tests", () => {
   const prisma = new PrismaClient();
 
   beforeAll(async () => {
+    // Phase 14 — only ever a SEPARATE test database. The Prisma client reads
+    // packages/db/.env when it is imported, so without this the suite wrote
+    // its fixture users into the development database whenever that happened
+    // to be running. The development (5432) and deployment (5433) databases
+    // are never a target; with one of those configured, the in-process store
+    // is used, exactly as when no database is reachable.
+    const safeTarget = !/:(?:5432|5433)\//.test(process.env.DATABASE_URL ?? "");
     try {
+      if (!safeTarget) throw new Error("not a test database");
       await prisma.$connect();
       // Prove the connection actually works rather than trusting $connect,
       // which can resolve lazily.
@@ -453,6 +461,15 @@ describe("Sprint 1.1D: Full Memory E2E Validation Tests", () => {
       isPrismaAvailable = true;
     } catch {
       isPrismaAvailable = false;
+    }
+
+    // Phase 14 — NO SILENT FALLBACK where PostgreSQL is the point of the run.
+    // The in-process store exists so the suite still says something on a
+    // machine with no database; in CI's database step it would turn "the
+    // database is down" into thirteen green tests that touched no database.
+    // JARVIS_REQUIRE_POSTGRES=1 makes that a failure instead.
+    if (!isPrismaAvailable && process.env.JARVIS_REQUIRE_POSTGRES === "1") {
+      throw new Error("sprint-1.1d memory E2E: PostgreSQL is required (JARVIS_REQUIRE_POSTGRES=1) and no separate test database is reachable. Refusing to fall back to the in-process store.");
     }
 
     if (!isPrismaAvailable) return;

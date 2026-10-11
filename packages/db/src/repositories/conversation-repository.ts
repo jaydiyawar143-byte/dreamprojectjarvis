@@ -25,6 +25,7 @@ function toConversation(row: {
   title: string | null;
   userId: string;
   agentId: string | null;
+  projectId?: string | null;
   createdAt: Date;
   updatedAt: Date;
 }): Conversation {
@@ -33,6 +34,7 @@ function toConversation(row: {
     title: row.title,
     userId: row.userId,
     agentId: row.agentId,
+    projectId: row.projectId ?? null,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
@@ -59,6 +61,21 @@ export class PrismaConversationRepository implements ConversationStorePort {
   constructor(private prisma: PrismaClient) {}
 
   async create(input: CreateConversationInput): Promise<Conversation> {
+    // Phase 14 — a conversation in a project. The project is connected by
+    // (id, owner), so one that is not this user's own cannot be attached even
+    // if a caller skipped its check: the create fails instead.
+    if (input.projectId) {
+      const row = await this.prisma.conversation.create({
+        data: {
+          title: input.title ?? null,
+          user: { connect: { id: input.userId } },
+          ...(input.agentId ? { agent: { connect: { id: input.agentId } } } : {}),
+          project: { connect: { id_userId: { id: input.projectId, userId: input.userId } } },
+        },
+      });
+      return toConversation(row);
+    }
+
     const row = await this.prisma.conversation.create({
       data: {
         userId: input.userId,
@@ -67,6 +84,31 @@ export class PrismaConversationRepository implements ConversationStorePort {
       },
     });
     return toConversation(row);
+  }
+
+  /**
+   * Phase 14 — the user's conversation with this exact title, created if they
+   * have none. The memory screen keeps its requests in one such conversation,
+   * so a correction has a saved USER message to point at and a confirmation
+   * has a conversation to belong to.
+   */
+  async findOrCreateTitled(userId: string, title: string): Promise<Conversation> {
+    const existing = await this.prisma.conversation.findFirst({
+      where: { userId, title, projectId: null },
+      orderBy: { createdAt: "asc" },
+    });
+    return existing ? toConversation(existing) : this.create({ userId, title });
+  }
+
+  /** Phase 14 — one saved message, only if it is in a conversation this user owns. */
+  async findMessageOwned(
+    userId: string,
+    messageId: string
+  ): Promise<(ConversationMessage & { conversationId: string }) | null> {
+    const row = await this.prisma.message.findFirst({
+      where: { id: messageId, conversation: { userId } },
+    });
+    return row ? { ...toMessage(row), conversationId: row.conversationId } : null;
   }
 
   async findById(conversationId: string): Promise<Conversation | null> {

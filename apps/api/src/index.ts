@@ -17,6 +17,9 @@ import { createOutcomesRouter } from "./routes/outcomes.js";
 import { createOpportunitiesRouter } from "./routes/opportunities.js";
 import { createAnalysisRouter } from "./routes/analysis.js";
 import { createKnowledgeRouter } from "./routes/knowledge.js";
+import { createMemoryRouter } from "./routes/memory.js";
+import { createProjectsRouter } from "./routes/projects.js";
+import { startMemoryRetentionSweep, type MemoryRetentionScheduler } from "./services/memory-retention-scheduler.js";
 import { createDashboardRouter } from "./routes/dashboard.js";
 import { createAgentsRouter } from "./routes/agents.js";
 import { createActivityRouter } from "./routes/activity.js";
@@ -252,6 +255,9 @@ app.use("/api/v1", createOutcomesRouter(container));
 app.use("/api/v1/opportunities", createOpportunitiesRouter(container));
 app.use("/api/v1/analysis", createAnalysisRouter(container));
 app.use("/api/v1/knowledge", createKnowledgeRouter(container));
+// Phase 14 — the memory screen's API and the projects a memory may belong to.
+app.use("/api/v1/memories", createMemoryRouter(container));
+app.use("/api/v1/projects", createProjectsRouter(container));
 app.use("/api/v1/dashboard", createDashboardRouter(container));
 // UI V2 — read-only windows on data the server already owns. Both are
 // auth-gated; activity is scoped to the caller's own rows.
@@ -622,6 +628,8 @@ installProcessErrorHandlers();
  * here is what makes the drain WAIT for a sweep that was already running.
  */
 let taskSchedulerLoop: TaskSchedulerLoop | null = null;
+/** Phase 14 — the memory retention sweep; assigned after `listen`, stopped on shutdown. */
+let memoryRetentionSweep: MemoryRetentionScheduler | null = null;
 
 const jarvisShutdown = createShutdownController({
   lifecycle,
@@ -631,6 +639,7 @@ const jarvisShutdown = createShutdownController({
   // S8.4 — and stop every MCP server process, if MCP is switched on at all.
   releaseExternalResources: async () => {
     await taskSchedulerLoop?.stop();
+    await memoryRetentionSweep?.stop();
     await getBrowserRuntime()?.shutdown();
     await Promise.all(getMcpConnections().map((connection) => connection.close()));
   },
@@ -708,6 +717,22 @@ httpServer.listen(env.PORT, () => {
     lifecycle,
     intervalMs: env.TASK_SCHEDULER_INTERVAL_MS,
     log: (level, event, meta) => operationalLog.child("task-scheduler")[level](event, meta),
+  });
+
+  // -------------------------------------------------------------------------
+  // Phase 14 at runtime — the memory retention sweep.
+  //
+  // AFTER listen, like the two loops above. An expired memory is already
+  // hidden from recall the moment it expires; this is what eventually deletes
+  // the row. Bounded per sweep, never overlapping, stopped when draining
+  // begins. Gated on JARVIS_MEMORY_RETENTION_INTERVAL_MS; 0 disables it and
+  // the scheduler logs that it is off.
+  // -------------------------------------------------------------------------
+  memoryRetentionSweep = startMemoryRetentionSweep({
+    sweep: container.memoryRetention,
+    lifecycle,
+    intervalMs: env.MEMORY_RETENTION_INTERVAL_MS,
+    log: (level, event, meta) => operationalLog.child("memory-retention")[level](event, meta),
   });
 
   // -------------------------------------------------------------------------
