@@ -110,6 +110,13 @@ Plan → Explain → Confirm → Execute → Audit → Verify → Report
   PENDING_ACTION_MISMATCH` (or `404` when nothing waits) and changes nothing, so
   a screen still showing an older request can never answer a newer one. A
   memory action can never be modified.
+- **One answer wins.** Confirming, cancelling or changing a pending action is
+  ONE conditional `UPDATE` in PostgreSQL (`decideApproval`, `fromPendingOnly`)
+  that applies only while the action is still waiting. Of two answers that
+  arrive together — two tabs, two API instances — exactly one wins; the other
+  gets `409 PENDING_ACTION_ALREADY_RESOLVED` and changes nothing. A cancelled
+  action can never be approved, so it never runs. Never resolve an approval
+  with a read followed by an unconditional write.
 
 ### Google scopes
 
@@ -199,9 +206,9 @@ The six memory end-to-end tests that used to fail on every run (B-1 in
 `docs/CODEBASE_AUDIT.md`) pass since 2026-09-14. The cause was a race in the
 test harness, not a production memory bug. `@jarvis/db` tests need PostgreSQL
 with pgvector: point `DATABASE_URL` at a separate test database, never the
-development one. On a fresh throwaway pgvector database they give 272 passed /
-0 failed (23 files; Phase 14 audit fixes, 2026-10-11). Every workspace's suite
-was run that day, one workspace at a time: 8,135 passed without a database,
+development one. On a fresh throwaway pgvector database they give 276 passed /
+0 failed (24 files; atomic approval fix, 2026-10-11). Every workspace's suite
+was run that day, one workspace at a time: 8,142 passed without a database,
 none failed.
 
 The two memory end-to-end tests (`sprint-1.1d-memory-e2e`, and

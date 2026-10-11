@@ -5,7 +5,7 @@ import { JarvisRequestSchema, JarvisError } from "@jarvis/core";
 import { maskIdentifiersInText } from "@jarvis/core";
 import type { SessionContext, AuthContext } from "@jarvis/core";
 import { createAuthMiddleware, type AuthenticatedRequest } from "../middleware/auth.js";
-import { detectIntent, detectMemoryCommand, detectWorkRequest, type PendingActionService } from "@jarvis/agents";
+import { detectIntent, detectMemoryCommand, detectWorkRequest, PendingActionConflictError, type PendingActionService } from "@jarvis/agents";
 import type {
   ConversationStorePort,
   IOrchestrator,
@@ -317,9 +317,11 @@ export function createChatRouter(container: ChatRouterDeps): Router {
       if (intent.type === "CONFIRM" && pendingAction && container.pendingActionService) {
         await saveUserMessage();
 
+        // The action this turn read is the one confirmed — and executed below.
         const confirmResult = await container.pendingActionService.confirmPendingAction(
           conversationId,
-          authContext.userId
+          authContext.userId,
+          pendingAction.id
         );
 
         if (confirmResult.success && confirmResult.pendingAction) {
@@ -413,7 +415,8 @@ export function createChatRouter(container: ChatRouterDeps): Router {
 
         const rejectResult = await container.pendingActionService.rejectPendingAction(
           conversationId,
-          authContext.userId
+          authContext.userId,
+          pendingAction.id
         );
 
         const assistantMessage = rejectResult.message;
@@ -437,11 +440,22 @@ export function createChatRouter(container: ChatRouterDeps): Router {
       if (intent.type === "MODIFY" && pendingAction && container.pendingActionService && intent.extractedParams) {
         await saveUserMessage();
 
-        const modifyResult = await container.pendingActionService.modifyPendingAction(
-          conversationId,
-          authContext.userId,
-          intent.extractedParams
-        );
+        let modifyResult: Awaited<ReturnType<PendingActionService["modifyPendingAction"]>>;
+        try {
+          modifyResult = await container.pendingActionService.modifyPendingAction(
+            conversationId,
+            authContext.userId,
+            intent.extractedParams,
+            pendingAction.id
+          );
+        } catch (error) {
+          // Another answer resolved it first, or it may not be changed: say
+          // so, and change nothing.
+          if (!(error instanceof PendingActionConflictError)) throw error;
+          await container.conversationRepo.addMessage({ conversationId, role: "assistant", content: error.message, metadata: { traceId } });
+          res.status(200).json({ success: true, data: { message: error.message, conversationId }, traceId, timestamp: new Date().toISOString() });
+          return;
+        }
 
         const assistantMessage = modifyResult.message;
         await container.conversationRepo.addMessage({

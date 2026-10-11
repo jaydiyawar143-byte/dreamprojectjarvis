@@ -329,6 +329,26 @@ describe("Audit F4 / F2 — the screen reports only what the server confirmed", 
     expect(mocked.confirmPendingAction).toHaveBeenCalledWith("pa-1", "conv-memory");
   });
 
+  it("a Confirm that another tab's answer beat (409 already resolved) claims nothing, shows the server's words, and the request leaves the screen", async () => {
+    mocked.confirmPendingAction.mockResolvedValue(
+      refused("PENDING_ACTION_ALREADY_RESOLVED", "That action was already cancelled or replaced, so nothing was confirmed or run.")
+    );
+    fireEvent.click(button(await ask(), "Confirm"));
+
+    expect(await screen.findByText(/already cancelled or replaced/)).toBeTruthy();
+    expect(screen.queryByText("The memory was forgotten.")).toBeNull();
+    await waitFor(() => expect(screen.queryByTestId("memory-confirmation")).toBeNull());
+  });
+
+  it("a Cancel that another tab's Confirm beat (409 already resolved) never says “Cancelled”", async () => {
+    mocked.rejectPendingActionApi.mockResolvedValue(refused("PENDING_ACTION_ALREADY_RESOLVED", "That action was already confirmed, so it can no longer be cancelled."));
+    fireEvent.click(button(await ask(), "Cancel"));
+
+    expect(await screen.findByText(/already confirmed, so it can no longer be cancelled/)).toBeTruthy();
+    expect(screen.queryByText("Cancelled. Nothing was changed.")).toBeNull();
+    await waitFor(() => expect(screen.queryByTestId("memory-confirmation")).toBeNull());
+  });
+
   it("a Confirm the server could not be reached for keeps the request on screen and claims nothing", async () => {
     mocked.confirmPendingAction.mockResolvedValue(refused("NETWORK_ERROR", "Network request failed"));
     fireEvent.click(button(await ask(), "Confirm"));

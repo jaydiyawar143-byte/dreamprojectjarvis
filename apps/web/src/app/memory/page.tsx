@@ -71,10 +71,11 @@ interface Waiting {
 
 /**
  * The server's answer when the request on screen is no longer the one waiting
- * (audit F2): it was replaced, used or expired. Nothing was changed, and there
+ * (audit F2): it was replaced, used or expired — or another answer, from
+ * another tab, resolved it first. Nothing was changed by this one, and there
  * is nothing left for this panel to confirm or cancel.
  */
-const NO_LONGER_WAITING = new Set(["PENDING_ACTION_MISMATCH", "PENDING_ACTION_NOT_FOUND"]);
+const NO_LONGER_WAITING = new Set(["PENDING_ACTION_MISMATCH", "PENDING_ACTION_NOT_FOUND", "PENDING_ACTION_ALREADY_RESOLVED"]);
 
 export default function MemoryPage() {
   const [page, setPage] = useState<MemoryPageData | null>(null);

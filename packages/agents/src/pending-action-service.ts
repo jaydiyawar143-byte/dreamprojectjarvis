@@ -15,6 +15,19 @@ export interface PendingActionServiceConfig {
     updateStatus(id: string, status: ApprovalStatus, resolvedAt?: string): Promise<Approval | null>;
     findPendingByConversationId(conversationId: string, userId: string): Promise<Approval | null>;
     updateParams(id: string, params: Record<string, unknown>, paramsHash: string): Promise<Approval | null>;
+    /**
+     * The ONE conditional write that resolves a waiting action
+     * (PrismaApprovalRepository.decideApproval): UPDATE … WHERE status is
+     * PENDING and unexpired, with the affected-row count deciding the winner.
+     * `fromPendingOnly` makes a reject, like an approve, apply only while the
+     * approval is still PENDING.
+     */
+    decideApproval(
+      id: string,
+      userId: string,
+      decision: "approve" | "reject",
+      options?: { fromPendingOnly?: boolean }
+    ): Promise<{ outcome: string; currentState?: string }>;
   };
   toolRegistry: {
     get(toolId: string): ITool | undefined;
@@ -39,11 +52,14 @@ export interface PendingActionResult {
 
 /**
  * Why an answer to a pending action changed nothing.
- *   NOT_FOUND  nothing is waiting in this conversation
- *   MISMATCH   something is waiting, but not the action the caller named
- *   FAILED     the approval could not be moved
+ *   NOT_FOUND         nothing is waiting in this conversation
+ *   MISMATCH          something is waiting, but not the action the caller named
+ *   ALREADY_RESOLVED  the action was waiting when read, but another answer
+ *                     resolved it first (it was confirmed, cancelled or
+ *                     replaced) — this answer lost and changed nothing
+ *   FAILED            the approval could not be moved
  */
-export type PendingActionRefusal = "NOT_FOUND" | "MISMATCH" | "FAILED";
+export type PendingActionRefusal = "NOT_FOUND" | "MISMATCH" | "ALREADY_RESOLVED" | "FAILED";
 
 export interface ConfirmResult {
   success: boolean;
@@ -56,12 +72,13 @@ export interface ConfirmResult {
 
 /**
  * A modification that must not happen: the caller named an action that is not
- * the one waiting (MISMATCH), or the waiting action may never be modified
- * (NOT_MODIFIABLE). Nothing was changed.
+ * the one waiting (MISMATCH), the waiting action may never be modified
+ * (NOT_MODIFIABLE), or another answer resolved it first (ALREADY_RESOLVED).
+ * Nothing was changed.
  */
 export class PendingActionConflictError extends Error {
   constructor(
-    readonly reason: "MISMATCH" | "NOT_MODIFIABLE",
+    readonly reason: "MISMATCH" | "NOT_MODIFIABLE" | "ALREADY_RESOLVED",
     message: string
   ) {
     super(message);
@@ -71,6 +88,40 @@ export class PendingActionConflictError extends Error {
 
 export const PENDING_ACTION_MISMATCH_MESSAGE =
   "That is no longer the action waiting for your confirmation, so nothing was changed. Answer the latest request instead.";
+
+type Answer = "confirm" | "cancel" | "change";
+
+/**
+ * What a refused conditional write means, said truthfully. Another answer won
+ * the action — it was confirmed, or cancelled or replaced — or it is gone.
+ */
+function refusedDecision(answer: Answer, decided: { outcome: string; currentState?: string }): { reason: PendingActionRefusal; message: string } {
+  const verb = answer === "cancel" ? "cancelled" : "changed";
+  if (decided.outcome === "already_consumed" || (decided.outcome === "conflict" && decided.currentState === "APPROVED")) {
+    return {
+      reason: "ALREADY_RESOLVED",
+      message: answer === "confirm" ? "That action was already confirmed." : `That action was already confirmed, so it can no longer be ${verb}.`,
+    };
+  }
+  if (decided.outcome === "already_rejected") {
+    return {
+      reason: "ALREADY_RESOLVED",
+      message:
+        answer === "confirm"
+          ? "That action was already cancelled or replaced, so nothing was confirmed or run."
+          : answer === "cancel"
+            ? "That action was already cancelled or replaced."
+            : "That action was already cancelled or replaced, so it can no longer be changed.",
+    };
+  }
+  if (decided.outcome === "expired" || decided.currentState === "EXPIRED") {
+    return { reason: "NOT_FOUND", message: "That action has expired, so nothing was changed." };
+  }
+  if (decided.outcome === "conflict") {
+    return { reason: "FAILED", message: "That action could not be resolved, so nothing was changed." };
+  }
+  return { reason: "NOT_FOUND", message: "No pending action found for this conversation." };
+}
 
 export interface ModifyResult {
   pendingAction: PendingAction;
@@ -180,6 +231,35 @@ export class PendingActionService {
   }
 
   /**
+   * Resolves the waiting action with ONE conditional write.
+   *
+   * Reading the action as waiting proves nothing by the time it is written:
+   * a Confirm and a Cancel — in this process or another API instance — can
+   * both have read it. The write therefore re-checks it in the database
+   * (decideApproval, `fromPendingOnly`): it changes the row only while the
+   * action is still PENDING and unexpired, and the affected-row count decides
+   * the winner. Exactly one answer wins; the other gets ALREADY_RESOLVED and
+   * changes nothing. A cancelled action can therefore never be approved, so it
+   * can never be consumed or run; an approved one is consumed at most once.
+   */
+  private async decide(
+    pending: PendingAction,
+    userId: string,
+    decision: "approve" | "reject",
+    answer: Answer
+  ): Promise<{ ok: true } | { ok: false; reason: PendingActionRefusal; message: string }> {
+    let decided: { outcome: string; currentState?: string };
+    try {
+      decided = await this.config.approvalRepo.decideApproval(pending.approvalId, userId, decision, { fromPendingOnly: true });
+    } catch {
+      const verb = answer === "confirm" ? "confirmed" : answer === "cancel" ? "cancelled" : "changed";
+      return { ok: false, reason: "FAILED", message: `That action could not be ${verb} right now, so nothing was changed.` };
+    }
+    if (decided.outcome === (decision === "approve" ? "approved" : "rejected")) return { ok: true };
+    return { ok: false, ...refusedDecision(answer, decided) };
+  }
+
+  /**
    * Confirm a pending action. Transitions the approval to APPROVED.
    * Does NOT execute the tool — the caller is responsible for execution.
    * With `actionId`, only that action is confirmed (see waitingAction).
@@ -195,18 +275,11 @@ export class PendingActionService {
     }
     const { pending } = found;
 
-    // Transition to APPROVED — this action's own approval, by its id.
-    const result = await this.config.approvalRepo.updateStatus(
-      pending.approvalId,
-      "approved"
-    );
-
-    if (!result) {
-      return {
-        success: false,
-        reason: "FAILED",
-        message: "Failed to approve the pending action.",
-      };
+    // Transition to APPROVED — this action's own approval, by its id, and
+    // only if it is still waiting (see decide).
+    const decided = await this.decide(pending, userId, "approve", "confirm");
+    if (!decided.ok) {
+      return { success: false, reason: decided.reason, message: decided.message };
     }
 
     return {
@@ -234,17 +307,11 @@ export class PendingActionService {
     }
     const { pending } = found;
 
-    const result = await this.config.approvalRepo.updateStatus(
-      pending.approvalId,
-      "rejected"
-    );
-
-    if (!result) {
-      return {
-        success: false,
-        reason: "FAILED",
-        message: "Failed to reject the pending action.",
-      };
+    // Only if it is still waiting: a confirmed action cannot be cancelled
+    // after the fact (see decide).
+    const decided = await this.decide(pending, userId, "reject", "cancel");
+    if (!decided.ok) {
+      return { success: false, reason: decided.reason, message: decided.message };
     }
 
     return {
@@ -280,11 +347,13 @@ export class PendingActionService {
     // Merge params: old params + new overrides
     const mergedParams = { ...pending.params, ...newParams };
 
-    // Reject the old approval
-    await this.config.approvalRepo.updateStatus(
-      pending.approvalId,
-      "rejected"
-    );
+    // Reject the old approval — only if it is still waiting. A Confirm (or
+    // another change) that resolved it first wins, and no replacement is made.
+    const decided = await this.decide(pending, userId, "reject", "change");
+    if (!decided.ok) {
+      if (decided.reason === "ALREADY_RESOLVED") throw new PendingActionConflictError("ALREADY_RESOLVED", decided.message);
+      throw new Error(decided.message);
+    }
 
     // Create a new pending action with merged params
     const result = await this.createPendingAction({

@@ -41,6 +41,17 @@ function approvalRepo() {
       approval.status = status as Approval["status"];
       return approval;
     },
+    // The conditional write (PrismaApprovalRepository.decideApproval): only a
+    // waiting approval changes; any other answer is told what happened instead.
+    async decideApproval(id: string, userId: string, decision: "approve" | "reject") {
+      const approval = rows.get(id);
+      if (!approval || approval.userId !== userId) return { outcome: "not_found" };
+      if (approval.status === "consumed") return { outcome: "already_consumed" };
+      if (approval.status === "rejected") return { outcome: "already_rejected" };
+      if (approval.status !== "pending") return { outcome: "conflict", currentState: approval.status.toUpperCase() };
+      approval.status = decision === "approve" ? "approved" : "rejected";
+      return { outcome: approval.status };
+    },
     async findPendingByConversationId(conversationId: string, userId: string) {
       return [...rows.values()].reverse().find((a) => a.conversationId === conversationId && a.userId === userId && a.status === "pending") ?? null;
     },
@@ -64,9 +75,60 @@ interface Reply {
   body: { success: boolean; data?: Record<string, any>; error?: { code: string; message: string } };
 }
 
-function world() {
+type Decision = "approve" | "reject";
+
+/** Points a race needs to hold: after the waiting action is read, and around the write that resolves it. */
+interface RaceHooks {
+  afterRead?: () => Promise<void>;
+  beforeWrite?: (decision: Decision) => Promise<void>;
+  afterWrite?: (decision: Decision) => void;
+}
+
+/** Resolves for every party once `parties` of them have arrived. */
+function barrier(parties: number): () => Promise<void> {
+  let arrived = 0;
+  let open!: () => void;
+  const opened = new Promise<void>((resolve) => (open = resolve));
+  return () => {
+    arrived++;
+    if (arrived === parties) open();
+    return opened;
+  };
+}
+
+/** The `first` decision writes first; the other waits until it has finished. */
+function writesFirst(first: Decision): RaceHooks {
+  let done!: () => void;
+  const firstDone = new Promise<void>((resolve) => (done = resolve));
+  return {
+    beforeWrite: async (decision) => {
+      if (decision !== first) await firstDone;
+    },
+    afterWrite: (decision) => {
+      if (decision === first) done();
+    },
+  };
+}
+
+function world(hooks: RaceHooks = {}) {
   const approvals = approvalRepo();
-  const pending = new PendingActionService({ approvalRepo: approvals, toolRegistry: { get: () => undefined, getAll: () => [] } });
+  const raced = {
+    ...approvals,
+    async findPendingByConversationId(conversationId: string, userId: string) {
+      const found = await approvals.findPendingByConversationId(conversationId, userId);
+      await hooks.afterRead?.();
+      return found;
+    },
+    async decideApproval(id: string, userId: string, decision: Decision) {
+      await hooks.beforeWrite?.(decision);
+      try {
+        return await approvals.decideApproval(id, userId, decision);
+      } finally {
+        hooks.afterWrite?.(decision);
+      }
+    },
+  };
+  const pending = new PendingActionService({ approvalRepo: raced, toolRegistry: { get: () => undefined, getAll: () => [] } });
   const executed: ToolExecutionRequest[] = [];
   const executor: IToolExecutor = {
     async execute(request): Promise<ToolExecutionResult> {
@@ -222,6 +284,63 @@ describe("F2 — the id in the path is the action that is answered", () => {
     expect(reply.status).toBe(404);
     expect(env.statusOf(theirs.id)).toBe("pending");
     expect(env.executed).toEqual([]);
+  });
+});
+
+describe("Atomic resolution — answers that both read the action as waiting (in-process model of the conditional write)", () => {
+  // The PostgreSQL version — two connection pools, the real repository, the
+  // real executor and audit log — is pending-action-atomic-pg.integration.test.ts.
+  const PAUSE = { campaignId: "c-1" };
+
+  it.each(["approve", "reject"] as const)(
+    "Confirm against Cancel (%s writes first): one 200, one 409 PENDING_ACTION_ALREADY_RESOLVED, and the executor runs only if Confirm won",
+    async (first) => {
+      const env = world({ afterRead: barrier(2), ...writesFirst(first) });
+      const shown = await env.propose("meta.campaign.pause", PAUSE);
+
+      const [confirm, cancel] = await Promise.all([
+        env.call(`/pending-actions/${shown.id}/confirm`, { conversationId: "conv-1" }),
+        env.call(`/pending-actions/${shown.id}/reject`, { conversationId: "conv-1" }),
+      ]);
+
+      const [winner, loser] = first === "approve" ? [confirm, cancel] : [cancel, confirm];
+      expect(winner.status).toBe(200);
+      expect(loser.status).toBe(409);
+      expect(loser.body.success).toBe(false);
+      expect(loser.body.error?.code).toBe("PENDING_ACTION_ALREADY_RESOLVED");
+      expect(env.executed).toHaveLength(first === "approve" ? 1 : 0);
+      expect(env.statusOf(shown.id)).toBe(first === "approve" ? "approved" : "rejected");
+    }
+  );
+
+  it("two Confirms that both read the action as waiting: the executor runs once, and the other is told it was already confirmed", async () => {
+    const env = world({ afterRead: barrier(2) });
+    const shown = await env.propose("meta.campaign.pause", PAUSE);
+
+    const replies = await Promise.all([
+      env.call(`/pending-actions/${shown.id}/confirm`, { conversationId: "conv-1" }),
+      env.call(`/pending-actions/${shown.id}/confirm`, { conversationId: "conv-1" }),
+    ]);
+
+    expect(replies.map((r) => r.status).sort()).toEqual([200, 409]);
+    expect(replies.find((r) => r.status === 409)!.body.error?.message).toMatch(/already confirmed/);
+    expect(env.executed).toHaveLength(1);
+  });
+
+  it("Modify against Confirm, Confirm writing first: the Modify answers 409 and creates no replacement", async () => {
+    const env = world({ afterRead: barrier(2), ...writesFirst("approve") });
+    const shown = await env.propose("meta.campaign.budget.update", { campaignId: "c-1", dailyBudget: 5000 });
+
+    const [confirm, modify] = await Promise.all([
+      env.call(`/pending-actions/${shown.id}/confirm`, { conversationId: "conv-1" }),
+      env.call(`/pending-actions/${shown.id}/modify`, { conversationId: "conv-1", params: { dailyBudget: 1 } }),
+    ]);
+
+    expect(confirm.status).toBe(200);
+    expect(modify.status).toBe(409);
+    expect(modify.body.error?.code).toBe("PENDING_ACTION_ALREADY_RESOLVED");
+    expect(env.approvals.rows.size).toBe(1);
+    expect(env.executed).toEqual([expect.objectContaining({ params: { campaignId: "c-1", dailyBudget: 5000 } })]);
   });
 });
 

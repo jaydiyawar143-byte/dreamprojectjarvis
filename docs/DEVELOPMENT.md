@@ -127,8 +127,8 @@ DATABASE_URL=postgresql://USER:PASSWORD@127.0.0.1:5436/DB?schema=public JARVIS_R
 | Memory contracts (Phase 14) | `vitest run memory learning` in `@jarvis/core`, `vitest run memory-tools` in `@jarvis/tools`, `vitest run memory` in `@jarvis/agents` — by file name; those workspaces' other tests are still not gated |
 | Migrations | `pnpm --filter @jarvis/db exec prisma migrate deploy`, against the CI database |
 | PostgreSQL tests | `vitest run` for all of `@jarvis/db`; `vitest run pg.integration` for `@jarvis/memory`; `vitest run pg.integration sprint-1.1d-memory-e2e` for `@jarvis/api` |
-| Memory quality evaluation (Phase 14) | `vitest run memory-quality-eval-p14-pg` in `@jarvis/memory`, against the CI database — its own gate, with the report in the log |
-| Skip check | `node .github/scripts/assert-no-skipped-tests.mjs` on the PostgreSQL tests' JSON reports |
+| Memory quality evaluation (Phase 14) | `vitest run memory-quality-eval-p14-pg` in `@jarvis/memory`, against the CI database — its own gate, with the report in the log and a JSON report for the skip check |
+| Skip check | `node .github/scripts/assert-no-skipped-tests.mjs` on the PostgreSQL tests' JSON reports — `@jarvis/db`, `@jarvis/memory`, `@jarvis/api` and the evaluation step |
 
 Any failure fails the run. Each test step runs once the build has passed, even if an earlier test step failed, so one run lists every failing suite.
 

@@ -14,8 +14,10 @@
 #   @jarvis/agents (by file name: their other tests are still not gated), and
 #   the memory quality evaluation, printed as a report. In the database steps
 #   JARVIS_REQUIRE_POSTGRES=1 makes the two memory end-to-end tests FAIL rather
-#   than fall back or skip if PostgreSQL cannot be reached. No step calls a
-#   model provider: the real-embedding evaluation is opt-in and never runs here.
+#   than fall back or skip if PostgreSQL cannot be reached, and the skip check
+#   reads the evaluation's report too, so it cannot pass with its tests skipped.
+#   No step calls a model provider: the real-embedding evaluation is opt-in and
+#   never runs here.
 #
 # Deliberately not gated yet (docs/DEVELOPMENT.md, "Continuous integration"):
 #   - Test files OUTSIDE @jarvis/api. `typecheck:tests` exists only in that
@@ -186,16 +188,18 @@ jobs:
       # control compliance, correction and project-isolation pass rates, and
       # the weight comparison — and fails the run if a floor is missed. It has
       # already run once inside the memory step above; here it is its own gate
-      # and its report is in the log. No model provider is called.
+      # and its report is in the log. No model provider is called. Its JSON
+      # report goes to the skip check below: a gate whose tests all skipped
+      # (no database) would otherwise pass.
       - name: Memory quality evaluation (PostgreSQL, deterministic)
         if: ${{ !cancelled() && steps.migrate.outcome == 'success' }}
         env:
           DATABASE_URL: postgresql://jarvis_ci:jarvis_ci@127.0.0.1:5436/jarvis_ci?schema=public
-        run: pnpm --filter @jarvis/memory exec vitest run memory-quality-eval-p14-pg
+        run: pnpm --filter @jarvis/memory exec vitest run memory-quality-eval-p14-pg --reporter=default --reporter=json --outputFile.json="$RUNNER_TEMP/vitest-eval.json"
 
       # These suites skip themselves when they cannot reach their database, and
       # vitest counts a skip as a pass. Here a skip means the database never
       # reached the test, so any skipped test — or a missing report — fails.
       - name: No PostgreSQL test was skipped
         if: ${{ !cancelled() && steps.migrate.outcome == 'success' }}
-        run: node .github/scripts/assert-no-skipped-tests.mjs "$RUNNER_TEMP/vitest-db.json" "$RUNNER_TEMP/vitest-memory.json" "$RUNNER_TEMP/vitest-api.json"
+        run: node .github/scripts/assert-no-skipped-tests.mjs "$RUNNER_TEMP/vitest-db.json" "$RUNNER_TEMP/vitest-memory.json" "$RUNNER_TEMP/vitest-api.json" "$RUNNER_TEMP/vitest-eval.json"

@@ -14,6 +14,11 @@
 // 409 PENDING_ACTION_MISMATCH (or 404 when nothing is waiting) and changes
 // nothing: no approval moves and no tool runs. A screen still showing an older
 // request can no longer answer a newer one.
+//
+// ONE WINNER. Answers that arrive together for the SAME action are resolved by
+// one conditional write in PostgreSQL (PendingActionService.decide): exactly
+// one wins; the others get 409 PENDING_ACTION_ALREADY_RESOLVED and change
+// nothing. A cancelled action is never executed.
 // ---------------------------------------------------------------------------
 
 import { Router } from "express";
@@ -27,10 +32,21 @@ import {
   isGoogleWriteApprovalAction,
 } from "../services/google/execute-approved-action.js";
 
-/** How a refused answer is reported: a different action waiting is a conflict, nothing waiting is not found. */
+/**
+ * How a refused answer is reported: a different action waiting, or an action
+ * another answer resolved first, is a conflict; nothing waiting is not found.
+ */
 function refusalOf(reason: PendingActionRefusal | undefined): { status: number; code: string } {
-  return reason === "MISMATCH" ? { status: 409, code: "PENDING_ACTION_MISMATCH" } : { status: 404, code: "PENDING_ACTION_NOT_FOUND" };
+  if (reason === "MISMATCH") return { status: 409, code: "PENDING_ACTION_MISMATCH" };
+  if (reason === "ALREADY_RESOLVED") return { status: 409, code: "PENDING_ACTION_ALREADY_RESOLVED" };
+  return { status: 404, code: "PENDING_ACTION_NOT_FOUND" };
 }
+
+const CONFLICT_CODES = {
+  MISMATCH: "PENDING_ACTION_MISMATCH",
+  NOT_MODIFIABLE: "PENDING_ACTION_NOT_MODIFIABLE",
+  ALREADY_RESOLVED: "PENDING_ACTION_ALREADY_RESOLVED",
+} as const;
 
 export function createPendingActionsRouter(container: Container): Router {
   const router = Router();
@@ -324,10 +340,7 @@ export function createPendingActionsRouter(container: Container): Router {
       if (error instanceof PendingActionConflictError) {
         res.status(409).json({
           success: false,
-          error: {
-            code: error.reason === "MISMATCH" ? "PENDING_ACTION_MISMATCH" : "PENDING_ACTION_NOT_MODIFIABLE",
-            message: error.message,
-          },
+          error: { code: CONFLICT_CODES[error.reason], message: error.message },
           traceId,
           timestamp: new Date().toISOString(),
         });

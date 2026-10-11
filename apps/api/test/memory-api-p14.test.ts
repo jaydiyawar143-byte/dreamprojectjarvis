@@ -186,6 +186,17 @@ function approvalRepo() {
       approval.status = status as Approval["status"];
       return approval;
     },
+    // The conditional write (PrismaApprovalRepository.decideApproval): only a
+    // waiting approval changes; any other answer is told what happened instead.
+    async decideApproval(id: string, userId: string, decision: "approve" | "reject") {
+      const approval = rows.get(id);
+      if (!approval || approval.userId !== userId) return { outcome: "not_found" };
+      if (approval.status === "consumed") return { outcome: "already_consumed" };
+      if (approval.status === "rejected") return { outcome: "already_rejected" };
+      if (approval.status !== "pending") return { outcome: "conflict", currentState: approval.status.toUpperCase() };
+      approval.status = decision === "approve" ? "approved" : "rejected";
+      return { outcome: approval.status };
+    },
     async findPendingByConversationId(conversationId: string, userId: string) {
       return [...rows.values()].reverse().find((a) => a.conversationId === conversationId && a.userId === userId && a.status === "pending") ?? null;
     },

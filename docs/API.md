@@ -59,7 +59,7 @@ Tool parameters, free-text audit fields and the assistant's reply text are never
 | Router | Mount | Endpoints |
 |---|---|---|
 | `approvals.ts` | `/api/v1/approvals` | `GET /`, `GET /:id`, `POST /:id/approve`, `POST /:id/reject` |
-| `pending-actions.ts` | `/api/v1/pending-actions` | `GET /`, `POST /:id/confirm`, `POST /:id/reject`, `POST /:id/modify` — `:id` must be the action waiting in the conversation (`409 PENDING_ACTION_MISMATCH` otherwise; nothing changes) |
+| `pending-actions.ts` | `/api/v1/pending-actions` | `GET /`, `POST /:id/confirm`, `POST /:id/reject`, `POST /:id/modify` — `:id` must be the action waiting in the conversation (`409 PENDING_ACTION_MISMATCH` otherwise; nothing changes). Answers that arrive together for the same action are resolved by one conditional write: exactly one wins, the others get `409 PENDING_ACTION_ALREADY_RESOLVED` and change nothing |
 | `recommendations.ts` | `/api/v1/recommendations` | `GET /`, `GET /:id`, `POST /:id/execute` |
 | `outcomes.ts` | `/api/v1` | `GET /recommendations/:id/outcome`, `GET /outcomes/:id` |
 | `opportunities.ts` | `/api/v1/opportunities` | `GET /`, `GET /:id` |

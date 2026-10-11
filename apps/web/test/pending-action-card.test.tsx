@@ -86,6 +86,16 @@ describe("Audit F2 — the card answers its own action, and claims only what the
     expect(message()).not.toMatch(/success|executed/i);
   });
 
+  it("a Confirm that lost to another answer (409 already resolved) is shown in the server's words — never as success", async () => {
+    mocked.confirmPendingAction.mockResolvedValue(refused("PENDING_ACTION_ALREADY_RESOLVED", "That action was already cancelled or replaced, so nothing was confirmed or run."));
+    render(<PendingActionCard pendingAction={action("meta.campaign.pause")} conversationId="conv-1" />);
+
+    fireEvent.click(screen.getByTestId("confirm-button"));
+
+    await waitFor(() => expect(card().getAttribute("data-state")).toBe("FAILED"));
+    expect(message()).toBe("That action was already cancelled or replaced, so nothing was confirmed or run.");
+  });
+
   it("an action the server ran but which failed shows the tool's own reason, not “undefined” and not success", async () => {
     mocked.confirmPendingAction.mockResolvedValue(
       ok({ pendingAction: {}, executionResult: { status: "failed", result: { success: false, error: "That memory changed after you chose it, so nothing was changed." } } })
