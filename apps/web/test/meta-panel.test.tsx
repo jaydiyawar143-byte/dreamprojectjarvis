@@ -399,7 +399,15 @@ describe("write boundary", () => {
     // /integrations/google/writes/:approvalId/execute, which spends a durable
     // APPROVED approval the user created on this page. It cannot originate a
     // write, and it carries no parameters — the payload is the approved plan.
-    const ALLOWED_WRITE_WRAPPERS = ["executeGoogleWrite"];
+    //
+    // Phase 15 adds the second, deliberately. `executeMarketingPublish` is not
+    // a Meta ADS write and cannot become one: it POSTs
+    // /marketing/content/:id/publish with an approval id and nothing else. It
+    // spends an approval the user decided on the Approvals API, for the exact
+    // text and Page that approval is bound to; the text is read from the saved
+    // item on the server and is not a parameter here. It changes no campaign,
+    // ad set, ad or budget. `marketing-page.test.tsx` pins what it sends.
+    const ALLOWED_WRITE_WRAPPERS = ["executeGoogleWrite", "executeMarketingPublish"];
 
     const forbidden = exported.filter(
       (name) =>

@@ -1,6 +1,6 @@
 # JARVIS Architecture
 
-How the system is built today. Verified against the code on 2026-10-05, commit `68628c0`; the Phase 13 parts — durable confirmations, health, the operational log and error monitor, deployment — on 2026-10-06; the Phase 14 parts — project-scoped memory, the memory API and screen, correction and retention — on 2026-10-08.
+How the system is built today. Verified against the code on 2026-10-05, commit `68628c0`; the Phase 13 parts — durable confirmations, health, the operational log and error monitor, deployment — on 2026-10-06; the Phase 14 parts — project-scoped memory, the memory API and screen, correction and retention — on 2026-10-08; the Phase 15 parts — the marketing workspace — on 2026-10-12.
 
 - For the marketing-intelligence pipeline (analysis → recommendation → approval → outcome) and its phase-by-phase history, see [JARVIS_ARCHITECTURE.md](./JARVIS_ARCHITECTURE.md).
 - The superseded first architecture document is kept at [archive/ARCHITECTURE_LEGACY_2026-08.md](./archive/ARCHITECTURE_LEGACY_2026-08.md). It describes Fastify and Redis; neither is used.
@@ -15,16 +15,17 @@ JARVIS is a pnpm + Turborepo monorepo of 19 workspaces: 2 apps and 17 packages. 
 
 | Concept | Home | Notes |
 |---|---|---|
-| Web UI | `apps/web` | Next.js 14 App Router, 21 pages, Zustand stores, customisable widget grid |
-| HTTP and realtime API | `apps/api` | 26 routers under `/api/v1` ([API.md](./API.md)); Socket.IO; wiring in `src/services/container.ts` |
+| Web UI | `apps/web` | Next.js 14 App Router, 23 pages, Zustand stores, customisable widget grid |
+| HTTP and realtime API | `apps/api` | 28 routers under `/api/v1` ([API.md](./API.md)); Socket.IO; wiring in `src/services/container.ts` |
 | Contracts | `packages/core` | Types, Zod schemas and pure utilities. No I/O. Named "core", but it is **not** the brain |
 | The brain | `packages/agents` | `orchestrator.ts`, `agent-router.ts`, `tool-planner.ts`, `intent-detector.ts`, `agent-policy.ts`, `agents/` |
 | What JARVIS can do | agents + tool allowlists | [SKILLS.md](./SKILLS.md) |
 | Memory and documents | `packages/memory`; storage in `packages/db/src/repositories` | [MEMORY.md](./MEMORY.md) |
+| Marketing workspace | `apps/api/src/services/marketing` (the one implementation); rules in `packages/core`; storage in `packages/db/src/repositories/marketing-repository.ts` | Campaigns, content calendar, page research, reports, recommendations, approval-gated publishing — [MARKETING.md](./MARKETING.md) |
 | Tools | `packages/tools` | Registry, `ToolExecutor`, execution journal, output sanitiser, `AnalysisGenerator` — the shared on-demand account analysis service behind both `POST /api/v1/analysis` and the `meta.analyze` tool |
 | Provider integrations | `packages/ai-openai`, `ai-elevenlabs`, `meta-graph`, `google-ads`, `google-workspace`, `whatsapp`, `n8n`, `browser`, `mcp` | One package per provider. `ai-anthropic` exists but is not wired. `mcp` is the MCP runtime and the only home of the MCP SDK ([its README](../packages/mcp/README.md)) |
 | Widget data | `apps/api/src/services/providers` | Weather, markets, geo, system monitor — used only by the API |
-| Database | `packages/db` | Prisma schema (28 models), 28 migrations, repositories, the single `PrismaClient` |
+| Database | `packages/db` | Prisma schema (33 models), 30 migrations, repositories, the single `PrismaClient` |
 | Operational log and error monitor | `apps/api/src/services/observability` | One of each per process; see Observability below |
 | Security | `packages/security` | scrypt passwords, JWT, AES-256-GCM encryption, RBAC, approvals, audit |
 | Configuration | `packages/config` | Plus a `config.ts` in each integration package ([DEVELOPMENT.md](./DEVELOPMENT.md)) |
@@ -73,7 +74,9 @@ Domain agent → model (OpenAI) → tool calls, limited to the agent's allowlist
    the user's message exactly as typed
    ▼
 Orchestrator — the allowlist is checked again; the write-intent gate refuses
-   any non-read-only call the user did not ask for (audited, never executed)
+   any non-read-only call the user did not ask for (audited, never executed);
+   an approval-gated call from a role that could not run it is refused before
+   any pending action is created (Phase 15)
    ▼
 ToolExecutor — packages/tools
    validate → agent allowlist + role permission → approval gate → single deadline → journal → audit
@@ -96,6 +99,17 @@ One chain, described in [MEMORY.md](./MEMORY.md). What holds across all of it:
 - **The user's controls** — list, forget, correct, veto, pause — are reachable from chat and from the memory API (`/api/v1/memories`) and screen (`/memory`), through the same service. Forgetting and correcting are pending actions the user confirms; there is no endpoint that deletes or edits a memory.
 - **Retention.** A learned memory expires 90 days after the user last stated it and is hidden at once; a bounded sweep, started by the API after it is listening, purges rows 30 days after expiry through the `memory.purge_expired` tool.
 
+## The marketing workspace
+
+Added in Phase 15; the contract is [MARKETING.md](./MARKETING.md). What holds across all of it:
+
+- **One implementation, two ways in.** `MarketingService` (`apps/api/src/services/marketing`) is the only place a marketing rule lives. The `marketing.*` tools hold it as their port, and the Marketing page's router runs those same tools through `ToolExecutor` — one endpoint, one tool. A sentence and a button pass one permission check, one approval gate and one audit row.
+- **It holds no provider and no credential.** A report reads the ad account by running the registered `meta.*` **read** tools through the executor, as a `viewer`. A page is read only through `PublicPageFetcher` (`packages/browser`), which judges every hop and pins the connection to the address it judged. A post goes out only through a `ContentPublisher` — today one: a Facebook Page publisher in `packages/meta-graph`.
+- **Three registrations, three conditions.** The workspace tools always register (they reach only the database). The two page reads register only while `BROWSER_ENABLED=true`. The two publish tools register only when a publisher could be built. What is not registered is offered to no model and has no control on the screen.
+- **Published means read back.** A publish is approval-gated and bound to the exact text and Page; the approval is consumed in the step that claims the execution; the item is claimed by one conditional `UPDATE`; and the item is recorded as published only after the post was read from the provider by its id. A sent post whose outcome is unknown is its own state, and the next attempt looks for it before sending anything.
+- **Nothing is reported that was not read.** Reports and audits are pure functions in `packages/core` over rows that were read; no model writes them. A source that could not be read is listed as unread. Google Ads is recorded as a source and never read.
+- **Scope beside ownership.** A row is its owner's, and optionally one of their projects'. In a conversation the project is the conversation's own.
+
 ## Writes that leave JARVIS
 
 Two gates stand in front of one execution authority.
@@ -110,6 +124,7 @@ Two gates stand in front of one execution authority.
 - Both gates hash parameters with the same canonical function, `computeParamsHash` in `packages/core`, which sorts keys at every depth.
 - The integration command service **gates** an action and hands it to `ToolExecutor`, which **executes** it. Nothing calls a provider write directly. `AGENTS.md` sets out the rules.
 - Google write tools only **plan**: they create an approval row. The write runs when a person approves that row.
+- A marketing publish (`marketing.content.publish`) is the third kind of external write. Its approval carries the exact text and Page; the tool consumes it in the step that claims the execution; and the service checks the saved item against it again before sending. See [MARKETING.md](./MARKETING.md#5-publishing).
 - A voice session cannot confirm a write.
 
 ## Work tasks and scheduling
@@ -178,6 +193,7 @@ One Docker image (`node:24-alpine`, runs as the `node` user) serves both the API
 ## Known gaps
 
 - `@jarvis/ai-anthropic` is built and not wired.
+- Marketing, after Phase 15: JARVIS can publish only a text post (with an optional link) to a Facebook Page; Instagram, LinkedIn, X and the rest can be planned for and not published to. Google Ads figures are in no report — no Google connection carries the Ads scope and no developer token is configured. SEO research reads what a page says about itself: there is no keyword-volume, ranking, traffic or backlink data, because no provider of them is integrated. A client report is a downloaded HTML or Markdown file; nothing sends it. Nothing publishes on a date: the calendar is a plan. See [MARKETING.md](./MARKETING.md) and [phases/phase-15.md](./phases/phase-15.md).
 - `MemoryEngine` is tested and not used at runtime.
 - Memory, after Phase 14: project *state* is still not learned (only the user's own durable statements are, in whichever project they were made); a reworded restatement replaces a memory instead of adding to its evidence; a contradiction replaces without keeping the old wording; memory content is stored as plain text; there is no vector index; and a project cannot be renamed or deleted. See [MEMORY.md](./MEMORY.md#known-limitations).
 - The structured operational log covers start-up, shutdown, failed requests, confirmations, the two background loops and error reports. Everything else still writes its own JSON line without a timestamp, and the request log is text.

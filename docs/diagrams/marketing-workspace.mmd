@@ -1,0 +1,21 @@
+%% Phase 15 — the marketing workspace: where a marketing request goes.
+%% One service, reached the same way from chat and from the Marketing page.
+%% See docs/MARKETING.md. One publish, step by step, is marketing-publish-flow.mmd.
+
+flowchart LR
+    chat["Chat"] --> orch["Orchestrator<br/>allowlist · write-intent gate ·<br/>role · pending action"]
+    orch --> agent["marketing-agent"]
+    agent --> exec
+    page["/marketing page"] --> router["/api/v1/marketing<br/>one endpoint = one tool"]
+    router --> exec["ToolExecutor<br/>validate · role · approval ·<br/>deadline · audit"]
+    exec --> tools["marketing.* tools (17)"]
+    tools --> svc["MarketingService<br/>the one implementation"]
+    svc --> db[("PostgreSQL<br/>MarketingCampaign · ContentItem ·<br/>MarketingReport · MarketingResearch")]
+    svc -- "report reads, as a viewer" --> exec
+    exec --> meta["meta.* READ tools"]
+    meta --> metaApi["Meta ad account"]
+    svc -- "only while BROWSER_ENABLED=true" --> fetcher["PublicPageFetcher<br/>every hop judged ·<br/>connection pinned"]
+    fetcher --> web["a public web page"]
+    svc -- "only inside an approved publish" --> pub["ContentPublisher"]
+    pub --> fb["a Facebook Page"]
+    svc -. "asked, never read" .-> cap["CapabilityService<br/>is Google Ads readable?"]

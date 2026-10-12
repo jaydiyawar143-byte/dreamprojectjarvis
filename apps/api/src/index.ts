@@ -19,6 +19,7 @@ import { createAnalysisRouter } from "./routes/analysis.js";
 import { createKnowledgeRouter } from "./routes/knowledge.js";
 import { createMemoryRouter } from "./routes/memory.js";
 import { createProjectsRouter } from "./routes/projects.js";
+import { createMarketingRouter } from "./routes/marketing.js";
 import { startMemoryRetentionSweep, type MemoryRetentionScheduler } from "./services/memory-retention-scheduler.js";
 import { createDashboardRouter } from "./routes/dashboard.js";
 import { createAgentsRouter } from "./routes/agents.js";
@@ -258,6 +259,19 @@ app.use("/api/v1/knowledge", createKnowledgeRouter(container));
 // Phase 14 — the memory screen's API and the projects a memory may belong to.
 app.use("/api/v1/memories", createMemoryRouter(container));
 app.use("/api/v1/projects", createProjectsRouter(container));
+// Phase 15 — the Marketing page. Every endpoint runs one marketing tool through
+// the executor; the router implements nothing of its own.
+app.use(
+  "/api/v1/marketing",
+  createMarketingRouter({
+    tokenService: container.tokenService,
+    executor: container.executor,
+    toolRegistry: container.toolRegistry,
+    marketing: container.marketing,
+    publishFlow: container.marketingPublishFlow,
+    permissions: container.permissions,
+  })
+);
 app.use("/api/v1/dashboard", createDashboardRouter(container));
 // UI V2 — read-only windows on data the server already owns. Both are
 // auth-gated; activity is scoped to the caller's own rows.

@@ -5,7 +5,7 @@ import type {
   ITool,
   ToolExecutionResult,
 } from "@jarvis/core";
-import { APPROVAL_TTL_MS, MEMORY_CORRECT_TOOL_ID, computeParamsHash, isDestructiveMemoryTool } from "@jarvis/core";
+import { APPROVAL_TTL_MS, MARKETING_TOOL_IDS, MEMORY_CORRECT_TOOL_ID, computeParamsHash, isDestructiveMemoryTool } from "@jarvis/core";
 import type { PendingAction, PendingActionState } from "@jarvis/core";
 
 export interface PendingActionServiceConfig {
@@ -344,6 +344,18 @@ export class PendingActionService {
       throw new PendingActionConflictError("NOT_MODIFIABLE", "A memory action cannot be changed. Cancel it and ask again.");
     }
 
+    // Phase 15 — a publish names the exact text and the exact place the user
+    // was shown, built by the server from the saved item. Changing either here
+    // would put words in front of the user that no longer match what is saved,
+    // and the publish would then refuse them. The way to change a post is to
+    // change the item.
+    if (pending.toolId === MARKETING_TOOL_IDS.contentPublish) {
+      throw new PendingActionConflictError(
+        "NOT_MODIFIABLE",
+        "A publish cannot be changed once it is waiting for you. Cancel it, edit the content item, and ask again."
+      );
+    }
+
     // Merge params: old params + new overrides
     const mergedParams = { ...pending.params, ...newParams };
 
@@ -472,13 +484,33 @@ export class PendingActionService {
     if (p.status) lines.push(`Status: ${p.status}`);
     if (p.campaignId) lines.push(`Campaign ID: ${p.campaignId}`);
 
+    // Phase 15 — what will be posted and where, read from the parameters the
+    // approval is bound to. This is the text that runs, not a model's
+    // description of it.
+    if (pending.toolId === MARKETING_TOOL_IDS.contentPublish) {
+      if (typeof p.targetName === "string") lines.push(`Publish to: ${p.targetName}`);
+      if (typeof p.message === "string") {
+        lines.push("Text to be posted:");
+        lines.push(p.message);
+      }
+      if (typeof p.link === "string") lines.push(`Link: ${p.link}`);
+      lines.push("");
+      lines.push("This will be posted publicly and JARVIS cannot undo it.");
+    }
+
     if (pending.riskLevel === "HIGH_IMPACT" || pending.riskLevel === "FINANCIAL") {
       lines.push("");
       lines.push("⚠ This is a high-risk action. Please confirm carefully.");
     }
 
     lines.push("");
-    lines.push("Reply 'yes' to confirm, 'no' to cancel, or provide updated parameters.");
+    lines.push(
+      pending.toolId === MARKETING_TOOL_IDS.contentPublish
+        ? // A publish cannot be changed while it waits (see modifyPendingAction),
+          // so it is not offered.
+          "Reply 'yes' to publish it, or 'no' to cancel."
+        : "Reply 'yes' to confirm, 'no' to cancel, or provide updated parameters."
+    );
 
     return lines.join("\n");
   }

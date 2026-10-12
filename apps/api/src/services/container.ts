@@ -15,6 +15,7 @@ import {
   GoogleAdsAgent,
   BrowserAgent,
   LocationAgent,
+  MarketingAgent,
   PendingActionService,
   AGENT_IDS,
   AGENT_POLICIES,
@@ -65,8 +66,12 @@ import {
   createBrowserConfig,
   isBrowserConfigured,
   describeBrowserConfigStatus,
+  // Phase 15 — one bounded read of a public page, under the same navigation policy.
+  PublicPageFetcher,
+  isPageResearchEnabled,
+  pageResearchPolicy,
 } from "@jarvis/browser";
-import { createMetaGraphProvider } from "@jarvis/meta-graph";
+import { createMetaGraphProvider, createMetaPagePublisher } from "@jarvis/meta-graph";
 import {
   createGoogleAdsProvider,
   createGoogleConfig,
@@ -112,6 +117,7 @@ import {
   PrismaIntegrationStateRepository,
   PrismaPreferenceRepository,
   PrismaProjectRepository,
+  PrismaMarketingRepository,
 } from "@jarvis/db";
 import { MemoryExtractionService, KnowledgeRetrievalService, MemoryManagementService, MemoryRetentionSweep } from "@jarvis/memory";
 import { createMemoryToolPort } from "./memory-tool-port.js";
@@ -155,6 +161,19 @@ import { MCP_MANIFEST, MEMORY_PURGE_TOOL_ID, validateMcpManifest, type McpManife
 import { randomUUID } from "node:crypto";
 import { McpConnection, isMcpEnabled } from "@jarvis/mcp";
 import { createMcpTools } from "@jarvis/tools";
+// Phase 15 — the marketing workspace: one service, the tools that hold it as
+// their port, and the publisher contract a provider package implements.
+import {
+  createMarketingPublishTools,
+  createMarketingResearchTools,
+  createMarketingWorkspaceTools,
+  type ContentPublisher,
+  type MarketingPort,
+} from "@jarvis/tools";
+import { MarketingService } from "./marketing/marketing-service.js";
+import { googleAdsReportSource } from "./marketing/google-ads-source.js";
+import { MarketingPublishFlow } from "./marketing/publish-flow.js";
+import { RATE_LIMIT_NAMESPACES } from "./rate-limiter.js";
 import { buildIntegrationCommandService } from "./integrations/build.js";
 import { errorMonitor, operationalLog } from "./observability/index.js";
 import { mcpToolUnavailable } from "./integration-registry.js";
@@ -341,6 +360,29 @@ export interface Container {
    * Shared with the `self.describe` tool for the same reason.
    */
   selfKnowledge: SelfKnowledgeService;
+  /**
+   * Phase 15 — the marketing workspace.
+   *
+   * The SAME instance the marketing tools hold as their port. The Marketing
+   * page's router does not call it to do work — it runs the tools through
+   * `executor`, so a button passes the permission check, the approval gate and
+   * the audit row a sentence passes. It is exposed for the two things a screen
+   * must know before it draws a control: whether page research is switched on,
+   * and which channels have a publisher.
+   */
+  marketing: MarketingService;
+  /**
+   * Phase 15 — publishing from the Marketing page: request an approval for the
+   * exact parameters, then run the publish tool through `executor` naming that
+   * approval. It holds no provider and decides nothing; see publish-flow.ts.
+   */
+  marketingPublishFlow: MarketingPublishFlow;
+  /**
+   * Phase 15 — the role table, the SAME instance the executor checks against.
+   * Exposed read-only so a route can tell a screen which controls a role could
+   * use. It grants nothing: the executor still asks for itself.
+   */
+  permissions: PermissionService;
 }
 
 /**
@@ -1163,6 +1205,119 @@ export function getContainer(options?: {
     }));
   }
 
+  // ---------------------------------------------------------------------------
+  // PHASE 11.10 — `meta.analyze`, registered HERE, before the definitions the
+  // agents are offered are computed a few lines below.
+  //
+  // It used to be registered at the very end of this function, once the
+  // service it forwards to had been built — which was after those definitions
+  // were taken. So the tool was in the registry, was granted to three agents
+  // by policy, was listed as a capability, and was offered to no model: the
+  // dashboard's Analyze button worked and "analyse my ad account" in chat
+  // could not reach it (found in Phase 15, while checking Meta Ads analysis).
+  //
+  // The service needs the executor, which needs the registry, so it still
+  // cannot be built yet. The tool is therefore given a port that looks the
+  // service up when it is CALLED — the same late reference `registryRef` and
+  // `memoryWriter` are. Registered on exactly the condition the service is
+  // built on, so an agent is still never offered an analysis it cannot run.
+  // ---------------------------------------------------------------------------
+  const analysisRef: { current: AnalysisGenerator | null } = { current: null };
+  const analysisPossible = Boolean(process.env.META_ACCESS_TOKEN && process.env.META_AD_ACCOUNT_ID && openAIConfigured);
+  if (analysisPossible) {
+    toolRegistry.register(
+      new MetaAnalyzeTool(
+        {
+          analyze: (input, caller) => {
+            const service = analysisRef.current;
+            // Unreachable once this function has returned; the tool turns a
+            // throw into a plain failure, never into a verdict.
+            if (!service) throw new Error("analysis service is not ready");
+            return service.analyze(input, caller);
+          },
+        },
+        process.env.META_AD_ACCOUNT_ID
+      )
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 15 — the marketing workspace.
+  //
+  // ONE MarketingService. The tools registered below hold it as their port,
+  // and the Marketing page's router runs those same tools through the
+  // executor — so a sentence and a button reach this object by one road.
+  //
+  // WHAT IT IS GIVEN, AND WHAT IT IS NOT.
+  //   - the marketing repository, projects and conversations: JARVIS's own
+  //     database, for its rows and for the scope a conversation implies;
+  //   - the EXECUTOR, by late reference, and nothing else of Meta: a report
+  //     reads the ad account by running the registered read tools, exactly as
+  //     AnalysisGenerator does. It holds no provider and no token;
+  //   - a page reader ONLY when the operator has switched page reads on — the
+  //     same BROWSER_ENABLED that governs browsing, under the same domain
+  //     allowlist — and null otherwise;
+  //   - the publishers that exist. Today that is one: a Facebook Page
+  //     publisher, built only when the Meta integration is configured.
+  //
+  // THREE REGISTRATIONS, THREE CONDITIONS.
+  //   workspace tools   always. They reach the database and nothing else.
+  //   research tools    only with a page reader. Without one they are absent,
+  //                     and capability discovery says so.
+  //   publish tools     only with a publisher. A publish button on a server
+  //                     that cannot publish would be a control that does
+  //                     nothing.
+  //
+  // Registered here, before the agents' definitions are computed.
+  // ---------------------------------------------------------------------------
+  const executorRef: { current: IToolExecutor | null } = { current: null };
+
+  const marketingPublishers: ContentPublisher[] = [];
+  if (process.env.META_ACCESS_TOKEN && process.env.META_AD_ACCOUNT_ID) {
+    marketingPublishers.push(
+      createMetaPagePublisher({
+        accessToken: process.env.META_ACCESS_TOKEN,
+        apiVersion: process.env.META_GRAPH_API_VERSION,
+      })
+    );
+  }
+
+  const pageReader = isPageResearchEnabled() ? new PublicPageFetcher({ policy: pageResearchPolicy() }) : null;
+
+  const marketingService = new MarketingService({
+    store: new PrismaMarketingRepository(prisma),
+    projects: projectRepo,
+    conversations: conversationRepo,
+    executor: () => executorRef.current,
+    // The configured ad account, and only where its read tools registered.
+    metaAccount: () => (toolRegistry.get("meta.insights") !== undefined ? (process.env.META_AD_ACCOUNT_ID ?? null) : null),
+    googleAds: (userId) => googleAdsReportSource(capabilityService, userId),
+    pages: pageReader,
+    publishers: marketingPublishers,
+    audit: auditLogger,
+    // Counted in the same audit-backed window every other limiter uses, so
+    // the ceiling on page reads holds across processes.
+    researchLimiter: new DbBackedRateLimiter(auditLogger, RATE_LIMIT_NAMESPACES.marketing),
+  });
+  const marketingPort: MarketingPort = marketingService;
+
+  for (const tool of createMarketingWorkspaceTools(marketingPort)) toolRegistry.register(tool);
+  if (pageReader) {
+    for (const tool of createMarketingResearchTools(marketingPort)) toolRegistry.register(tool);
+  }
+  if (marketingPublishers.length > 0) {
+    // The same journal and the same approval store the Meta and memory write
+    // tools use: a publish consumes its approval in the durable step that
+    // claims its execution.
+    for (const tool of createMarketingPublishTools(marketingPort, executionJournal, approvalRepo)) toolRegistry.register(tool);
+  }
+  // A start-up event an operator checks after a deploy (docs/DEPLOYMENT.md), so
+  // it goes through the operational log: timestamped, attributed, redacted.
+  operationalLog.child("marketing").info("marketing_wiring", {
+    pageResearch: pageReader ? "enabled" : "disabled (BROWSER_ENABLED is not set to true)",
+    publishers: marketingPublishers.map((publisher) => `${publisher.provider}:${publisher.channel}`),
+  });
+
   const { definitions: agentTools, sanitizedToOriginal } = convertToolsToAIToolDefinitions(toolRegistry.getAll());
 
   // Sprint 6 — narrow the definitions offered to each agent to its policy.
@@ -1394,6 +1549,21 @@ export function getContainer(options?: {
     );
   }
 
+  // Phase 15 — the marketing workspace. Gated like the others, and like the
+  // maps agent the guard is effectively always true: the workspace tools reach
+  // only JARVIS's own database, so they register on every deployment. What
+  // differs between deployments is what the agent is OFFERED — the two page
+  // reads and the two publish tools are in its definitions only where they
+  // were registered above.
+  if (hasTool("marketing.content.list")) {
+    agentRegistry.register(
+      new MarketingAgent({
+        provider: adapter,
+        tools: toolDefsFor(AGENT_POLICIES[AGENT_IDS.marketing]!.allowedTools),
+      })
+    );
+  }
+
   console.log(JSON.stringify({
     level: "info",
     event: "agent_registration",
@@ -1427,6 +1597,20 @@ export function getContainer(options?: {
     auditLogger,
     { lifecycle: options?.lifecycle }
   );
+
+  // Phase 15 — the marketing service reads the ad account through this
+  // executor and no other way. Bound now that it exists.
+  executorRef.current = toolExecutor;
+
+  // Phase 15 — the page's way to ask for a publish. The SAME executor, the SAME
+  // approval store and the SAME role table as everything else: it sequences
+  // them and adds no check of its own.
+  const marketingPublishFlow = new MarketingPublishFlow({
+    executor: toolExecutor,
+    approvals: approvalRepo,
+    tools: toolRegistry,
+    permissions: permissionService,
+  });
 
   // Task Execution V1 — the sequencer, over the two services built above.
   //
@@ -1717,9 +1901,9 @@ export function getContainer(options?: {
         })
       : null;
 
-  if (analysisService) {
-    toolRegistry.register(new MetaAnalyzeTool(analysisService, metaAccountIdConfigured));
-  }
+  // The tool was registered above, before the agents' definitions were taken,
+  // on the same condition; this is the service it has been waiting for.
+  analysisRef.current = analysisService;
 
   _container = {
     tokenService,
@@ -1763,6 +1947,10 @@ export function getContainer(options?: {
     taskPlanner: taskPlannerService!,
     taskConversation: taskConversationService!,
     taskScheduler: taskSchedulerService!,
+    // Phase 15 — the marketing workspace service the tools hold.
+    marketing: marketingService,
+    marketingPublishFlow,
+    permissions: permissionService,
   };
 
   return _container;

@@ -336,8 +336,13 @@ describe("the two task namespaces stay apart", () => {
 // ---------------------------------------------------------------------------
 
 describe("the rest of the catalogue is where S1 left it", () => {
-  it("still has exactly eight skills, with the same ids in the same order", () => {
-    expect(SKILL_CATALOG.map((s) => s.id)).toEqual([
+  // Phase 15 added a ninth skill, the marketing workspace. It was APPENDED: the
+  // eight S1 skills keep their ids and their order, which is what this test
+  // has always protected — order is the tie-breaker when two rules could claim
+  // one tool, so nothing may be inserted ahead of an existing rule.
+  it("still has the eight S1 skills, with the same ids in the same order, and one appended since", () => {
+    const ids = SKILL_CATALOG.map((s) => s.id);
+    expect(ids.slice(0, 8)).toEqual([
       "advertising",
       "places",
       "workspace",
@@ -347,6 +352,17 @@ describe("the rest of the catalogue is where S1 left it", () => {
       "monitoring",
       "integrations",
     ]);
+    expect(ids.slice(8)).toEqual(["marketing"]);
+  });
+
+  it("the appended skill takes no tool away from an S1 skill", () => {
+    const marketing = SKILL_CATALOG.find((s) => s.id === "marketing")!;
+    expect(marketing.prefixes).toEqual(["marketing."]);
+    expect(marketing.exact).toBeUndefined();
+    for (const skill of SKILL_CATALOG.slice(0, 8)) {
+      expect(skill.prefixes.some((p) => p.startsWith("marketing") || "marketing.".startsWith(p))).toBe(false);
+      expect((skill.exact ?? []).some((id) => id.startsWith("marketing."))).toBe(false);
+    }
   });
 
   it("gives every tool at most one skill", () => {

@@ -19,6 +19,8 @@ export {
 export { GoogleAdsAgent } from "./agents/google-ads-agent.js";
 export { BrowserAgent } from "./agents/browser-agent.js";
 export { LocationAgent } from "./agents/location-agent.js";
+// Phase 15 — the marketing workspace agent.
+export { MarketingAgent } from "./agents/marketing-agent.js";
 export { Orchestrator } from "./orchestrator.js";
 export { MockAIProvider } from "./mock-ai-provider.js";
 export { ToolPlanValidator, ToolPlanParser, ToolDescriptionBuilder } from "./tool-planner.js";
@@ -68,6 +70,11 @@ export {
   MEMORY_READ_TOOLS,
   // S8.4 — the reviewed MCP group (general assistant only), and what tasks may reach.
   MCP_READ_TOOLS,
+  // Phase 15 — the four marketing groups. Publishing is held by one agent.
+  MARKETING_READ_TOOLS,
+  MARKETING_WORKSPACE_TOOLS,
+  MARKETING_RESEARCH_TOOLS,
+  MARKETING_PUBLISH_TOOLS,
   schedulableToolIds,
   getAgentPolicy,
   isToolAllowed,

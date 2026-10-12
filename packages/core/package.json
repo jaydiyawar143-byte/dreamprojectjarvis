@@ -21,6 +21,10 @@
     "./surface": {
       "types": "./dist/surface.d.ts",
       "import": "./dist/surface.js"
+    },
+    "./marketing": {
+      "types": "./dist/marketing.d.ts",
+      "import": "./dist/marketing.js"
     }
   },
   "scripts": {

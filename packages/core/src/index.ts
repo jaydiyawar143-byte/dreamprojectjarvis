@@ -186,6 +186,16 @@ export * from "./memory-detail.js";
 // and the fail-closed validator. Nothing registers an MCP tool yet.
 export * from "./types/mcp.js";
 export * from "./mcp-manifest.js";
+// Phase 15 — the Marketing Operating System. Pure: the vocabulary and input
+// schemas, the content lifecycle and calendar, the on-page SEO audit and page
+// comparison, the report builder and its renderers, and the recommendation
+// rules. No model and no I/O anywhere in it: a page is audited from HTML it is
+// handed, and a report is arithmetic over rows that were already read.
+export * from "./types/marketing.js";
+export * from "./marketing-content.js";
+export * from "./seo-audit.js";
+export * from "./marketing-report.js";
+export * from "./marketing-recommendations.js";
 export * from "./speech-preparation.js";
 export * from "./tool-failure-classifier.js";
 export * from "./integration-health-snapshot.js";

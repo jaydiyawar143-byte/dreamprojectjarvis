@@ -1,3 +1,19 @@
+// Phase 15 — the marketing workspace's shapes, from the browser-safe entry
+// point (never the package barrel, which reaches Node-only modules).
+import type {
+  CampaignWorkspaceView,
+  ContentItemView,
+  MarketingCampaignView,
+  MarketingChannel,
+  MarketingRecommendationSet,
+  MarketingReportSummary,
+  MarketingReportView,
+  MarketingResearchSummary,
+  MarketingResearchView,
+  PublishParams,
+  PublishPreparation,
+} from "@jarvis/core/marketing";
+
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001/api/v1";
 
 export interface ApiError {
@@ -2626,4 +2642,299 @@ export async function createProject(name: string, description?: string): Promise
     method: "POST",
     body: JSON.stringify({ name, ...(description?.trim() ? { description: description.trim() } : {}) }),
   });
+}
+
+// ---------------------------------------------------------------------------
+// Phase 15 — the marketing workspace.
+//
+// Campaigns, the content calendar, page research, reports, recommendations and
+// publishing. Every call here reaches an endpoint that runs ONE tool through
+// the server's executor — the same tool a sentence in chat reaches — so this
+// file carries no rule of its own.
+//
+// THREE THINGS THE TYPES SAY ON PURPOSE.
+//
+//   A publish is never a boolean you infer. The reply carries `published`, and
+//   it is true in exactly one case: the post was read back from the Page.
+//   "Sent, outcome not known" is its own answer, not a failure to retry.
+//
+//   Publishing is two calls with a person between them. `requestMarketingPublish`
+//   asks, and returns the exact text and place an approval is bound to. The
+//   approval is decided with the existing `approveApproval` / `rejectApproval`.
+//   Only then does `executeMarketingPublish` post.
+//
+//   Nothing here sends the text of a post. What is published is read from the
+//   saved item on the server; this client can name an item, a target and an
+//   approval, and nothing else.
+// ---------------------------------------------------------------------------
+
+export interface MarketingStatus {
+  /** Whether this server reads public pages at all, and if not, what would change that. */
+  research: { available: boolean; reason: string | null };
+  publishing: { available: boolean; channels: MarketingChannel[]; reason: string | null };
+  adAccount: { available: boolean };
+  /** What the signed-in user's role could run. A hint for the screen; the server still decides. */
+  caller: { canEdit: boolean; canResearch: boolean; canPublish: boolean };
+}
+
+export interface MarketingCalendar {
+  /** Present when one item was asked for by id. */
+  item?: ContentItemView | null;
+  from: string;
+  to: string;
+  days: Array<{ date: string; items: ContentItemView[] }>;
+  unscheduled: ContentItemView[];
+  total: number;
+  truncated: boolean;
+}
+
+/** The approval a publish is waiting on, with exactly what it would post and where. */
+export interface MarketingPublishAsk {
+  status: "APPROVAL_REQUIRED";
+  published: false;
+  /** REQUESTED: just asked. WAITING: already asked. EXPIRED: the earlier one ran out of time. */
+  ask: "REQUESTED" | "WAITING" | "EXPIRED";
+  approvalId: string;
+  expiresAt: string;
+  params: PublishParams;
+  summary: ApprovalSummaryInfo;
+}
+
+export interface MarketingPublishDone {
+  status: "PUBLISHED";
+  published: true;
+  message: string;
+  /** True when an earlier attempt had already posted it and nothing new was sent. */
+  alreadyPublished: boolean;
+  item: ContentItemView | null;
+}
+
+export type MarketingPublishReply = MarketingPublishAsk | MarketingPublishDone;
+
+/**
+ * Why a publish did not happen, as the server's error carries it.
+ *
+ * `code` is one of NOT_READY, DECLINED, NOT_FOUND, FORBIDDEN, UNAVAILABLE,
+ * FAILED or UNCONFIRMED. UNCONFIRMED means the post was sent and its outcome
+ * is not known — it is not marked published and must not be blindly retried.
+ */
+export interface MarketingPublishError extends ApiError {
+  published?: false;
+  reason?: string;
+  /** With NOT_READY from a request: the check, including the places it could go. */
+  preparation?: PublishPreparation | null;
+}
+
+function marketingQuery(params: Record<string, string | number | boolean | null | undefined>): string {
+  const qs = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value === undefined || value === null || value === "" || value === false) continue;
+    qs.set(key, String(value));
+  }
+  const query = qs.toString();
+  return query ? `?${query}` : "";
+}
+
+const marketingId = (id: string) => encodeURIComponent(id);
+
+export async function getMarketingStatus(): Promise<ApiResponse<MarketingStatus>> {
+  return request("/marketing/status");
+}
+
+// --- campaign workspaces ----------------------------------------------------
+
+export async function listMarketingCampaigns(
+  options: { projectId?: string | null; includeArchived?: boolean } = {}
+): Promise<ApiResponse<{ campaigns: MarketingCampaignView[]; count: number; inOtherProjects?: number }>> {
+  return request(`/marketing/campaigns${marketingQuery({ projectId: options.projectId, includeArchived: options.includeArchived })}`);
+}
+
+export async function createMarketingCampaign(
+  input: { name: string; objective?: string; brief?: string; channels?: MarketingChannel[]; startDate?: string; endDate?: string },
+  projectId?: string | null
+): Promise<ApiResponse<{ campaign: MarketingCampaignView }>> {
+  return request(`/marketing/campaigns${marketingQuery({ projectId })}`, { method: "POST", body: JSON.stringify(input) });
+}
+
+export async function getMarketingCampaign(id: string, projectId?: string | null): Promise<ApiResponse<CampaignWorkspaceView>> {
+  return request(`/marketing/campaigns/${marketingId(id)}${marketingQuery({ projectId })}`);
+}
+
+export async function updateMarketingCampaign(
+  id: string,
+  patch: Partial<{
+    name: string;
+    objective: string | null;
+    brief: string | null;
+    status: string;
+    channels: MarketingChannel[];
+    startDate: string | null;
+    endDate: string | null;
+    metaCampaignIds: string[];
+  }>
+): Promise<ApiResponse<{ campaign: MarketingCampaignView }>> {
+  return request(`/marketing/campaigns/${marketingId(id)}`, { method: "PATCH", body: JSON.stringify(patch) });
+}
+
+// --- content and the calendar ----------------------------------------------
+
+export async function getMarketingCalendar(
+  options: { from?: string; to?: string; campaign?: string; status?: string; channel?: string; projectId?: string | null; limit?: number } = {}
+): Promise<ApiResponse<MarketingCalendar>> {
+  return request(`/marketing/content${marketingQuery(options)}`);
+}
+
+export interface MarketingContentDraft {
+  title: string;
+  channel: MarketingChannel;
+  body?: string;
+  link?: string;
+  notes?: string;
+  scheduledDate?: string;
+  scheduledTime?: string;
+}
+
+/** Saves drafts to the calendar. It publishes nothing. */
+export async function planMarketingContent(
+  input: { campaign?: string; items: MarketingContentDraft[] },
+  projectId?: string | null
+): Promise<ApiResponse<{ campaign: { id: string; name: string } | null; saved: number; items: ContentItemView[] }>> {
+  return request(`/marketing/content${marketingQuery({ projectId })}`, { method: "POST", body: JSON.stringify(input) });
+}
+
+export async function getMarketingContent(id: string): Promise<ApiResponse<MarketingCalendar>> {
+  return request(`/marketing/content/${marketingId(id)}`);
+}
+
+/**
+ * Edits a draft, moves it on the calendar, or marks it ready.
+ *
+ * It cannot mark an item published: the server refuses that status here, and
+ * a publication is only ever recorded by a verified publish or by
+ * `markMarketingContentPublished`.
+ */
+export async function updateMarketingContent(
+  id: string,
+  patch: Partial<{
+    title: string;
+    channel: MarketingChannel;
+    body: string;
+    link: string | null;
+    notes: string | null;
+    scheduledDate: string | null;
+    scheduledTime: string | null;
+    status: "IDEA" | "DRAFT" | "READY" | "ARCHIVED";
+  }>
+): Promise<ApiResponse<{ item: ContentItemView }>> {
+  return request(`/marketing/content/${marketingId(id)}`, { method: "PATCH", body: JSON.stringify(patch) });
+}
+
+/** Records that the USER posted this themselves. JARVIS did not publish it and has not checked. */
+export async function markMarketingContentPublished(
+  id: string,
+  input: { url?: string; publishedOn?: string } = {}
+): Promise<ApiResponse<{ item: ContentItemView; note: string }>> {
+  return request(`/marketing/content/${marketingId(id)}/mark-published`, { method: "POST", body: JSON.stringify(input) });
+}
+
+// --- publishing -------------------------------------------------------------
+
+/** Whether an item can be published, where, and with exactly what. A read. */
+export async function checkMarketingPublish(id: string, targetId?: string): Promise<ApiResponse<PublishPreparation>> {
+  return request(`/marketing/content/${marketingId(id)}/publish${marketingQuery({ targetId })}`);
+}
+
+/** Asks to publish. Posts nothing: it returns the approval to decide. */
+export async function requestMarketingPublish(id: string, targetId?: string): Promise<ApiResponse<MarketingPublishReply>> {
+  return request(`/marketing/content/${marketingId(id)}/publish`, {
+    method: "POST",
+    body: JSON.stringify(targetId ? { targetId } : {}),
+  });
+}
+
+/** Publishes, for an approval the user has approved. */
+export async function executeMarketingPublish(id: string, approvalId: string): Promise<ApiResponse<MarketingPublishReply>> {
+  return request(`/marketing/content/${marketingId(id)}/publish`, { method: "POST", body: JSON.stringify({ approvalId }) });
+}
+
+// --- research ---------------------------------------------------------------
+
+export async function listMarketingResearch(
+  options: { kind?: "SEO_AUDIT" | "COMPETITOR_SNAPSHOT"; campaign?: string; projectId?: string | null } = {}
+): Promise<ApiResponse<{ research: MarketingResearchSummary[]; count: number }>> {
+  return request(`/marketing/research${marketingQuery(options)}`);
+}
+
+export async function getMarketingResearch(id: string): Promise<ApiResponse<{ research: MarketingResearchView; notice: string }>> {
+  return request(`/marketing/research/${marketingId(id)}`);
+}
+
+export async function runSeoAudit(
+  input: { url: string; campaign?: string },
+  projectId?: string | null
+): Promise<ApiResponse<{ research: MarketingResearchView; notice: string }>> {
+  return request(`/marketing/research/seo-audit${marketingQuery({ projectId })}`, { method: "POST", body: JSON.stringify(input) });
+}
+
+export async function runCompetitorAnalysis(
+  input: { competitorUrl: string; ownUrl?: string; campaign?: string },
+  projectId?: string | null
+): Promise<ApiResponse<{ research: MarketingResearchView; notice: string }>> {
+  return request(`/marketing/research/competitor${marketingQuery({ projectId })}`, { method: "POST", body: JSON.stringify(input) });
+}
+
+// --- reports and recommendations -------------------------------------------
+
+export async function listMarketingReports(
+  options: { campaign?: string; projectId?: string | null } = {}
+): Promise<ApiResponse<{ reports: MarketingReportSummary[]; count: number }>> {
+  return request(`/marketing/reports${marketingQuery(options)}`);
+}
+
+export async function generateMarketingReport(
+  input: { kind?: "PERFORMANCE" | "CLIENT"; campaign?: string; from?: string; to?: string; title?: string; compare?: boolean },
+  projectId?: string | null
+): Promise<ApiResponse<{ report: MarketingReportView; note: string }>> {
+  return request(`/marketing/reports${marketingQuery({ projectId })}`, { method: "POST", body: JSON.stringify(input) });
+}
+
+export async function getMarketingReport(id: string): Promise<ApiResponse<{ report: MarketingReportView }>> {
+  return request(`/marketing/reports/${marketingId(id)}`);
+}
+
+export async function getMarketingRecommendations(
+  options: { campaign?: string; projectId?: string | null } = {}
+): Promise<ApiResponse<MarketingRecommendationSet & { count: number }>> {
+  return request(`/marketing/recommendations${marketingQuery(options)}`);
+}
+
+/**
+ * Downloads a saved report as a file.
+ *
+ * Not a link: the export needs the caller's access token, which lives in
+ * memory and is never put in a URL. The file is fetched with the token and
+ * handed to the caller as a blob; it is never rendered in this page.
+ */
+export async function downloadMarketingReport(
+  id: string,
+  format: "html" | "md"
+): Promise<{ ok: true; blob: Blob; fileName: string } | { ok: false; message: string }> {
+  const attempt = () =>
+    fetch(`${API_BASE}/marketing/reports/${marketingId(id)}/export?format=${format}`, {
+      headers: { "X-Auth-Mode": "cookie", ...(_accessToken ? { Authorization: `Bearer ${_accessToken}` } : {}) },
+      credentials: "include",
+    });
+  try {
+    let res = await attempt();
+    // The access token expires every few minutes; one refresh, as `request` does.
+    if (res.status === 401 && (await refreshTokens())) res = await attempt();
+    if (!res.ok) {
+      const body = (await res.json().catch(() => null)) as ApiResponse | null;
+      return { ok: false, message: body?.error?.message ?? "The report could not be downloaded." };
+    }
+    const named = /filename="([A-Za-z0-9._-]+)"/.exec(res.headers.get("content-disposition") ?? "");
+    return { ok: true, blob: await res.blob(), fileName: named?.[1] ?? `report.${format}` };
+  } catch {
+    return { ok: false, message: "The report could not be downloaded." };
+  }
 }

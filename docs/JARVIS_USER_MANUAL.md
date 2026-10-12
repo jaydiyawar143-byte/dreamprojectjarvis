@@ -513,6 +513,76 @@ The memory now says what you typed, word for word. You can also say "change 2 to
 - A memory cannot be moved from one project to another, and a project cannot be renamed or deleted.
 - Forgetting a memory does not delete the chat message it came from.
 
+---
+
+## Phase 15 — The Marketing Workspace
+
+*Added 2026-10-12. Status: implemented and verified by automated tests against PostgreSQL. User-accessible in chat and on the Marketing page, with three exceptions set out under "What it cannot do yet": publishing has been exercised against stand-ins only, never a live Page; page research works only where an administrator has switched page reads on; and Google Ads figures are in no report.*
+
+Open **Marketing** in the sidebar, or ask in chat. Both do the same thing by the same route, so what you save in one you see in the other.
+
+**Four words, used carefully everywhere:**
+
+| It says | It means |
+|---|---|
+| **Draft** / **Idea** | Saved in JARVIS. Nothing has gone anywhere. |
+| **Ready** | The words are final. Still nothing has gone anywhere. |
+| **Published · verified** | JARVIS posted it **and read the post back from the Page**. |
+| **Published · reported by you** | You told JARVIS you posted it. JARVIS did not publish it and has not checked. |
+
+There is one more: **Publish not confirmed** — a post was sent and the answer never came back. It is *not* marked published. Publishing it again first looks for the post on the Page and will not post it twice.
+
+**Plan content.** Ask for a plan and you get one to read. Ask for it to be **saved** and it goes on the calendar as drafts:
+
+> **You:** Plan five Facebook posts for our Diwali sale.
+> **JARVIS:** (five draft posts, to read — nothing saved)
+> **You:** Save these posts to the content calendar.
+> **JARVIS:** Saved to the content calendar as drafts. Nothing was published.
+
+Before Phase 15 JARVIS could write the posts and had nowhere to keep them.
+
+**Keep a calendar.** The Marketing page shows thirty days at a time. Give an item a date and, if you like, a time of day. **A date is a plan.** Nothing is published because a date arrives — there is no timer.
+
+**Organise a campaign.** A campaign workspace is a place in JARVIS for one campaign's content, research and reports. It is not an ad campaign and it creates nothing in an ad account.
+
+**Research a page.** *SEO audit* reads one public page and tells you what is on it: its title, description, headings, images without a description, and so on, each as a fact followed by a suggestion. *A competitor's page* does the same for someone else's page, compares it with yours if you give yours, and — the second time you read the same page — tells you what changed.
+
+Every result also says **what it does not tell you**: rankings, search volume, traffic, backlinks. Those cannot be read from a page, and JARVIS does not estimate them.
+
+**Report on performance.** *Generate report* reads your ad account and this workspace's content for a period (the last 30 complete days unless you choose; 90 days at most) and saves the result. The report lists **where every figure came from**. A source that could not be read contributes no figure and is listed as not read — never as zero.
+
+> **Before:** "How did last month go?" got an answer written by a model from whatever it had fetched.
+> **Now:** it gets a saved report whose totals are arithmetic over rows that were read, with each source's status beside it, that you can open again or download.
+
+A **client report** is the same report with a client heading. Download it as HTML or Markdown and send it yourself — JARVIS does not send it to anyone.
+
+**Get recommendations.** Suggestions worked out by fixed rules from your calendar, your latest saved report and your saved audits — "two items are ready and their date has passed", "click-through rate fell 25% against the previous period". Each one lists the facts it rests on and is marked **Advice · not carried out**. There is no "apply" button: to act on one, do the thing itself.
+
+**Publish — with your approval, every time.** Today JARVIS can publish one thing: **a text post, with an optional link, to a Facebook Page** your Meta connection may post to.
+
+1. Mark the item **Ready**.
+2. Press **Publish** (or ask in chat). Nothing is posted. JARVIS shows you **the exact text and the Page**.
+3. Press **Approve and publish**, or **Decline**. In chat, reply "yes" or "no".
+4. JARVIS posts it, reads it back from the Page, and only then says it is published.
+
+If you change the words after asking, the approval no longer matches and nothing is posted — ask again. Declining one post does not block any other. Voice cannot approve a publish.
+
+For any other channel — Instagram, LinkedIn, X — plan it here, post it yourself, and press **I posted this myself**. It is recorded as reported by you.
+
+**What it cannot do yet.**
+
+- **Publishing has not been exercised against a live Facebook Page.** It is tested against stand-ins for the Page; the first real post should be watched.
+- It publishes text and a link only — no images, video, carousels, stories or reels — and only to a Facebook Page.
+- It does not publish on a schedule.
+- A post whose text contains a word JARVIS hides in conversations for safety — "password", "token", "secret" — or that is very long, cannot be published from chat. JARVIS says so and asks you to publish it from the Marketing page, where it works.
+- **Google Ads figures are in no report.** Every report says whether Google Ads could have been read and why not.
+- Research needs an administrator to switch page reads on (`BROWSER_ENABLED=true`). Where it is off, the Research tab says so and shows no form.
+- SEO research has no keyword volumes, rankings or backlinks, and competitor research has no traffic or ad-spend figures: no provider of that data is connected.
+- Reports cover Meta Ads and your own content. There is no website or conversion analytics.
+- A client report downloads as HTML or Markdown, not PDF.
+- Content items and campaigns can be archived, not deleted.
+- Your role matters: a viewer can read the workspace and generate reports, and cannot save, edit or publish.
+
 ## Glossary
 
 | Term | Definition |

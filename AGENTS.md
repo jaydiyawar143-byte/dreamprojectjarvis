@@ -158,6 +158,49 @@ fails when one of the first three does.
 - **Retention deletes only what the policy says** (`MEMORY_RETENTION` in
   `packages/core`): bounded, one user at a time, through `memory.purge_expired`.
 
+### Marketing
+
+The contract is in [`docs/MARKETING.md`](docs/MARKETING.md); these are the
+parts a change must not break.
+
+- **One implementation.** Marketing behaviour lives in `MarketingService`
+  (`apps/api/src/services/marketing`). The `marketing.*` tools hold it as their
+  port, and the Marketing page's router runs those same tools through
+  `ToolExecutor` — one endpoint, one tool. Never put a marketing rule in a route
+  or a tool, and never add an endpoint that reaches the service or the
+  repository around the executor.
+- **Published means read back.** An item is recorded `VERIFIED` only after the
+  post was read from the provider by its id. Never from a provider's
+  "accepted", a status code or a timeout. `REPORTED_BY_USER` is a different
+  thing and is never upgraded to it, or worded like it.
+- **An unknown outcome is a state, not a failure to retry.** A publish that was
+  sent and not confirmed leaves the item `UNCONFIRMED` and unpublished. The
+  next attempt looks for the post before it sends anything, and posts nothing
+  if it cannot look.
+- **The text of a post comes from the saved item.** No endpoint accepts it. A
+  publish whose text is not exactly the saved text is refused, even after a
+  person approved it.
+- **Publishing is approval-gated by the exact text and Page**, and the item is
+  claimed by ONE conditional `UPDATE` (`claimForPublish`). Never read the
+  publish state, check it in memory and then write. No path may publish
+  without an approval, and nothing publishes because a date arrived.
+- **Nothing is reported that was not read.** Reports, audits and
+  recommendations are pure functions in `packages/core` over rows that were
+  read; no model writes them. A source that could not be read is listed as
+  unread and contributes no figure. Never estimate a metric, a keyword, a
+  ranking or a competitor's numbers.
+- **Google Ads stays out of marketing reports** until a grant carrying the Ads
+  scope exists and a read against it has been verified. A report records
+  whether it could have been read — from the **granted** scopes — and why not.
+- **A page a user names is read only through `PublicPageFetcher`**
+  (`packages/browser`), which judges every hop and pins the connection to the
+  address it judged. Page research registers only while `BROWSER_ENABLED=true`.
+- **Scope beside ownership**, as for memory. In a conversation the project is
+  the conversation's; a `projectId` in the parameters that names another is
+  refused, never obeyed.
+- **A recommendation is advice.** Each carries `executed: false`. Never add a
+  tool, a route or a button that carries one out.
+
 ### Operational logs and errors
 
 - An operational event — start-up, shutdown, a failed request, anything a
@@ -209,7 +252,9 @@ with pgvector: point `DATABASE_URL` at a separate test database, never the
 development one. On a fresh throwaway pgvector database they give 276 passed /
 0 failed (24 files; atomic approval fix, 2026-10-11). Every workspace's suite
 was run that day, one workspace at a time: 8,142 passed without a database,
-none failed.
+none failed. After Phase 15 (2026-10-12): `@jarvis/db` 327 passed / 0 failed
+(25 files) on a fresh database, and `pnpm test` 8,959 passed without a
+database, none failed.
 
 The two memory end-to-end tests (`sprint-1.1d-memory-e2e`, and
 `phase14-memory-e2e-pg.integration`, which has no in-memory fallback at all)
@@ -221,6 +266,12 @@ after applying every migration, and fails if any of them is skipped
 (`docs/DEVELOPMENT.md`, "Continuous integration"). It picks them up by name: a
 database-backed test in `apps/api` or `packages/memory` must be named
 `*-pg.integration.test.ts`, or CI never gives it a database.
+
+CI does not run the tests of `@jarvis/core`, `tools`, `agents`, `browser` or
+`meta-graph` as workspaces. Two slices of them are gated by **file name**: the
+memory contracts and the marketing contracts. A new contract test for either
+must match the names that step selects (`.github/workflows/ci.yml`), or CI
+never runs it.
 
 ---
 
@@ -238,6 +289,7 @@ Every capability has one home. Before creating a file, find that home.
 | Something JARVIS can do | a tool in `packages/tools/src/tools`, added to an agent's allowlist | the agent itself |
 | A third-party client | its provider package (`meta-graph`, `google-ads`, `whatsapp`, `n8n`, `ai-openai`, …) | a tool, a route, or a utility file |
 | Memory or knowledge behaviour | `packages/memory`; storage in `packages/db/src/repositories` | a second memory manager |
+| Marketing behaviour — campaigns, calendar, research, reports, publishing | `apps/api/src/services/marketing` (the one service); its pure rules in `packages/core`; storage in `packages/db/src/repositories` | a route, a tool, or a second marketing service |
 | A database model, migration or repository | `packages/db` | a new `PrismaClient` |
 | Auth, encryption, permissions, approvals, audit | `packages/security` | an app |
 | A log line for operators, or an error report | `apps/api/src/services/observability` | a bare `console.log`, or a vendor SDK in a route |

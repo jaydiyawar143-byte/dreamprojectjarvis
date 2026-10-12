@@ -1261,6 +1261,57 @@ export class Orchestrator implements IOrchestrator {
         continue;
       }
 
+      // ---------------------------------------------------------------------
+      // Phase 15 — the caller's role, before a pending action exists.
+      //
+      // The direct path below asks ToolApprovalService whether this role may
+      // run the tool, and the executor asks again when it runs. The
+      // pending-action branch asked nobody: a viewer who asked for an
+      // approval-gated write was given a pending action and an approval row,
+      // was told to reply "yes", and was refused only when they did. Nothing
+      // ran — the executor saw to that — but a request nobody could act on had
+      // been put in front of a person, which is exactly what the allowlist gate
+      // above exists to prevent.
+      //
+      // The same question, of the same table, asked one step earlier. It can
+      // only refuse what the executor would refuse anyway, so it narrows and
+      // never widens. With no permission checker wired it is skipped, as the
+      // agent floor is: the executor still performs its own check.
+      // ---------------------------------------------------------------------
+      if (needsConfirmation && tool && this.permissionChecker && this.pendingActionService && context.conversationId) {
+        const permitted = tool.requiredPermissions.every((perm) =>
+          this.permissionChecker!.hasPermission(context.auth.role, "tools", perm)
+        );
+        if (!permitted) {
+          // The wording ToolApprovalService uses for the same refusal.
+          const reason = `Missing permissions: ${tool.requiredPermissions.join(", ")}`;
+
+          results.push({
+            executionId,
+            toolId: action.toolId,
+            toolCallId: action.toolCallId,
+            status: "permission_denied",
+            error: reason,
+            startedAt: stepStartedAt,
+            completedAt: new Date(),
+            durationMs: Date.now() - stepStartedAt.getTime(),
+          });
+
+          await this.auditLogger.log({
+            userId: context.auth.userId,
+            agentId: policy?.agentId ?? context.agentId,
+            toolId: action.toolId,
+            action: "agent.tool_role_denied",
+            result: "rejected",
+            traceId: context.traceId,
+            ipAddress: context.ipAddress,
+            metadata: { reason, risk: tool.risk, domain: policy?.domain, executionId, stepIndex: i },
+          });
+
+          continue;
+        }
+      }
+
       if (needsConfirmation && this.pendingActionService && context.conversationId) {
         // Create a pending action instead of executing directly
         const pendingService = this.pendingActionService as import("./pending-action-service.js").PendingActionService;

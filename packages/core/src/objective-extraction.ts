@@ -114,6 +114,12 @@ export const OBJECTIVE_SKILL_VOCABULARY = Object.freeze({
   messaging: Object.freeze(["whatsapp"]),
   monitoring: Object.freeze(["cpu", "disk", "system status", "memory usage", "current time", "today's date"]),
   integrations: Object.freeze(["integration", "integrations", "connection", "connections", "connected", "health"]),
+  // Phase 15. Multi-word on purpose where a single word is already another
+  // skill's: "calendar" is workspace's, "content calendar" is this one's.
+  marketing: Object.freeze([
+    "content calendar", "content plan", "social media", "post", "posts", "caption", "captions",
+    "hashtag", "hashtags", "seo", "competitor", "competitors", "client report", "marketing",
+  ]),
 } as const satisfies Record<string, readonly string[]>);
 
 /**

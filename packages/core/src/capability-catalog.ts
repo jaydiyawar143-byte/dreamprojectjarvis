@@ -82,6 +82,13 @@ const PREFIX_RULES: Array<{
   { prefix: "pdf.", group: "system", integration: null },
   { prefix: "document.", group: "knowledge", integration: null },
   { prefix: "web.", group: "browser", integration: null },
+  // Phase 15 — the marketing workspace. Campaigns, content, research and
+  // reports live in JARVIS's own store, so they are gated on nothing. The two
+  // publishing ids are longer prefixes and so are matched first: a publish
+  // posts through the Meta connection, and is exactly as available as that is.
+  { prefix: "marketing.content.publish", group: "advertising", integration: "meta" },
+  { prefix: "marketing.publish.", group: "advertising", integration: "meta" },
+  { prefix: "marketing.", group: "advertising", integration: null },
 ];
 
 /** Human labels for ids worth wording better than their raw description. */
@@ -156,6 +163,25 @@ const LABEL_OVERRIDES: Record<string, string> = {
   "google.plan.calendar.createEvent": "Prepare a calendar event (needs approval)",
   "google.plan.calendar.updateEvent": "Prepare an event change (needs approval)",
   "google.plan.calendar.deleteEvent": "Request approval to delete an event",
+  // Phase 15 — the marketing workspace. The publish label says what stands
+  // between a request and a post, for the reason the Phase 13 labels do.
+  "marketing.campaign.create": "Create a campaign workspace",
+  "marketing.campaign.update": "Update a campaign workspace",
+  "marketing.campaign.list": "List your campaign workspaces",
+  "marketing.campaign.get": "Open a campaign workspace",
+  "marketing.content.plan": "Save planned content to the calendar",
+  "marketing.content.update": "Edit or reschedule a content item",
+  "marketing.content.list": "Read the content calendar",
+  "marketing.content.mark_published": "Record a post you published yourself",
+  "marketing.publish.prepare": "Check whether a content item can be published",
+  "marketing.content.publish": "Publish a content item (needs approval)",
+  "marketing.seo.audit": "Audit a web page's on-page SEO",
+  "marketing.competitor.analyze": "Compare a competitor's web page",
+  "marketing.research.list": "List saved SEO and competitor research",
+  "marketing.report.generate": "Generate a performance or client report",
+  "marketing.report.list": "List saved reports",
+  "marketing.report.get": "Open a saved report",
+  "marketing.recommendations": "Recommend what to do next in a workspace",
 };
 
 export function groupForToolId(toolId: string): {

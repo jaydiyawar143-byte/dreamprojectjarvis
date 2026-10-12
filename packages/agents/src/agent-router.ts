@@ -191,6 +191,72 @@ const LOCATION_SIGNALS: RegExp[] = [
   /\b(restaurants?|cafes?|coffee\s+shops?|hotels?|dhaba|pharmac(?:y|ies)|chemist|hospitals?|clinics?|atms?|banks?|petrol\s*(?:pump|station)?|fuel|gas\s+station|airports?|bus\s+stand|railway\s+station|shops?|stores?|markets?|malls?|supermarkets?|gyms?|salons?|parks?|temples?|mandir|police\s+station|post\s+office)\b/i,
 ];
 
+/**
+ * Phase 15 — the marketing workspace.
+ *
+ * Every pattern names a marketing ARTIFACT or ACTIVITY: a content calendar, a
+ * caption, an SEO audit, a competitor, a client report, publishing a post. A
+ * bare "campaign", "post" or "report" is deliberately not enough — "campaign"
+ * is the Meta heuristic's word, and "the report" could be anything.
+ *
+ * These are judged against the message WITH ITS LINKS TAKEN OUT (see
+ * `withoutLinks`): "open https://example.com/blog/seo-tips" mentions SEO only
+ * inside an address, and is a request to open a page, not to audit one.
+ *
+ * "performance report" and "campaign report" are claimed here although
+ * analytics words appear in them, because producing a REPORT — a saved
+ * document with its sources — is this workspace's tool. A question about
+ * performance with no report in it ("why did CPA rise") still goes where it
+ * always went.
+ */
+const MARKETING_SIGNALS: RegExp[] = [
+  // Content planning and the calendar.
+  /\bcontent\s+(calendar|plan|plans|planning|planner|schedule|ideas?|strategy|pipeline|pillars?)\b/i,
+  /\b(editorial|posting|social)\s+(calendar|schedule|plan)\b/i,
+  /\bsocial\s+media\b/i,
+  /\bcaptions?\b/i,
+  /\bhashtags?\b/i,
+  /\b(facebook|instagram|insta|linkedin|twitter|youtube)\s+(post|posts|caption|captions|reel|reels|story|stories|carousel)\b/i,
+  /\b(post|posts|reel|reels)\s+(for|on)\s+(facebook|instagram|insta|linkedin|twitter|youtube|x)\b/i,
+  /\bpost\s+ideas?\b/i,
+
+  // Campaign workspace.
+  /\bcampaign\s+(workspace|brief|plan)\b/i,
+  /\bmarketing\s+(workspace|plan|calendar|strategy|recommendations?|report|campaign)\b/i,
+
+  // Publishing a content item.
+  /\bpublish(ed|ing|es)?\b/i,
+  /\bpost\s+(it|this|that)\s+(on|to)\b/i,
+  /\bmark(ed)?\b[^.!?]*\bas\s+(published|posted)\b/i,
+
+  // SEO research.
+  /\bseo\b/i,
+  /\bon[-\s]?page\b/i,
+  /\bmeta\s+(description|title|tags?)\b/i,
+  /\btitle\s+tag\b/i,
+  // "keywords" alone is an ad-platform word too ("my Google Ads keywords"), so
+  // it counts only with a research word beside it.
+  /\bkeyword(s)?\s+(research|ideas?|analysis|gap|strategy|density)\b/i,
+  /\b(seo|search|organic)\s+keyword(s)?\b/i,
+  /\b(site|page|website)\s+audit\b/i,
+  /\bsearch\s+engine\b/i,
+
+  // Competitor intelligence.
+  /\bcompetitors?\b/i,
+  /\bcompetitive\s+(analysis|research|intel|intelligence)\b/i,
+  /\bpratiyogi\b/i,
+
+  // Reports as documents.
+  /\bclient\s+report\b/i,
+  /\b(performance|campaign|monthly|weekly|marketing)\s+report\b/i,
+  /\breport\s+for\s+(the\s+|my\s+|our\s+)?client\b/i,
+];
+
+/** A message with every http(s) link replaced by a space. */
+function withoutLinks(text: string): string {
+  return text.replace(/\bhttps?:\/\/[^\s<>"']+/gi, " ");
+}
+
 function matches(signals: RegExp[], text: string): boolean {
   return signals.some((re) => re.test(text));
 }
@@ -325,6 +391,29 @@ export function rankAgentCandidates(
   const candidates: RouteCandidate[] = [];
   const text = typeof message === "string" ? message : "";
 
+  // Phase 15 — the marketing workspace.
+  //
+  // Its phrases are specific ("content calendar", "SEO audit", "competitor"),
+  // so a match is strong evidence, and it is ranked FIRST: an SEO audit or a
+  // competitor comparison names a page by its address, and without this the
+  // link below would send "audit the SEO of https://…" to the browser agent,
+  // which can open the page and has no tool to audit it.
+  //
+  // The one thing that outranks it is a system named outright. "WhatsApp the
+  // content calendar to Priya" and "run the n8n workflow that posts our
+  // content" name where the request has to go, so there marketing is offered
+  // AFTER those agents instead — see below. Either way no existing candidate
+  // changes place relative to another.
+  const marketing = matches(MARKETING_SIGNALS, withoutLinks(text));
+  const namesASystem = matches(AUTOMATION_SIGNALS, text) || matches(COMMUNICATION_SIGNALS, text);
+  const marketingCandidate: RouteCandidate = {
+    agentId: AGENT_IDS.marketing,
+    domain: "marketing",
+    confidence: namesASystem ? 0.8 : 0.9,
+    reason: "message asks about content planning, the content calendar, SEO, competitors, a marketing report or publishing",
+  };
+  if (marketing && !namesASystem) candidates.push(marketingCandidate);
+
   // Sprint 7 — an explicit http(s) URL in the message is the least ambiguous
   // signal the router has, so it outranks every keyword heuristic. Somebody
   // who pastes a link wants that link opened, whatever else the sentence says.
@@ -354,6 +443,9 @@ export function rankAgentCandidates(
       reason: "message names WhatsApp",
     });
   }
+
+  // Phase 15 — marketing, behind the system that was named.
+  if (marketing && namesASystem) candidates.push(marketingCandidate);
 
   // Ranked here — above Google Ads, below the explicitly-named systems.
   //

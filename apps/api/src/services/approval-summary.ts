@@ -133,6 +133,23 @@ export function buildApprovalSummary(
         detailLines,
       };
     }
+    // Phase 15 — a publish. The words shown here are the parameters the
+    // approval is bound to: the exact text and the place, built by the server
+    // from the saved content item. They are what will run, or nothing will —
+    // the tool refuses if the saved item no longer says this.
+    case "marketing.content.publish": {
+      const target = typeof params.targetName === "string" ? params.targetName : "the selected Page";
+      const message = typeof params.message === "string" ? params.message : "";
+      return {
+        actionSummary: `Publish this post publicly to ${target}. JARVIS cannot undo it.`,
+        targetResource: target,
+        detailLines: [
+          { label: "Publish to", value: target },
+          { label: "Text to be posted", value: message },
+          ...(typeof params.link === "string" ? [{ label: "Link", value: params.link }] : []),
+        ],
+      };
+    }
     default:
       break;
   }

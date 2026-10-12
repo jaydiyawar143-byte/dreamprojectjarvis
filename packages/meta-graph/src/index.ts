@@ -12,3 +12,7 @@ export {
   type MetaListResponse,
 } from "./response-validator.js";
 export { MetaCampaignReconciler, type MetaCampaignReconcilerOptions } from "./reconciler.js";
+// Phase 15 — publishing a text post to a Facebook Page, behind the
+// ContentPublisher contract. Reached only through the approval-gated
+// marketing.content.publish tool.
+export { createMetaPagePublisher, META_PAGE_PUBLISHER_ID, type MetaPagePublisherConfig } from "./page-publisher.js";

@@ -172,6 +172,37 @@ docker compose exec postgres psql -U jarvis -d jarvis -c '\d "Project"' -c 'SELE
 
 Every memory that existed before the deploy has no project: it is personal, exactly as before. The retention sweep starts with the API (`memory_retention_started` in the log, then `memory_retention_sweep_completed` with counts) and runs every `JARVIS_MEMORY_RETENTION_INTERVAL_MS` — six hours unless set; `0` switches the purge off, in which case expired memories stay hidden from recall but are never deleted. The first sweep after this deploy deletes memories that expired more than 30 days ago; nothing that has not expired, and nothing without an expiry date, is ever touched by it.
 
+### Marketing: the workspace tables, and what is switched on
+
+Since Phase 15 there is a marketing workspace. After a deploy, check that the migration arrived — `20261012120000_phase15_marketing_os` adds four tables (`MarketingCampaign`, `ContentItem`, `MarketingReport`, `MarketingResearch`) and their indexes and constraints. It alters no existing table and rewrites no existing row:
+
+```bash
+docker compose exec postgres psql -U jarvis -d jarvis -c '\dt "Marketing"*' -c '\dt "ContentItem"' -c 'SELECT count(*) AS content_items, count(*) FILTER (WHERE publication_mode IS NOT NULL) AS published FROM "ContentItem"'
+```
+
+The first listing shows `MarketingCampaign`, `MarketingReport` and `MarketingResearch` — beside `MarketingAccount`, which is older and unrelated. On a first deploy both counts are `0`. Then look for one line in the API log, which says what this deployment wired:
+
+```bash
+docker compose logs api | grep marketing_wiring
+```
+
+```
+{"timestamp":"…","level":"info","service":"jarvis-api","component":"marketing","instance":"…","event":"marketing_wiring","pageResearch":"disabled (BROWSER_ENABLED is not set to true)","publishers":["meta-graph:FACEBOOK"]}
+```
+
+| It says | It means |
+|---|---|
+| `pageResearch: disabled …` | SEO audits and competitor pages are **off**. The two tools are not registered and the Marketing page draws no research form. This is the default in this stack: the compose file sets `BROWSER_ENABLED: "false"` |
+| `pageResearch: enabled` | The API will fetch public web pages a user names, under the navigation policy and `BROWSER_DOMAIN_ALLOWLIST` |
+| `publishers: []` | Nothing can be published. No Publish button is drawn |
+| `publishers: ["meta-graph:FACEBOOK"]` | `META_ACCESS_TOKEN` and `META_AD_ACCOUNT_ID` are set, so a publisher was built. Whether it can post depends on the token: it needs a Page it may create content on. That is not checked at start-up — the publish check reports it per item |
+
+**To switch page research on in this stack**, change `BROWSER_ENABLED` to `"true"` in `docker-compose.yml` and `docker compose up -d`. It needs no browser in the image: the page reader is plain HTTP, and the browser *automation* tools stay unregistered because the image has no Chrome. Decide it deliberately — it lets the API open outbound connections to addresses users choose. Every hop is checked against the navigation policy and every resolved address must be public, and reads are limited to 20 per user per 10 minutes; set `BROWSER_DOMAIN_ALLOWLIST` to restrict it to named sites.
+
+**Publishing has not been exercised against a live Page.** The first real post from a deployment should be made by someone watching the Page. Nothing is published without an approval of the exact text, and nothing publishes on a schedule.
+
+Nothing in Phase 15 starts a background loop, and no new environment variable is required.
+
 ## 8. After the deployment
 
 Look at what the API said while starting:
@@ -238,6 +269,8 @@ Then check it the way that release is checked. `docker compose ps` should show t
 **Do not undo a migration to roll back.** A previous release starting against a database that already has newer migrations is fine: its `migrate deploy` step reports `No pending migrations to apply.` and the server starts. This was checked for the Phase 13 migration specifically.
 
 That works because migrations here are additive. `20261006120000_phase13_confirmation` adds one table and touches nothing else; a release from before Phase 13 never reads or writes it. Leave the table in place — it is used again the next time the newer release is deployed.
+
+The Phase 15 migration is additive in the same way. `20261012120000_phase15_marketing_os` adds four tables and alters none; a release from before Phase 15 never reads or writes them. Its migration step was run against a database that already had the Phase 15 migration (2026-10-12): `29 migrations found`, `No pending migrations to apply.` Rolling back to before Phase 15 leaves the marketing rows in place and unreachable — the older release has no route, tool or page for them — and they are there again when the newer release returns. **A post that was published stays published**: rolling back does not, and cannot, take anything down from a Page.
 
 A migration that **failed part-way** is different. Prisma records it as failed and will refuse to apply anything after it until it is resolved, and how to resolve it depends on what the migration had already done. Roll the application back so the service is up, then stop and work out the state of the database before touching it.
 
@@ -390,6 +423,8 @@ Recorded so the claims above can be told apart from intentions.
 | Restoring over the database instead | `pg_restore --clean --if-exists` | Six errors, the `Confirmation` table left behind, and the next start failed with `P3018` — which is why the runbook does not do it |
 
 The steps the last code changes could affect — the database going away, a confirmation across a restart, stopping, the search of the logs — were repeated on the image built from the final code. The backup, health and confirmation-store commands were run in PowerShell as well as Git Bash, all but the `rm` line.
+
+**Phase 15, 2026-10-12 — what was checked, and what was not.** Checked, on a throwaway pgvector container on port 5436: all 30 migrations apply from nothing; the previous release's migration step then reports `No pending migrations to apply.` against that database; and the `psql` commands in "Marketing: the workspace tables" return what that section says. **Not** done for Phase 15: building the image, starting the stack, deploying, or rolling back a running stack. The `marketing_wiring` log line was read from the API's tests, not from a container. Nothing was published to a live Page, and the real stack was not touched.
 
 **Not rehearsed:**
 

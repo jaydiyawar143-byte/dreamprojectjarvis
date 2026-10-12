@@ -143,6 +143,10 @@ export const AgentDomainSchema = z.enum([
   // Maps, places and routing. Separate from `general` because it is the only
   // domain whose tools read the user's physical position.
   "location",
+  // Phase 15 — the marketing workspace: campaigns, the content calendar, page
+  // research, reports and approval-gated publishing. Separate from `meta-ads`,
+  // which owns the ad account itself.
+  "marketing",
 ]);
 
 export type AgentDomain = z.infer<typeof AgentDomainSchema>;

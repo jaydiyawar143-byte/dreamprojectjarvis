@@ -44,6 +44,10 @@ export const RATE_LIMIT_NAMESPACES = {
   // Phase 13 — approval-gated writes. Its own namespace so a burst of write
   // planning cannot exhaust the budget a read needs, and vice versa.
   google_write: "google_write",
+  // Phase 15 — the marketing workspace. Today it meters one thing: reads of
+  // public web pages for SEO audits and competitor comparisons, which reach
+  // addresses a user chose and must not be usable as a relay or a loop.
+  marketing: "marketing",
 } as const;
 
 export type RateLimitNamespace =

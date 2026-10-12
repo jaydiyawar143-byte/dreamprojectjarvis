@@ -1,0 +1,51 @@
+%% Phase 15 — one publish, from "ask" to "read back".
+%% An item is called published only on the PUBLISHED branch. See docs/MARKETING.md.
+
+sequenceDiagram
+    participant U as User
+    participant P as Page or chat
+    participant E as ToolExecutor
+    participant S as MarketingService
+    participant A as Approval (PostgreSQL)
+    participant J as Execution journal
+    participant F as Facebook Page
+
+    U->>P: Publish this item
+    P->>E: marketing.publish.prepare (a read)
+    E->>S: preparePublish
+    S->>F: list the Pages this connection may post to
+    S-->>P: publishParams — the saved text, the Page
+    P->>A: create approval, bound by hash to those parameters
+    P-->>U: the exact text and Page. Nothing has been sent.
+
+    U->>A: approve (one conditional UPDATE)
+    P->>E: marketing.content.publish, naming that approval
+    E->>J: begin execution, keyed by the approval
+    E->>A: consume the approval WITH the execution claim
+    E->>S: publish
+    S->>S: again — still ready? saved text = approved text? Page still listed, same name?
+    S->>S: claimForPublish (one conditional UPDATE)
+
+    alt an earlier attempt was never confirmed, and its post is found
+        S->>F: read that post by id, then look for the exact text
+        F-->>S: found
+        S-->>P: ALREADY_PUBLISHED — nothing new sent
+    else nothing to reconcile
+        S->>F: POST the post
+        alt accepted and read back
+            F-->>S: post id
+            S->>F: read the post back by its id
+            F-->>S: the post, with the text that was sent
+            S->>S: record PUBLISHED · VERIFIED
+            S-->>P: PUBLISHED
+        else accepted, cannot be read back
+            S->>S: leave unpublished, UNCONFIRMED, keep the post id
+            S-->>P: UNCONFIRMED — outcome not known
+        else refused
+            F-->>S: refusal
+            S-->>P: FAILED — nothing was published
+        else the answer never arrives
+            S->>S: leave unpublished, UNCONFIRMED
+            S-->>P: UNCONFIRMED — outcome not known
+        end
+    end
