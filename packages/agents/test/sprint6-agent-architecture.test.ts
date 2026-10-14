@@ -21,6 +21,7 @@ import { CommunicationAgent } from "../src/agents/communication-agent.js";
 import { GoogleAdsAgent } from "../src/agents/google-ads-agent.js";
 import { BrowserAgent } from "../src/agents/browser-agent.js";
 import { LocationAgent } from "../src/agents/location-agent.js";
+import { MarketingAgent } from "../src/agents/marketing-agent.js";
 import { ConversationalAssistant } from "../src/agents/conversational-assistant.js";
 import { MetaAdsAgent } from "../src/agents/meta-ads-agent.js";
 import {
@@ -59,8 +60,10 @@ describe("Sprint 6.1 — agent architecture", () => {
       // wired.
       registry.register(new BrowserAgent({ provider }));
       registry.register(new LocationAgent({ provider }));
+      // Phase 15 added the tenth, the marketing workspace.
+      registry.register(new MarketingAgent({ provider }));
 
-      expect(registry.getAll()).toHaveLength(9);
+      expect(registry.getAll()).toHaveLength(10);
       for (const id of Object.values(AGENT_IDS)) {
         expect(registry.get(id), `agent ${id}`).toBeDefined();
         expect(registry.getPolicy(id), `policy ${id}`).toBeDefined();

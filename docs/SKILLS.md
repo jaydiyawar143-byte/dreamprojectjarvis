@@ -57,7 +57,17 @@ Both are defined in `packages/agents/src/agent-policy.ts`. Adding a capability m
 > same as one you disliked. S5 only records these. Nothing reads them back into
 > how JARVIS decides anything — there is no learning here.
 
-Verified against the code on 2026-10-05, commit `68628c0`.
+>
+> **Phase 15 (2026-10-12)** added a tenth agent, `marketing-agent`, eighteen
+> `marketing.*` tools and a ninth skill, `marketing` ("Marketing workspace").
+> Fifteen of the tools are also held by the general assistant; the two that
+> publish are held by the marketing agent alone; and one —
+> `marketing.publish.resolve`, a person's decision about a publish whose
+> outcome is not known — is held by **no agent**. Publishing is approval-gated,
+> bound to the exact text and Page, and off unless
+> `MARKETING_PUBLISH_ENABLED=true`. See [MARKETING.md](./MARKETING.md).
+
+Verified against the code on 2026-10-05, commit `68628c0`; the marketing groups and the tenth agent on 2026-10-12.
 
 ---
 
@@ -85,14 +95,19 @@ Named groups keep each policy readable as a capability rather than a list of str
 | Single tools | `n8n.trigger`, `whatsapp.send` | approval-gated |
 | Registered, on **no** allowlist | `memory.forget`, `memory.forget_all` | approval-gated; they run only for a confirmed pending action the chat route created from the user's own words |
 | Registered, on **no** allowlist (Phase 14) | `memory.correct`, `memory.purge_expired` | `memory.correct` is approval-gated and runs only for a pending action the user confirmed; `memory.purge_expired` takes no parameters and is run only by the retention sweep. Both through `ToolExecutor` |
+| `MARKETING_READ_TOOLS` (ids in `packages/core/src/types/marketing.ts`) | `marketing.campaign.list`, `marketing.campaign.get`, `marketing.content.list`, `marketing.research.list`, `marketing.report.generate`, `marketing.report.list`, `marketing.report.get`, `marketing.recommendations` | read-only. `report.generate` reads the ad account through `ToolExecutor` and saves a record of what it read; it changes nothing outside JARVIS |
+| `MARKETING_WORKSPACE_TOOLS` | `marketing.campaign.create`, `marketing.campaign.update`, `marketing.content.plan`, `marketing.content.update`, `marketing.content.mark_published` | write only to JARVIS's own store; no approval. Saving is never publishing |
+| `MARKETING_RESEARCH_TOOLS` | `marketing.seo.audit`, `marketing.competitor.analyze` | read one public web page; registered only while `BROWSER_ENABLED=true`; metered per user |
+| `MARKETING_PUBLISH_TOOLS` | `marketing.publish.prepare`, `marketing.content.publish` | `publish.prepare` is a read; `content.publish` is approval-gated and bound to the exact text and Page. Registered only when a publisher exists — which needs `MARKETING_PUBLISH_ENABLED=true` as well as the Meta credentials. Held by `marketing-agent` alone |
+| `MARKETING_DECISION_TOOL_IDS` (in `packages/core/src/types/marketing.ts`; in no agent's allowlist) | `marketing.publish.resolve` | a person's decision that an unconfirmed publish did not happen: JARVIS looks once more and clears the attempt only if the post is not there. Reached from the Marketing page alone; refuses a call that carries an agent or a conversation. Registered with the publish tools |
 | `BROWSER_READ_TOOL_IDS` (in `packages/core/src/types/browser.ts`) | `browser.navigate`, `browser.inspect`, `browser.extract`, `browser.screenshot` | read-only |
 | `BROWSER_ACTION_TOOL_IDS` (same file) | `browser.click`, `browser.type`, `browser.select`, `browser.submit`, `browser.download`, `browser.upload` | every one approval-gated |
 
-## The nine agents
+## The ten agents
 
 | Agent id | Registered | May call | Role floor |
 |---|---|---|---|
-| `conversational-assistant` | always | Meta read + write, Google read, analysis, maps, ambient, integration read + write, capability, self, task, Google Workspace, Google write-plan, memory read, MCP | read |
+| `conversational-assistant` | always | Meta read + write, Google read, analysis, maps, ambient, integration read + write, capability, self, task, Google Workspace, Google write-plan, memory read, MCP, marketing read + workspace + research — **not** marketing publish | read |
 | `meta-ads-agent` | always | Meta read + write, integration read, capability, self | read |
 | `knowledge-agent` | always | capability and self only — retrieval already happened in the orchestrator, so it holds no search tool on purpose | read |
 | `analytics-agent` | always | Meta read, Google read, analysis, integration read, capability, self — no writes | read |
@@ -101,8 +116,9 @@ Named groups keep each policy readable as a capability rather than a list of str
 | `communication-agent` | when `whatsapp.send` is registered | `whatsapp.send`, integration read, capability, self | read + write |
 | `browser-agent` | when `browser.navigate` is registered | browser read + action, capability, self | read + write |
 | `location-agent` | when `maps.route` is registered (effectively always) | maps, integration read, capability, self | read |
+| `marketing-agent` | when `marketing.content.list` is registered (always: the workspace needs only the database) | marketing read + workspace + research + publish, Meta **read**, integration read, capability, self — no Meta write, no messaging, no automation | read |
 
-Every policy sets `writesRequireApproval: true`. The allowlist decides **who may propose** a tool call; the approval boundary decides **whether it runs**. When an integration-backed agent is not registered, the router falls through to the next candidate and the request usually lands on `conversational-assistant`.
+Every policy sets `writesRequireApproval: true`. The allowlist decides **who may propose** a tool call; the approval boundary decides **whether it runs**. Since Phase 15 the caller's **role** is also checked before a pending action is created for an approval-gated tool: a viewer who asks for one is refused there (audited as `agent.tool_role_denied`) instead of being handed an approval they could never use. When an integration-backed agent is not registered, the router falls through to the next candidate and the request usually lands on `conversational-assistant`.
 
 ## Tools that exist but no agent can use
 

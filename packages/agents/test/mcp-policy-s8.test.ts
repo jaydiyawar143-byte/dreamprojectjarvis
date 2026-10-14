@@ -53,8 +53,15 @@ describe("the MCP grant", () => {
 
   it("leaves every allowlist exactly the size it was, plus the reviewed MCP group for the general assistant", () => {
     const sizes = Object.fromEntries(Object.entries(AGENT_POLICIES).map(([id, p]) => [id, p.allowedTools.length]));
+    // Phase 15 changed two entries, on purpose, and nothing else:
+    //   - the general assistant gained the marketing workspace WITHOUT
+    //     publishing: 8 reads + 5 own-store writes + 2 page reads = 15;
+    //   - the marketing agent is new: those 15, the 2 publish tools, the 6 Meta
+    //     reads, the 7 integration reads, the 4 capability tools and
+    //     self.describe = 35.
+    // Every other allowlist is the size it was.
     expect(sizes).toEqual({
-      "conversational-assistant": 74 + MCP_READ_TOOLS.length,
+      "conversational-assistant": 74 + 15 + MCP_READ_TOOLS.length,
       "meta-ads-agent": 27,
       "google-ads-agent": 40,
       "knowledge-agent": 5,
@@ -63,6 +70,7 @@ describe("the MCP grant", () => {
       "communication-agent": 13,
       "browser-agent": 15,
       "location-agent": 20,
+      "marketing-agent": 35,
     });
   });
 });

@@ -15,7 +15,16 @@
 // ---------------------------------------------------------------------------
 
 import type { AgentPolicy, ITool, ToolRegistry } from "@jarvis/core";
-import { BROWSER_READ_TOOL_IDS, BROWSER_ACTION_TOOL_IDS, MCP_MANIFEST, mcpReadToolIds } from "@jarvis/core";
+import {
+  BROWSER_READ_TOOL_IDS,
+  BROWSER_ACTION_TOOL_IDS,
+  MARKETING_PUBLISH_TOOL_IDS,
+  MARKETING_READ_TOOL_IDS,
+  MARKETING_RESEARCH_TOOL_IDS,
+  MARKETING_WORKSPACE_TOOL_IDS,
+  MCP_MANIFEST,
+  mcpReadToolIds,
+} from "@jarvis/core";
 
 // ---------------------------------------------------------------------------
 // Agent ids — the closed set. An id absent from here cannot be resolved.
@@ -31,6 +40,8 @@ export const AGENT_IDS = {
   communication: "communication-agent",
   browser: "browser-agent",
   location: "location-agent",
+  // Phase 15 — the marketing workspace.
+  marketing: "marketing-agent",
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -292,6 +303,32 @@ export const MEMORY_READ_TOOLS = ["memory.list"] as const;
  */
 export const MCP_READ_TOOLS: readonly string[] = mcpReadToolIds(MCP_MANIFEST);
 
+/**
+ * Phase 15 — the marketing workspace, in four groups that are granted
+ * separately because they are not the same kind of thing.
+ *
+ * The ids themselves live in core (`types/marketing.ts`), beside the contracts
+ * that define them, the same way the browser ids do; the groups are restated
+ * here by name so a policy reads as a capability.
+ *
+ *   MARKETING_READ_TOOLS       reads of JARVIS's own marketing store.
+ *   MARKETING_WORKSPACE_TOOLS  writes to that store — a draft saved, a date
+ *                              moved, a report generated. LOW_IMPACT and
+ *                              ungated, like `task.create`: nothing leaves
+ *                              JARVIS, and saving is never publishing.
+ *   MARKETING_RESEARCH_TOOLS   one bounded read of a public page each.
+ *                              READ_ONLY. Registered only where the operator
+ *                              has switched page reads on.
+ *   MARKETING_PUBLISH_TOOLS    the publish check (a read) and the publish
+ *                              itself — EXTERNAL_SIDE_EFFECT and approval-gated
+ *                              in its own definition. Registered only where a
+ *                              publisher exists.
+ */
+export const MARKETING_READ_TOOLS: readonly string[] = MARKETING_READ_TOOL_IDS;
+export const MARKETING_WORKSPACE_TOOLS: readonly string[] = MARKETING_WORKSPACE_TOOL_IDS;
+export const MARKETING_RESEARCH_TOOLS: readonly string[] = MARKETING_RESEARCH_TOOL_IDS;
+export const MARKETING_PUBLISH_TOOLS: readonly string[] = MARKETING_PUBLISH_TOOL_IDS;
+
 // ---------------------------------------------------------------------------
 // Policies
 // ---------------------------------------------------------------------------
@@ -339,6 +376,16 @@ const GENERAL_POLICY = policy({
     ...MEMORY_READ_TOOLS,
     // S8.4 — reviewed MCP tools, read-only. No other agent receives them.
     ...MCP_READ_TOOLS,
+    // Phase 15 — the marketing workspace, WITHOUT publishing. "What is on my
+    // content calendar?" and "save that as a post idea" arrive on the fallback
+    // agent whenever the router sees no marketing phrase, and an assistant
+    // with no tool for them answers from nothing. The two publish tools are
+    // deliberately absent: like `whatsapp.send` and `n8n.trigger`, posting in
+    // public is held by one agent, so a request has to be recognisably about
+    // publishing before a post can even be proposed.
+    ...MARKETING_READ_TOOLS,
+    ...MARKETING_WORKSPACE_TOOLS,
+    ...MARKETING_RESEARCH_TOOLS,
   ],
   requiredPermissions: ["read"],
   writesRequireApproval: true,
@@ -497,6 +544,46 @@ const LOCATION_POLICY = policy({
   description: "Maps, place search, routing, distance and travel time over Google Maps Platform",
 });
 
+/**
+ * Phase 15 — the marketing workspace.
+ *
+ * The only agent that holds `marketing.content.publish`. The grant decides who
+ * may PROPOSE a post; the tool's own approval gate decides whether it runs, and
+ * `writesRequireApproval` enforces that a second time — were the tool ever
+ * registered ungated, the Orchestrator would still refuse it here.
+ *
+ * It reads the Meta ad account (a report and an analysis are asked for in the
+ * same breath as a content plan) and holds NO Meta write: pausing an ad or
+ * moving a budget belongs to the Meta Ads agent. An analysis that implies one
+ * names it and stops.
+ *
+ * The permission floor is `["read"]`, matching its tools, not `["read",
+ * "write"]`. Most of what this agent does is reading — a calendar, a report,
+ * a page — and a viewer is entitled to all of it. Every write here checks
+ * `write` for itself, so a stricter floor would add no safety and would only
+ * send a viewer asking "what is going out this week?" to an agent with fewer
+ * tools for the question.
+ */
+const MARKETING_POLICY = policy({
+  agentId: AGENT_IDS.marketing,
+  domain: "marketing",
+  allowedTools: [
+    ...MARKETING_READ_TOOLS,
+    ...MARKETING_WORKSPACE_TOOLS,
+    ...MARKETING_RESEARCH_TOOLS,
+    ...MARKETING_PUBLISH_TOOLS,
+    ...META_READ_TOOLS,
+    ...INTEGRATION_READ_TOOLS,
+    ...CAPABILITY_TOOLS,
+    ...SELF_TOOLS,
+  ],
+  requiredPermissions: ["read"],
+  writesRequireApproval: true,
+  clientSelectable: true,
+  description:
+    "Marketing workspace: campaign planning, the content calendar, page research, reporting, recommendations and approval-gated publishing",
+});
+
 /** The complete, immutable policy set. */
 export const AGENT_POLICIES: Readonly<Record<string, AgentPolicy>> = Object.freeze({
   [AGENT_IDS.general]: GENERAL_POLICY,
@@ -508,6 +595,7 @@ export const AGENT_POLICIES: Readonly<Record<string, AgentPolicy>> = Object.free
   [AGENT_IDS.communication]: COMMUNICATION_POLICY,
   [AGENT_IDS.browser]: BROWSER_POLICY,
   [AGENT_IDS.location]: LOCATION_POLICY,
+  [AGENT_IDS.marketing]: MARKETING_POLICY,
 });
 
 /**

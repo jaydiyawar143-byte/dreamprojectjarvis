@@ -24,7 +24,7 @@ Nothing is listed as implemented without a code path behind it. Where a capabili
 |---|---|
 | **Execution Path** | How a request reaches the outside world. Every tool call — from chat, from a dashboard button or from a scheduled task — runs through the one `ToolExecutor` |
 | **Approval** | What has to happen before it runs. "None" means read-only |
-| **Agent Scope** | Which agents' allowlists hold it: GA = `conversational-assistant`, Meta = `meta-ads-agent`, Analytics, Knowledge, Google Ads, Automation, Communication, Browser, Location. "All" means every agent |
+| **Agent Scope** | Which agents' allowlists hold it: GA = `conversational-assistant`, Meta = `meta-ads-agent`, Analytics, Knowledge, Google Ads, Automation, Communication, Browser, Location, Marketing = `marketing-agent`. "All" means every agent |
 | **Tested** | Representative test files, by name. Not an exhaustive list |
 
 ---
@@ -42,9 +42,11 @@ Nothing is listed as implemented without a code path behind it. Where a capabili
 | Messaging specialist | Not connected | registers only when `whatsapp.send` is registered | approval | Communication | `sprint6-agent-wiring`, `whatsapp-tools` |
 | Browser specialist | Not connected | registers only when browsing is switched on and a Chrome exists | actions: approval | Browser | `sprint7-browser-agent` |
 | Location specialist | Implemented | the maps tools register unconditionally, so this agent is effectively always present | None | Location | `v3-google-maps` |
+| Marketing specialist | Implemented (Phase 15) | registers whenever the marketing workspace tools do — always, because they need only the database. What it is *offered* differs by deployment: the page reads only where page research is switched on, the publish tools only where a publisher exists | publish: approval | Marketing | `marketing-agent-p15`, `marketing-wiring-p15` |
 | Write-intent gate | Implemented | orchestrator, in front of every non-read-only tool call in the chat path: a write the user did not ask for is refused, never executed, and audited | — | All | `write-intent-gate`, `orchestrator-write-intent` |
+| Role check before a pending action | Implemented (Phase 15) | orchestrator: an approval-gated call from a role that could not run it is refused before any pending action or approval row is created. Previously refused only at confirmation — nothing ran, but a request nobody could act on was shown | — | All | `marketing-agent-p15`, `marketing-e2e-pg.integration` |
 
-Nine agents in total. When an agent is not registered, the request falls through to the general assistant rather than failing silently. One agent runs per request: a request that needs two agents' tools ("check my ads and WhatsApp me the summary") is not possible.
+Ten agents in total. When an agent is not registered, the request falls through to the general assistant rather than failing silently. One agent runs per request: a request that needs two agents' tools ("check my ads and WhatsApp me the summary") is not possible.
 
 ---
 
@@ -52,8 +54,8 @@ Nine agents in total. When an agent is not registered, the request falls through
 
 | Capability | Status | Execution Path | Approval | Agent Scope | Tested |
 |---|---|---|---|---|---|
-| Read Meta ad accounts, campaigns, ad sets, ads | Not connected | `meta.*` tools → `ToolExecutor` → `meta-graph`; registered only with `META_ACCESS_TOKEN` and `META_AD_ACCOUNT_ID` | None | GA, Meta, Analytics | `meta-ads`, `container-wiring-meta-tools` |
-| Read Meta performance insights | Not connected | as above | None | GA, Meta, Analytics | `meta-insights-date-range` |
+| Read Meta ad accounts, campaigns, ad sets, ads | Not connected | `meta.*` tools → `ToolExecutor` → `meta-graph`; registered only with `META_ACCESS_TOKEN` and `META_AD_ACCOUNT_ID` | None | GA, Meta, Analytics, Marketing | `meta-ads`, `container-wiring-meta-tools` |
+| Read Meta performance insights | Not connected | as above | None | GA, Meta, Analytics, Marketing | `meta-insights-date-range` |
 | Pause or resume a Meta campaign, ad set or ad | Approval required | approval row → `ToolExecutor` claims the journal and consumes the approval atomically → Meta | approval | GA, Meta | `meta-ads-write`, `approval-flow-regression` |
 | Change a Meta campaign or ad set budget | Approval required | as above; bounded by a maximum value and caps on how far one change may move it | approval | GA, Meta | `meta-ads-budget` |
 | Create a Meta campaign | Approval required | as above. Verified against mocks only; not exercised against a live account | approval | GA, Meta | `meta-ads-campaign` |
@@ -69,13 +71,36 @@ Nine agents in total. When an agent is not registered, the request falls through
 |---|---|---|---|---|---|
 | KPI calculation, aggregation, anomaly detection | Implemented | pure engines in `packages/core` | — | — | `kpi-engine`, `performance-aggregator`, `anomaly-engine` |
 | Recommendation generation and confidence | Implemented | used by the on-demand analysis below | — | — | `recommendation-engine`, `recommendation-confidence` |
-| On-demand account analysis | Not connected | one shared `AnalysisGenerator` behind the `meta.analyze` tool and `POST /api/v1/analysis`; reads through `ToolExecutor`, diagnoses through the model, persists one PROPOSED recommendation. Needs Meta credentials and an AI provider | None — dry-run, read-only | GA, Meta, Analytics | `analysis-parity`, `analysis-generator`, `meta-analysis-tool` |
+| On-demand account analysis | Not connected | one shared `AnalysisGenerator` behind the `meta.analyze` tool and `POST /api/v1/analysis`; reads through `ToolExecutor`, diagnoses through the model, persists one PROPOSED recommendation. Needs Meta credentials and an AI provider. **Until Phase 15 the tool was registered after the agents' tool definitions had been computed, so it worked from the dashboard button and was offered to no model in chat; it is now registered before them** | None — dry-run, read-only | GA, Meta, Analytics, Marketing | `analysis-parity`, `analysis-generator`, `meta-analysis-tool`, `marketing-wiring-p15` |
 | Reading and executing a recommendation | Approval required | `RecommendationExecutionService` → approval → `ToolExecutor` | approval | REST and dashboard | `recommendation-bridge`, `phase116a-bridge-pg.integration` |
 | Opportunity prioritisation and queue | Implemented | `/api/v1/opportunities` | — | REST and dashboard | `opportunity-scoring`, `opportunities` |
 | Outcome measurement | Implemented | records created after an executed recommendation write; `OutcomeWorker` re-measures them on a background interval (`JARVIS_OUTCOME_WORKER_INTERVAL_MS`) — ledger R-32 | — | background | `outcome-engine`, `outcome-worker-scheduler`, `phase117b-outcome-pg.integration` |
 | Historical outcome intelligence | Partially implemented | matching relies on outcome records, created at runtime only for executed recommendation writes | — | — | `historical-outcome-engine`, `phase118a-outcome-pg.integration` |
 | A/B experimentation, automated bidding | Planned / not implemented | | — | — | — |
 | Website or conversion analytics | Planned / not implemented | No landing-page or conversion data source | — | — | — |
+
+---
+
+## Marketing workspace
+
+Added in Phase 15 (2026-10-12). One service, `MarketingService`, behind the `marketing.*` tools; chat and the `/marketing` page reach it through the same tools and the same `ToolExecutor`. The contract is [MARKETING.md](./MARKETING.md); what was verified and how is in [phases/phase-15.md](./phases/phase-15.md).
+
+| Capability | Status | Execution Path | Approval | Agent Scope | Tested |
+|---|---|---|---|---|---|
+| Campaign workspaces — a name, goal, dates and status, with the content, research and reports kept under it | Implemented | `marketing.campaign.*` → `ToolExecutor` → `MarketingService` → PostgreSQL. A workspace in JARVIS; it creates and changes nothing in an ad account | None — JARVIS's own store | GA, Marketing | `marketing-e2e-pg.integration`, `marketing-p15-pg.integration`, `marketing-routes-p15` |
+| Social content planning | Implemented | `marketing.content.plan` saves ideas and drafts; a model drafts the copy in chat and it is saved only when the user asks for it to be saved | None | GA, Marketing | `marketing-agent-p15`, `marketing-tools-p15`, `marketing-e2e-pg.integration` |
+| Content calendar | Implemented | `marketing.content.list` / `.update`; `/marketing` → Calendar. **A date is a plan: nothing is published because a date arrives** | None | GA, Marketing | `marketing-content-p15`, `marketing-page`, `marketing-e2e-pg.integration` |
+| Recording a post you published yourself | Implemented | `marketing.content.mark_published` → stored as *reported by you*, never as verified | None | GA, Marketing | `marketing-e2e-pg.integration`, `marketing-page` |
+| Publish a text post to a Facebook Page | Approval required · **Off unless `MARKETING_PUBLISH_ENABLED=true`** · Not connected without Meta credentials | publish check → approval bound to the exact text and Page → `marketing.content.publish` consumes the approval with the execution claim → post → **read back by its id, with the text that was sent** → recorded as verified. An outcome that is not known leaves the item unconfirmed: it cannot be edited, a retry only looks for the post and sends nothing — the approval for it is bound to that attempt and can never send — and it is settled by the post being found or by a person (`marketing.publish.resolve`, Marketing page only; held to the attempt's words and Page, and written with its audit row or not at all). A post another item already holds is never recorded as this one's. Where publishing is off, chat says so and says how it is switched on. **Exercised against stand-ins only; no post has been made to a live Page** | approval, by exact text and Page | Marketing only | `marketing-publish-flow-p15`, `page-publisher-p15`, `marketing-e2e-pg.integration` |
+| Publish to Instagram, LinkedIn, X or any other channel | Planned / not implemented | No publisher exists. Content for them can be planned; the screen says JARVIS cannot publish there and offers "I posted this myself" | — | — | `marketing-page` |
+| Scheduled or automatic publishing | Planned / not implemented | Nothing runs on a calendar date | — | — | — |
+| SEO audit of one page | Partially implemented · Not connected unless `BROWSER_ENABLED=true` | `marketing.seo.audit` → `PublicPageFetcher` (every hop judged, connection pinned, 2 MB, 15 s) → fixed rules over the page's own title, description, headings, canonical, images and links. **No keyword volume, ranking, traffic or backlink data — none is read and none is estimated** | None; 20 page reads per user per 10 minutes | GA, Marketing | `seo-audit-p15`, `page-fetcher-p15`, `marketing-e2e-pg.integration` |
+| Competitor page snapshot, and what changed since the last read | Partially implemented · Not connected unless `BROWSER_ENABLED=true` | `marketing.competitor.analyze` → the same reader. One public page's own facts, compared with your page and with the previous saved reading. **Not their traffic, rankings, ads or spend** | None; metered as above | GA, Marketing | `seo-audit-p15`, `marketing-e2e-pg.integration` |
+| Campaign performance report | Implemented; ad figures only with Meta credentials | `marketing.report.generate` → the `meta.*` read tools through `ToolExecutor` as a viewer, for the configured ad account → pure arithmetic in `packages/core`. A source that could not be read contributes no figure and is listed as unread | None — reads only | GA, Marketing | `marketing-report-p15`, `marketing-e2e-pg.integration` |
+| Client report | Partially implemented | The same document under a client heading, downloaded as self-contained HTML or Markdown. **No PDF** (the PDF generator is still not registered) and **nothing sends it to anyone** | None | GA, Marketing | `marketing-report-p15`, `marketing-routes-p15`, `marketing-page` |
+| Google Ads figures in a report | Planned / not implemented — blocked | A report records whether Google Ads *could* be read (from the granted scopes) and why not; it never reads it. Needs a Google Ads developer token and a Google connection whose **granted** scopes include Ads — ledger R-6 | — | — | `marketing-google-ads-source-p15` |
+| Marketing recommendations | Implemented | `marketing.recommendations` → fixed rules over the calendar, the latest saved report and saved audits. Each lists its evidence and is marked not carried out. No model, and no "apply" | None — advice only | GA, Marketing | `marketing-recommendations-p15`, `marketing-page` |
+| Marketing page | Implemented | `/marketing` → `/api/v1/marketing/*`, one tool per endpoint. Draws no control this deployment or this role cannot use | as the tools above | — | `marketing-page`, `marketing-api-client`, `marketing-routes-p15` |
 
 ---
 
@@ -256,10 +281,11 @@ Listed because they are commonly assumed. None of these exist in this repository
 |---|---|
 | Sales CRM, lead pipelines, deal tracking | Planned / not implemented — JARVIS is not a sales CRM |
 | Workspace or project-management integrations (task boards, sprints, tickets) | Planned / not implemented |
-| Social media content planning, publishing or scheduling; content calendars | Planned / not implemented |
-| SEO research | Planned / not implemented |
-| Competitor research | Planned / not implemented |
-| Client report generation | Planned / not implemented — the PDF generator is not registered |
+| Publishing to Instagram, LinkedIn, X or any channel other than a Facebook Page; scheduled or automatic publishing | Planned / not implemented — content planning, the calendar and approval-gated publishing to a Facebook Page arrived in Phase 15, see "Marketing workspace" above |
+| Keyword research: search volume, rankings, keyword difficulty, backlinks, traffic | Planned / not implemented — no provider of that data is integrated. The Phase 15 SEO audit reads what a page says about itself |
+| Competitor intelligence beyond one public page: their traffic, rankings, ads or spend | Planned / not implemented |
+| Client reports as PDF, or delivered to a client | Planned / not implemented — reports download as HTML or Markdown; the PDF generator is not registered and nothing sends a report |
+| Google Ads figures in marketing reports | Planned / not implemented — blocked on the Ads scope being granted and a developer token (ledger R-6) |
 | Integrations beyond Meta, Google (Ads, Gmail, Drive, Calendar, Maps), WhatsApp, n8n and the two reviewed MCP servers | Planned / not implemented |
 | Real-time multi-user collaboration | Planned / not implemented — roles exist, shared live editing does not |
 | Self-improving or self-modifying prompts | Planned / not implemented — prompts are static and auditable |
@@ -267,5 +293,5 @@ Listed because they are commonly assumed. None of these exist in this repository
 ---
 
 *Document version: 4.0 — regenerated in the Phase 12 documentation reconciliation (backlog A-7, ledger R-2): added work tasks and scheduling, memory learning and management (S7.2), evaluation (S5, S6), the write-intent gate and MCP (S8), and the Execution Path, Approval, Agent Scope and Tested columns.*
-*Verified against the repository on 2026-10-05, commit `68628c0`. Phase 13 (2026-10-06) changed one row: an integration action's confirmation is now durable. Phase 14 (2026-10-08) changed the two "Planned / not implemented" memory rows to Implemented and added five memory rows after them.*
+*Verified against the repository on 2026-10-05, commit `68628c0`. Phase 13 (2026-10-06) changed one row: an integration action's confirmation is now durable. Phase 14 (2026-10-08) changed the two "Planned / not implemented" memory rows to Implemented and added five memory rows after them. Phase 15 (2026-10-12) added the "Marketing workspace" section, the marketing specialist and the role check before a pending action; narrowed four "Planned / not implemented" rows to what is still missing; and corrected the on-demand analysis row, whose tool had not been reaching chat.*
 *Previous versions: 3.1 (2026-09-17, ledger P0-3 and R-33); 2.0 (2026-09-02), which described the Meta-era pipeline only.*

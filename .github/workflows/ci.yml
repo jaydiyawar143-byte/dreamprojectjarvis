@@ -18,6 +18,13 @@
 #   reads the evaluation's report too, so it cannot pass with its tests skipped.
 #   No step calls a model provider: the real-embedding evaluation is opt-in and
 #   never runs here.
+#   Phase 15 — the marketing contracts of @jarvis/core, @jarvis/tools,
+#   @jarvis/agents, @jarvis/browser and @jarvis/meta-graph, by file name, for
+#   the reason the memory contracts are: those workspaces are not gated as a
+#   whole. The marketing end-to-end test and the marketing repository test are
+#   PostgreSQL-backed and run in the database steps, where a skip fails the
+#   run. No step reaches a provider: the Page publisher and the page reader are
+#   tested against stand-ins.
 #
 # Deliberately not gated yet (docs/DEVELOPMENT.md, "Continuous integration"):
 #   - Test files OUTSIDE @jarvis/api. `typecheck:tests` exists only in that
@@ -148,6 +155,22 @@ jobs:
           pnpm --filter @jarvis/core exec vitest run memory learning
           pnpm --filter @jarvis/tools exec vitest run memory-tools
           pnpm --filter @jarvis/agents exec vitest run memory
+
+      # Phase 15 — the marketing contracts that live outside the gated
+      # workspaces: the content lifecycle, the SEO audit, the report arithmetic
+      # and the recommendation rules in core; the marketing tools, with the
+      # approval-gated publish; the marketing agent's allowlist, routing and
+      # gates in agents; the page fetcher that contains what a page read may
+      # reach; and the Facebook Page publisher. Selected by file name, so this
+      # gates marketing without gating those workspaces' other tests.
+      - name: Test marketing contracts (@jarvis/core, @jarvis/tools, @jarvis/agents, @jarvis/browser, @jarvis/meta-graph)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          pnpm --filter @jarvis/core exec vitest run marketing seo-audit
+          pnpm --filter @jarvis/tools exec vitest run marketing-tools
+          pnpm --filter @jarvis/agents exec vitest run marketing-agent
+          pnpm --filter @jarvis/browser exec vitest run page-fetcher
+          pnpm --filter @jarvis/meta-graph exec vitest run page-publisher
 
       # From here on, the PostgreSQL-backed tests. DATABASE_URL is set on these
       # steps only, so nothing above ever sees a database. Applying every

@@ -261,6 +261,27 @@ export const SKILL_CATALOG: readonly SkillDefinition[] = [
       { requires: "integration.disable", text: "switch an integration off (with your approval)" },
     ],
   },
+  // Phase 15 — the marketing workspace. Declared LAST so every earlier rule
+  // keeps the precedence it had; nothing else claims the `marketing.` prefix.
+  // Each phrase is gated on its tool, as everywhere above: on a deployment
+  // with no page research or no publishing connection, those phrases are
+  // simply not offered.
+  {
+    id: "marketing",
+    title: "Marketing workspace",
+    summary: "Plan campaigns and content, keep a content calendar, research pages and report on results.",
+    prefixes: ["marketing."],
+    phrases: [
+      { requires: "marketing.content.plan", text: "plan social content and save it to your content calendar" },
+      { requires: "marketing.content.list", text: "show what is on your content calendar" },
+      { requires: "marketing.campaign.create", text: "set up a campaign workspace" },
+      { requires: "marketing.report.generate", text: "generate a performance or client report from your real numbers" },
+      { requires: "marketing.seo.audit", text: "audit a web page's on-page SEO" },
+      { requires: "marketing.competitor.analyze", text: "compare a competitor's page with yours" },
+      { requires: "marketing.recommendations", text: "recommend what to work on next" },
+      { requires: "marketing.content.publish", text: "publish a ready post to your Facebook Page (with your approval)" },
+    ],
+  },
 ];
 
 /**
@@ -510,7 +531,7 @@ export function buildCapabilityBriefing(report: CapabilityReport): CapabilityBri
   const needsApproval = report.summary.requiresConfirmation;
   const approvalNote =
     needsApproval > 0
-      ? "Anything that changes something outside JARVIS — creating or pausing a campaign, changing a budget, sending a message, disconnecting an account — I prepare first and show you. It only runs after you explicitly approve it on screen."
+      ? "Anything that changes something outside JARVIS — creating or pausing a campaign, changing a budget, publishing a post, sending a message, disconnecting an account — I prepare first and show you. It only runs after you explicitly approve it on screen."
       : null;
 
   return {

@@ -513,6 +513,86 @@ The memory now says what you typed, word for word. You can also say "change 2 to
 - A memory cannot be moved from one project to another, and a project cannot be renamed or deleted.
 - Forgetting a memory does not delete the chat message it came from.
 
+---
+
+## Phase 15 — The Marketing Workspace
+
+*Added 2026-10-12. Status: implemented and verified by automated tests against PostgreSQL. User-accessible in chat and on the Marketing page, with three exceptions set out under "What it cannot do yet": publishing has been exercised against stand-ins only, never a live Page; page research works only where an administrator has switched page reads on; and Google Ads figures are in no report.*
+
+Open **Marketing** in the sidebar, or ask in chat. Both do the same thing by the same route, so what you save in one you see in the other.
+
+**Four words, used carefully everywhere:**
+
+| It says | It means |
+|---|---|
+| **Draft** / **Idea** | Saved in JARVIS. Nothing has gone anywhere. |
+| **Ready** | The words are final. Still nothing has gone anywhere. |
+| **Published · verified** | JARVIS posted it **and read the post back from the Page**. |
+| **Published · reported by you** | You told JARVIS you posted it. JARVIS did not publish it and has not checked. |
+
+There is one more: **Publish not confirmed** — a post was sent and JARVIS could not learn, or could not confirm, what happened to it. It is *not* marked published. Until you settle it, the item cannot be edited and **JARVIS sends nothing more for it**. See "When a publish is not confirmed" below.
+
+**Plan content.** Ask for a plan and you get one to read. Ask for it to be **saved** and it goes on the calendar as drafts:
+
+> **You:** Plan five Facebook posts for our Diwali sale.
+> **JARVIS:** (five draft posts, to read — nothing saved)
+> **You:** Save these posts to the content calendar.
+> **JARVIS:** Saved to the content calendar as drafts. Nothing was published.
+
+Before Phase 15 JARVIS could write the posts and had nowhere to keep them.
+
+**Keep a calendar.** The Marketing page shows thirty days at a time. Give an item a date and, if you like, a time of day. **A date is a plan.** Nothing is published because a date arrives — there is no timer.
+
+**Organise a campaign.** A campaign workspace is a place in JARVIS for one campaign's content, research and reports. It is not an ad campaign and it creates nothing in an ad account.
+
+**Research a page.** *SEO audit* reads one public page and tells you what is on it: its title, description, headings, images without a description, and so on, each as a fact followed by a suggestion. *A competitor's page* does the same for someone else's page, compares it with yours if you give yours, and — the second time you read the same page — tells you what changed.
+
+Every result also says **what it does not tell you**: rankings, search volume, traffic, backlinks. Those cannot be read from a page, and JARVIS does not estimate them.
+
+**Report on performance.** *Generate report* reads your ad account and this workspace's content for a period (the last 30 complete days unless you choose; 90 days at most) and saves the result. The report lists **where every figure came from**. A source that could not be read contributes no figure and is listed as not read — never as zero.
+
+> **Before:** "How did last month go?" got an answer written by a model from whatever it had fetched.
+> **Now:** it gets a saved report whose totals are arithmetic over rows that were read, with each source's status beside it, that you can open again or download.
+
+A **client report** is the same report with a client heading. Download it as HTML or Markdown and send it yourself — JARVIS does not send it to anyone.
+
+**Get recommendations.** Suggestions worked out by fixed rules from your calendar, your latest saved report and your saved audits — "two items are ready and their date has passed", "click-through rate fell 25% against the previous period". Each one lists the facts it rests on and is marked **Advice · not carried out**. There is no "apply" button: to act on one, do the thing itself.
+
+**Publish — with your approval, every time.** Today JARVIS can publish one thing: **a text post, with an optional link, to a Facebook Page** your Meta connection may post to.
+
+1. Mark the item **Ready**.
+2. Press **Publish** (or ask in chat). Nothing is posted. JARVIS shows you **the exact text and the Page**.
+3. Press **Approve and publish**, or **Decline**. In chat, reply "yes" or "no".
+4. JARVIS posts it, reads it back from the Page, and only then says it is published.
+
+If you change the words after asking, the approval no longer matches and nothing is posted — ask again. Declining one post does not block any other. Voice cannot approve a publish.
+
+Publishing is **off until your administrator switches it on** for this server. Where it is off there is no Publish button, and the page says so. In chat, JARVIS tells you the same thing — that publishing is switched off here, that nothing was published, and what your administrator has to set to switch it on — instead of asking you to confirm a post it could not make.
+
+**When a publish is not confirmed.** Sometimes a post is sent and the answer never arrives, or the post cannot be read back, or what comes back is not the text that was sent. JARVIS then does not know whether your post is on the Page, and it says so instead of guessing. While an item is in this state you cannot edit it, and it shows three buttons:
+
+- **Look for the post** — asks for your approval and then *only looks* on the Page the post was sent to. If the post is there with exactly this item's text, it is recorded as published. If it is not found, nothing is posted and the item stays as it is. What you approve here is a look and stays a look: if you settle the item some other way first — in another tab, say — and then approve this, **nothing is posted**; JARVIS tells you the item has changed and asks you again. A post that already belongs to another calendar item with the same words is never counted as this one's.
+- **I posted this myself** — records it as published · reported by you.
+- **It was not published** — use this only after you have looked at the Page yourself. JARVIS looks once more. If it finds the post, it records it as published. If it does not, the earlier attempt is cleared and you can edit and publish the item again. JARVIS refuses to clear it, and changes nothing, when it cannot be sure what it would be looking for or where: the item no longer holds the words that were sent, the Page it was sent to is no longer connected, the earlier attempt was replaced by a newer one while you were deciding, or your decision could not be written to the audit log.
+
+JARVIS will not send a second post on its own after an outcome it does not know. It **cannot promise** that a post will never appear twice: if the first post is in fact on the Page, JARVIS does not find it when it looks, and you tell it the post was not published, publishing again will post it again. That is why the last button asks you to check the Page first.
+
+For any other channel — Instagram, LinkedIn, X — plan it here, post it yourself, and press **I posted this myself**. It is recorded as reported by you.
+
+**What it cannot do yet.**
+
+- **Publishing has not been exercised against a live Facebook Page.** It is tested against stand-ins for the Page; the first real post should be watched.
+- It publishes text and a link only — no images, video, carousels, stories or reels — and only to a Facebook Page.
+- It does not publish on a schedule.
+- A post whose text contains a word JARVIS hides in conversations for safety — "password", "token", "secret" — or that is very long, cannot be published from chat. JARVIS says so and asks you to publish it from the Marketing page, where it works.
+- **Google Ads figures are in no report.** Every report says whether Google Ads could have been read and why not.
+- Research needs an administrator to switch page reads on (`BROWSER_ENABLED=true`). Where it is off, the Research tab says so and shows no form, and in chat JARVIS tells you the same.
+- SEO research has no keyword volumes, rankings or backlinks, and competitor research has no traffic or ad-spend figures: no provider of that data is connected.
+- Reports cover Meta Ads and your own content. There is no website or conversion analytics.
+- A client report downloads as HTML or Markdown, not PDF.
+- Content items and campaigns can be archived, not deleted.
+- Your role matters: a viewer can read the workspace and generate reports, and cannot save, edit or publish.
+
 ## Glossary
 
 | Term | Definition |

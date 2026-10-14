@@ -133,6 +133,24 @@ export interface OrchestratorConfig {
    * rendered into the prompt and is never consulted when a call is authorized.
    */
   skillContext?: ISkillContextProvider;
+  /**
+   * Phase 15 — tools this server has deliberately switched off, by registry
+   * id, each with the reason in words for a person (what is off, and how an
+   * operator switches it on).
+   *
+   * An agent's grant is compile-time, so a model can still name a tool its
+   * policy allows and this server did not register. Sent to the executor that
+   * is "Tool not found", and a turn whose only tool call failed is answered as
+   * an error — for something that is not an error at all, but a setting. A
+   * call to a tool named here that is NOT in the registry is answered before
+   * the executor instead: `unavailable`, with this reason, audited. Nothing
+   * runs and no approval or pending action is created.
+   *
+   * It grants nothing and hides nothing: the allowlist gate runs first, a tool
+   * that IS registered is never looked up here, and a tool that is neither
+   * registered nor named here is handled exactly as before.
+   */
+  switchedOffTools?: Readonly<Record<string, string>>;
 }
 
 /**

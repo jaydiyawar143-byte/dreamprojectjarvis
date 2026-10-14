@@ -26,6 +26,7 @@ import {
   GoogleAdsAgent,
   BrowserAgent,
   LocationAgent,
+  MarketingAgent,
   KnowledgeAgent,
   MetaAdsAgent,
   MCP_READ_TOOLS,
@@ -176,6 +177,27 @@ const ALL_REGISTERED_TOOLS = [
   "system.status",
   "time.now",
   "tasks.list",
+  // Phase 15 — the marketing workspace. The first thirteen are registered
+  // unconditionally (they reach JARVIS's own database only); the two page
+  // reads when BROWSER_ENABLED is set; the two publish tools when the Meta
+  // integration is configured.
+  "marketing.campaign.create",
+  "marketing.campaign.update",
+  "marketing.campaign.list",
+  "marketing.campaign.get",
+  "marketing.content.plan",
+  "marketing.content.update",
+  "marketing.content.list",
+  "marketing.content.mark_published",
+  "marketing.research.list",
+  "marketing.report.generate",
+  "marketing.report.list",
+  "marketing.report.get",
+  "marketing.recommendations",
+  "marketing.seo.audit",
+  "marketing.competitor.analyze",
+  "marketing.publish.prepare",
+  "marketing.content.publish",
 ];
 
 function fakeTool(overrides: Partial<ITool> & { id: string }): ITool {
@@ -379,6 +401,10 @@ describe("Sprint 6 — conditional agent registration", () => {
     }
     if (has("maps.route")) {
       registry.register(new LocationAgent({ provider: stubProvider }));
+    }
+    // Phase 15 — gated on its own workspace tools, as in the container.
+    if (has("marketing.content.list")) {
+      registry.register(new MarketingAgent({ provider: stubProvider }));
     }
     return registry;
   }

@@ -122,6 +122,25 @@ const TASK_CREATION_SIGNALS =
   /(\bcreate\s+a?\s*task\b|\bmake\s+a?\s*task\b|\badd\s+a?\s*task\b|\btask\s+(banao|bana\s+do|create\s+karo)\b|\bremember\s+(this|that)\s+as\s+a?\s*task\b|\bnote\s+this\s+down\b)/i;
 
 /**
+ * Phase 15 — putting something on the CONTENT calendar.
+ *
+ * Deliberately NOT work to perform, for the reason "create a task" is not:
+ * the user is asking for a plan to be RECORDED. "Kal 10 baje ke liye Diwali
+ * post schedule karo" carries a Hinglish imperative and a time, so without
+ * this rule it reads as "do some work tomorrow at ten" and a task is scheduled
+ * to run then — when what was asked for is one calendar entry, dated tomorrow,
+ * saved now. The date in that sentence is the post's, not the work's.
+ *
+ * NONE is this detector's safe direction: the turn goes to the assistant,
+ * which has the calendar tools and every gate in front of them.
+ *
+ * Narrow on purpose. It needs the calendar named, or a piece of content named
+ * beside the word "schedule" — "schedule a system check for 9am" is untouched.
+ */
+const CONTENT_CALENDAR_SIGNALS =
+  /(\bcontent\s+calendar\b|\b(post|posts|caption|captions|reel|reels|story|stories|content|draft|drafts)\b[^.!?]{0,40}\b(re)?schedule\b|\b(re)?schedule\b[^.!?]{0,40}\b(post|posts|caption|captions|reel|reels|story|stories|content|draft|drafts)\b|\bcalendar\s+(mein|me|par|pe)\b)/i;
+
+/**
  * A turn ABOUT the conversation — "summarize our conversation", "check what I
  * asked earlier", "analyze the current conversation and identify the latest
  * test".
@@ -273,6 +292,11 @@ export function detectWorkRequest(message: string, now: Date = new Date()): Work
 
   // 2. Recording a task is not performing one.
   if (TASK_CREATION_SIGNALS.test(trimmed)) return { type: "NONE" };
+
+  // 2a. Neither is putting a post on the content calendar. Before the
+  //     schedule check on purpose: the time in "schedule the post for
+  //     tomorrow at 10" belongs to the post.
+  if (CONTENT_CALENDAR_SIGNALS.test(trimmed)) return { type: "NONE" };
 
   // 2b. A turn about the conversation belongs to the one component that can
   //     see the conversation. Before PLAN_ONLY on purpose: "summarize our

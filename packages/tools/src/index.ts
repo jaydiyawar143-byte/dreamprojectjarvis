@@ -294,3 +294,41 @@ export {
   GOOGLE_WRITE_TOOL_IDS,
 } from "./tools/google-write-tools.js";
 export type { GoogleWritePlanPort } from "./tools/google-write-tools.js";
+
+// Phase 15 — the marketing workspace: campaigns, the content calendar, page
+// research, reports, recommendations and approval-gated publishing. The tools
+// hold a port; the publisher contract is implemented in the provider package.
+export {
+  MarketingCampaignCreateTool,
+  MarketingCampaignUpdateTool,
+  MarketingCampaignListTool,
+  MarketingCampaignGetTool,
+  MarketingContentPlanTool,
+  MarketingContentUpdateTool,
+  MarketingContentListTool,
+  MarketingContentMarkPublishedTool,
+  MarketingSeoAuditTool,
+  MarketingCompetitorAnalyzeTool,
+  MarketingResearchListTool,
+  MarketingReportGenerateTool,
+  MarketingReportListTool,
+  MarketingReportGetTool,
+  MarketingRecommendationsTool,
+  MarketingPublishPrepareTool,
+  MarketingContentPublishTool,
+  MarketingPublishResolveTool,
+  createMarketingWorkspaceTools,
+  createMarketingResearchTools,
+  createMarketingPublishTools,
+  createMarketingDecisionTools,
+  isPublishParams,
+  type MarketingPort,
+  type MarketingCallContext,
+} from "./tools/marketing-tools.js";
+export {
+  PublisherError,
+  isAmbiguousPublisherError,
+  type ContentPublisher,
+  type PublishedPost,
+  type PublisherErrorCode,
+} from "./tools/marketing-publisher.js";

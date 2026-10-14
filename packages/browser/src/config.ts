@@ -181,6 +181,40 @@ export function describeBrowserConfigStatus(env: NodeJS.ProcessEnv = process.env
 }
 
 /**
+ * Phase 15 — whether JARVIS may read public web pages for research.
+ *
+ * The SAME switch as browsing, and deliberately not a second one: BROWSER_ENABLED
+ * is the operator saying "this deployment may open public web pages", and that
+ * is exactly the question a page read asks. What differs is what it needs —
+ * a page read is one plain GET, so it does not need a Chrome to exist, and a
+ * deployment with the switch on and no browser installed can still audit a
+ * page while the interactive browser tools stay unmounted.
+ *
+ * Off by default for the reason browsing is: reaching arbitrary addresses is
+ * something a deployment asks for, never something it is handed.
+ */
+export function isPageResearchEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.BROWSER_ENABLED === "true";
+}
+
+/**
+ * The navigation policy a page read runs under.
+ *
+ * Built from the same environment the browser's is — the same schemes, the
+ * same ports, the same BROWSER_DOMAIN_ALLOWLIST — so an operator who has
+ * restricted where JARVIS may browse has restricted where it may read, without
+ * having to say so twice. `__unsafeAllowPrivateAddresses` is never set here.
+ */
+export function pageResearchPolicy(env: NodeJS.ProcessEnv = process.env): NavigationPolicyConfig {
+  return {
+    allowedSchemes: DEFAULT_ALLOWED_SCHEMES,
+    allowedPorts: DEFAULT_ALLOWED_PORTS,
+    maxUrlLength: DEFAULT_MAX_URL_LENGTH,
+    domainAllowlist: parseAllowlist(env.BROWSER_DOMAIN_ALLOWLIST),
+  };
+}
+
+/**
  * The navigation policy implied by a config.
  *
  * Note what is NOT here: `__unsafeAllowPrivateAddresses` is never set, and

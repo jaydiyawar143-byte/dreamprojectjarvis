@@ -147,6 +147,9 @@ export function productionLikeTools(): ITool[] {
       requiresApproval: true,
       requiredPermissions: ["read", "write"],
     });
+  /** A write that stays inside JARVIS: LOW_IMPACT, needs `write`, no approval. */
+  const ownStoreWrite = (id: string) =>
+    fakeTool({ id, risk: "LOW_IMPACT", requiredPermissions: ["read", "write"] });
 
   return [
     read("meta.accounts"),
@@ -259,6 +262,26 @@ export function productionLikeTools(): ITool[] {
     read("system.status"),
     read("time.now"),
     read("tasks.list"),
+    // Phase 15 — the marketing workspace, in the three shapes its real tools
+    // have: reads, ungated writes to JARVIS's own store, and the one
+    // approval-gated write that leaves JARVIS.
+    read("marketing.campaign.list"),
+    read("marketing.campaign.get"),
+    read("marketing.content.list"),
+    read("marketing.research.list"),
+    read("marketing.report.generate"),
+    read("marketing.report.list"),
+    read("marketing.report.get"),
+    read("marketing.recommendations"),
+    read("marketing.seo.audit"),
+    read("marketing.competitor.analyze"),
+    read("marketing.publish.prepare"),
+    ownStoreWrite("marketing.campaign.create"),
+    ownStoreWrite("marketing.campaign.update"),
+    ownStoreWrite("marketing.content.plan"),
+    ownStoreWrite("marketing.content.update"),
+    ownStoreWrite("marketing.content.mark_published"),
+    write("marketing.content.publish"),
   ];
 }
 

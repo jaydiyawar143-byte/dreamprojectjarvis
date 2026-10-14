@@ -158,6 +158,106 @@ fails when one of the first three does.
 - **Retention deletes only what the policy says** (`MEMORY_RETENTION` in
   `packages/core`): bounded, one user at a time, through `memory.purge_expired`.
 
+### Marketing
+
+The contract is in [`docs/MARKETING.md`](docs/MARKETING.md); these are the
+parts a change must not break.
+
+- **One implementation.** Marketing behaviour lives in `MarketingService`
+  (`apps/api/src/services/marketing`). The `marketing.*` tools hold it as their
+  port, and the Marketing page's router runs those same tools through
+  `ToolExecutor` — one endpoint, one tool. Never put a marketing rule in a route
+  or a tool, and never add an endpoint that reaches the service or the
+  repository around the executor.
+- **Published means read back, with its text.** An item is recorded `VERIFIED`
+  only after the post was read from the provider by its id AND the text that
+  came back is the item's text. Never from a provider's "accepted", a status
+  code or a timeout, and never from a post with other text or none — on the
+  first attempt or on a retry. `REPORTED_BY_USER` is a different thing and is
+  never upgraded to it, or worded like it.
+- **One post is one item's post.** A provider post id another item already
+  holds — any user's, since every user publishes through the same connection —
+  is never recorded a second time. `finalizePublished` is the only writer of
+  `VERIFIED`; it checks and writes under a lock on that post's id. A look for
+  an earlier post passes such a post over and keeps looking. Never add a
+  second writer of `VERIFIED`, and never take the check out of that
+  transaction.
+- **An unknown outcome is a state, and nothing is sent while it lasts.** A
+  publish that was sent and not confirmed leaves the item `UNCONFIRMED` and
+  unpublished. From then on: the item cannot be edited; the record of the
+  original attempt — its Page, a hash of what was sent — is kept as it is; a
+  retry is held to that Page and those words; and **a retry only looks, it
+  never sends**. Not finding the post is not permission to post again. Never
+  add a path that sends for an unconfirmed item.
+- **Only a person settles an unconfirmed publish.** `marketing.publish.resolve`
+  records "it was not published", looks once more, and clears the attempt only
+  if the post is not there. It stays on NO agent's allowlist and refuses a call
+  that carries an agent or a conversation. Before it looks, it is held to the
+  attempt as a retry is: the item must still hold the words that attempt sent
+  (by the hash that was kept — no hash, no clearing) and the attempt's Page
+  must still be one the connection can read; otherwise nothing is cleared.
+  And it settles only the attempt it checked: if the attempt under its claim
+  is not the one it read a moment before, nothing is cleared.
+- **A settle changes nothing without its audit row.** Clearing an attempt, and
+  recording a post the settle found, are each ONE transaction with the audit
+  row of the decision (`clearUnconfirmed`, `finalizePublished`). If the row
+  cannot be written the decision is not carried out and the item stays
+  unconfirmed. Never clear first and audit afterwards, and never swallow a
+  failure to write that row.
+- **The text of a post comes from the saved item.** No endpoint accepts it. A
+  publish whose text is not exactly the saved text is refused, even after a
+  person approved it.
+- **Publishing is approval-gated by the exact text and Page**, and the item is
+  claimed by a conditional `UPDATE` (`claimForPublish`) that says what it took:
+  only a claim taken from an item with no publish outstanding may send. Never
+  read the publish state, check it in memory and then write. No path may
+  publish without an approval, and nothing publishes because a date arrived.
+- **An approval is for a send or for a look, and its parameters say which.**
+  While an earlier publish is unconfirmed the publish check adds
+  `earlierAttempt` — the identity of that attempt, never its text — and what
+  the person is shown is a look, not a post. The claim is taken ONLY from the
+  state the approval was made for: an approval to look can never take the
+  claim that may send, not even when the attempt it named was settled between
+  the approval and its execution, and an approval to send is not run as a
+  look. Never add a claim that tries one state and falls back to the other.
+- **Publishing is off unless the operator switches it on.**
+  `MARKETING_PUBLISH_ENABLED` must be exactly `true`; the Meta credentials alone
+  never register a publish tool. Where it is off there is no publish tool for a
+  sentence or a button to reach, so no approval for a publish can exist. Never
+  add a fallback that builds a publisher without it.
+- **What an agent is told about publishing follows the tools it was handed.**
+  The marketing agent's prompt is computed from its definitions: without the
+  publish tools it says publishing is not available here, why, and how an
+  operator switches it on. A model that names a switched-off tool anyway is
+  answered by the orchestrator (`unavailable`, `switchedOffTools`) before the
+  executor is asked — an ordinary reply, with no execution, approval or
+  pending action. The two page reads are named the same way wherever
+  `BROWSER_ENABLED` is not `true`. Never tell a model to call a tool it was
+  not given, and never register a stand-in tool to make such a call succeed.
+- **Work that reaches outside JARVIS takes a slot first.** A page read, a
+  report and a publish check each reserve a place in a per-user window —
+  count and reservation in ONE step in PostgreSQL (`reserveSlot`,
+  `AtomicRateLimiter`) — BEFORE the provider is called. Never count, act, and
+  write the counted row afterwards: requests that arrive together would all
+  pass. A report's cap is answered before the ad account is read, too. If the
+  limit cannot be checked, the work is refused.
+- **Nothing is reported that was not read.** Reports, audits and
+  recommendations are pure functions in `packages/core` over rows that were
+  read; no model writes them. A source that could not be read is listed as
+  unread and contributes no figure. Never estimate a metric, a keyword, a
+  ranking or a competitor's numbers.
+- **Google Ads stays out of marketing reports** until a grant carrying the Ads
+  scope exists and a read against it has been verified. A report records
+  whether it could have been read — from the **granted** scopes — and why not.
+- **A page a user names is read only through `PublicPageFetcher`**
+  (`packages/browser`), which judges every hop and pins the connection to the
+  address it judged. Page research registers only while `BROWSER_ENABLED=true`.
+- **Scope beside ownership**, as for memory. In a conversation the project is
+  the conversation's; a `projectId` in the parameters that names another is
+  refused, never obeyed.
+- **A recommendation is advice.** Each carries `executed: false`. Never add a
+  tool, a route or a button that carries one out.
+
 ### Operational logs and errors
 
 - An operational event — start-up, shutdown, a failed request, anything a
@@ -209,7 +309,21 @@ with pgvector: point `DATABASE_URL` at a separate test database, never the
 development one. On a fresh throwaway pgvector database they give 276 passed /
 0 failed (24 files; atomic approval fix, 2026-10-11). Every workspace's suite
 was run that day, one workspace at a time: 8,142 passed without a database,
-none failed.
+none failed. After Phase 15 (2026-10-12): `@jarvis/db` 327 passed / 0 failed
+(25 files) on a fresh database, and `pnpm test` 8,959 passed without a
+database, none failed. After the Phase 15 audit fixes (2026-10-13), on Linux
+from a clean copy: `@jarvis/db` 341 passed / 0 failed (25 files) on a fresh
+database; every CI step passed; and of the 9,049 tests that run without a
+database, 9,048 passed — the one that did not is a performance budget in
+`@jarvis/core` that is not gated by CI. Three tests outside marketing are
+sensitive to the machine's timing and can fail under load; they are named in
+`docs/phases/phase-15.md`, §15. After the final Phase 15 safety pass (same
+day, same method): `@jarvis/db` 365 passed / 0 failed (25 files) on a fresh
+database; every CI step passed, the marketing contracts at 565; and of the
+9,111 tests that run without a database, all but one or two passed when every
+workspace's suite was started at once — the performance budget again, and a
+web test that waits one second for a page (`auth-session`, "/approvals loads
+its data…"). Both pass alone and in CI's own steps; see §16.
 
 The two memory end-to-end tests (`sprint-1.1d-memory-e2e`, and
 `phase14-memory-e2e-pg.integration`, which has no in-memory fallback at all)
@@ -221,6 +335,12 @@ after applying every migration, and fails if any of them is skipped
 (`docs/DEVELOPMENT.md`, "Continuous integration"). It picks them up by name: a
 database-backed test in `apps/api` or `packages/memory` must be named
 `*-pg.integration.test.ts`, or CI never gives it a database.
+
+CI does not run the tests of `@jarvis/core`, `tools`, `agents`, `browser` or
+`meta-graph` as workspaces. Two slices of them are gated by **file name**: the
+memory contracts and the marketing contracts. A new contract test for either
+must match the names that step selects (`.github/workflows/ci.yml`), or CI
+never runs it.
 
 ---
 
@@ -238,6 +358,7 @@ Every capability has one home. Before creating a file, find that home.
 | Something JARVIS can do | a tool in `packages/tools/src/tools`, added to an agent's allowlist | the agent itself |
 | A third-party client | its provider package (`meta-graph`, `google-ads`, `whatsapp`, `n8n`, `ai-openai`, …) | a tool, a route, or a utility file |
 | Memory or knowledge behaviour | `packages/memory`; storage in `packages/db/src/repositories` | a second memory manager |
+| Marketing behaviour — campaigns, calendar, research, reports, publishing | `apps/api/src/services/marketing` (the one service); its pure rules in `packages/core`; storage in `packages/db/src/repositories` | a route, a tool, or a second marketing service |
 | A database model, migration or repository | `packages/db` | a new `PrismaClient` |
 | Auth, encryption, permissions, approvals, audit | `packages/security` | an app |
 | A log line for operators, or an error report | `apps/api/src/services/observability` | a bare `console.log`, or a vendor SDK in a route |

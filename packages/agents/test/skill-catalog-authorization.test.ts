@@ -49,6 +49,9 @@ const IMPLEMENTATION_SOURCE: string = [
   // S8.6 — reviewed MCP tool ids are declared once, in the reviewed manifest
   // (MCP_MANIFEST); McpTool builds from it.
   new URL("../../core/src/mcp-manifest.ts", import.meta.url),
+  // Phase 15 — the marketing tool ids are declared once, in the core contract
+  // (MARKETING_TOOL_IDS); marketing-tools.ts builds from it.
+  new URL("../../core/src/types/marketing.ts", import.meta.url),
 ]
   .map((u) => readFileSync(u, "utf8"))
   .join(" ");

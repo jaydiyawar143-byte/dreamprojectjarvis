@@ -124,6 +124,8 @@ export class Orchestrator implements IOrchestrator {
   private readonly pendingActionService: import("./pending-action-service.js").PendingActionService | null;
   /** S3 — semantic planning context. Null keeps the prompt exactly as it was. */
   private readonly skillContextProvider: ISkillContextProvider | null;
+  /** Phase 15 — tools this server switched off, by registry id, with the reason in a person's words. */
+  private readonly switchedOffTools: Readonly<Record<string, string>>;
   private readonly toolDescriptionBuilder: ToolDescriptionBuilder;
   private readonly toolPlanValidator: ToolPlanValidator;
   private readonly toolPlanParser: ToolPlanParser;
@@ -160,6 +162,7 @@ export class Orchestrator implements IOrchestrator {
     this.permissionChecker = config.permissionChecker ?? null;
     this.pendingActionService = (config as unknown as { pendingActionService?: import("./pending-action-service.js").PendingActionService }).pendingActionService ?? null;
     this.skillContextProvider = config.skillContext ?? null;
+    this.switchedOffTools = { ...(config.switchedOffTools ?? {}) };
     this.toolDescriptionBuilder = new ToolDescriptionBuilder();
     this.toolPlanValidator = new ToolPlanValidator();
     this.toolPlanParser = new ToolPlanParser();
@@ -1150,6 +1153,52 @@ export class Orchestrator implements IOrchestrator {
       const needsConfirmation = tool?.requiresApproval === true;
 
       // ---------------------------------------------------------------------
+      // Phase 15 — a tool this server has switched off.
+      //
+      // The agent's policy allows it, so the allowlist gate above let it
+      // through; the server did not register it, so there is nothing to run.
+      // Handed to the executor it comes back "Tool not found", and a turn
+      // whose only call failed is answered as an error — "Data retrieval
+      // failed." and HTTP 500 — for what is a setting, not a fault.
+      //
+      // So it is answered here, in the server's own words for why it is off
+      // and how an operator switches it on. The model is given that as the
+      // tool's result and tells the user. NOTHING is created on this path:
+      // the executor is not asked, so there is no execution, and no approval
+      // or pending action can come to exist for a tool that is not there.
+      //
+      // Only for a tool the composition root NAMED as switched off. Any other
+      // unregistered tool is handled exactly as before.
+      // ---------------------------------------------------------------------
+      if (this.toolRegistry && !tool && Object.prototype.hasOwnProperty.call(this.switchedOffTools, action.toolId)) {
+        const reason = this.switchedOffTools[action.toolId]!;
+
+        results.push({
+          executionId,
+          toolId: action.toolId,
+          toolCallId: action.toolCallId,
+          status: "unavailable",
+          error: `${reason} Nothing was done.`,
+          startedAt: stepStartedAt,
+          completedAt: new Date(),
+          durationMs: Date.now() - stepStartedAt.getTime(),
+        });
+
+        await this.auditLogger.log({
+          userId: context.auth.userId,
+          agentId: policy?.agentId ?? context.agentId,
+          toolId: action.toolId,
+          action: "agent.tool_unavailable",
+          result: "rejected",
+          traceId: context.traceId,
+          ipAddress: context.ipAddress,
+          metadata: { reason: "switched off on this server", domain: policy?.domain, executionId, stepIndex: i },
+        });
+
+        continue;
+      }
+
+      // ---------------------------------------------------------------------
       // Write-intent gate — BUG-INTENT-001 / BUG-SAFETY-001.
       //
       // Between the model deciding a tool and the pending-action branch. A
@@ -1259,6 +1308,57 @@ export class Orchestrator implements IOrchestrator {
         });
 
         continue;
+      }
+
+      // ---------------------------------------------------------------------
+      // Phase 15 — the caller's role, before a pending action exists.
+      //
+      // The direct path below asks ToolApprovalService whether this role may
+      // run the tool, and the executor asks again when it runs. The
+      // pending-action branch asked nobody: a viewer who asked for an
+      // approval-gated write was given a pending action and an approval row,
+      // was told to reply "yes", and was refused only when they did. Nothing
+      // ran — the executor saw to that — but a request nobody could act on had
+      // been put in front of a person, which is exactly what the allowlist gate
+      // above exists to prevent.
+      //
+      // The same question, of the same table, asked one step earlier. It can
+      // only refuse what the executor would refuse anyway, so it narrows and
+      // never widens. With no permission checker wired it is skipped, as the
+      // agent floor is: the executor still performs its own check.
+      // ---------------------------------------------------------------------
+      if (needsConfirmation && tool && this.permissionChecker && this.pendingActionService && context.conversationId) {
+        const permitted = tool.requiredPermissions.every((perm) =>
+          this.permissionChecker!.hasPermission(context.auth.role, "tools", perm)
+        );
+        if (!permitted) {
+          // The wording ToolApprovalService uses for the same refusal.
+          const reason = `Missing permissions: ${tool.requiredPermissions.join(", ")}`;
+
+          results.push({
+            executionId,
+            toolId: action.toolId,
+            toolCallId: action.toolCallId,
+            status: "permission_denied",
+            error: reason,
+            startedAt: stepStartedAt,
+            completedAt: new Date(),
+            durationMs: Date.now() - stepStartedAt.getTime(),
+          });
+
+          await this.auditLogger.log({
+            userId: context.auth.userId,
+            agentId: policy?.agentId ?? context.agentId,
+            toolId: action.toolId,
+            action: "agent.tool_role_denied",
+            result: "rejected",
+            traceId: context.traceId,
+            ipAddress: context.ipAddress,
+            metadata: { reason, risk: tool.risk, domain: policy?.domain, executionId, stepIndex: i },
+          });
+
+          continue;
+        }
       }
 
       if (needsConfirmation && this.pendingActionService && context.conversationId) {

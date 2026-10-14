@@ -13,6 +13,7 @@ import {
   BookOpen,
   Bot,
   Brain,
+  CalendarRange,
   CheckSquare,
   Globe,
   Inbox,
@@ -57,6 +58,10 @@ export const NAV_GROUPS: NavGroup[] = [
       // Phase 14 — what JARVIS remembers about the user, and their controls over it.
       { href: "/memory", label: "Memory", icon: Brain, available: true },
       { href: "/meta-ads", label: "Meta Ads", icon: Megaphone, available: true },
+      // Phase 15 — the marketing workspace: calendar, campaigns, research,
+      // reports. The page reports for itself which of those this deployment
+      // can do, and draws no control for one it cannot.
+      { href: "/marketing", label: "Marketing", icon: CalendarRange, available: true },
       // Phase 12 — real read-only Gmail, Drive and Calendar. The page reports
       // its own live connection state, so on a deployment with no Google OAuth
       // client it says so rather than implying access it does not have.

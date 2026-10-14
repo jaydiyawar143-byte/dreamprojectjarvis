@@ -57,7 +57,14 @@ const ACTION_VERBS =
   "activate|deactivate|enable|disable|connect|disconnect|reconnect|configure|" +
   "deploy|rollout|release|" +
   "send|create|make|delete|remove|add|rename|archive|restore|publish|share|submit|" +
-  "trigger|run|execute|launch|click|open|close|approve|do|tell|inform|notify|message";
+  "trigger|run|execute|launch|click|open|close|approve|do|tell|inform|notify|message|" +
+  // Phase 15 — the content calendar's own imperatives. "Save these to the
+  // calendar", "schedule the post for Friday", "move it to Monday" and "mark
+  // it as ready" were each read as a musing about a calendar and refused.
+  // Each is an order when it opens a clause, and none is a "think about it"
+  // verb. "post" is deliberately NOT here: "Post-campaign analysis shows…"
+  // opens with it and instructs nothing — the word for that order is publish.
+  "save|schedule|reschedule|move|mark";
 
 /**
  * Information-request framings that must beat a coincidental instruction:

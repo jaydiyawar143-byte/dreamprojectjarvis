@@ -44,6 +44,13 @@ export const RATE_LIMIT_NAMESPACES = {
   // Phase 13 — approval-gated writes. Its own namespace so a burst of write
   // planning cannot exhaust the budget a read needs, and vice versa.
   google_write: "google_write",
+  // Phase 15 — the marketing workspace. It meters the three things that reach
+  // outside JARVIS without an approval: reads of public web pages (addresses a
+  // user chose, which must not be usable as a relay or a loop), reports (each
+  // reads the shared ad account several times) and publish checks (each asks
+  // the provider which Pages it may post to). Counted by `AtomicRateLimiter`
+  // below, which reserves a slot before the work starts.
+  marketing: "marketing",
 } as const;
 
 export type RateLimitNamespace =
@@ -142,3 +149,82 @@ export const BROWSER_RATE_LIMITS = {
   navigate: { limit: 30, windowMs: 60_000 },
   action: { limit: 20, windowMs: 60_000 },
 } as const;
+
+// ---------------------------------------------------------------------------
+// Phase 15 — the atomic limiter.
+//
+// `DbBackedRateLimiter.check` above answers "how many rows are in the window?"
+// and leaves writing the next row to its caller. Between that answer and that
+// row there is a gap, and every request that arrives inside it is given the
+// same answer: sixty simultaneous page reads were all told "none yet" by a
+// limit of twenty. For an endpoint whose work is short the gap is small; for
+// one that makes an outbound request and audits it afterwards, it is as long
+// as the request.
+//
+// `reserve` has no gap. It asks the audit store to count the window AND write
+// the reservation row in one step that only one caller at a time can be
+// inside — in PostgreSQL, so the ceiling holds across API instances as well.
+// The slot is taken BEFORE the work starts, and a caller that is refused has
+// written nothing and started nothing.
+//
+// It fails closed. If the store cannot be reached the answer is "not allowed",
+// marked UNAVAILABLE so the caller can say that rather than "too many".
+// ---------------------------------------------------------------------------
+
+/** What the atomic limiter needs from the audit store. */
+export interface SlotReservationPort {
+  reserveSlot(input: {
+    userId: string;
+    action: string;
+    limit: number;
+    windowMs: number;
+    traceId?: string;
+    now?: Date;
+  }): Promise<{ reserved: boolean; count: number }>;
+}
+
+export interface SlotDecision extends RateLimitDecision {
+  /** Why not, when not allowed. */
+  reason?: "LIMIT" | "UNAVAILABLE";
+}
+
+export class AtomicRateLimiter {
+  constructor(
+    private readonly store: SlotReservationPort,
+    private readonly namespace: RateLimitNamespace | string
+  ) {}
+
+  /**
+   * Take one slot in `bucket` for this user, or be refused.
+   *
+   * The row that is written — and the only row that counts — is the action
+   * `namespace.bucket`, matched exactly.
+   */
+  async reserve(
+    userId: string,
+    bucket: string,
+    limit: number,
+    windowMs: number,
+    options: { traceId?: string; now?: Date } = {}
+  ): Promise<SlotDecision> {
+    try {
+      const taken = await this.store.reserveSlot({
+        userId,
+        action: `${this.namespace}.${bucket}`,
+        limit,
+        windowMs,
+        ...(options.traceId ? { traceId: options.traceId } : {}),
+        ...(options.now ? { now: options.now } : {}),
+      });
+      return {
+        allowed: taken.reserved,
+        currentCount: taken.count,
+        limit,
+        windowMs,
+        ...(taken.reserved ? {} : { reason: "LIMIT" as const }),
+      };
+    } catch {
+      return { allowed: false, currentCount: limit, limit, windowMs, reason: "UNAVAILABLE" };
+    }
+  }
+}

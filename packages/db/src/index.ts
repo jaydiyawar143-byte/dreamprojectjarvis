@@ -90,3 +90,17 @@ export {
   type MemoryVectorReembedResult,
   type MemoryVectorRollbackResult,
 } from "./maintenance/memory-vector-backfill.js";
+// Phase 15 — the marketing workspace: campaigns, content, reports, research.
+export {
+  PrismaMarketingRepository,
+  PostRecordedElsewhereError,
+  type CampaignWrite,
+  type ContentWrite,
+  type ContentPatch,
+  type ContentFilter,
+  type VerifiedPublication,
+  type PublishClaim,
+  type PublishDecisionRecord,
+  type ResearchWrite,
+  type ReportWrite,
+} from "./repositories/marketing-repository.js";

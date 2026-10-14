@@ -1,6 +1,6 @@
 # JARVIS HTTP API
 
-Everything below is served by `apps/api` under `/api/v1`. Verified against the code on 2026-09-17; the memory and project routes were added in Phase 14, on 2026-10-08.
+Everything below is served by `apps/api` under `/api/v1`. Verified against the code on 2026-09-17; the memory and project routes were added in Phase 14, on 2026-10-08, and the marketing routes in Phase 15, on 2026-10-12.
 
 - **Mounts:** `apps/api/src/index.ts` · **Handlers:** `apps/api/src/routes/*.ts`
 - **Authentication:** unless a table says otherwise, send `Authorization: Bearer <access token>`. Data is always scoped to that token's user; a user id in a body or path is ignored.
@@ -106,6 +106,53 @@ Added 2026-10-08 (Phase 14). A project is a scope for memory: a name, owned by t
 There is no rename and no delete: deleting a project deletes its memories, and nothing in Phase 14 asks for that.
 
 **A conversation's project.** `POST /api/v1/chat` accepts `projectId` on the request that **creates** a conversation. It must be one of the caller's own projects (`404 PROJECT_NOT_FOUND` otherwise) and is then fixed: a later request that names a different project gets `409 PROJECT_MISMATCH`.
+
+### Marketing — `/api/v1/marketing` · `marketing.ts`
+
+Added 2026-10-12 (Phase 15). The Marketing page's API. **The router implements nothing**: every endpoint below turns the request into one tool call and runs it through `ToolExecutor` — the same tool, with the same id, the marketing agent proposes in chat — so a button and a sentence pass one permission check, one approval gate and one audit row. See [MARKETING.md](./MARKETING.md).
+
+| Method | Path | Tool it runs | What it does |
+|---|---|---|---|
+| GET | `/status` | — (reads the registry) | What this deployment can do, and what the caller's role could run: `research { available, reason }`, `publishing { available, channels, reason }`, `adAccount { available }`, `caller { canEdit, canResearch, canPublish, canResolve }`. `publishing.reason` says whether publishing is switched off (`MARKETING_PUBLISH_ENABLED`) or not configured |
+| GET | `/campaigns` | `marketing.campaign.list` | The caller's campaign workspaces. `?projectId=` · `?includeArchived=true` |
+| POST | `/campaigns` | `marketing.campaign.create` | Creates a workspace. `201`. Body: `name`, `objective?`, `brief?`, `channels?`, `startDate?`, `endDate?`, `status?`, `metaCampaignIds?` |
+| GET | `/campaigns/:id` | `marketing.campaign.get` | One workspace: the campaign, content counts by status, what is coming up, the latest report and research |
+| PATCH | `/campaigns/:id` | `marketing.campaign.update` | Changes the fields sent |
+| GET | `/content` | `marketing.content.list` | The content calendar. `?from=&to=` (YYYY-MM-DD, default the next 30 days) · `?campaign=` · `?status=` · `?channel=` · `?limit=1..100` · `?projectId=`. A list shows copy shortened to 280 characters |
+| POST | `/content` | `marketing.content.plan` | Saves drafts. `201`. Body `{ campaign?, items: [{ title, channel, body?, link?, notes?, format?, scheduledDate?, scheduledTime?, status? }] }`. **It publishes nothing** |
+| GET | `/content/:id` | `marketing.content.list` | One item, whole — `data.item` |
+| PATCH | `/content/:id` | `marketing.content.update` | Edits a draft, moves it, or marks it ready. `status` may be `IDEA`, `DRAFT`, `READY` or `ARCHIVED` — **never `PUBLISHED`** |
+| POST | `/content/:id/mark-published` | `marketing.content.mark_published` | Records that the **user** posted it. Body `{ url?, publishedOn? }`. Stored as `REPORTED_BY_USER`, never as verified |
+| GET | `/content/:id/publish` | `marketing.publish.prepare` | The publish check — a read. Whether it can be published, where, and with exactly which parameters. `?targetId=`. While an earlier publish of the item is unconfirmed, `publishParams` carries `earlierAttempt` — the identity of that attempt, never its text — and `warning` says that asking again only looks: those are the parameters of a look, not of a send |
+| POST | `/content/:id/publish` | (the publish flow) | Body `{}` or `{ targetId }`: **asks** — `202` with the approval to decide. Body `{ approvalId }`: **publishes**, for an approval the caller has approved |
+| POST | `/content/:id/publish/resolve` | `marketing.publish.resolve` | A person's decision that a publish whose outcome is not known did **not** happen. Body `{ decision: "NOT_PUBLISHED" }` — the only decision there is. The server looks for the post once more: found with the item's text → `200 { resolution: "FOUND_PUBLISHED" }` and it is recorded as published; not found → `200 { resolution: "CLEARED" }` and the item can be edited and published again; a post from the attempt is there with other text → `409 CONFLICT`; the Page cannot be checked → `502 PROVIDER_FAILED`; nothing to settle → `409 CONFLICT`. **Before it looks**, the item must still hold exactly the words the attempt sent, and the Page the attempt went to must still be one the connection can read: otherwise `409 CONFLICT`, nothing is looked for and nothing is cleared. So too if the attempt under its claim is not the one it checked a moment before — that attempt was settled and the item sent again in between: `409 CONFLICT`, and the newer attempt is left as it is. A post that is already another item's is never taken for this one's. The decision's audit row is written in the same transaction as the change: if it cannot be written, `503 UNAVAILABLE` and **nothing was cleared or recorded**. It posts nothing, and no agent can call it |
+| GET | `/research` | `marketing.research.list` | Saved research. `?kind=SEO_AUDIT\|COMPETITOR_SNAPSHOT` · `?campaign=` · `?projectId=` |
+| GET | `/research/:id` | `marketing.research.list` | One result, with where and when the page was read |
+| POST | `/research/seo-audit` | `marketing.seo.audit` | Reads one public page and audits it. `201`. Body `{ url, campaign? }` |
+| POST | `/research/competitor` | `marketing.competitor.analyze` | Reads a competitor's page; compares it with `ownUrl` when given, and with the last saved reading of the same page. `201`. Body `{ competitorUrl, ownUrl?, campaign? }` |
+| GET | `/reports` | `marketing.report.list` | Saved reports. `?campaign=` · `?projectId=` |
+| POST | `/reports` | `marketing.report.generate` | Reads the data and saves a report. `201`. Body `{ kind?: PERFORMANCE\|CLIENT, campaign?, from?, to?, title?, compare? }`. At most 90 days; default the last 30 complete days |
+| GET | `/reports/:id` | `marketing.report.get` | One report and its document |
+| GET | `/reports/:id/export` | `marketing.report.get` | The report as a file. `?format=html\|md`. Sent as an attachment with `nosniff` and a sandboxing CSP; never rendered in this origin |
+| GET | `/recommendations` | `marketing.recommendations` | Advice derived from the workspace. Every item carries `executed: false` |
+
+- **The caller is the token.** A user id, a role, a conversation id or an agent id in the body or the query is ignored. Only the named fields of a body reach a tool; anything else a client sends is dropped.
+- **Refusals** keep the service's own sentence: `400 INVALID` (including a page address the reader's policy will not open — private, loopback, a non-web port, off the allowlist), `403 FORBIDDEN` (the role may not run that tool) or `403 OUT_OF_SCOPE`, `404 NOT_FOUND` (not the caller's, another project's, or does not exist — one answer for all three), `409 CONFLICT` or `409 LIMIT`, `429 RATE_LIMITED` (too many page reads, reports or publish checks in ten minutes; the slot is taken before the provider is called, so nothing was read), `502 PROVIDER_FAILED` (a page could not be reached or was not HTML, or a provider failed), `503 UNAVAILABLE` (this deployment did not register that tool — publishing is switched off or not configured, page reads are off — or a limit could not be checked), `504 TIMEOUT`.
+- **Publishing.** `POST /content/:id/publish` never accepts the text of a post, a target name or a link — what is posted is read from the saved item on the server. Its answers:
+
+  | HTTP | `status` / `error.code` | Meaning |
+  |---|---|---|
+  | `200` | `PUBLISHED`, `published: true` | Posted **and read back from the Page**. `alreadyPublished: true` when an earlier attempt had posted it and nothing new was sent |
+  | `202` | `APPROVAL_REQUIRED`, `published: false` | An approval is waiting. `ask` is `REQUESTED`, `WAITING` or `EXPIRED`; `params` and `summary` are the exact text and Page it is bound to — and, when `params.earlierAttempt` is present, the one earlier attempt this approval is to **look** for. Such an approval can never send: the Approvals API shows it as a look. Decide it with `POST /api/v1/approvals/:id/approve` or `/reject` |
+  | `409` | `NOT_READY` | It cannot be published as it stands. `reason` is set when the tool refused after the approval: `STALE` (the saved text is no longer the approved text, or no longer what an unconfirmed earlier attempt sent; **or the item is no longer in the state the approval was made for** — an approval to look whose attempt has since been settled, an approval to send for an item that has since become unconfirmed, or an approval to look that names an attempt which is no longer the one outstanding. Nothing was sent; ask again), `TARGET_REFUSED` (including a retry that names another Page than the unconfirmed attempt's), `IN_PROGRESS`, `NOT_READY` |
+  | `409` | `DECLINED` | The approval was rejected. Nothing was posted |
+  | `404` / `403` / `503` | `NOT_FOUND` / `FORBIDDEN` / `UNAVAILABLE` | Not the caller's item or approval / the role cannot publish / publishing is switched off or not configured on this server. **No approval is created** |
+  | `429` | `RATE_LIMITED` | Too many publish checks in ten minutes. The provider was not asked and **no approval is created** |
+  | `502` | `FAILED` | Nothing was published. `reason` says why |
+  | `502` | `UNCONFIRMED` | **The outcome of a publish is not known.** The item is not marked published, cannot be edited, and nothing more is sent for it until it is settled. `reason` is the specific outcome and `sentNothing` says whether THIS request sent anything: `AMBIGUOUS_OUTCOME`, `VERIFY_FAILED`, `VERIFY_MISMATCH`, `VERIFY_NO_TEXT`, `RECORD_FAILED`, `POST_RECORDED_ELSEWHERE` — the post that was read back is already another item's, so this one is not marked published — (`sentNothing: false` — a post went out); `NOT_FOUND_ON_PAGE`, `RECONCILE_MISMATCH` (`sentNothing: true` — a retry that only looked for the earlier post). Settle it with `POST /content/:id/publish/resolve`, or record it with `/mark-published` |
+
+  Every non-`200` answer carries `published: false`. `published` is `true` in exactly one case.
+- **Google Ads** is never read by any of these endpoints. A report records whether it could have been, and why not.
 
 ### Dashboard
 

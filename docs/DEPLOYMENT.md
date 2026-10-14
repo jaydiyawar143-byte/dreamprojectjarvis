@@ -172,6 +172,50 @@ docker compose exec postgres psql -U jarvis -d jarvis -c '\d "Project"' -c 'SELE
 
 Every memory that existed before the deploy has no project: it is personal, exactly as before. The retention sweep starts with the API (`memory_retention_started` in the log, then `memory_retention_sweep_completed` with counts) and runs every `JARVIS_MEMORY_RETENTION_INTERVAL_MS` — six hours unless set; `0` switches the purge off, in which case expired memories stay hidden from recall but are never deleted. The first sweep after this deploy deletes memories that expired more than 30 days ago; nothing that has not expired, and nothing without an expiry date, is ever touched by it.
 
+### Marketing: the workspace tables, and what is switched on
+
+Since Phase 15 there is a marketing workspace. After a deploy, check that the migration arrived — `20261012120000_phase15_marketing_os` adds four tables (`MarketingCampaign`, `ContentItem`, `MarketingReport`, `MarketingResearch`) and their indexes and constraints. It alters no existing table and rewrites no existing row:
+
+```bash
+docker compose exec postgres psql -U jarvis -d jarvis -c '\dt "Marketing"*' -c '\dt "ContentItem"' -c 'SELECT count(*) AS content_items, count(*) FILTER (WHERE publication_mode IS NOT NULL) AS published FROM "ContentItem"'
+```
+
+The first listing shows `MarketingCampaign`, `MarketingReport` and `MarketingResearch` — beside `MarketingAccount`, which is older and unrelated. On a first deploy both counts are `0`. Then look for one line in the API log, which says what this deployment wired:
+
+```bash
+docker compose logs api | grep marketing_wiring
+```
+
+```
+{"timestamp":"…","level":"info","service":"jarvis-api","component":"marketing","instance":"…","event":"marketing_wiring","pageResearch":"disabled (BROWSER_ENABLED is not set to true)","publishing":"disabled (MARKETING_PUBLISH_ENABLED is not set to true)","publishers":[]}
+```
+
+| It says | It means |
+|---|---|
+| `pageResearch: disabled …` | SEO audits and competitor pages are **off**. The two tools are not registered and the Marketing page draws no research form. In chat, a model that names one of them is answered with the reason — which names `BROWSER_ENABLED=true` and a restart — not with an error, and the audit log gains an `agent.tool_unavailable` row. This is the default in this stack: the compose file sets `BROWSER_ENABLED: "false"` |
+| `pageResearch: enabled` | The API will fetch public web pages a user names, under the navigation policy and `BROWSER_DOMAIN_ALLOWLIST` |
+| `publishing: disabled …` | Publishing is **off**, whatever credentials are set. This is the default, and it is what a deployment upgraded from before Phase 15 shows. No publish tool is registered, no Publish button is drawn, the publish endpoints answer `503`, and no approval for a publish can be created. In chat the marketing agent is told publishing is off and says so — with this server's own sentence, which names `MARKETING_PUBLISH_ENABLED=true` and a restart — and a model that names a publish tool anyway gets that sentence as its answer, not an error: the turn replies normally and the audit log gains an `agent.tool_unavailable` row |
+| `publishing: enabled`, `publishers: []` | The switch is on, but `META_ACCESS_TOKEN` and `META_AD_ACCOUNT_ID` are not both set, so there is nothing to publish through. Nothing can be published, and chat says that instead ("switched on, but no publishing connection is configured") |
+| `publishing: enabled`, `publishers: ["meta-graph:FACEBOOK"]` | The switch is on and the Meta integration is configured, so a publisher was built. Whether it can post depends on the token: it needs a Page it may create content on. That is not checked at start-up — the publish check reports it per item |
+
+**To switch page research on in this stack**, change `BROWSER_ENABLED` to `"true"` in `docker-compose.yml` and `docker compose up -d`. It needs no browser in the image: the page reader is plain HTTP, and the browser *automation* tools stay unregistered because the image has no Chrome. Decide it deliberately — it lets the API open outbound connections to addresses users choose. Every hop is checked against the navigation policy and every resolved address must be public, and reads are limited to 20 per user per 10 minutes — a slot is reserved before each page is fetched, so the ceiling holds for requests that arrive together; set `BROWSER_DOMAIN_ALLOWLIST` to restrict it to named sites.
+
+**To switch publishing on**, add `MARKETING_PUBLISH_ENABLED=true` to the root `.env` (the compose file passes `.env` to the API through `env_file`; nothing in `docker-compose.yml` needs to change) and `docker compose up -d api`. Only the exact value `true` switches it on. Then read the `marketing_wiring` line again: it must say `publishing: enabled` and name a publisher. To switch it off, remove the line or set it to anything else and restart the API — an approval that was waiting can then no longer be executed, and nothing is posted.
+
+Decide it deliberately. Publishing posts **publicly**, to a Page, and JARVIS cannot take a post back. It is separate from the credentials on purpose: `META_ACCESS_TOKEN` and `META_AD_ACCOUNT_ID` alone only ever let JARVIS *read* the ad account.
+
+**Publishing has not been exercised against a live Page.** The first real post from a deployment should be made by someone watching the Page. Nothing is published without an approval of the exact text, and nothing publishes on a schedule.
+
+**When a publish is not confirmed.** If a post was sent and JARVIS could not learn or confirm the outcome, the item is shown as *Publish not confirmed*. Nothing more is sent for that item — a retry only looks for the post — until a person settles it on the Marketing page: the post is found and recorded, or they record that they posted it, or they say it was not published (JARVIS looks once more, then clears the attempt; that decision is in the audit log as `marketing.publish.resolve`). To see the items waiting:
+
+```bash
+docker compose exec postgres psql -U jarvis -d jarvis -c "SELECT id, title, publish_state, publish_attempt->>'code' AS code, publish_attempt->>'targetName' AS page FROM \"ContentItem\" WHERE publish_state <> 'NONE'"
+```
+
+**Limits.** Page reads (20), reports (10) and publish checks (60) are each limited per user per 10 minutes, and each takes its slot in the audit table *before* the provider is called (`marketing.limit.research`, `.report`, `.publish_check`). A request past a limit is answered `429` and reaches nothing outside JARVIS. They need PostgreSQL to be reachable; if it is not, the work is refused rather than let through.
+
+Nothing in Phase 15 starts a background loop. One environment variable was added, and it is optional: `MARKETING_PUBLISH_ENABLED`, off by default.
+
 ## 8. After the deployment
 
 Look at what the API said while starting:
@@ -238,6 +282,8 @@ Then check it the way that release is checked. `docker compose ps` should show t
 **Do not undo a migration to roll back.** A previous release starting against a database that already has newer migrations is fine: its `migrate deploy` step reports `No pending migrations to apply.` and the server starts. This was checked for the Phase 13 migration specifically.
 
 That works because migrations here are additive. `20261006120000_phase13_confirmation` adds one table and touches nothing else; a release from before Phase 13 never reads or writes it. Leave the table in place — it is used again the next time the newer release is deployed.
+
+The Phase 15 migration is additive in the same way. `20261012120000_phase15_marketing_os` adds four tables and alters none; a release from before Phase 15 never reads or writes them. Its migration step was run against a database that already had the Phase 15 migration (2026-10-12): `29 migrations found`, `No pending migrations to apply.` Rolling back to before Phase 15 leaves the marketing rows in place and unreachable — the older release has no route, tool or page for them — and they are there again when the newer release returns. **A post that was published stays published**: rolling back does not, and cannot, take anything down from a Page.
 
 A migration that **failed part-way** is different. Prisma records it as failed and will refuse to apply anything after it until it is resolved, and how to resolve it depends on what the migration had already done. Roll the application back so the service is up, then stop and work out the state of the database before touching it.
 
@@ -390,6 +436,8 @@ Recorded so the claims above can be told apart from intentions.
 | Restoring over the database instead | `pg_restore --clean --if-exists` | Six errors, the `Confirmation` table left behind, and the next start failed with `P3018` — which is why the runbook does not do it |
 
 The steps the last code changes could affect — the database going away, a confirmation across a restart, stopping, the search of the logs — were repeated on the image built from the final code. The backup, health and confirmation-store commands were run in PowerShell as well as Git Bash, all but the `rm` line.
+
+**Phase 15, 2026-10-12 — what was checked, and what was not.** Checked, on a throwaway pgvector container on port 5436: all 30 migrations apply from nothing; the previous release's migration step then reports `No pending migrations to apply.` against that database; and the `psql` commands in "Marketing: the workspace tables" return what that section says. **Not** done for Phase 15: building the image, starting the stack, deploying, or rolling back a running stack. The `marketing_wiring` log line was read from the API's tests, not from a container. Nothing was published to a live Page, and the real stack was not touched.
 
 **Not rehearsed:**
 

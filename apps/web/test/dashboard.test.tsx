@@ -414,6 +414,11 @@ describe("navigation model", () => {
       // user's own words.
       "Memory",
       "Meta Ads",
+      // Phase 15 — the marketing workspace: the content calendar, campaign
+      // workspaces, page research and reports. Beside Meta Ads because a
+      // report reads the same ad account; it is where marketing work is kept,
+      // not a control over the ad platform.
+      "Marketing",
       // Phase 12 — real read-only Gmail, Drive and Calendar. Filed under
       // Intelligence because it is a source JARVIS reads FROM, alongside the
       // knowledge base and the ad platforms, rather than a control surface.

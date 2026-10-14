@@ -133,6 +133,31 @@ export function buildApprovalSummary(
         detailLines,
       };
     }
+    // Phase 15 — a publish. The words shown here are the parameters the
+    // approval is bound to: the exact text and the place, built by the server
+    // from the saved content item. They are what will run, or nothing will —
+    // the tool refuses if the saved item no longer says this.
+    //
+    // The same parameters say WHICH of two things is being approved. With
+    // `earlierAttempt`, an earlier attempt's outcome is not known and this
+    // approval only looks for its post; it is held to that at execution, so
+    // what is said here is what can happen.
+    case "marketing.content.publish": {
+      const target = typeof params.targetName === "string" ? params.targetName : "the selected Page";
+      const message = typeof params.message === "string" ? params.message : "";
+      const look = typeof params.earlierAttempt === "string";
+      return {
+        actionSummary: look
+          ? `Look on ${target} for the post an earlier attempt may have made. Nothing new will be posted.`
+          : `Publish this post publicly to ${target}. JARVIS cannot undo it.`,
+        targetResource: target,
+        detailLines: [
+          { label: look ? "Look on" : "Publish to", value: target },
+          { label: look ? "Text to look for" : "Text to be posted", value: message },
+          ...(typeof params.link === "string" ? [{ label: "Link", value: params.link }] : []),
+        ],
+      };
+    }
     default:
       break;
   }

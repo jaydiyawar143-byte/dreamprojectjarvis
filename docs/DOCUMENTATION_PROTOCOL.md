@@ -11,6 +11,7 @@ docs/
 ├── ARCHITECTURE.md                How the system is built today — start here
 ├── API.md                         Every HTTP route
 ├── MEMORY.md                      Memory and document knowledge
+├── MARKETING.md                   The marketing workspace: the contract (Phase 15)
 ├── SKILLS.md                      Agents, tools, and what JARVIS can do
 ├── DEVELOPMENT.md                 Setup, environment files, quality gates
 ├── CODEBASE_AUDIT.md              2026-09-14 audit and cleanup record
@@ -29,14 +30,17 @@ docs/
 ├── phases/
 │   ├── phase-9.md                 Phase 9 documentation
 │   ├── phase-10.md                Phase 10 documentation
-│   └── phase-11.md                Phase 11 documentation
+│   ├── phase-11.md                Phase 11 documentation
+│   └── phase-15.md                Phase 15 — the marketing workspace: scope, evidence, verdicts
 └── diagrams/
     ├── system-architecture.mmd    System architecture diagram
     ├── data-flow.mmd              Intelligence pipeline flow
     ├── execution-flow.mmd         Execution sequence diagram
     ├── optimization-loop.mmd      Optimization feedback loop
     ├── phase-evolution.mmd        Phase timeline diagram
-    └── meta-ads-current-architecture.mmd   Meta Ads baseline (Sprint 2.0)
+    ├── meta-ads-current-architecture.mmd   Meta Ads baseline (Sprint 2.0)
+    ├── marketing-workspace.mmd    Where a marketing request goes (Phase 15)
+    └── marketing-publish-flow.mmd One publish, from "ask" to "read back" (Phase 15)
 ```
 
 ## Future Phase Documentation Requirements

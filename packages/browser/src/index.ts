@@ -11,6 +11,9 @@ export * from "./navigation-policy.js";
 export * from "./config.js";
 export * from "./download.js";
 export * from "./runtime.js";
+// Phase 15 — one bounded, address-pinned GET of a public page, under the same
+// navigation policy. No browser is involved and none is needed.
+export * from "./page-fetcher.js";
 export {
   BrowserSession,
   type BrowserSessionDeps,

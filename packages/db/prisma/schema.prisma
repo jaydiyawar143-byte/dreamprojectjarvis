@@ -93,6 +93,11 @@ model User {
   tasks             Task[]
   confirmations     Confirmation[]
   projects          Project[]
+  // Phase 15 — the marketing workspace.
+  marketingCampaigns MarketingCampaign[]
+  contentItems       ContentItem[]
+  marketingReports   MarketingReport[]
+  marketingResearch  MarketingResearch[]
 }
 
 model RefreshToken {
@@ -145,6 +150,12 @@ model Project {
   user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
   memories      Memory[]
   conversations Conversation[]
+  // Phase 15 — the marketing rows scoped to this project. Each references it
+  // by (id, userId), exactly as `Memory` does.
+  marketingCampaigns MarketingCampaign[]
+  contentItems       ContentItem[]
+  marketingReports   MarketingReport[]
+  marketingResearch  MarketingResearch[]
 
   @@unique([userId, name])
   @@unique([id, userId])
@@ -966,4 +977,176 @@ model MapsUsage {
   @@index([period], map: "maps_usage_period_idx")
   @@index([period, userId], map: "maps_usage_period_user_idx")
   @@map("MapsUsage")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 15 — the Marketing Operating System.
+//
+// Four tables, all JARVIS's own records: a campaign workspace, the content
+// planned in it, and the reports and page research saved for it. Nothing here
+// is a copy of a provider's data model, and nothing here causes anything
+// outside JARVIS to change — a row in `ContentItem` is a PLAN.
+//
+// OWNERSHIP AND SCOPE, the same two rules Phase 14 set for memory.
+//
+//   - `userId` is the owner, and every query filters on it. There is no row a
+//     second user can read by knowing its id.
+//   - `projectId` is the scope: NULL is personal, otherwise ONE project of the
+//     same user. Each table references `Project` by BOTH columns, so the
+//     database itself refuses a row in a project its owner does not own.
+//     A content item, a report or a piece of research that belongs to a
+//     campaign references it by (id, owner) for the same reason, and carries
+//     the project of that campaign — which is fixed when the campaign is
+//     created and never changes, so the two cannot drift apart.
+//
+// STATUS COLUMNS ARE STRINGS, matching `Task.status`: the lifecycle is
+// enforced in one place (`packages/core`), and a database enum would need a
+// migration to add a state the code already rejects.
+// ---------------------------------------------------------------------------
+
+model MarketingCampaign {
+  id              String    @id @default(cuid())
+  userId          String    @map("user_id")
+  /// NULL: personal. Fixed at creation.
+  projectId       String?   @map("project_id")
+  name            String
+  objective       String?
+  brief           String?
+  /// PLANNING | ACTIVE | PAUSED | COMPLETED | ARCHIVED
+  status          String    @default("PLANNING")
+  channels        String[]  @default([])
+  startDate       DateTime? @map("start_date") @db.Date
+  endDate         DateTime? @map("end_date") @db.Date
+  /// Meta campaign ids this workspace reports on. Empty: the whole ad account.
+  metaCampaignIds String[]  @default([]) @map("meta_campaign_ids")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  user     User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project  Project?            @relation(fields: [projectId, userId], references: [id, userId], onDelete: Cascade)
+  content  ContentItem[]
+  reports  MarketingReport[]
+  research MarketingResearch[]
+
+  /// Exists so the three tables below can reference a campaign by (id, owner).
+  @@unique([id, userId])
+  @@index([userId, projectId])
+  @@map("MarketingCampaign")
+}
+
+model ContentItem {
+  id               String    @id @default(cuid())
+  userId           String    @map("user_id")
+  campaignId       String?   @map("campaign_id")
+  /// The project of its campaign, or the scope it was created in. NULL: personal.
+  projectId        String?   @map("project_id")
+  title            String
+  /// FACEBOOK | INSTAGRAM | LINKEDIN | X | YOUTUBE | WHATSAPP | EMAIL | BLOG | OTHER
+  channel          String
+  format           String    @default("POST")
+  /// The copy. This and `link` are exactly what a publish would send.
+  body             String    @default("")
+  link             String?
+  notes            String?
+  /// IDEA | DRAFT | READY | PUBLISHED | ARCHIVED. PUBLISHED is never written
+  /// by a status change — only together with the publication columns below.
+  status           String    @default("DRAFT")
+  /// The calendar date the item is planned for. A plan, not a trigger:
+  /// nothing runs on this date.
+  scheduledDate    DateTime? @map("scheduled_date") @db.Date
+  /// "HH:MM", a wall-clock label. Not an instant: there is no user timezone.
+  scheduledTime    String?   @map("scheduled_time")
+
+  /// NONE | PUBLISHING | UNCONFIRMED. The single-winner claim on a publish:
+  /// one conditional UPDATE moves NONE to PUBLISHING, so two executions can
+  /// never both post the same item.
+  publishState     String    @default("NONE") @map("publish_state")
+  publishClaimedAt DateTime? @map("publish_claimed_at")
+  /// The last attempt that did not end in a verified post: a fixed code, the
+  /// target, and the post id when the provider returned one. Never the text.
+  publishAttempt   Json?     @map("publish_attempt")
+
+  /// VERIFIED (JARVIS published it and read it back) | REPORTED_BY_USER (the
+  /// user said they posted it). NULL: not published.
+  publicationMode  String?   @map("publication_mode")
+  publishedAt      DateTime? @map("published_at")
+  publishedVia     String?   @map("published_via")
+  publishedTarget  String?   @map("published_target")
+  externalId       String?   @map("external_id")
+  externalUrl      String?   @map("external_url")
+  verifiedAt       DateTime? @map("verified_at")
+
+  /// "user" | "jarvis"
+  createdBy        String    @default("user") @map("created_by")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+
+  user     User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  campaign MarketingCampaign? @relation(fields: [campaignId, userId], references: [id, userId], onDelete: Cascade)
+  project  Project?           @relation(fields: [projectId, userId], references: [id, userId], onDelete: Cascade)
+
+  /// The query the calendar makes: one user, a date window.
+  @@index([userId, scheduledDate])
+  @@index([userId, campaignId])
+  @@index([userId, projectId])
+  @@index([userId, status])
+  @@map("ContentItem")
+}
+
+model MarketingReport {
+  id              String   @id @default(cuid())
+  userId          String   @map("user_id")
+  campaignId      String?  @map("campaign_id")
+  projectId       String?  @map("project_id")
+  /// PERFORMANCE | CLIENT
+  kind            String
+  title           String
+  periodStart     DateTime @map("period_start") @db.Date
+  periodEnd       DateTime @map("period_end") @db.Date
+  /// The whole report, as built: figures, where each came from, the notes.
+  /// A report is a record of what the data said when it was generated, so it
+  /// is stored complete and is never recomputed.
+  document        Json
+  sourcesIncluded Int      @default(0) @map("sources_included")
+  sourcesTotal    Int      @default(0) @map("sources_total")
+  generatedAt     DateTime @default(now()) @map("generated_at")
+
+  user     User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  campaign MarketingCampaign? @relation(fields: [campaignId, userId], references: [id, userId], onDelete: Cascade)
+  project  Project?           @relation(fields: [projectId, userId], references: [id, userId], onDelete: Cascade)
+
+  @@index([userId, generatedAt])
+  @@index([userId, campaignId])
+  @@index([userId, projectId])
+  @@map("MarketingReport")
+}
+
+model MarketingResearch {
+  id         String   @id @default(cuid())
+  userId     String   @map("user_id")
+  campaignId String?  @map("campaign_id")
+  projectId  String?  @map("project_id")
+  /// SEO_AUDIT | COMPETITOR_SNAPSHOT
+  kind       String
+  /// The host that was read, lower-case, without "www.".
+  host       String
+  /// The address the content came from, after redirects.
+  url        String
+  headline   String
+  /// How the page was fetched: addresses, status, time, size. Never the HTML.
+  provenance Json
+  /// The audit or the comparison: facts read from the page, and checks.
+  result     Json
+  fetchedAt  DateTime @map("fetched_at")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  user     User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  campaign MarketingCampaign? @relation(fields: [campaignId, userId], references: [id, userId], onDelete: Cascade)
+  project  Project?           @relation(fields: [projectId, userId], references: [id, userId], onDelete: Cascade)
+
+  /// "The last read of this page" — what a comparison is made against.
+  @@index([userId, kind, url, fetchedAt])
+  @@index([userId, projectId])
+  @@index([userId, campaignId])
+  @@map("MarketingResearch")
 }

@@ -1,0 +1,82 @@
+%% Phase 15 — one publish, from "ask" to "read back".
+%% An item is called published only on the PUBLISHED branches, and only when
+%% the text read back is the item's text. A retry of an unconfirmed publish
+%% never sends: what is approved for it is a look, and an approval to look can
+%% never take the claim that may send. See docs/MARKETING.md.
+
+sequenceDiagram
+    participant U as User
+    participant P as Page or chat
+    participant E as ToolExecutor
+    participant S as MarketingService
+    participant A as Approval (PostgreSQL)
+    participant J as Execution journal
+    participant F as Facebook Page
+
+    Note over P,S: Only where MARKETING_PUBLISH_ENABLED=true. Otherwise no publish tool exists and no approval can be created — in chat the agent says so, and a call to a publish tool is answered as unavailable before the executor is asked.
+
+    U->>P: Publish this item
+    P->>E: marketing.publish.prepare (a read)
+    E->>S: preparePublish
+    S->>S: reserve a publish-check slot (atomic) — refused: 429, the provider is not asked
+    S->>F: list the Pages this connection may post to
+    S-->>P: publishParams — the saved text, the Page (for an unconfirmed item: only its original Page, and earlierAttempt — which attempt a look is for)
+    P->>A: create approval, bound by hash to those parameters — a send, or a look for that one attempt
+    P-->>U: the exact text and Page, and whether it will be posted or only looked for. Nothing has been sent.
+
+    U->>A: approve (one conditional UPDATE)
+    P->>E: marketing.content.publish, naming that approval
+    E->>J: begin execution, keyed by the approval
+    E->>A: consume the approval WITH the execution claim
+    E->>S: publish
+    S->>S: again — still ready? saved text = approved text? Page still listed, same name?
+    S->>S: claimForPublish (conditional UPDATE) — ONLY from the state the approval was made for
+
+    alt the item is not in that state: a look whose attempt was settled, a send for an item now unconfirmed, a look for another attempt
+        S-->>P: STALE — nothing is taken, NOTHING IS SENT; ask again
+    else an approval to SEND, and the claim was FRESH: no publish was outstanding
+        Note over S: the attempt's Page and a hash of its text were written with the claim
+        S->>F: POST the post
+        alt accepted, read back, and the text is the text that was sent
+            F-->>S: post id
+            S->>F: read the post back by its id
+            F-->>S: the post, with the text that was sent
+            S->>S: record PUBLISHED · VERIFIED — unless another item already holds that post
+            S-->>P: PUBLISHED
+        else accepted, but not read back — or read back with other text, or none, or the post is another item's
+            S->>S: leave unpublished, UNCONFIRMED, keep the post id
+            S-->>P: UNCONFIRMED — outcome not known
+        else refused
+            F-->>S: refusal
+            S-->>P: FAILED — nothing was published
+        else the answer never arrives
+            S->>S: leave unpublished, UNCONFIRMED
+            S-->>P: UNCONFIRMED — outcome not known
+        end
+    else an approval to LOOK, and the attempt it names is still UNCONFIRMED: this execution only LOOKS
+        S->>S: same Page and same words as the original attempt? If not — refused, nothing sent
+        S->>F: read the earlier post by its id, then look for the exact text on its Page — passing over a post another item holds
+        alt found, its text is the item's text, and no other item holds it
+            S->>S: record PUBLISHED · VERIFIED
+            S-->>P: ALREADY_PUBLISHED — nothing new sent
+        else found by id with other text, or not found, or the Page cannot be asked
+            S->>S: stay UNCONFIRMED, original attempt kept as it was
+            S-->>P: UNCONFIRMED or FAILED — NOTHING IS SENT
+        end
+    end
+
+    Note over U,F: Leaving UNCONFIRMED takes the post being found, or a person: "I posted this myself", or "it was not published".
+    U->>P: It was not published (Marketing page only — no agent can call this)
+    P->>E: marketing.publish.resolve
+    E->>S: resolveUnconfirmed
+    S->>S: held to the attempt first — the item still holds the words it sent, and its Page is still one the connection can read. If not: refused, nothing looked for, nothing cleared
+    S->>F: look once more
+    alt the post is there after all
+        S->>S: record it as published AND write the decision's audit row — one transaction
+        S-->>P: FOUND_PUBLISHED — recorded as published, nothing cleared
+    else not there
+        S->>S: clear the attempt AND write the decision's audit row — one transaction; if the row cannot be written, nothing is cleared
+        S-->>P: CLEARED — the item can be edited and published again
+    else a post with other text is there, or the Page cannot be asked
+        S-->>P: refused — nothing changes
+    end
