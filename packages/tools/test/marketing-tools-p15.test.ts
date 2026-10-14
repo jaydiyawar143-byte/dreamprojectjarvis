@@ -7,6 +7,7 @@
 import { describe, it, expect } from "vitest";
 import {
   ALL_MARKETING_TOOL_IDS,
+  MARKETING_DECISION_TOOL_IDS,
   MARKETING_PUBLISH_TOOL_IDS,
   MARKETING_READ_TOOL_IDS,
   MARKETING_RESEARCH_TOOL_IDS,
@@ -21,11 +22,13 @@ import {
   type PublishOutcome,
   type PublishParams,
   type PublishPreparation,
+  type PublishResolution,
   type ToolContext,
   type ToolExecutionRequest,
 } from "@jarvis/core";
 import { MemoryApprovalConsumer, MemoryExecutionJournal } from "../src/execution-journal.js";
 import {
+  createMarketingDecisionTools,
   createMarketingPublishTools,
   createMarketingResearchTools,
   createMarketingWorkspaceTools,
@@ -142,6 +145,10 @@ function fakePort(overrides: Partial<MarketingPort> = {}) {
       calls.push({ method: "publish", userId, args: [params], ctx });
       return { status: "PUBLISHED", message: "Published to Shop Page and read back from the Page.", code: "PUBLISHED", content: published() } satisfies PublishOutcome;
     }) as MarketingPort["publish"],
+    resolveUnconfirmed: record(
+      "resolveUnconfirmed",
+      marketingOk<PublishResolution>({ resolution: "CLEARED", message: "JARVIS looked on Shop Page and did not find the post. The earlier attempt is cleared.", item: item() })
+    ),
     ...overrides,
   };
   return { port, calls };
@@ -195,6 +202,7 @@ function setup(overrides: Partial<MarketingPort> = {}) {
     ...createMarketingWorkspaceTools(port),
     ...createMarketingResearchTools(port),
     ...createMarketingPublishTools(port, journal, approvals),
+    ...createMarketingDecisionTools(port),
   ];
   const byId = (id: string) => {
     const tool = tools.find((t) => t.id === id);
@@ -221,7 +229,7 @@ function approve(approvals: MemoryApprovalConsumer, params: Record<string, unkno
 describe("what each marketing tool is", () => {
   const { tools, byId } = setup();
 
-  it("registers exactly the seventeen tool ids, once each", () => {
+  it("registers exactly the eighteen tool ids, once each", () => {
     expect(tools.map((t) => t.id).sort()).toEqual([...ALL_MARKETING_TOOL_IDS].sort());
   });
 
@@ -254,8 +262,10 @@ describe("what each marketing tool is", () => {
     }
   });
 
-  it("the publish tool takes no project and no status: only what will be posted and where", () => {
-    expect(byId(MARKETING_TOOL_IDS.contentPublish).parameters.map((p) => p.name)).toEqual(["contentId", "targetId", "targetName", "message", "link"]);
+  it("the publish tool takes no project and no status: only what will be posted and where — and whether it is a look for an earlier attempt", () => {
+    expect(byId(MARKETING_TOOL_IDS.contentPublish).parameters.map((p) => p.name)).toEqual(["contentId", "targetId", "targetName", "message", "link", "earlierAttempt"]);
+    // What the item needs, a person always sees; the last two are present only when the publish check put them there.
+    expect(byId(MARKETING_TOOL_IDS.contentPublish).parameters.filter((p) => p.required).map((p) => p.name)).toEqual(["contentId", "targetId", "targetName", "message"]);
   });
 
   it("every tool is in the marketing category with a description that fits a model's tool list", () => {
@@ -437,7 +447,7 @@ describe("research results are labelled as text from an outside website", () => 
   });
 });
 
-describe("publish parameters are exactly five keys of the right shape", () => {
+describe("publish parameters are exactly the known keys, each of the right shape", () => {
   it("accepts what the publish check produces", () => {
     expect(isPublishParams({ ...PARAMS })).toBe(true);
     expect(isPublishParams({ ...PARAMS, link: "https://shop.example/offer" })).toBe(true);
@@ -650,6 +660,28 @@ describe("publishing: every outcome is reported as what it is", () => {
     expect(row.status).toBe("UNKNOWN");
   });
 
+  it("a retry that only LOOKED leaves the item unconfirmed and its own record FAILED: this execution sent nothing", async () => {
+    for (const code of ["NOT_FOUND_ON_PAGE", "RECONCILE_MISMATCH"]) {
+      const message = "JARVIS looked for the earlier post on Shop Page and did not find it. Nothing new was posted.";
+      const { result, row } = await run({ status: "UNCONFIRMED", message, code, content: item({ publishUnconfirmed: true }) });
+      expect(result.success, code).toBe(false);
+      expect(result.error, code).toBe(message);
+      // The item is still unconfirmed, and the caller is told which outcome it was.
+      expect(result.metadata, code).toMatchObject({ status: "UNCONFIRMED", code });
+      // Nothing was sent by THIS run, so it is not an unknown external write.
+      expect(row.status, code).toBe("FAILED");
+      expect(row.errorCode, code).toBe(code);
+    }
+  });
+
+  it("an outcome in which something was sent keeps its record UNKNOWN, whatever its code", async () => {
+    for (const code of ["AMBIGUOUS_OUTCOME", "VERIFY_FAILED", "VERIFY_MISMATCH", "VERIFY_NO_TEXT", "RECORD_FAILED"]) {
+      const { result, row } = await run({ status: "UNCONFIRMED", message: "Not confirmed.", code, content: item() });
+      expect(result.metadata, code).toMatchObject({ status: "UNCONFIRMED", code });
+      expect(row.status, code).toBe("UNKNOWN");
+    }
+  });
+
   it("a service that throws is treated as an unknown outcome — never as nothing having happened", async () => {
     const { result, row } = await run(() => {
       throw new Error("connection reset by peer; token=EAAsecret");
@@ -665,6 +697,64 @@ describe("publishing: every outcome is reported as what it is", () => {
     const { result } = await run({ status: "FAILED", message: "Facebook refused the post. Nothing was published.", code: "PROVIDER_REFUSED", content: item() });
     expect(result.data).toBeUndefined();
     expect(JSON.stringify(result)).not.toContain("verified");
+  });
+});
+
+describe("settling an unconfirmed publish is a person's decision", () => {
+  const RESOLVE = MARKETING_TOOL_IDS.publishResolve;
+
+  it("is its own tool: an own-store write that needs no approval and is in no group an agent is granted", () => {
+    const { byId } = setup();
+    const tool = byId(RESOLVE);
+    expect(tool.risk).toBe("LOW_IMPACT");
+    expect(tool.requiredPermissions).toEqual(["read", "write"]);
+    expect(tool.requiresApproval).toBe(false);
+    expect(createMarketingDecisionTools(fakePort().port).map((t) => t.id)).toEqual([...MARKETING_DECISION_TOOL_IDS]);
+    expect(createMarketingPublishTools(fakePort().port, new MemoryExecutionJournal()).map((t) => t.id)).not.toContain(RESOLVE);
+  });
+
+  it("accepts exactly one decision, for one item", () => {
+    const tool = setup().byId(RESOLVE);
+    expect(tool.validate({ contentId: "c1", decision: "NOT_PUBLISHED" })).toBe(true);
+    expect(tool.validate({ contentId: "c1" })).toBe(false);
+    expect(tool.validate({ contentId: "c1", decision: "PUBLISHED" })).toBe(false);
+    expect(tool.validate({ contentId: "c1", decision: "not_published" })).toBe(false);
+    expect(tool.validate({ contentId: "../x", decision: "NOT_PUBLISHED" })).toBe(false);
+    expect(tool.validate({ decision: "NOT_PUBLISHED" })).toBe(false);
+  });
+
+  it("from a person at a screen: forwards the decision for the context's user and reports what the service found", async () => {
+    const s = setup();
+    const result = await s.byId(RESOLVE).execute({ contentId: "c1", decision: "NOT_PUBLISHED" }, ctx());
+    expect(result.success).toBe(true);
+    expect(result.data).toMatchObject({ resolution: "CLEARED" });
+    expect(result.metadata).toMatchObject({ contentId: "c1", resolution: "CLEARED" });
+    expect(s.calls).toEqual([expect.objectContaining({ method: "resolveUnconfirmed", userId: "user-1", args: ["c1", { decision: "NOT_PUBLISHED" }] })]);
+    expect(s.calls[0]!.ctx.actor).toBe("user");
+  });
+
+  it("is never taken from an agent or from inside a conversation — the service is not reached", async () => {
+    for (const from of [{ agentId: "marketing-agent" }, { conversationId: "conv-1" }, { agentId: "marketing-agent", conversationId: "conv-1" }]) {
+      const s = setup();
+      const result = await s.byId(RESOLVE).execute({ contentId: "c1", decision: "NOT_PUBLISHED" }, ctx(from));
+      expect(result.success, JSON.stringify(from)).toBe(false);
+      expect(result.error, JSON.stringify(from)).toMatch(/Only a person can settle/);
+      expect(s.calls, JSON.stringify(from)).toHaveLength(0);
+    }
+  });
+
+  it("a refusal from the service is the tool's failure, in the service's own words", async () => {
+    const s = setup({
+      resolveUnconfirmed: (async () => marketingFail("CONFLICT", "A post from the earlier attempt is on Shop Page, so the attempt was not cleared.")) as MarketingPort["resolveUnconfirmed"],
+    });
+    const result = await s.byId(RESOLVE).execute({ contentId: "c1", decision: "NOT_PUBLISHED" }, ctx());
+    expect(result).toMatchObject({ success: false, error: "A post from the earlier attempt is on Shop Page, so the attempt was not cleared.", metadata: { code: "CONFLICT" } });
+  });
+
+  it("is unavailable, in words, on a server with no publisher", async () => {
+    const s = setup({ resolveUnconfirmed: undefined });
+    const result = await s.byId(RESOLVE).execute({ contentId: "c1", decision: "NOT_PUBLISHED" }, ctx());
+    expect(result).toMatchObject({ success: false, error: "Publishing is not available on this server." });
   });
 });
 
@@ -749,11 +839,155 @@ describe("through the real ToolExecutor", () => {
     expect(requested).toHaveLength(0);
   });
 
+  it("a viewer cannot settle an unconfirmed publish; a member can, and it asks for no approval", async () => {
+    const asViewer = executorFor(viewerOnly);
+    const refused = await asViewer.executor.execute({ toolId: MARKETING_TOOL_IDS.publishResolve, params: { contentId: "c1", decision: "NOT_PUBLISHED" }, userId: "user-1", role: "viewer" });
+    expect(refused.status).toBe("permission_denied");
+    expect(asViewer.calls).toHaveLength(0);
+
+    const asMember = executorFor(allow);
+    const done = await asMember.executor.execute({ toolId: MARKETING_TOOL_IDS.publishResolve, params: { contentId: "c1", decision: "NOT_PUBLISHED" }, userId: "user-1", role: "member" });
+    expect(done.status).toBe("completed");
+    expect(asMember.requested).toHaveLength(0);
+    expect(asMember.calls.map((c) => c.method)).toEqual(["resolveUnconfirmed"]);
+  });
+
   it("an own-store write runs without an approval — there is nothing outside JARVIS to approve", async () => {
     const { executor, requested, calls } = executorFor(allow);
     const result = await executor.execute({ toolId: MARKETING_TOOL_IDS.campaignCreate, params: { name: "Diwali Sale" }, userId: "user-1", role: "member" });
     expect(result.status).toBe("completed");
     expect(requested).toHaveLength(0);
     expect(calls.map((c) => c.method)).toEqual(["createCampaign"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A send and a look are different approvals (second audit, L1)
+//
+// The publish check writes `earlierAttempt` into the parameters when an
+// earlier publish is unconfirmed. It is part of what the approval's hash is
+// taken over, so the two can never be exchanged at this layer — and it reaches
+// the service exactly as it was approved, where the item's state is checked.
+// ---------------------------------------------------------------------------
+
+describe("an approval says whether it is for a send or for a look", () => {
+  const LOOK: PublishParams = { ...PARAMS, earlierAttempt: "a1b2c3d4e5f60718293a4b5c6d7e8f90" };
+  const publishTool = (s: ReturnType<typeof setup>) => s.byId(MARKETING_TOOL_IDS.contentPublish);
+  const publishCalls = (s: ReturnType<typeof setup>) => s.calls.filter((c) => c.method === "publish");
+
+  it("accepts the parameters of a look, as the publish check produces them", () => {
+    const { byId } = setup();
+    for (const params of [{ ...LOOK }, { ...LOOK, link: "https://shop.example/offer" }, { ...PARAMS, earlierAttempt: "unrecorded" }]) {
+      expect(isPublishParams(params)).toBe(true);
+      expect(byId(MARKETING_TOOL_IDS.contentPublish).validate(params)).toBe(true);
+    }
+  });
+
+  it.each<[string, unknown]>([
+    ["empty", ""],
+    ["not a string", 7],
+    ["null", null],
+    ["a list", ["a1b2"]],
+    ["longer than an id", "a".repeat(65)],
+    ["a sentence", "the earlier attempt"],
+    ["a path", "../attempt"],
+  ])("refuses an earlier attempt that is %s", (_label, earlierAttempt) => {
+    const { byId } = setup();
+    const params = { ...PARAMS, earlierAttempt } as Record<string, unknown>;
+    expect(isPublishParams(params)).toBe(false);
+    expect(byId(MARKETING_TOOL_IDS.contentPublish).validate(params)).toBe(false);
+  });
+
+  it("the two are bound differently: the same item, Page and text hash differently as a look", () => {
+    expect(computeParamsHash({ ...LOOK })).not.toBe(computeParamsHash({ ...PARAMS }));
+    expect(computeParamsHash({ ...LOOK })).not.toBe(computeParamsHash({ ...LOOK, earlierAttempt: "00000000000000000000000000000000" }));
+  });
+
+  it("an approval to SEND does not fit a look", async () => {
+    const s = setup();
+    const approval = approve(s.approvals, { ...PARAMS });
+    const result = await publishTool(s).execute({ ...LOOK }, ctx({ approvalId: approval.id }));
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("Approval denied");
+    expect(publishCalls(s)).toHaveLength(0);
+    expect(s.approvals.get(approval.id)!.status).toBe("approved");
+  });
+
+  it("an approval to LOOK does not fit a send — dropping the parameter does not turn one into the other", async () => {
+    const s = setup();
+    const approval = approve(s.approvals, { ...LOOK });
+    const result = await publishTool(s).execute({ ...PARAMS }, ctx({ approvalId: approval.id }));
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("Approval denied");
+    expect(result.error).toContain("Nothing was published");
+    expect(publishCalls(s)).toHaveLength(0);
+    expect(s.approvals.get(approval.id)!.status).toBe("approved");
+  });
+
+  it("an approval to look for one attempt does not fit another", async () => {
+    const s = setup();
+    const approval = approve(s.approvals, { ...LOOK });
+    const result = await publishTool(s).execute({ ...LOOK, earlierAttempt: "ffffffffffffffffffffffffffffffff" }, ctx({ approvalId: approval.id }));
+    expect(result.success).toBe(false);
+    expect(publishCalls(s)).toHaveLength(0);
+  });
+
+  it("a look reaches the service with the attempt it was approved for, exactly", async () => {
+    const s = setup();
+    const approval = approve(s.approvals, { ...LOOK });
+    await publishTool(s).execute({ ...LOOK }, ctx({ approvalId: approval.id }));
+    expect(publishCalls(s)).toHaveLength(1);
+    expect(publishCalls(s)[0]!.args[0]).toEqual(LOOK);
+  });
+
+  it("a send reaches the service naming no earlier attempt", async () => {
+    const s = setup();
+    const approval = approve(s.approvals, { ...PARAMS });
+    await publishTool(s).execute({ ...PARAMS }, ctx({ approvalId: approval.id }));
+    expect(publishCalls(s)[0]!.args[0]).toEqual(PARAMS);
+    expect(publishCalls(s)[0]!.args[0]).not.toHaveProperty("earlierAttempt");
+  });
+
+  it("the publish check hands the parameter on, and a model is shown it unaltered", async () => {
+    const prepared = marketingOk<PublishPreparation>({ ready: true, blockers: [], channel: "FACEBOOK", targets: [], publishParams: LOOK, warning: "Asking again only LOOKS for that post." });
+    const { byId } = setup({ preparePublish: async () => prepared });
+
+    const inChat = await byId(MARKETING_TOOL_IDS.publishPrepare).execute({ contentId: "c1" }, ctx({ agentId: "marketing-agent", conversationId: "conv-1" }));
+
+    // It is not mistaken for something to hide, so a look can be asked for in a conversation.
+    expect(inChat.data).toMatchObject({ ready: true, publishParams: LOOK });
+  });
+
+  it.each<[string]>([["STATE_CHANGED"], ["ATTEMPT_CHANGED"]])(
+    "a look refused because the item moved on (%s) is recorded as a publish that did not happen — never as unknown",
+    async (code) => {
+      const message = "This approval was only to look for an earlier post, and that attempt has been settled since. Nothing was sent and nothing was published.";
+      const s = setup({ publish: (async () => ({ status: "STALE", message, code, content: item() })) as MarketingPort["publish"] });
+      const approval = approve(s.approvals, { ...LOOK });
+
+      const result = await publishTool(s).execute({ ...LOOK }, ctx({ approvalId: approval.id }));
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe(message);
+      expect(result.metadata).toMatchObject({ status: "STALE", code });
+      const row = await s.journal.getById((result.metadata as { executionId: string }).executionId);
+      expect(row).toMatchObject({ status: "FAILED", errorCode: code });
+      // The approval is spent: it was made for a state the item is no longer in.
+      expect(s.approvals.get(approval.id)!.status).toBe("consumed");
+    }
+  );
+
+  it("a send whose post turned out to be another item's is unconfirmed, and its record stays UNKNOWN: something was sent", async () => {
+    const message = "Shop Page answered with a post that is already recorded as a different calendar item's post, so this item is NOT marked as published.";
+    const s = setup({ publish: (async () => ({ status: "UNCONFIRMED", message, code: "POST_RECORDED_ELSEWHERE", content: item() })) as MarketingPort["publish"] });
+    const approval = approve(s.approvals, { ...PARAMS });
+
+    const result = await publishTool(s).execute({ ...PARAMS }, ctx({ approvalId: approval.id }));
+
+    expect(result.success).toBe(false);
+    expect(result.data).toBeUndefined();
+    expect(result.metadata).toMatchObject({ status: "UNCONFIRMED", code: "POST_RECORDED_ELSEWHERE" });
+    const row = await s.journal.getById((result.metadata as { executionId: string }).executionId);
+    expect(row!.status).toBe("UNKNOWN");
   });
 });

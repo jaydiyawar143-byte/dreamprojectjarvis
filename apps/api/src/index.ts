@@ -268,6 +268,7 @@ app.use(
     executor: container.executor,
     toolRegistry: container.toolRegistry,
     marketing: container.marketing,
+    ...(container.marketingPublishingUnavailableReason ? { publishingUnavailableReason: container.marketingPublishingUnavailableReason } : {}),
     publishFlow: container.marketingPublishFlow,
     permissions: container.permissions,
   })

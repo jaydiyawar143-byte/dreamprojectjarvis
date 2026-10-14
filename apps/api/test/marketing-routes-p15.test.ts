@@ -81,6 +81,7 @@ let registeredTools: Set<string>;
 const REQUIRES: Record<string, ToolPermission[]> = {
   [MARKETING_TOOL_IDS.contentUpdate]: ["read", "write"],
   [MARKETING_TOOL_IDS.contentPublish]: ["read", "write"],
+  [MARKETING_TOOL_IDS.publishResolve]: ["read", "write"],
   [MARKETING_TOOL_IDS.seoAudit]: ["read"],
 };
 const toolRegistry = {
@@ -269,6 +270,15 @@ const ROWS: Row[] = [
   },
   { name: "one report", method: "GET", path: "/reports/rep_1", tool: T.reportGet, params: { reportId: "rep_1" }, status: 200 },
   { name: "recommendations", method: "GET", path: "/recommendations?campaign=camp_1", tool: T.recommendations, params: { campaign: "camp_1" }, status: 200 },
+  {
+    name: "settle an unconfirmed publish",
+    method: "POST",
+    path: "/content/item_1/publish/resolve",
+    body: { decision: "NOT_PUBLISHED" },
+    tool: T.publishResolve,
+    params: { contentId: "item_1", decision: "NOT_PUBLISHED" },
+    status: 200,
+  },
 ];
 
 describe("Phase 15 routes — each endpoint is one tool call through the executor", () => {
@@ -710,6 +720,8 @@ describe("Phase 15 routes — publishing goes through the flow, and only the flo
     [{ status: "NOT_READY", reason: "STALE", message: "The saved text is no longer the text that was approved, so nothing was published.", preparation: null }, 409],
     [{ status: "FAILED", reason: "FAILED", message: "The Page refused the post. Nothing was published." }, 502],
     [{ status: "UNCONFIRMED", message: "It is not known whether the post went out. It is NOT marked as published." }, 502],
+    [{ status: "UNCONFIRMED", reason: "NOT_FOUND_ON_PAGE", sentNothing: true, message: "JARVIS looked for the earlier post and did not find it. Nothing new was posted." }, 502],
+    [{ status: "RATE_LIMITED", message: "Too many publish checks have been made in the last few minutes. Wait a little and try again." }, 429],
   ];
 
   it.each(REFUSALS.map(([result, status]) => ({ result, status, name: "reason" in result && result.reason ? result.status + " (" + result.reason + ")" : result.status })))(
@@ -790,7 +802,7 @@ describe("Phase 15 routes — /status reports what was registered, so the page c
       research: { available: true, reason: null },
       publishing: { available: true, channels: ["FACEBOOK"], reason: null },
       adAccount: { available: true },
-      caller: { canEdit: true, canResearch: true, canPublish: true },
+      caller: { canEdit: true, canResearch: true, canPublish: true, canResolve: true },
     });
     // It reads the registry. It runs no tool.
     expect(executed).toHaveLength(0);
@@ -826,19 +838,20 @@ describe("Phase 15 routes — /status reports what was registered, so the page c
   });
 
   it.each([
-    ["token-owner", { canEdit: true, canResearch: true, canPublish: true }],
-    ["token-member", { canEdit: true, canResearch: true, canPublish: true }],
+    ["token-owner", { canEdit: true, canResearch: true, canPublish: true, canResolve: true }],
+    ["token-member", { canEdit: true, canResearch: true, canPublish: true, canResolve: true }],
     // A viewer holds read and nothing else: it may run a page read, and no write.
-    ["token-viewer", { canEdit: false, canResearch: true, canPublish: false }],
+    ["token-viewer", { canEdit: false, canResearch: true, canPublish: false, canResolve: false }],
   ])("tells %s what its own role could run, from the executor's role table", async (token, expected) => {
     expect((await call("GET", "/status", { token })).body.data.caller).toEqual(expected);
   });
 
   it("never says a role could use a tool that is not registered", async () => {
     registeredTools.delete(T.contentPublish);
+    registeredTools.delete(T.publishResolve);
     registeredTools.delete(T.seoAudit);
 
-    expect((await call("GET", "/status", { token: "token-owner" })).body.data.caller).toEqual({ canEdit: true, canResearch: false, canPublish: false });
+    expect((await call("GET", "/status", { token: "token-owner" })).body.data.caller).toEqual({ canEdit: true, canResearch: false, canPublish: false, canResolve: false });
   });
 
   it("takes the role from the token: a role named in the query changes nothing", async () => {
@@ -954,5 +967,67 @@ describe("Phase 15 routes — exporting a report", () => {
     await call("GET", "/reports/rep_1/export?userId=user-owner", { token: "token-viewer" });
 
     expect(executed[0]).toMatchObject({ userId: "user-viewer", role: "viewer" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Settling an unconfirmed publish — a person's decision, one tool call
+// ---------------------------------------------------------------------------
+
+describe("Phase 15 routes — settling an unconfirmed publish", () => {
+  it("hands the executor exactly one decision for the item in the path, as the caller", async () => {
+    const reply = await call("POST", "/content/item_9/publish/resolve", { body: { decision: "NOT_PUBLISHED" } });
+
+    expect(reply.status).toBe(200);
+    expect(executed).toHaveLength(1);
+    expect(executed[0]).toMatchObject({ toolId: T.publishResolve, params: { contentId: "item_9", decision: "NOT_PUBLISHED" }, userId: "user-member", role: "member" });
+    // No agent and no conversation: this is a person at a screen.
+    expect(executed[0]!.agentId).toBeUndefined();
+    expect(executed[0]!.conversationId).toBeUndefined();
+  });
+
+  it.each([
+    ["no decision", {}],
+    ["another decision", { decision: "PUBLISHED" }],
+    ["a decision in other capitals", { decision: "not_published" }],
+    ["a decision that is not text", { decision: true }],
+  ])("refuses %s before anything is run", async (_label, body) => {
+    const reply = await call("POST", "/content/item_9/publish/resolve", { body });
+
+    expect(reply.status).toBe(400);
+    expect(reply.body.error?.code).toBe("INVALID");
+    expect(executed).toHaveLength(0);
+  });
+
+  it("passes nothing else a client sends: no user, no role, no text, no target", async () => {
+    await call("POST", "/content/item_9/publish/resolve", {
+      body: { decision: "NOT_PUBLISHED", userId: "someone-else", role: "owner", contentId: "item_other", message: "post this instead", targetId: "999" },
+    });
+
+    expect(executed[0]!.params).toEqual({ contentId: "item_9", decision: "NOT_PUBLISHED" });
+    expect(executed[0]!.userId).toBe("user-member");
+  });
+
+  it("refuses an id that could not be one, without running anything", async () => {
+    const reply = await call("POST", "/content/item%209%3B/publish/resolve", { body: { decision: "NOT_PUBLISHED" } });
+
+    expect(reply.status).toBe(404);
+    expect(executed).toHaveLength(0);
+  });
+
+  it("maps the service's refusals: the post is still there, the Page cannot be checked, too many checks", async () => {
+    for (const [code, status] of [["CONFLICT", 409], ["PROVIDER_FAILED", 502], ["RATE_LIMITED", 429], ["UNAVAILABLE", 503], ["NOT_FOUND", 404]] as const) {
+      nextResult = refused(code, "said by the service");
+      const reply = await call("POST", "/content/item_9/publish/resolve", { body: { decision: "NOT_PUBLISHED" } });
+      expect(reply.status, code).toBe(status);
+      expect(reply.body.error, code).toMatchObject({ code, message: "said by the service" });
+    }
+  });
+
+  it("needs a signed-in caller", async () => {
+    const reply = await call("POST", "/content/item_9/publish/resolve", { body: { decision: "NOT_PUBLISHED" }, token: null });
+
+    expect(reply.status).toBe(401);
+    expect(executed).toHaveLength(0);
   });
 });

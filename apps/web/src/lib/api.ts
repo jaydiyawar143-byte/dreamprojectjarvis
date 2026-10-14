@@ -12,6 +12,7 @@ import type {
   MarketingResearchView,
   PublishParams,
   PublishPreparation,
+  PublishResolution,
 } from "@jarvis/core/marketing";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001/api/v1";
@@ -2674,7 +2675,7 @@ export interface MarketingStatus {
   publishing: { available: boolean; channels: MarketingChannel[]; reason: string | null };
   adAccount: { available: boolean };
   /** What the signed-in user's role could run. A hint for the screen; the server still decides. */
-  caller: { canEdit: boolean; canResearch: boolean; canPublish: boolean };
+  caller: { canEdit: boolean; canResearch: boolean; canPublish: boolean; canResolve: boolean };
 }
 
 export interface MarketingCalendar {
@@ -2715,12 +2716,16 @@ export type MarketingPublishReply = MarketingPublishAsk | MarketingPublishDone;
  * Why a publish did not happen, as the server's error carries it.
  *
  * `code` is one of NOT_READY, DECLINED, NOT_FOUND, FORBIDDEN, UNAVAILABLE,
- * FAILED or UNCONFIRMED. UNCONFIRMED means the post was sent and its outcome
- * is not known — it is not marked published and must not be blindly retried.
+ * RATE_LIMITED, FAILED or UNCONFIRMED. UNCONFIRMED means a post was sent — by
+ * this request or an earlier one — and its outcome is not known: the item is
+ * not marked published, and nothing more is sent for it until a person settles
+ * it. `sentNothing` is true when this request only looked for the earlier
+ * post.
  */
 export interface MarketingPublishError extends ApiError {
   published?: false;
   reason?: string;
+  sentNothing?: boolean;
   /** With NOT_READY from a request: the check, including the places it could go. */
   preparation?: PublishPreparation | null;
 }
@@ -2855,6 +2860,21 @@ export async function requestMarketingPublish(id: string, targetId?: string): Pr
 /** Publishes, for an approval the user has approved. */
 export async function executeMarketingPublish(id: string, approvalId: string): Promise<ApiResponse<MarketingPublishReply>> {
   return request(`/marketing/content/${marketingId(id)}/publish`, { method: "POST", body: JSON.stringify({ approvalId }) });
+}
+
+/**
+ * The user's decision that a publish whose outcome is not known did NOT happen.
+ *
+ * It posts nothing. The server looks for the post once more: if it is on the
+ * Page it is recorded as published instead (`FOUND_PUBLISHED`); only if it is
+ * not there is the attempt cleared (`CLEARED`), after which the item can be
+ * edited and published again.
+ */
+export async function resolveUnconfirmedPublish(id: string): Promise<ApiResponse<PublishResolution>> {
+  return request(`/marketing/content/${marketingId(id)}/publish/resolve`, {
+    method: "POST",
+    body: JSON.stringify({ decision: "NOT_PUBLISHED" }),
+  });
 }
 
 // --- research ---------------------------------------------------------------

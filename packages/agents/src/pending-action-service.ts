@@ -487,15 +487,25 @@ export class PendingActionService {
     // Phase 15 — what will be posted and where, read from the parameters the
     // approval is bound to. This is the text that runs, not a model's
     // description of it.
+    //
+    // The same parameters say which of two things is being confirmed. With
+    // `earlierAttempt`, an earlier attempt's outcome is not known and this
+    // only looks for its post — the execution is held to that, so the person
+    // is told so here rather than being asked to confirm a post.
     if (pending.toolId === MARKETING_TOOL_IDS.contentPublish) {
-      if (typeof p.targetName === "string") lines.push(`Publish to: ${p.targetName}`);
+      const look = typeof p.earlierAttempt === "string";
+      if (typeof p.targetName === "string") lines.push(`${look ? "Look on" : "Publish to"}: ${p.targetName}`);
       if (typeof p.message === "string") {
-        lines.push("Text to be posted:");
+        lines.push(look ? "Text to look for:" : "Text to be posted:");
         lines.push(p.message);
       }
       if (typeof p.link === "string") lines.push(`Link: ${p.link}`);
       lines.push("");
-      lines.push("This will be posted publicly and JARVIS cannot undo it.");
+      lines.push(
+        look
+          ? "An earlier attempt to publish this may already have posted it. This only looks for that post: if it is there the item is recorded as published, and if it is not, nothing is posted."
+          : "This will be posted publicly and JARVIS cannot undo it."
+      );
     }
 
     if (pending.riskLevel === "HIGH_IMPACT" || pending.riskLevel === "FINANCIAL") {
@@ -508,7 +518,9 @@ export class PendingActionService {
       pending.toolId === MARKETING_TOOL_IDS.contentPublish
         ? // A publish cannot be changed while it waits (see modifyPendingAction),
           // so it is not offered.
-          "Reply 'yes' to publish it, or 'no' to cancel."
+          typeof p.earlierAttempt === "string"
+          ? "Reply 'yes' to look for the post, or 'no' to cancel."
+          : "Reply 'yes' to publish it, or 'no' to cancel."
         : "Reply 'yes' to confirm, 'no' to cancel, or provide updated parameters."
     );
 

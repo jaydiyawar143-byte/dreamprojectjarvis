@@ -9,6 +9,7 @@
 //   POST   /api/v1/marketing/content/:id/mark-published
 //   GET    /api/v1/marketing/content/:id/publish        (the publish check — a read)
 //   POST   /api/v1/marketing/content/:id/publish        (request, or execute with an approval)
+//   POST   /api/v1/marketing/content/:id/publish/resolve (a person settles an unconfirmed publish)
 //   GET    /api/v1/marketing/research                   GET   .../research/:id
 //   POST   /api/v1/marketing/research/seo-audit         POST  .../research/competitor
 //   GET    /api/v1/marketing/reports                    POST  .../reports
@@ -60,6 +61,8 @@ export interface MarketingRouterDeps {
   executor: Pick<IToolExecutor, "execute">;
   toolRegistry: { get(toolId: string): ITool | undefined };
   marketing: { researchAvailable(): boolean; publishableChannels(): MarketingChannel[] };
+  /** Why publishing is unavailable here, when it is: switched off, or not configured. */
+  publishingUnavailableReason?: string;
   publishFlow: MarketingPublishFlow;
   /** The same role table the executor checks against. Read here, never decided here. */
   permissions: { checkToolPermissions(role: Role, required: ToolPermission[]): boolean };
@@ -198,7 +201,7 @@ export function createMarketingRouter(deps: MarketingRouterDeps): Router {
         publishing: {
           available: registered(T.contentPublish),
           channels: registered(T.contentPublish) ? deps.marketing.publishableChannels() : [],
-          reason: registered(T.contentPublish) ? null : "No publishing connection is configured on this server.",
+          reason: registered(T.contentPublish) ? null : (deps.publishingUnavailableReason ?? "No publishing connection is configured on this server."),
         },
         adAccount: { available: registered("meta.insights") },
         // What THIS caller's role could run. A hint for the screen, not a grant.
@@ -206,6 +209,8 @@ export function createMarketingRouter(deps: MarketingRouterDeps): Router {
           canEdit: may(T.contentUpdate),
           canResearch: may(T.seoAudit),
           canPublish: may(T.contentPublish),
+          // Settling an unconfirmed publish is a person's decision, made here and nowhere else.
+          canResolve: may(T.publishResolve),
         },
       });
     })
@@ -348,6 +353,7 @@ export function createMarketingRouter(deps: MarketingRouterDeps): Router {
     // Sent, outcome not known. Not a success, and not safe to report as a
     // plain failure a client might retry.
     UNCONFIRMED: 502,
+    RATE_LIMITED: 429,
   });
 
   /**
@@ -386,6 +392,26 @@ export function createMarketingRouter(deps: MarketingRouterDeps): Router {
       const { status: code, message, ...rest } = result;
       // Written after the result's own fields: a refusal is never `published`.
       fail(res, status, code, message, { ...rest, published: false });
+    })
+  );
+
+  /**
+   * A person's decision about a publish whose outcome is not known: "it was
+   * not published". The server looks for the post once more before it clears
+   * anything, and posts nothing either way.
+   *
+   * The body is fixed by the server — a client cannot widen what is decided
+   * here, only make this one decision about this one item.
+   */
+  router.post(
+    "/content/:id/publish/resolve",
+    requireAuth,
+    handle(async (req, res) => {
+      if (!validId(res, req.params.id, "content item")) return;
+      if (body(req).decision !== "NOT_PUBLISHED") {
+        return fail(res, 400, "INVALID", "decision must be NOT_PUBLISHED.");
+      }
+      send(res, await run(req, T.publishResolve, { contentId: req.params.id, decision: "NOT_PUBLISHED", ...projectOf(req) }));
     })
   );
 

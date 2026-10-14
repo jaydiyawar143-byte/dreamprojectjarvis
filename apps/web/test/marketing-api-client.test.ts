@@ -25,6 +25,7 @@ import {
   markMarketingContentPublished,
   planMarketingContent,
   requestMarketingPublish,
+  resolveUnconfirmedPublish,
   runCompetitorAnalysis,
   runSeoAudit,
   setAccessToken,
@@ -194,6 +195,21 @@ describe("marketing client — publishing is asked for, decided, then run", () =
   it("publishing sends the approval's id and nothing else", async () => {
     await executeMarketingPublish("item_1", "appr_1");
     expect(lastCall()).toEqual({ path: "/marketing/content/item_1/publish", query: {}, method: "POST", body: { approvalId: "appr_1" } });
+  });
+
+  it("settling an unconfirmed publish sends the one decision there is, for the item in the path", async () => {
+    await resolveUnconfirmedPublish("item_1");
+    expect(lastCall()).toEqual({ path: "/marketing/content/item_1/publish/resolve", query: {}, method: "POST", body: { decision: "NOT_PUBLISHED" } });
+    // One parameter: which item. A caller cannot choose another decision, a Page or any words.
+    expect(resolveUnconfirmedPublish.length).toBe(1);
+  });
+
+  it("hands back what the server found when it settled it", async () => {
+    mockFetch.mockResolvedValue(json({ success: true, data: { resolution: "FOUND_PUBLISHED", message: "The post IS on Shop Page.", item: { id: "item_1" } }, timestamp: "t" }));
+
+    const reply = await resolveUnconfirmedPublish("item_1");
+
+    expect(reply.data).toMatchObject({ resolution: "FOUND_PUBLISHED", message: "The post IS on Shop Page." });
   });
 
   it("no publish call can carry words: neither function has a parameter for them", async () => {

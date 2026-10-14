@@ -49,7 +49,15 @@ export type ToolExecutionStatus =
   | "approval_pending"
   | "approval_denied"
   | "not_requested"
-  | "clarification_required";
+  | "clarification_required"
+  /**
+   * The tool is switched off on this server, and the server said so. Nothing
+   * ran and nothing failed: no execution, no approval and no pending action
+   * exists for it. Set only by the Orchestrator, for a tool the composition
+   * root declared switched off — never by `ToolExecutor`, which still answers
+   * an unknown tool as "failed".
+   */
+  | "unavailable";
 
 export interface ToolExecutionRequest {
   toolId: string;

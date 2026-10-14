@@ -80,6 +80,61 @@ export class PrismaAuditRepository implements IAuditRepository {
   }
 
   /**
+   * Phase 15 — take one slot in a per-user window, atomically.
+   *
+   * The audit-counting limiter reads how many rows a user has in the window
+   * and lets the caller act; the row that feeds the next count is written
+   * afterwards. That is sound for one request at a time and unsound for
+   * several at once: they all read the same count, and all pass.
+   *
+   * Here the count and the row that raises it are ONE step. A transaction-
+   * scoped advisory lock, keyed on the user and the action, lets one caller at
+   * a time through — on this instance and on every other, since the lock lives
+   * in PostgreSQL — and inside it the window is counted and, if there is room,
+   * the reservation row is written. A caller that finds the window full writes
+   * nothing. The lock is released when the transaction ends, however it ends.
+   *
+   * `action` is matched EXACTLY, not by prefix, so the rows that report what
+   * the reserved work came to never count as reservations themselves.
+   *
+   * It throws if the database cannot be reached; the caller refuses the work.
+   */
+  async reserveSlot(input: {
+    userId: string;
+    action: string;
+    limit: number;
+    windowMs: number;
+    traceId?: string;
+    now?: Date;
+  }): Promise<{ reserved: boolean; count: number }> {
+    const now = input.now ?? new Date();
+    const since = new Date(now.getTime() - input.windowMs);
+    const lockKey = `${input.userId}:${input.action}`;
+
+    return this.prisma.$transaction(
+      async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`;
+        const count = await tx.auditLog.count({
+          where: { userId: input.userId, action: input.action, createdAt: { gte: since } },
+        });
+        if (count >= input.limit) return { reserved: false, count };
+        await tx.auditLog.create({
+          data: {
+            userId: input.userId,
+            action: input.action,
+            result: "PENDING",
+            traceId: input.traceId ?? null,
+            // The same clock the window was measured with.
+            createdAt: now,
+          },
+        });
+        return { reserved: true, count: count + 1 };
+      },
+      { maxWait: 10_000, timeout: 10_000 }
+    );
+  }
+
+  /**
    * Task Engine V2.3 - the execution evidence for ONE `executionId`.
    *
    * `ToolExecutor` writes exactly one `tool.execute` audit row per execution,

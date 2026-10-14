@@ -11,15 +11,23 @@
 // beside the user filter (`scoped()` below is the one place that happens) and
 // never instead of it.
 //
-// THE THREE WRITES THAT ARE CONDITIONAL, and why they are one statement each:
+// THE WRITES THAT ARE CONDITIONAL, and why each is one statement or one
+// transaction:
 //
-//   claimForPublish     NONE/UNCONFIRMED -> PUBLISHING, only while the saved
-//                       copy is still exactly what was approved. Two
-//                       executions racing for one item: the affected-row
-//                       count picks one, the other publishes nothing.
+//   claimForPublish     NONE -> PUBLISHING, or UNCONFIRMED -> PUBLISHING, only
+//                       while the saved copy is still exactly what was
+//                       approved — and only from the state the caller NAMES,
+//                       which is the state the approval was made for. Only a
+//                       claim taken from NONE may send, so an approval to look
+//                       can never take one. Two executions racing for one
+//                       item: the affected-row count picks one, the other
+//                       publishes nothing.
 //   finalizePublished   PUBLISHING -> PUBLISHED with its evidence, in the same
-//                       statement that clears the claim.
+//                       statement that clears the claim — and never with a
+//                       post another item already holds.
 //   releasePublish      PUBLISHING -> NONE or UNCONFIRMED.
+//   clearUnconfirmed    PUBLISHING -> NONE on a person's word, in the same
+//                       transaction as the audit row that says who and why.
 //
 // A read followed by a write would let two requests both pass the check.
 //
@@ -42,6 +50,7 @@ import {
   MARKETING_LIMITS,
   effectivePublishState,
   emptyStatusCounts,
+  redactSecrets,
   type CampaignStatus,
   type CompetitorAnalysis,
   type ContentFormat,
@@ -105,6 +114,14 @@ function toAttempt(value: Prisma.JsonValue | null): ContentPublishAttempt | null
   const record = value as Record<string, unknown>;
   if (record.state !== "UNCONFIRMED" && record.state !== "FAILED") return null;
   const text = (key: string): string | null => (typeof record[key] === "string" ? (record[key] as string) : null);
+  const looked = record.lastLookup;
+  let lastLookup: ContentPublishAttempt["lastLookup"] = null;
+  if (looked !== null && typeof looked === "object" && !Array.isArray(looked)) {
+    const lookup = looked as Record<string, unknown>;
+    if ((lookup.result === "NOT_FOUND" || lookup.result === "TEXT_MISMATCH") && typeof lookup.at === "string") {
+      lastLookup = { at: lookup.at, result: lookup.result };
+    }
+  }
   return {
     state: record.state,
     at: text("at") ?? new Date(0).toISOString(),
@@ -112,6 +129,8 @@ function toAttempt(value: Prisma.JsonValue | null): ContentPublishAttempt | null
     targetId: text("targetId"),
     targetName: text("targetName"),
     externalId: text("externalId"),
+    textHash: text("textHash"),
+    lastLookup,
   };
 }
 
@@ -288,6 +307,54 @@ export interface VerifiedPublication {
   url: string | null;
   publishedAt: Date;
   verifiedAt: Date;
+}
+
+/**
+ * Which state a publish claim may be taken from — the state the approval was
+ * made for. From NONE the attempt that is starting is written with the claim.
+ * From UNCONFIRMED nothing is written: the record of the original attempt
+ * stays exactly as it is.
+ */
+export type PublishClaim = { from: "NONE"; attempt: ContentPublishAttempt } | { from: "UNCONFIRMED" };
+
+/**
+ * The audit row for a person's decision about an unconfirmed publish, written
+ * in the SAME transaction as the change it describes. Ids, codes and the
+ * decision — never the text of a post.
+ */
+export interface PublishDecisionRecord {
+  action: string;
+  parameters: Record<string, unknown>;
+  traceId?: string;
+}
+
+/**
+ * The post that was read back is already recorded as ANOTHER item's post.
+ *
+ * One post on the provider is one item here. Recording it twice would mark as
+ * published an item whose own post may not exist. Thrown by `finalizePublished`
+ * with nothing written; matched by `code`, so no class has to be shared.
+ */
+export class PostRecordedElsewhereError extends Error {
+  readonly code = "POST_RECORDED_ELSEWHERE";
+  constructor() {
+    super("That post is already recorded as another content item's post.");
+    this.name = "PostRecordedElsewhereError";
+  }
+}
+
+/** A lock per post, held for one transaction: two items cannot record the same post at once. */
+const postLockKey = (provider: string, externalId: string): string => `marketing.post:${provider}:${externalId}`;
+
+/** The decision's audit row. Secret-shaped values are removed before it is stored, as everywhere else. */
+function decisionRow(userId: string, record: PublishDecisionRecord): Prisma.AuditLogUncheckedCreateInput {
+  return {
+    userId,
+    action: record.action,
+    parameters: JSON.parse(redactSecrets(JSON.stringify(record.parameters))) as Prisma.InputJsonValue,
+    result: "SUCCESS",
+    traceId: record.traceId ?? null,
+  };
 }
 
 export interface ResearchWrite {
@@ -566,11 +633,14 @@ export class PrismaMarketingRepository {
   }
 
   /**
-   * Change an item that is not published.
+   * Change an item that is not published and has no publish outstanding.
    *
-   * The WHERE refuses a published item and an item with a publish running, so
-   * the copy cannot be changed underneath an execution that has already
-   * checked it. Returns null when nothing matched.
+   * The WHERE takes only an item whose publish state is NONE. That refuses a
+   * published item, an item with a publish running — so the copy cannot be
+   * changed underneath an execution that has already checked it — and an item
+   * whose earlier publish is UNCONFIRMED: a post with the old words may be on
+   * the Page, and the item must go on saying what was sent until that is
+   * settled. Returns null when nothing matched.
    */
   async updateContent(
     userId: string,
@@ -589,14 +659,13 @@ export class PrismaMarketingRepository {
     if (patch.scheduledDate !== undefined) data.scheduledDate = patch.scheduledDate ? toDate(patch.scheduledDate) : null;
     if (patch.scheduledTime !== undefined) data.scheduledTime = patch.scheduledTime;
 
-    const staleBefore = new Date(this.now().getTime() - CONTENT_PUBLISH_CLAIM_TTL_MS);
     const changed = await this.prisma.contentItem.updateMany({
       where: {
         ...scoped(userId, scope),
         id: contentId,
         status: { not: "PUBLISHED" },
         publicationMode: null,
-        OR: [{ publishState: { not: "PUBLISHING" } }, { publishClaimedAt: { lt: staleBefore } }],
+        publishState: "NONE",
       },
       data: { ...data, updatedAt: this.now() },
     });
@@ -650,34 +719,88 @@ export class PrismaMarketingRepository {
   // -------------------------------------------------------------------------
 
   /**
-   * Take the item for one publish.
+   * Take the item for one publish — and say what was taken.
    *
    * Succeeds for exactly one caller, and only while the item is READY, not
    * published, on the expected channel, and its copy and link are still
-   * exactly the approved ones. A claim older than the TTL was abandoned and
-   * may be taken over — by an execution that must first find out what the
-   * abandoned one did.
+   * exactly the approved ones.
+   *
+   * `claim.from` is the state the APPROVAL was made for, and the item is taken
+   * only from that state:
+   *
+   *   from NONE         "FRESH": the item had no publish outstanding. The
+   *                     attempt is written in the SAME statement: where it is
+   *                     going and a hash of what it sends, so that if the
+   *                     process dies before it can report, the next one still
+   *                     knows both. Only this claim may send.
+   *   from UNCONFIRMED  "UNCONFIRMED": an earlier attempt's outcome is not
+   *                     known — it reported so, or its claim is older than the
+   *                     TTL and was abandoned. The record of that ORIGINAL
+   *                     attempt is left exactly as it is. Whoever holds this
+   *                     claim must not send anything.
+   *   null              nothing was taken: the item is not in that state, or
+   *                     is not the approved copy any more.
+   *
+   * ONE conditional statement. An approval to look for an earlier post can
+   * therefore never take a claim that may send — not even when the attempt it
+   * was made for is cleared between the approval and its execution — because
+   * the statement that would do so is never issued for it. The answer comes
+   * from whether a row changed, never from a read made beforehand, which a
+   * concurrent execution could have made untrue by the time the claim landed.
    */
   async claimForPublish(
     userId: string,
     contentId: string,
-    expected: { channel: MarketingChannel; body: string; link: string | null }
-  ): Promise<boolean> {
+    expected: { channel: MarketingChannel; body: string; link: string | null },
+    claim: PublishClaim
+  ): Promise<"FRESH" | "UNCONFIRMED" | null> {
+    const now = this.now();
+    const staleBefore = new Date(now.getTime() - CONTENT_PUBLISH_CLAIM_TTL_MS);
+    const item = {
+      userId,
+      id: contentId,
+      status: "READY",
+      publicationMode: null,
+      channel: expected.channel,
+      body: expected.body,
+      link: expected.link,
+    };
+
+    if (claim.from === "NONE") {
+      const fresh = await this.prisma.contentItem.updateMany({
+        where: { ...item, publishState: "NONE" },
+        data: { publishState: "PUBLISHING", publishClaimedAt: now, publishAttempt: claim.attempt as unknown as Prisma.InputJsonValue },
+      });
+      return fresh.count === 1 ? "FRESH" : null;
+    }
+
+    const earlier = await this.prisma.contentItem.updateMany({
+      where: {
+        ...item,
+        OR: [{ publishState: "UNCONFIRMED" }, { publishState: "PUBLISHING", publishClaimedAt: { lt: staleBefore } }],
+      },
+      data: { publishState: "PUBLISHING", publishClaimedAt: now },
+    });
+    return earlier.count === 1 ? "UNCONFIRMED" : null;
+  }
+
+  /**
+   * Take an item whose publish is UNCONFIRMED, to look for its post — never to send.
+   *
+   * One conditional statement. It takes only an unconfirmed item (or one whose
+   * claim was abandoned), and never one with no publish outstanding: there is
+   * nothing to settle on such an item, and taking it would look like a publish
+   * in progress. The record of the original attempt is not touched.
+   */
+  async claimUnconfirmed(userId: string, contentId: string): Promise<boolean> {
     const now = this.now();
     const staleBefore = new Date(now.getTime() - CONTENT_PUBLISH_CLAIM_TTL_MS);
     const changed = await this.prisma.contentItem.updateMany({
       where: {
         userId,
         id: contentId,
-        status: "READY",
         publicationMode: null,
-        channel: expected.channel,
-        body: expected.body,
-        link: expected.link,
-        OR: [
-          { publishState: { in: ["NONE", "UNCONFIRMED"] } },
-          { publishState: "PUBLISHING", publishClaimedAt: { lt: staleBefore } },
-        ],
+        OR: [{ publishState: "UNCONFIRMED" }, { publishState: "PUBLISHING", publishClaimedAt: { lt: staleBefore } }],
       },
       data: { publishState: "PUBLISHING", publishClaimedAt: now },
     });
@@ -685,31 +808,120 @@ export class PrismaMarketingRepository {
   }
 
   /**
-   * PUBLISHING -> PUBLISHED, with the evidence, in one statement.
+   * Is this post already recorded as a DIFFERENT item's post?
+   *
+   * Asked while looking for an earlier attempt's post, so that a post which
+   * belongs to something else is passed over instead of being taken for this
+   * item's. A read; `finalizePublished` is what enforces the rule.
+   *
+   * NOT scoped to one user, on purpose: a post id names one post on the
+   * provider, and every user of a deployment publishes through the same
+   * connection to the same Pages. The answer is a yes or a no — no row, and
+   * nothing about whose item it is, leaves this method.
+   */
+  async isPostRecordedElsewhere(provider: string, externalId: string, exceptContentId: string): Promise<boolean> {
+    const other = await this.prisma.contentItem.findFirst({
+      where: { publishedVia: provider, externalId, id: { not: exceptContentId } },
+      select: { id: true },
+    });
+    return other !== null;
+  }
+
+  /**
+   * PUBLISHING -> PUBLISHED, with the evidence, in one transaction.
    *
    * VERIFIED and nothing else: this is the only method that writes that mode,
    * and it cannot be called without the provider's post id and the time the
    * post was read back (the database checks both as well).
+   *
+   * ONE POST, ONE ITEM. A post another item already holds is never recorded a
+   * second time: `PostRecordedElsewhereError`, with nothing written. The check
+   * and the write are made under a lock on that post's id, so two items that
+   * found the same post at the same moment cannot both pass the check.
+   *
+   * `record`, when given, is written in the same transaction: the item is
+   * recorded as published together with the audit row, or neither is.
    */
-  async finalizePublished(userId: string, contentId: string, publication: VerifiedPublication): Promise<ContentItemView | null> {
-    const changed = await this.prisma.contentItem.updateMany({
-      where: { userId, id: contentId, publishState: "PUBLISHING", publicationMode: null },
-      data: {
-        status: "PUBLISHED",
-        publicationMode: "VERIFIED",
-        publishedAt: publication.publishedAt,
-        publishedVia: publication.provider,
-        publishedTarget: publication.targetName,
-        externalId: publication.externalId,
-        externalUrl: publication.url,
-        verifiedAt: publication.verifiedAt,
-        publishState: "NONE",
-        publishClaimedAt: null,
-        publishAttempt: Prisma.DbNull,
-        updatedAt: this.now(),
+  async finalizePublished(
+    userId: string,
+    contentId: string,
+    publication: VerifiedPublication,
+    record?: PublishDecisionRecord
+  ): Promise<ContentItemView | null> {
+    const lockKey = postLockKey(publication.provider, publication.externalId);
+    const recorded = await this.prisma.$transaction(
+      async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`;
+        const other = await tx.contentItem.findFirst({
+          where: { publishedVia: publication.provider, externalId: publication.externalId, id: { not: contentId } },
+          select: { id: true },
+        });
+        if (other) throw new PostRecordedElsewhereError();
+
+        const changed = await tx.contentItem.updateMany({
+          where: { userId, id: contentId, publishState: "PUBLISHING", publicationMode: null },
+          data: {
+            status: "PUBLISHED",
+            publicationMode: "VERIFIED",
+            publishedAt: publication.publishedAt,
+            publishedVia: publication.provider,
+            publishedTarget: publication.targetName,
+            externalId: publication.externalId,
+            externalUrl: publication.url,
+            verifiedAt: publication.verifiedAt,
+            publishState: "NONE",
+            publishClaimedAt: null,
+            publishAttempt: Prisma.DbNull,
+            updatedAt: this.now(),
+          },
+        });
+        if (changed.count === 0) return false;
+        if (record) await tx.auditLog.create({ data: decisionRow(userId, record) });
+        return true;
       },
-    });
-    if (changed.count === 0) return null;
+      { maxWait: 10_000, timeout: 10_000 }
+    );
+    if (!recorded) return null;
+    return this.findContent(userId, { kind: "ALL" }, contentId);
+  }
+
+  /**
+   * PUBLISHING -> NONE on a person's word that an unconfirmed publish did not
+   * happen — together with the audit row that says so.
+   *
+   * ONE TRANSACTION. Clearing an attempt is what makes an item sendable again,
+   * so it is never done without the durable record of who decided it and what
+   * was seen: if the row cannot be written, the item is not cleared, and if
+   * the item cannot be cleared, no row is left describing a clearing that did
+   * not happen. It throws when the database refuses either; the caller still
+   * holds the claim and gives the item back as unconfirmed.
+   *
+   * Null: the item was not held by a claim, and nothing was written.
+   */
+  async clearUnconfirmed(
+    userId: string,
+    contentId: string,
+    attempt: ContentPublishAttempt,
+    record: PublishDecisionRecord
+  ): Promise<ContentItemView | null> {
+    const cleared = await this.prisma.$transaction(
+      async (tx) => {
+        const changed = await tx.contentItem.updateMany({
+          where: { userId, id: contentId, publishState: "PUBLISHING", publicationMode: null },
+          data: {
+            publishState: "NONE",
+            publishClaimedAt: null,
+            publishAttempt: attempt as unknown as Prisma.InputJsonValue,
+            updatedAt: this.now(),
+          },
+        });
+        if (changed.count === 0) return false;
+        await tx.auditLog.create({ data: decisionRow(userId, record) });
+        return true;
+      },
+      { maxWait: 10_000, timeout: 10_000 }
+    );
+    if (!cleared) return null;
     return this.findContent(userId, { kind: "ALL" }, contentId);
   }
 
@@ -754,6 +966,11 @@ export class PrismaMarketingRepository {
   // -------------------------------------------------------------------------
   // Reports
   // -------------------------------------------------------------------------
+
+  /** How many reports the user has saved — asked BEFORE a report reads anything. */
+  async countReports(userId: string): Promise<number> {
+    return this.prisma.marketingReport.count({ where: { userId } });
+  }
 
   async createReport(userId: string, input: ReportWrite): Promise<MarketingReportView> {
     if ((await this.prisma.marketingReport.count({ where: { userId } })) >= MARKETING_LIMITS.reportsPerUser) {

@@ -76,7 +76,9 @@ Domain agent → model (OpenAI) → tool calls, limited to the agent's allowlist
 Orchestrator — the allowlist is checked again; the write-intent gate refuses
    any non-read-only call the user did not ask for (audited, never executed);
    an approval-gated call from a role that could not run it is refused before
-   any pending action is created (Phase 15)
+   any pending action is created (Phase 15); a call to a tool the server named
+   as switched off is answered `unavailable`, with the server's reason, before
+   the executor is asked — no execution, approval or pending action (Phase 15)
    ▼
 ToolExecutor — packages/tools
    validate → agent allowlist + role permission → approval gate → single deadline → journal → audit
@@ -124,7 +126,8 @@ Two gates stand in front of one execution authority.
 - Both gates hash parameters with the same canonical function, `computeParamsHash` in `packages/core`, which sorts keys at every depth.
 - The integration command service **gates** an action and hands it to `ToolExecutor`, which **executes** it. Nothing calls a provider write directly. `AGENTS.md` sets out the rules.
 - Google write tools only **plan**: they create an approval row. The write runs when a person approves that row.
-- A marketing publish (`marketing.content.publish`) is the third kind of external write. Its approval carries the exact text and Page; the tool consumes it in the step that claims the execution; and the service checks the saved item against it again before sending. See [MARKETING.md](./MARKETING.md#5-publishing).
+- A marketing publish (`marketing.content.publish`) is the third kind of external write. Its approval carries the exact text and Page; the tool consumes it in the step that claims the execution; and the service checks the saved item against it again before sending. It exists only where `MARKETING_PUBLISH_ENABLED=true`. A publish whose outcome is not known is never followed by a second send: a retry only looks for the earlier post, and sending again takes a person's recorded decision. The approval's parameters say which of the two it is for — a send, or a look at one named earlier attempt — and the claim is taken only from that state, so an approval to look can never send. One post is one item's post, and a person's decision to clear an attempt is one transaction with its audit row. See [MARKETING.md](./MARKETING.md#5-publishing).
+- Marketing work that reaches outside JARVIS without an approval — a page read, a report's reads of the ad account, a publish check — reserves a slot first, atomically, in the audit table (`AtomicRateLimiter` over `PrismaAuditRepository.reserveSlot`). The older `DbBackedRateLimiter` counts and leaves the row to its caller; it is not used for these.
 - A voice session cannot confirm a write.
 
 ## Work tasks and scheduling

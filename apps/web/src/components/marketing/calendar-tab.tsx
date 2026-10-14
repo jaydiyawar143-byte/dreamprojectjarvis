@@ -24,6 +24,7 @@ import {
   getMarketingContent,
   markMarketingContentPublished,
   planMarketingContent,
+  resolveUnconfirmedPublish,
   updateMarketingContent,
   type MarketingCalendar,
   type MarketingStatus,
@@ -77,6 +78,8 @@ export function CalendarTab({
   const [draft, setDraft] = useState<Draft>(EMPTY_DRAFT);
   const [editing, setEditing] = useState<{ id: string; draft: Draft } | null>(null);
   const [reporting, setReporting] = useState<{ id: string; url: string } | null>(null);
+  /** The item whose unconfirmed publish the user is about to declare not published. */
+  const [settling, setSettling] = useState<string | null>(null);
   const [publishing, setPublishing] = useState<ContentItemView | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -202,12 +205,36 @@ export function CalendarTab({
   const setStatus = (item: ContentItemView, next: "DRAFT" | "READY" | "ARCHIVED", done: string) =>
     act(() => updateMarketingContent(item.id, { status: next }), done, "The status could not be changed.");
 
+  /**
+   * The user says an unconfirmed publish did NOT happen. The server looks once
+   * more and answers in its own words — which may be that the post IS there.
+   */
+  async function settleNotPublished(id: string) {
+    setBusy(true);
+    setNotice(null);
+    setActionError(null);
+    const response = await resolveUnconfirmedPublish(id);
+    setBusy(false);
+    if (!response.success || !response.data) {
+      setActionError(failureOf(response, "That could not be settled."));
+    } else {
+      setNotice(response.data.message);
+      setSettling(null);
+    }
+    await load();
+  }
+
   function renderItem(item: ContentItemView) {
     const publication = publicationOf(item);
     const isOut = item.status === "PUBLISHED";
     const publishable = status.publishing.available && status.caller.canPublish && status.publishing.channels.includes(item.channel);
     const isEditing = editing?.id === item.id;
     const isReporting = reporting?.id === item.id;
+    const isSettling = settling === item.id;
+    // An earlier publish's outcome is not known. The item cannot be changed
+    // until that is settled, so none of the controls that change it are drawn.
+    const unconfirmed = item.publishUnconfirmed;
+    const attempt = unconfirmed ? item.publishAttempt : null;
 
     return (
       <li key={item.id} data-testid="content-item" data-status={item.status} className="rounded border border-sys-line bg-sys-edge/20 p-4">
@@ -291,8 +318,61 @@ export function CalendarTab({
           </form>
         )}
 
+        {unconfirmed && (
+          <p data-testid="unconfirmed-note" className="mt-2 text-xs text-amber-300">
+            An earlier attempt to publish this was sent{attempt?.targetName ? ` to ${attempt.targetName}` : ""} and its outcome is not known. It is not
+            marked as published, it cannot be edited, and nothing more is sent for it until this is settled.
+            {attempt?.lastLookup?.result === "NOT_FOUND" && " JARVIS has looked for the post on the Page and did not find it."}
+            {attempt?.lastLookup?.result === "TEXT_MISMATCH" && " JARVIS found a post from that attempt on the Page, but could not confirm its text is this item's text."}
+          </p>
+        )}
+
+        {isSettling && (
+          <form
+            className="mt-3 space-y-3"
+            aria-label={`Settle the publish of ${item.title}`}
+            onSubmit={(event) => {
+              event.preventDefault();
+              void settleNotPublished(item.id);
+            }}
+          >
+            <p className="text-xs text-sys-dim">
+              Use this only after you have looked at the Page yourself and the post is not there. JARVIS will look once more: if it finds the post, the
+              item is recorded as published instead. If it does not, the earlier attempt is cleared and the item can be published again — and
+              publishing it again will post it.
+            </p>
+            <div className="flex gap-2">
+              <Button type="submit" variant="primary" size="sm" disabled={busy}>
+                It was not published — check and clear
+              </Button>
+              <Button size="sm" onClick={() => setSettling(null)} disabled={busy}>
+                Cancel
+              </Button>
+            </div>
+          </form>
+        )}
+
+        {/* An unconfirmed item offers only the three ways to settle it. Edit, Back to draft and Archive would all be refused. */}
+        {canEdit && !isOut && unconfirmed && !isReporting && !isSettling && (
+          <div className="mt-3 flex flex-wrap gap-2">
+            {item.status === "READY" && publishable && (
+              <Button size="sm" variant="primary" onClick={() => setPublishing(item)} disabled={busy || publishing !== null}>
+                Look for the post
+              </Button>
+            )}
+            <Button size="sm" onClick={() => setReporting({ id: item.id, url: "" })} disabled={busy || publishing !== null}>
+              I posted this myself
+            </Button>
+            {status.publishing.available && status.caller.canResolve && (
+              <Button size="sm" onClick={() => setSettling(item.id)} disabled={busy || publishing !== null}>
+                It was not published
+              </Button>
+            )}
+          </div>
+        )}
+
         {/* A published item is a record. It has no controls, because none could do anything. */}
-        {canEdit && !isOut && !isEditing && !isReporting && (
+        {canEdit && !isOut && !unconfirmed && !isEditing && !isReporting && (
           <div className="mt-3 flex flex-wrap gap-2">
             <Button size="sm" onClick={() => void startEdit(item)} disabled={busy || publishing !== null}>
               Edit
@@ -310,7 +390,7 @@ export function CalendarTab({
             )}
             {item.status === "READY" && publishable && (
               <Button size="sm" variant="primary" onClick={() => setPublishing(item)} disabled={busy || publishing !== null}>
-                {item.publishUnconfirmed ? "Check and publish" : "Publish"}
+                Publish
               </Button>
             )}
             <Button size="sm" onClick={() => setReporting({ id: item.id, url: "" })} disabled={busy || publishing !== null}>

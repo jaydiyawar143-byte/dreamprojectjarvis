@@ -175,6 +175,7 @@ const LABEL_OVERRIDES: Record<string, string> = {
   "marketing.content.mark_published": "Record a post you published yourself",
   "marketing.publish.prepare": "Check whether a content item can be published",
   "marketing.content.publish": "Publish a content item (needs approval)",
+  "marketing.publish.resolve": "Settle a publish whose outcome is not known (on the Marketing page)",
   "marketing.seo.audit": "Audit a web page's on-page SEO",
   "marketing.competitor.analyze": "Compare a competitor's web page",
   "marketing.research.list": "List saved SEO and competitor research",

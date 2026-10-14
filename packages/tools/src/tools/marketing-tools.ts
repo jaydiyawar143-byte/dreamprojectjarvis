@@ -22,6 +22,10 @@
 //   THE ONE WRITE THAT LEAVES JARVIS (EXTERNAL_SIDE_EFFECT, approval-gated)
 //     marketing.content.publish
 //
+//   A PERSON'S DECISION (LOW_IMPACT, on NO agent's allowlist)
+//     marketing.publish.resolve    "that unconfirmed publish did not happen" —
+//                                  JARVIS looks once more, then clears it
+//
 // THE PORT IS THE WHOLE BOUNDARY, as for the task and memory tools. These
 // classes receive one object — implemented over MarketingService at the
 // composition root — and nothing else: no database, no HTTP client, no
@@ -63,6 +67,7 @@ import type {
   PublishOutcome,
   PublishParams,
   PublishPreparation,
+  PublishResolution,
   RiskLevel,
   ToolContext,
   ToolParameter,
@@ -73,6 +78,7 @@ import {
   CREATE_BLOCKED_STATUSES,
   MARKETING_LIMITS,
   MARKETING_TOOL_IDS,
+  PUBLISH_LOOK_ONLY_CODES,
   computeParamsHash,
   containsInstructionInjection,
 } from "@jarvis/core";
@@ -152,6 +158,8 @@ export interface MarketingPort {
   /** Absent: this deployment has no publisher, and the two publish tools are not registered. */
   preparePublish?(userId: string, contentId: string, targetId: string | undefined, ctx: MarketingCallContext): Promise<MarketingResult<PublishPreparation>>;
   publish?(userId: string, params: PublishParams, ctx: MarketingCallContext): Promise<PublishOutcome>;
+  /** A person's decision that an unconfirmed publish did not happen. Absent where there is no publisher. */
+  resolveUnconfirmed?(userId: string, contentId: string, input: { decision: string }, ctx: MarketingCallContext): Promise<MarketingResult<PublishResolution>>;
 }
 
 // ---------------------------------------------------------------------------
@@ -843,11 +851,19 @@ export class MarketingRecommendationsTool extends MarketingTool {
 
 const ID = /^[A-Za-z0-9_-]{1,64}$/;
 const TARGET_NAME_MAX = 200;
-const PUBLISH_KEYS = ["contentId", "targetId", "targetName", "message", "link"] as const;
+const PUBLISH_KEYS = ["contentId", "targetId", "targetName", "message", "link", "earlierAttempt"] as const;
 
-/** Exactly the five keys, each of the right shape. Used by `validate` and by the approval route's re-check. */
+/**
+ * Exactly these keys and no others, each of the right shape. Used by
+ * `validate` and by the approval route's re-check.
+ *
+ * `earlierAttempt` is optional and opaque here: the service wrote it into the
+ * parameters when the approval was for a LOOK, and the service is what holds
+ * an execution to it. It is part of what the approval's hash is taken over, so
+ * it cannot be added to, or dropped from, parameters a person approved.
+ */
 export function isPublishParams(params: Record<string, unknown>): params is Record<string, unknown> & PublishParams {
-  const { contentId, targetId, targetName, message, link } = params;
+  const { contentId, targetId, targetName, message, link, earlierAttempt } = params;
   return (
     Object.keys(params).every((key) => (PUBLISH_KEYS as readonly string[]).includes(key)) &&
     typeof contentId === "string" &&
@@ -860,7 +876,8 @@ export function isPublishParams(params: Record<string, unknown>): params is Reco
     typeof message === "string" &&
     message.trim().length > 0 &&
     message.length <= MARKETING_LIMITS.contentBodyMax &&
-    (link === undefined || (typeof link === "string" && link.length > 0 && link.length <= MARKETING_LIMITS.linkMax))
+    (link === undefined || (typeof link === "string" && link.length > 0 && link.length <= MARKETING_LIMITS.linkMax)) &&
+    (earlierAttempt === undefined || (typeof earlierAttempt === "string" && ID.test(earlierAttempt)))
   );
 }
 
@@ -932,13 +949,20 @@ export class MarketingContentPublishTool extends MarketingTool {
       "Publish content item",
       "Publish one READY content item to its channel — today, a text post to a Facebook Page. This posts publicly and cannot be undone by JARVIS. It requires the user's approval. " +
         "Use it ONLY when the user asks for a specific item to be published, and ONLY with the `publishParams` returned by the publish-check tool, unchanged. " +
-        "The result says what happened: published and read back from the Page, not published, or sent with an outcome that is not known. Report it exactly — never say an item was published unless the result says so.",
+        "The result says what happened: published and read back from the Page, not published, or sent with an outcome that is not known. Report it exactly — never say an item was published unless the result says so. " +
+        "When an earlier attempt's outcome is not known, this only LOOKS for that post and sends nothing; if it is not found, the user must settle it on the Marketing page — you cannot do that for them.",
       [
         { name: "contentId", type: "string", description: "From publishParams.", required: true },
         { name: "targetId", type: "string", description: "From publishParams.", required: true },
         { name: "targetName", type: "string", description: "From publishParams.", required: true },
         { name: "message", type: "string", description: "From publishParams — the exact saved text. Never rewrite it.", required: true },
         { name: "link", type: "string", description: "From publishParams, when it has one.", required: false },
+        {
+          name: "earlierAttempt",
+          type: "string",
+          description: "From publishParams, when it has one — it marks this as a look for an earlier attempt's post, and nothing is sent. Never add, change or leave it out yourself.",
+          required: false,
+        },
       ],
       marketing,
       { risk: "EXTERNAL_SIDE_EFFECT", permissions: ["read", "write"], requiresApproval: true }
@@ -1005,6 +1029,7 @@ export class MarketingContentPublishTool extends MarketingTool {
           targetName: params.targetName,
           message: params.message,
           ...(params.link !== undefined ? { link: params.link } : {}),
+          ...(params.earlierAttempt !== undefined ? { earlierAttempt: params.earlierAttempt } : {}),
         },
         callContext(context, {})
       );
@@ -1019,7 +1044,7 @@ export class MarketingContentPublishTool extends MarketingTool {
       };
     }
 
-    const metadata = { toolId: this.id, risk: this.risk, status: outcome.status, executionId: record.executionId, contentId: params.contentId };
+    const metadata = { toolId: this.id, risk: this.risk, status: outcome.status, code: outcome.code, executionId: record.executionId, contentId: params.contentId };
 
     switch (outcome.status) {
       case "PUBLISHED":
@@ -1035,12 +1060,67 @@ export class MarketingContentPublishTool extends MarketingTool {
           metadata
         );
       case "UNCONFIRMED":
-        await this.journal.markUnknown(record.executionId, { code: outcome.code, message: outcome.message });
+        // The ITEM is unconfirmed either way. What this EXECUTION did differs:
+        // a retry that only looked sent nothing, and its record says so; one
+        // that sent and did not learn the outcome is unknown.
+        if (PUBLISH_LOOK_ONLY_CODES.includes(outcome.code)) {
+          await this.journal.markFailed(record.executionId, { code: outcome.code, message: outcome.message });
+        } else {
+          await this.journal.markUnknown(record.executionId, { code: outcome.code, message: outcome.message });
+        }
         return { success: false, error: outcome.message, metadata };
       default:
         await this.journal.markFailed(record.executionId, { code: outcome.code, message: outcome.message });
         return { success: false, error: outcome.message, metadata };
     }
+  }
+}
+
+/**
+ * A person's decision that a publish whose outcome is not known did NOT happen.
+ *
+ * It is a tool so that it runs where everything else does — through
+ * `ToolExecutor`, past the role check, with an audit row — and it is on NO
+ * agent's allowlist, so no model is ever offered it: whether an earlier post
+ * went out is something a person looks at a Page to know. The Marketing page's
+ * router is its one caller.
+ *
+ * It sends nothing. The service looks for the post once more and clears the
+ * attempt only if it is not there.
+ */
+export class MarketingPublishResolveTool extends MarketingTool {
+  constructor(marketing: MarketingPort) {
+    super(
+      MARKETING_TOOL_IDS.publishResolve,
+      "Settle an unconfirmed publish",
+      "Record a person's decision that an earlier publish, whose outcome is not known, did NOT happen. JARVIS looks for the post on the Page once more: if it is there it is recorded as published instead; if it is not, the attempt is cleared and the item can be published again. " +
+        "It posts nothing. It is used from the Marketing page by a person who has checked the Page — never on a model's own judgement.",
+      [
+        { name: "contentId", type: "string", description: "The item's id, from the calendar.", required: true },
+        { name: "decision", type: "string", description: "NOT_PUBLISHED — the only decision recorded here.", required: true },
+        PROJECT_PARAM,
+      ],
+      marketing,
+      OWN_STORE
+    );
+  }
+
+  override validate(params: Record<string, unknown>): boolean {
+    return typeof params.contentId === "string" && ID.test(params.contentId.trim()) && params.decision === "NOT_PUBLISHED";
+  }
+
+  async execute(params: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
+    if (!this.marketing.resolveUnconfirmed) return this.failure("Publishing is not available on this server.");
+    // Fail closed: a decision that only a person can make is not taken from an agent.
+    if (context.agentId || context.conversationId) return this.failure("Only a person can settle an unconfirmed publish, from the Marketing page.");
+    const result = await this.marketing.resolveUnconfirmed(
+      context.userId,
+      (params.contentId as string).trim(),
+      { decision: String(params.decision) },
+      callContext(context, params)
+    );
+    if (!result.ok) return this.refused(result);
+    return this.ok(result.value, { contentId: result.value.item.id, resolution: result.value.resolution });
   }
 }
 
@@ -1079,4 +1159,9 @@ export function createMarketingPublishTools(
   approvals?: IApprovalConsumptionPort
 ): BaseTool[] {
   return [new MarketingPublishPrepareTool(marketing), new MarketingContentPublishTool(marketing, journal, approvals)];
+}
+
+/** A person's decision about an unconfirmed publish. Registered with the publish tools; offered to no agent. */
+export function createMarketingDecisionTools(marketing: MarketingPort): BaseTool[] {
+  return [new MarketingPublishResolveTool(marketing)];
 }

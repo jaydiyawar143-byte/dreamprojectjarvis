@@ -100,7 +100,7 @@ export function publicationOf(item: ContentItemView): PublicationState | null {
     return {
       label: "Publish not confirmed",
       tone: "warn",
-      detail: "A publish was sent and its outcome is not known. This item is NOT marked as published. Check the Page before trying again.",
+      detail: "A publish was sent and its outcome is not known. This item is NOT marked as published, and nothing more is sent for it until you settle it.",
     };
   }
   return null;

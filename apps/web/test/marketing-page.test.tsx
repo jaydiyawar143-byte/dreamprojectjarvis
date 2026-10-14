@@ -20,7 +20,7 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import React from "react";
-import { render, screen, waitFor, fireEvent, within } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, fireEvent, within } from "@testing-library/react";
 import type {
   ContentItemView,
   MarketingCampaignView,
@@ -56,6 +56,7 @@ vi.mock("../src/lib/api", async () => {
     markMarketingContentPublished: vi.fn(),
     requestMarketingPublish: vi.fn(),
     executeMarketingPublish: vi.fn(),
+    resolveUnconfirmedPublish: vi.fn(),
     approveApproval: vi.fn(),
     rejectApproval: vi.fn(),
     listMarketingResearch: vi.fn(),
@@ -94,7 +95,7 @@ const STATUS = (over: Partial<api.MarketingStatus> = {}): api.MarketingStatus =>
   research: { available: true, reason: null },
   publishing: { available: true, channels: ["FACEBOOK"], reason: null },
   adAccount: { available: true },
-  caller: { canEdit: true, canResearch: true, canPublish: true },
+  caller: { canEdit: true, canResearch: true, canPublish: true, canResolve: true },
   ...over,
 });
 
@@ -370,7 +371,7 @@ const panel = () => screen.findByTestId("publish-panel");
 async function startPublish(itemOver: Partial<ContentItemView> = {}) {
   mocked.getMarketingCalendar.mockResolvedValue(ok(CALENDAR([ITEM({ status: "READY", ...itemOver })])));
   render(<MarketingPage />);
-  fireEvent.click(button(await item("Teaser"), /^(Publish|Check and publish)$/));
+  fireEvent.click(button(await item("Teaser"), /^(Publish|Look for the post)$/));
   return panel();
 }
 
@@ -428,7 +429,7 @@ describe("Marketing screen — the shell", () => {
 
 describe("Marketing screen — a role that can only read", () => {
   beforeEach(() => {
-    mocked.getMarketingStatus.mockResolvedValue(ok(STATUS({ caller: { canEdit: false, canResearch: true, canPublish: false } })));
+    mocked.getMarketingStatus.mockResolvedValue(ok(STATUS({ caller: { canEdit: false, canResearch: true, canPublish: false, canResolve: false } })));
     mocked.getMarketingCalendar.mockResolvedValue(ok(CALENDAR([ITEM({ status: "READY" })])));
   });
 
@@ -509,7 +510,7 @@ describe("Marketing screen — the calendar", () => {
 
     const unknown = await item("Unknown");
     expect(within(unknown).getByText("Publish not confirmed")).toBeInTheDocument();
-    expect(within(unknown).getByText(/This item is NOT marked as published\./)).toBeInTheDocument();
+    expect(within(unknown).getByText(/It is not\s+marked as published, it cannot be edited, and nothing more is sent for it until this is settled\./)).toBeInTheDocument();
     expect(within(unknown).queryByText(/^Published/)).not.toBeInTheDocument();
 
     expect(within(await item("Draft only")).getByText("Draft")).toBeInTheDocument();
@@ -689,17 +690,119 @@ describe("Marketing screen — where a Publish button is, and is not", () => {
   });
 
   it("is not there for a role that can edit and cannot publish", async () => {
-    withItem({ status: "READY" }, { caller: { canEdit: true, canResearch: true, canPublish: false } });
+    withItem({ status: "READY" }, { caller: { canEdit: true, canResearch: true, canPublish: false, canResolve: true } });
     const node = await item("Teaser");
 
     expect(hasButton(node, "Publish")).toBe(false);
     expect(within(node).getByText("Your role cannot publish.")).toBeInTheDocument();
   });
 
-  it("says 'Check and publish' when an earlier attempt's outcome is unknown", async () => {
-    withItem({ status: "READY", publishUnconfirmed: true });
+  it("an item whose publish is not confirmed offers only the ways to settle it — never Publish, Edit, Back to draft or Archive", async () => {
+    withItem({
+      status: "READY",
+      publishUnconfirmed: true,
+      publishAttempt: { state: "UNCONFIRMED", at: ts(), code: "AMBIGUOUS_OUTCOME", targetId: "1234567890", targetName: "Shop Page", externalId: null },
+    });
+    const node = await item("Teaser");
 
-    expect(hasButton(await item("Teaser"), "Check and publish")).toBe(true);
+    expect(hasButton(node, "Look for the post")).toBe(true);
+    expect(hasButton(node, "I posted this myself")).toBe(true);
+    expect(hasButton(node, "It was not published")).toBe(true);
+    // Each of these would be refused by the server, so none of them is drawn.
+    for (const name of ["Publish", "Check and publish", "Edit", "Back to draft", "Mark ready", "Archive"]) expect(hasButton(node, name), name).toBe(false);
+    const note = within(node).getByTestId("unconfirmed-note");
+    expect(note).toHaveTextContent("An earlier attempt to publish this was sent to Shop Page and its outcome is not known.");
+    expect(note).toHaveTextContent("it cannot be edited, and nothing more is sent for it until this is settled");
+  });
+
+  it("says what JARVIS found the last time it looked", async () => {
+    const attempt = { state: "UNCONFIRMED" as const, at: ts(), code: "AMBIGUOUS_OUTCOME", targetId: "1", targetName: "Shop Page", externalId: null };
+    mocked.getMarketingCalendar.mockResolvedValue(
+      ok(
+        CALENDAR([
+          ITEM({ id: "n", title: "Not found", status: "READY", publishUnconfirmed: true, publishAttempt: { ...attempt, lastLookup: { at: ts(), result: "NOT_FOUND" } } }),
+          ITEM({ id: "m", title: "Mismatch", status: "READY", publishUnconfirmed: true, publishAttempt: { ...attempt, externalId: "1_2", lastLookup: { at: ts(), result: "TEXT_MISMATCH" } } }),
+        ])
+      )
+    );
+    render(<MarketingPage />);
+
+    expect(within(await item("Not found")).getByTestId("unconfirmed-note")).toHaveTextContent("JARVIS has looked for the post on the Page and did not find it.");
+    expect(within(await item("Mismatch")).getByTestId("unconfirmed-note")).toHaveTextContent("could not confirm its text is this item's text");
+  });
+
+  it("does not offer to settle it to a role that could not, or on a server that cannot publish", async () => {
+    withItem({ status: "READY", publishUnconfirmed: true }, { caller: { canEdit: true, canResearch: true, canPublish: true, canResolve: false } });
+    expect(hasButton(await item("Teaser"), "It was not published")).toBe(false);
+    cleanup();
+
+    withItem({ status: "READY", publishUnconfirmed: true }, { publishing: { available: false, channels: [], reason: "Publishing is switched off on this server." } });
+    const node = await item("Teaser");
+    expect(hasButton(node, "It was not published")).toBe(false);
+    expect(hasButton(node, "Look for the post")).toBe(false);
+    // The one thing a person can still do without a publisher: say they posted it themselves.
+    expect(hasButton(node, "I posted this myself")).toBe(true);
+  });
+});
+
+describe("Marketing screen — settling a publish whose outcome is not known", () => {
+  const unconfirmed = () => {
+    mocked.getMarketingCalendar.mockResolvedValue(ok(CALENDAR([ITEM({ status: "READY", publishUnconfirmed: true })])));
+    render(<MarketingPage />);
+  };
+
+  it("asks first, in words that say what will happen — and sends nothing until the person confirms", async () => {
+    unconfirmed();
+    fireEvent.click(button(await item("Teaser"), "It was not published"));
+
+    const form = await screen.findByRole("form", { name: "Settle the publish of Teaser" });
+    expect(form).toHaveTextContent("Use this only after you have looked at the Page yourself and the post is not there.");
+    expect(form).toHaveTextContent("publishing it again will post it");
+    expect(mocked.resolveUnconfirmedPublish).not.toHaveBeenCalled();
+
+    fireEvent.click(button(form, "Cancel"));
+    await waitFor(() => expect(screen.queryByRole("form", { name: "Settle the publish of Teaser" })).not.toBeInTheDocument());
+    expect(mocked.resolveUnconfirmedPublish).not.toHaveBeenCalled();
+  });
+
+  it("sends the one decision for that item, and shows the server's own account of what it found", async () => {
+    mocked.resolveUnconfirmedPublish.mockResolvedValue(
+      ok({ resolution: "CLEARED", message: "JARVIS looked on Shop Page and did not find the post, and you said it was not published. The earlier attempt is cleared.", item: ITEM({ status: "READY" }) })
+    );
+    unconfirmed();
+    fireEvent.click(button(await item("Teaser"), "It was not published"));
+    const before = mocked.getMarketingCalendar.mock.calls.length;
+
+    fireEvent.click(button(await screen.findByRole("form", { name: "Settle the publish of Teaser" }), "It was not published — check and clear"));
+
+    await waitFor(() => expect(mocked.resolveUnconfirmedPublish).toHaveBeenCalledTimes(1));
+    expect(mocked.resolveUnconfirmedPublish).toHaveBeenCalledWith("item-1");
+    expect(await screen.findByRole("status")).toHaveTextContent("JARVIS looked on Shop Page and did not find the post");
+    // The calendar is read again, so the item shows what the server now says.
+    await waitFor(() => expect(mocked.getMarketingCalendar.mock.calls.length).toBeGreaterThan(before));
+  });
+
+  it("when JARVIS finds the post after all, says so — it is the server's sentence, not a 'cleared'", async () => {
+    mocked.resolveUnconfirmedPublish.mockResolvedValue(
+      ok({ resolution: "FOUND_PUBLISHED", message: "The post IS on Shop Page, with this item's text. It is recorded as published. Nothing was cleared and nothing new was posted.", item: ITEM({ status: "PUBLISHED" }) })
+    );
+    unconfirmed();
+    fireEvent.click(button(await item("Teaser"), "It was not published"));
+    fireEvent.click(button(await screen.findByRole("form", { name: "Settle the publish of Teaser" }), "It was not published — check and clear"));
+
+    const notice = await screen.findByRole("status");
+    expect(notice).toHaveTextContent("The post IS on Shop Page");
+    expect(notice).not.toHaveTextContent(/is cleared/);
+  });
+
+  it("a refusal is shown in the server's words, and the item is left as it was", async () => {
+    mocked.resolveUnconfirmedPublish.mockResolvedValue(refused("CONFLICT", "A post from the earlier attempt is on Shop Page, so the attempt was not cleared."));
+    unconfirmed();
+    fireEvent.click(button(await item("Teaser"), "It was not published"));
+    fireEvent.click(button(await screen.findByRole("form", { name: "Settle the publish of Teaser" }), "It was not published — check and clear"));
+
+    expect(await screen.findByText("A post from the earlier attempt is on Shop Page, so the attempt was not cleared.")).toBeInTheDocument();
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
 });
 
@@ -769,7 +872,7 @@ describe("Marketing screen — publishing is asked for, decided, then run", () =
     mocked.requestMarketingPublish.mockResolvedValue(ok(ASK()));
     mocked.approveApproval.mockResolvedValue(ok({ approvalId: "appr-1", status: "approved" }));
     mocked.executeMarketingPublish.mockResolvedValue(
-      refused("UNCONFIRMED", "The post was sent to Shop Page, but the answer never arrived. It is NOT marked as published. Check the Page before trying again.", { published: false })
+      refused("UNCONFIRMED", "The post was sent to Shop Page, but the answer never arrived. It is NOT marked as published. Check the Page.", { published: false, reason: "AMBIGUOUS_OUTCOME", sentNothing: false })
     );
 
     const node = await startPublish();
@@ -777,7 +880,7 @@ describe("Marketing screen — publishing is asked for, decided, then run", () =
 
     const warning = await within(node).findByTestId("publish-unconfirmed");
     expect(within(warning).getByText("Not confirmed — do not assume it was posted")).toBeInTheDocument();
-    expect(within(warning).getByText(/It is NOT marked as published\. Check the Page before trying again\./)).toBeInTheDocument();
+    expect(within(warning).getByText(/It is NOT marked as published\. Check the Page\./)).toBeInTheDocument();
     expect(node).toHaveAttribute("data-step", "unconfirmed");
     expect(within(node).queryByText(/^Published to/)).not.toBeInTheDocument();
     expect(within(node).queryByText("Not published")).not.toBeInTheDocument();
@@ -910,6 +1013,49 @@ describe("Marketing screen — publishing is asked for, decided, then run", () =
     await within(node).findByTestId("publish-confirmation");
     expect(mocked.requestMarketingPublish).toHaveBeenLastCalledWith("item-1", "page-2");
     expect(mocked.executeMarketingPublish).not.toHaveBeenCalled();
+  });
+
+  it("for an item whose publish is not confirmed, says before approval that approving only LOOKS — and after, that nothing new was posted", async () => {
+    mocked.requestMarketingPublish.mockResolvedValue(ok(ASK()));
+    mocked.approveApproval.mockResolvedValue(ok({ approvalId: "appr-1", status: "approved" }));
+    mocked.executeMarketingPublish.mockResolvedValue(
+      refused("UNCONFIRMED", "JARVIS looked for the earlier post on Shop Page and did not find it. Nothing new was posted, and the item is still not marked as published.", {
+        published: false,
+        reason: "NOT_FOUND_ON_PAGE",
+        sentNothing: true,
+      })
+    );
+
+    const node = await startPublish({ publishUnconfirmed: true });
+    const confirmation = await within(node).findByTestId("publish-confirmation");
+    expect(within(confirmation).getByTestId("publish-look-only")).toHaveTextContent("Approving this only LOOKS for that post on the Page");
+    // The button says what it will do. There is no "Approve and publish" here.
+    expect(hasButton(confirmation, "Approve and publish")).toBe(false);
+    fireEvent.click(button(confirmation, "Approve and look for the post"));
+
+    const warning = await within(node).findByTestId("publish-unconfirmed");
+    expect(within(warning).getByText("Still not confirmed — nothing new was posted")).toBeInTheDocument();
+    expect(within(warning).getByText(/did not find it\. Nothing new was posted/)).toBeInTheDocument();
+    expect(within(node).queryByText(/^Published to/)).not.toBeInTheDocument();
+  });
+
+  it("an ordinary item's confirmation carries no such note", async () => {
+    mocked.requestMarketingPublish.mockResolvedValue(ok(ASK()));
+
+    const node = await startPublish();
+    const confirmation = await within(node).findByTestId("publish-confirmation");
+
+    expect(within(confirmation).queryByTestId("publish-look-only")).not.toBeInTheDocument();
+    expect(hasButton(confirmation, "Approve and publish")).toBe(true);
+  });
+
+  it("being asked too often is shown as that, with nothing posted", async () => {
+    mocked.requestMarketingPublish.mockResolvedValue(refused("RATE_LIMITED", "Too many publish checks have been made in the last few minutes. Wait a little and try again.", { published: false }));
+
+    const node = await startPublish();
+
+    expect(await within(node).findByText("Too many checks — nothing was posted")).toBeInTheDocument();
+    expect(within(node).getByText(/Wait a little and try again\./)).toBeInTheDocument();
   });
 
   it("when these exact words were already approved, the request itself publishes — and is shown as published", async () => {

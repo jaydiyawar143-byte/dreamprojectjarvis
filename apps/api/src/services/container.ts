@@ -71,7 +71,7 @@ import {
   isPageResearchEnabled,
   pageResearchPolicy,
 } from "@jarvis/browser";
-import { createMetaGraphProvider, createMetaPagePublisher } from "@jarvis/meta-graph";
+import { createMetaGraphProvider, createMetaPagePublisher, isPagePublishingEnabled } from "@jarvis/meta-graph";
 import {
   createGoogleAdsProvider,
   createGoogleConfig,
@@ -157,23 +157,24 @@ import {
   type ProviderChainEvent,
 } from "@jarvis/core";
 // S8.4 — MCP: the reviewed manifest, the runtime and the tool adapter.
-import { MCP_MANIFEST, MEMORY_PURGE_TOOL_ID, validateMcpManifest, type McpManifest } from "@jarvis/core";
+import { MARKETING_PUBLISH_TOOL_IDS, MARKETING_RESEARCH_TOOL_IDS, MCP_MANIFEST, MEMORY_PURGE_TOOL_ID, validateMcpManifest, type McpManifest } from "@jarvis/core";
 import { randomUUID } from "node:crypto";
 import { McpConnection, isMcpEnabled } from "@jarvis/mcp";
 import { createMcpTools } from "@jarvis/tools";
 // Phase 15 — the marketing workspace: one service, the tools that hold it as
 // their port, and the publisher contract a provider package implements.
 import {
+  createMarketingDecisionTools,
   createMarketingPublishTools,
   createMarketingResearchTools,
   createMarketingWorkspaceTools,
   type ContentPublisher,
   type MarketingPort,
 } from "@jarvis/tools";
-import { MarketingService } from "./marketing/marketing-service.js";
+import { MarketingService, PAGE_RESEARCH_OFF } from "./marketing/marketing-service.js";
 import { googleAdsReportSource } from "./marketing/google-ads-source.js";
 import { MarketingPublishFlow } from "./marketing/publish-flow.js";
-import { RATE_LIMIT_NAMESPACES } from "./rate-limiter.js";
+import { AtomicRateLimiter, RATE_LIMIT_NAMESPACES } from "./rate-limiter.js";
 import { buildIntegrationCommandService } from "./integrations/build.js";
 import { errorMonitor, operationalLog } from "./observability/index.js";
 import { mcpToolUnavailable } from "./integration-registry.js";
@@ -377,6 +378,12 @@ export interface Container {
    * approval. It holds no provider and decides nothing; see publish-flow.ts.
    */
   marketingPublishFlow: MarketingPublishFlow;
+  /**
+   * Phase 15 — why publishing is unavailable on this deployment, when it is:
+   * switched off (MARKETING_PUBLISH_ENABLED), or switched on with nothing to
+   * publish through. Null when a publisher is registered. For the screen.
+   */
+  marketingPublishingUnavailableReason: string | null;
   /**
    * Phase 15 — the role table, the SAME instance the executor checks against.
    * Exposed read-only so a route can tell a screen which controls a role could
@@ -1264,16 +1271,23 @@ export function getContainer(options?: {
   //   workspace tools   always. They reach the database and nothing else.
   //   research tools    only with a page reader. Without one they are absent,
   //                     and capability discovery says so.
-  //   publish tools     only with a publisher. A publish button on a server
-  //                     that cannot publish would be a control that does
-  //                     nothing.
+  //   publish tools     only with a publisher — and a publisher exists only
+  //                     where the operator switched publishing ON
+  //                     (MARKETING_PUBLISH_ENABLED=true) AND the Meta
+  //                     integration is configured. Off by default: the
+  //                     credentials that read the ad account must not, on
+  //                     their own, make a deployment able to post publicly.
+  //                     With no publisher there is no publish tool for a
+  //                     sentence or a button to reach, so no approval for a
+  //                     publish can come to exist.
   //
   // Registered here, before the agents' definitions are computed.
   // ---------------------------------------------------------------------------
   const executorRef: { current: IToolExecutor | null } = { current: null };
 
+  const publishingSwitchedOn = isPagePublishingEnabled();
   const marketingPublishers: ContentPublisher[] = [];
-  if (process.env.META_ACCESS_TOKEN && process.env.META_AD_ACCOUNT_ID) {
+  if (publishingSwitchedOn && process.env.META_ACCESS_TOKEN && process.env.META_AD_ACCOUNT_ID) {
     marketingPublishers.push(
       createMetaPagePublisher({
         accessToken: process.env.META_ACCESS_TOKEN,
@@ -1295,9 +1309,11 @@ export function getContainer(options?: {
     pages: pageReader,
     publishers: marketingPublishers,
     audit: auditLogger,
-    // Counted in the same audit-backed window every other limiter uses, so
-    // the ceiling on page reads holds across processes.
-    researchLimiter: new DbBackedRateLimiter(auditLogger, RATE_LIMIT_NAMESPACES.marketing),
+    // A slot is RESERVED in the audit table before a page read, a report or a
+    // publish check starts — count and reservation in one step, in PostgreSQL,
+    // so the ceilings hold for requests that arrive together and across
+    // processes.
+    limiter: new AtomicRateLimiter(auditRepo, RATE_LIMIT_NAMESPACES.marketing),
   });
   const marketingPort: MarketingPort = marketingService;
 
@@ -1310,11 +1326,44 @@ export function getContainer(options?: {
     // tools use: a publish consumes its approval in the durable step that
     // claims its execution.
     for (const tool of createMarketingPublishTools(marketingPort, executionJournal, approvalRepo)) toolRegistry.register(tool);
+    // A person's decision about a publish whose outcome is not known. In the
+    // registry so the page reaches it through the executor; on no agent's
+    // allowlist, so no model is offered it.
+    for (const tool of createMarketingDecisionTools(marketingPort)) toolRegistry.register(tool);
+  }
+  const marketingPublishingUnavailableReason =
+    marketingPublishers.length > 0
+      ? null
+      : publishingSwitchedOn
+        ? "Publishing is switched on, but no publishing connection is configured on this server."
+        : "Publishing is switched off on this server. An administrator can switch it on by setting MARKETING_PUBLISH_ENABLED=true and restarting.";
+  // The same sentence, for a conversation. The marketing agent's policy still
+  // names the two publish tools — a grant is compile-time — so a model can name
+  // one on a server that did not register it. The orchestrator is told which
+  // tools are switched off and why, and answers such a call with this sentence
+  // instead of handing the executor a tool that is not there. Empty where the
+  // tools ARE registered: a tool that exists is never looked up in it.
+  const marketingSwitchedOffTools: Record<string, string> = {};
+  if (marketingPublishingUnavailableReason !== null) {
+    for (const id of MARKETING_PUBLISH_TOOL_IDS) {
+      if (toolRegistry.get(id) === undefined) marketingSwitchedOffTools[id] = marketingPublishingUnavailableReason;
+    }
+  }
+  // The two page reads are in the same position wherever `BROWSER_ENABLED` is
+  // not `true`: granted to the marketing agent and to the general assistant,
+  // registered nowhere. A model that named one got "Tool not found" and a
+  // failed turn. They are named here too, with the sentence the service gives
+  // when it is asked for a page read it cannot make.
+  if (!pageReader) {
+    for (const id of MARKETING_RESEARCH_TOOL_IDS) {
+      if (toolRegistry.get(id) === undefined) marketingSwitchedOffTools[id] = PAGE_RESEARCH_OFF;
+    }
   }
   // A start-up event an operator checks after a deploy (docs/DEPLOYMENT.md), so
   // it goes through the operational log: timestamped, attributed, redacted.
   operationalLog.child("marketing").info("marketing_wiring", {
     pageResearch: pageReader ? "enabled" : "disabled (BROWSER_ENABLED is not set to true)",
+    publishing: publishingSwitchedOn ? "enabled" : "disabled (MARKETING_PUBLISH_ENABLED is not set to true)",
     publishers: marketingPublishers.map((publisher) => `${publisher.provider}:${publisher.channel}`),
   });
 
@@ -1560,6 +1609,9 @@ export function getContainer(options?: {
       new MarketingAgent({
         provider: adapter,
         tools: toolDefsFor(AGENT_POLICIES[AGENT_IDS.marketing]!.allowedTools),
+        // Its prompt follows the tools above: with the publish tools it is
+        // told how to publish, and without them it is told this instead.
+        publishingUnavailableReason: marketingPublishingUnavailableReason,
       })
     );
   }
@@ -1610,6 +1662,7 @@ export function getContainer(options?: {
     approvals: approvalRepo,
     tools: toolRegistry,
     permissions: permissionService,
+    ...(marketingPublishingUnavailableReason ? { unavailableMessage: marketingPublishingUnavailableReason } : {}),
   });
 
   // Task Execution V1 — the sequencer, over the two services built above.
@@ -1839,6 +1892,9 @@ export function getContainer(options?: {
     ...(knowledgeRetriever !== null ? { knowledgeRetriever } : {}),
     // S3: skill-aware planning context. Absent leaves the prompt untouched.
     ...(skillContextProvider !== null ? { skillContext: skillContextProvider } : {}),
+    // Phase 15: the publish tools where publishing is off, and the page reads
+    // where page reads are off — each with why.
+    switchedOffTools: marketingSwitchedOffTools,
   });
 
   const recommendationRepo = new PrismaRecommendationRepository(prisma);
@@ -1950,6 +2006,7 @@ export function getContainer(options?: {
     // Phase 15 — the marketing workspace service the tools hold.
     marketing: marketingService,
     marketingPublishFlow,
+    marketingPublishingUnavailableReason,
     permissions: permissionService,
   };
 

@@ -530,7 +530,7 @@ Open **Marketing** in the sidebar, or ask in chat. Both do the same thing by the
 | **Published · verified** | JARVIS posted it **and read the post back from the Page**. |
 | **Published · reported by you** | You told JARVIS you posted it. JARVIS did not publish it and has not checked. |
 
-There is one more: **Publish not confirmed** — a post was sent and the answer never came back. It is *not* marked published. Publishing it again first looks for the post on the Page and will not post it twice.
+There is one more: **Publish not confirmed** — a post was sent and JARVIS could not learn, or could not confirm, what happened to it. It is *not* marked published. Until you settle it, the item cannot be edited and **JARVIS sends nothing more for it**. See "When a publish is not confirmed" below.
 
 **Plan content.** Ask for a plan and you get one to read. Ask for it to be **saved** and it goes on the calendar as drafts:
 
@@ -567,6 +567,16 @@ A **client report** is the same report with a client heading. Download it as HTM
 
 If you change the words after asking, the approval no longer matches and nothing is posted — ask again. Declining one post does not block any other. Voice cannot approve a publish.
 
+Publishing is **off until your administrator switches it on** for this server. Where it is off there is no Publish button, and the page says so. In chat, JARVIS tells you the same thing — that publishing is switched off here, that nothing was published, and what your administrator has to set to switch it on — instead of asking you to confirm a post it could not make.
+
+**When a publish is not confirmed.** Sometimes a post is sent and the answer never arrives, or the post cannot be read back, or what comes back is not the text that was sent. JARVIS then does not know whether your post is on the Page, and it says so instead of guessing. While an item is in this state you cannot edit it, and it shows three buttons:
+
+- **Look for the post** — asks for your approval and then *only looks* on the Page the post was sent to. If the post is there with exactly this item's text, it is recorded as published. If it is not found, nothing is posted and the item stays as it is. What you approve here is a look and stays a look: if you settle the item some other way first — in another tab, say — and then approve this, **nothing is posted**; JARVIS tells you the item has changed and asks you again. A post that already belongs to another calendar item with the same words is never counted as this one's.
+- **I posted this myself** — records it as published · reported by you.
+- **It was not published** — use this only after you have looked at the Page yourself. JARVIS looks once more. If it finds the post, it records it as published. If it does not, the earlier attempt is cleared and you can edit and publish the item again. JARVIS refuses to clear it, and changes nothing, when it cannot be sure what it would be looking for or where: the item no longer holds the words that were sent, the Page it was sent to is no longer connected, the earlier attempt was replaced by a newer one while you were deciding, or your decision could not be written to the audit log.
+
+JARVIS will not send a second post on its own after an outcome it does not know. It **cannot promise** that a post will never appear twice: if the first post is in fact on the Page, JARVIS does not find it when it looks, and you tell it the post was not published, publishing again will post it again. That is why the last button asks you to check the Page first.
+
 For any other channel — Instagram, LinkedIn, X — plan it here, post it yourself, and press **I posted this myself**. It is recorded as reported by you.
 
 **What it cannot do yet.**
@@ -576,7 +586,7 @@ For any other channel — Instagram, LinkedIn, X — plan it here, post it yours
 - It does not publish on a schedule.
 - A post whose text contains a word JARVIS hides in conversations for safety — "password", "token", "secret" — or that is very long, cannot be published from chat. JARVIS says so and asks you to publish it from the Marketing page, where it works.
 - **Google Ads figures are in no report.** Every report says whether Google Ads could have been read and why not.
-- Research needs an administrator to switch page reads on (`BROWSER_ENABLED=true`). Where it is off, the Research tab says so and shows no form.
+- Research needs an administrator to switch page reads on (`BROWSER_ENABLED=true`). Where it is off, the Research tab says so and shows no form, and in chat JARVIS tells you the same.
 - SEO research has no keyword volumes, rankings or backlinks, and competitor research has no traffic or ad-spend figures: no provider of that data is connected.
 - Reports cover Meta Ads and your own content. There is no website or conversion analytics.
 - A client report downloads as HTML or Markdown, not PDF.

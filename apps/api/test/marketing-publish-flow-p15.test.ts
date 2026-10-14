@@ -158,7 +158,7 @@ const READY: PublishPreparation = {
 
 const publishedItem = { id: "item_1", status: "PUBLISHED" } as unknown as ContentItemView;
 
-const outcome = (status: PublishOutcome["status"], message: string, content: ContentItemView | null = null): PublishOutcome => ({ status, code: status, message, content });
+const outcome = (status: PublishOutcome["status"], message: string, content: ContentItemView | null = null, code: string = status): PublishOutcome => ({ status, code, message, content });
 
 interface Script {
   prepare: (contentId: string, targetId: string | undefined, ctx: MarketingCallContext) => MarketingResult<PublishPreparation>;
@@ -310,6 +310,27 @@ describe("Phase 15 publish flow — refusals that come before any approval exist
     const result = await w.flow.request(caller(), "item_other");
 
     expect(result).toEqual({ status: "NOT_FOUND", message });
+    expect(w.store.rows.size).toBe(0);
+  });
+
+  it("answers RATE_LIMITED, and creates no approval, when the check was refused for being asked too often", async () => {
+    const w = world();
+    w.script.prepare = () => marketingFail("RATE_LIMITED", "Too many publish checks have been made in the last few minutes. Wait a little and try again.");
+
+    const result = await w.flow.request(caller(), "item_1");
+
+    expect(result).toEqual({ status: "RATE_LIMITED", message: "Too many publish checks have been made in the last few minutes. Wait a little and try again." });
+    expect(w.store.rows.size).toBe(0);
+    expect(w.published).toHaveLength(0);
+  });
+
+  it("answers UNAVAILABLE, and creates no approval, when the limit itself could not be checked", async () => {
+    const w = world();
+    w.script.prepare = () => marketingFail("UNAVAILABLE", "The request limit could not be checked just now, so nothing was started. Try again in a moment.");
+
+    const result = await w.flow.request(caller(), "item_1");
+
+    expect(result).toMatchObject({ status: "UNAVAILABLE" });
     expect(w.store.rows.size).toBe(0);
   });
 
@@ -736,7 +757,44 @@ describe("Phase 15 publish flow — the outcome is reported as exactly what it w
 
     const result = await w.flow.execute(caller(), "item_1", await approved(w));
 
-    expect(result).toEqual({ status: "UNCONFIRMED", message: "The post was sent to Shop Page, but the answer never arrived. It is NOT marked as published." });
+    expect(result).toEqual({
+      status: "UNCONFIRMED",
+      message: "The post was sent to Shop Page, but the answer never arrived. It is NOT marked as published.",
+      reason: "UNCONFIRMED",
+      // Something WAS sent by this request.
+      sentNothing: false,
+    });
+  });
+
+  it.each(["NOT_FOUND_ON_PAGE", "RECONCILE_MISMATCH"])("says UNCONFIRMED, and that THIS request sent nothing, when a retry only looked (%s)", async (code) => {
+    const w = world();
+    const message = "JARVIS looked for the earlier post on Shop Page and did not find it. Nothing new was posted.";
+    w.script.publish = () => outcome("UNCONFIRMED", message, null, code);
+
+    const result = await w.flow.execute(caller(), "item_1", await approved(w));
+
+    expect(result).toEqual({ status: "UNCONFIRMED", message, reason: code, sentNothing: true });
+  });
+
+  it.each(["AMBIGUOUS_OUTCOME", "VERIFY_FAILED", "VERIFY_MISMATCH", "VERIFY_NO_TEXT", "RECORD_FAILED"])("never says a request that sent something sent nothing (%s)", async (code) => {
+    const w = world();
+    w.script.publish = () => outcome("UNCONFIRMED", "Not confirmed. It is NOT marked as published.", null, code);
+
+    const result = await w.flow.execute(caller(), "item_1", await approved(w));
+
+    expect(result).toMatchObject({ status: "UNCONFIRMED", reason: code, sentNothing: false });
+  });
+
+  it.each([
+    ["TARGET_REFUSED", "TARGET_CHANGED"],
+    ["STALE", "TEXT_CHANGED"],
+  ] as const)("a retry held to the earlier attempt's Page or words is a refusal in which nothing was sent (%s)", async (status, code) => {
+    const w = world();
+    w.script.publish = () => outcome(status, "It cannot be sent to a different Page until that is settled. Nothing was published.", null, code);
+
+    const result = await w.flow.execute(caller(), "item_1", await approved(w));
+
+    expect(result).toMatchObject({ status: "NOT_READY", reason: status });
   });
 
   it("says UNCONFIRMED when the service reports no outcome at all", async () => {

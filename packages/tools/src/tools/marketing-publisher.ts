@@ -58,9 +58,13 @@ export interface ContentPublisher {
   /**
    * Look for a post on the target whose text is exactly `message`, created at
    * or after `since`. Null: none was found among the target's recent posts.
+   *
+   * `excludeIds` are posts the caller already knows are NOT the one it is
+   * looking for — posts recorded as another item's. They are passed over, so
+   * a second post with the same words, further down, can still be found.
    */
   findByMessage(
-    input: { targetId: string; message: string; since: Date },
+    input: { targetId: string; message: string; since: Date; excludeIds?: readonly string[] },
     options?: ProviderCallOptions
   ): Promise<PublishedPost | null>;
 }

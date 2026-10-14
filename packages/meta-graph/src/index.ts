@@ -1,5 +1,5 @@
 export { createMetaGraphProvider, type MetaGraphProvider, type MetaGraphProviderConfig } from "./provider.js";
-export { createMetaConfig, normalizeAccountId, buildBaseUrl, META_GRAPH_API_HOST, META_DEFAULT_API_VERSION, type MetaConfig, type MetaConfigInput } from "./config.js";
+export { createMetaConfig, normalizeAccountId, buildBaseUrl, isPagePublishingEnabled, META_GRAPH_API_HOST, META_DEFAULT_API_VERSION, type MetaConfig, type MetaConfigInput } from "./config.js";
 export { createMetaHttpClient, isSuccessResponse, extractError, MetaRequestAbortedError, type MetaHttpClient, type MetaHttpRequest, type MetaHttpResponse, type MetaAbortPhase } from "./client.js";
 export { classifyMetaError, toJarvisError, type ClassifiedMetaError, type MetaErrorCode } from "./error-handler.js";
 export {

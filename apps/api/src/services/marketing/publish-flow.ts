@@ -31,6 +31,7 @@ import { randomUUID } from "node:crypto";
 import {
   APPROVAL_TTL_MS,
   MARKETING_TOOL_IDS,
+  PUBLISH_LOOK_ONLY_CODES,
   computeParamsHash,
   type Approval,
   type ContentItemView,
@@ -55,6 +56,11 @@ export interface PublishFlowDeps {
   tools: { get(toolId: string): ITool | undefined };
   /** The same role table the executor checks against. */
   permissions: { checkToolPermissions(role: Role, required: ToolPermission[]): boolean };
+  /**
+   * Why publishing is unavailable here, when it is — switched off, or not
+   * configured. Said to the caller in place of the general sentence.
+   */
+  unavailableMessage?: string;
   now?: () => Date;
 }
 
@@ -98,7 +104,14 @@ export type PublishFlowResult =
     }
   | { status: "DECLINED"; message: string }
   | { status: "PUBLISHED"; message: string; alreadyPublished: boolean; item: ContentItemView | null }
-  | { status: "UNCONFIRMED"; message: string }
+  /**
+   * The item's publish is not confirmed. `reason` is the specific outcome;
+   * `sentNothing` is true when this request only looked for an earlier
+   * attempt's post and sent nothing itself.
+   */
+  | { status: "UNCONFIRMED"; message: string; reason?: string; sentNothing?: boolean }
+  /** The caller has asked the provider too often for now. Nothing was started. */
+  | { status: "RATE_LIMITED"; message: string }
   /** `reason` is the specific failure. It is never the envelope's code: that is always this status. */
   | { status: "FAILED"; reason: string; message: string };
 
@@ -108,16 +121,17 @@ const PREPARE = MARKETING_TOOL_IDS.publishPrepare;
 /** What the publish tool reports when it refused BEFORE sending anything. */
 const NOTHING_SENT: ReadonlySet<string> = new Set(["NOT_READY", "STALE", "TARGET_REFUSED", "IN_PROGRESS"]);
 
-const UNAVAILABLE: PublishFlowResult = {
-  status: "UNAVAILABLE",
-  message: "Publishing is not available on this server: JARVIS has no publishing connection configured.",
-};
-
 export class MarketingPublishFlow {
   private readonly now: () => Date;
+  /** Said whenever the publish tools are not registered here. No approval is ever created then. */
+  private readonly unavailable: PublishFlowResult;
 
   constructor(private readonly deps: PublishFlowDeps) {
     this.now = deps.now ?? (() => new Date());
+    this.unavailable = {
+      status: "UNAVAILABLE",
+      message: deps.unavailableMessage ?? "Publishing is not available on this server: JARVIS has no publishing connection configured.",
+    };
   }
 
   /** Whether this caller's role may publish at all — the tool's own requirement, the executor's own table. */
@@ -146,7 +160,7 @@ export class MarketingPublishFlow {
    */
   async request(caller: PublishCaller, contentId: string, targetId?: string): Promise<PublishFlowResult> {
     const tool = this.deps.tools.get(PUBLISH);
-    if (!tool || !this.deps.tools.get(PREPARE)) return UNAVAILABLE;
+    if (!tool || !this.deps.tools.get(PREPARE)) return this.unavailable;
     // Refused BEFORE an approval row exists: a request nobody could ever act
     // on should not sit in front of a person asking to be approved.
     if (!this.mayPublish(caller, tool)) {
@@ -165,6 +179,9 @@ export class MarketingPublishFlow {
     if (check.status !== "completed" || !check.result?.success) {
       const code = check.result?.metadata?.code;
       const message = check.result?.error ?? check.error ?? "The item could not be checked for publishing.";
+      // The check is metered, and it was refused before the provider was asked.
+      if (code === "RATE_LIMITED") return { status: "RATE_LIMITED", message };
+      if (code === "UNAVAILABLE") return { status: "UNAVAILABLE", message };
       return code === "NOT_FOUND" || code === "OUT_OF_SCOPE"
         ? { status: "NOT_FOUND", message }
         : { status: "NOT_READY", message, preparation: null };
@@ -203,7 +220,7 @@ export class MarketingPublishFlow {
    */
   async execute(caller: PublishCaller, contentId: string, approvalId: string): Promise<PublishFlowResult> {
     const tool = this.deps.tools.get(PUBLISH);
-    if (!tool) return UNAVAILABLE;
+    if (!tool) return this.unavailable;
     if (!this.mayPublish(caller, tool)) return { status: "FORBIDDEN", message: "Your role cannot publish content." };
 
     const approval = await this.deps.approvals.findByIdForUser(approvalId, caller.userId);
@@ -218,6 +235,9 @@ export class MarketingPublishFlow {
       targetName: approval.params.targetName,
       message: approval.params.message,
       ...(approval.params.link !== undefined ? { link: approval.params.link } : {}),
+      // Whether this approval was for a look, and for which earlier attempt.
+      // Part of what was approved, so it is carried exactly as it was bound.
+      ...(approval.params.earlierAttempt !== undefined ? { earlierAttempt: approval.params.earlierAttempt } : {}),
     };
 
     switch (approval.status) {
@@ -276,6 +296,7 @@ export class MarketingPublishFlow {
 
     const data = (run.result?.data ?? null) as { status?: string; message?: string; item?: ContentItemView | null } | null;
     const outcome = run.result?.metadata?.status;
+    const code = typeof run.result?.metadata?.code === "string" ? run.result.metadata.code : undefined;
     const said = run.result?.error ?? run.error;
 
     switch (run.status) {
@@ -314,7 +335,11 @@ export class MarketingPublishFlow {
     }
 
     if (outcome === "UNCONFIRMED") {
-      return { status: "UNCONFIRMED", message: said ?? "The outcome of the publish is not known. It is NOT marked as published." };
+      return {
+        status: "UNCONFIRMED",
+        message: said ?? "The outcome of the publish is not known. It is NOT marked as published.",
+        ...(code ? { reason: code, sentNothing: PUBLISH_LOOK_ONLY_CODES.includes(code) } : {}),
+      };
     }
     // The tool checked again, after the approval, and refused before sending
     // anything: the item, its text or the Page was no longer what was approved,

@@ -124,6 +124,8 @@ export class Orchestrator implements IOrchestrator {
   private readonly pendingActionService: import("./pending-action-service.js").PendingActionService | null;
   /** S3 — semantic planning context. Null keeps the prompt exactly as it was. */
   private readonly skillContextProvider: ISkillContextProvider | null;
+  /** Phase 15 — tools this server switched off, by registry id, with the reason in a person's words. */
+  private readonly switchedOffTools: Readonly<Record<string, string>>;
   private readonly toolDescriptionBuilder: ToolDescriptionBuilder;
   private readonly toolPlanValidator: ToolPlanValidator;
   private readonly toolPlanParser: ToolPlanParser;
@@ -160,6 +162,7 @@ export class Orchestrator implements IOrchestrator {
     this.permissionChecker = config.permissionChecker ?? null;
     this.pendingActionService = (config as unknown as { pendingActionService?: import("./pending-action-service.js").PendingActionService }).pendingActionService ?? null;
     this.skillContextProvider = config.skillContext ?? null;
+    this.switchedOffTools = { ...(config.switchedOffTools ?? {}) };
     this.toolDescriptionBuilder = new ToolDescriptionBuilder();
     this.toolPlanValidator = new ToolPlanValidator();
     this.toolPlanParser = new ToolPlanParser();
@@ -1148,6 +1151,52 @@ export class Orchestrator implements IOrchestrator {
       // Check if this is a write tool that needs pending-action flow
       const tool = this.toolRegistry?.get(action.toolId);
       const needsConfirmation = tool?.requiresApproval === true;
+
+      // ---------------------------------------------------------------------
+      // Phase 15 — a tool this server has switched off.
+      //
+      // The agent's policy allows it, so the allowlist gate above let it
+      // through; the server did not register it, so there is nothing to run.
+      // Handed to the executor it comes back "Tool not found", and a turn
+      // whose only call failed is answered as an error — "Data retrieval
+      // failed." and HTTP 500 — for what is a setting, not a fault.
+      //
+      // So it is answered here, in the server's own words for why it is off
+      // and how an operator switches it on. The model is given that as the
+      // tool's result and tells the user. NOTHING is created on this path:
+      // the executor is not asked, so there is no execution, and no approval
+      // or pending action can come to exist for a tool that is not there.
+      //
+      // Only for a tool the composition root NAMED as switched off. Any other
+      // unregistered tool is handled exactly as before.
+      // ---------------------------------------------------------------------
+      if (this.toolRegistry && !tool && Object.prototype.hasOwnProperty.call(this.switchedOffTools, action.toolId)) {
+        const reason = this.switchedOffTools[action.toolId]!;
+
+        results.push({
+          executionId,
+          toolId: action.toolId,
+          toolCallId: action.toolCallId,
+          status: "unavailable",
+          error: `${reason} Nothing was done.`,
+          startedAt: stepStartedAt,
+          completedAt: new Date(),
+          durationMs: Date.now() - stepStartedAt.getTime(),
+        });
+
+        await this.auditLogger.log({
+          userId: context.auth.userId,
+          agentId: policy?.agentId ?? context.agentId,
+          toolId: action.toolId,
+          action: "agent.tool_unavailable",
+          result: "rejected",
+          traceId: context.traceId,
+          ipAddress: context.ipAddress,
+          metadata: { reason: "switched off on this server", domain: policy?.domain, executionId, stepIndex: i },
+        });
+
+        continue;
+      }
 
       // ---------------------------------------------------------------------
       // Write-intent gate — BUG-INTENT-001 / BUG-SAFETY-001.

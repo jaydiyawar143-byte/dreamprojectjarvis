@@ -94,8 +94,10 @@ export type CampaignStatus = z.infer<typeof CampaignStatusSchema>;
  *   NONE         nothing is in flight
  *   PUBLISHING   one execution holds the item; no second one may start
  *   UNCONFIRMED  a request was sent and its outcome is not known. The item is
- *                NOT published and is not offered for a second post until the
- *                provider has been asked what is actually there.
+ *                NOT published, cannot be edited, and NOTHING is sent for it
+ *                again while it is in this state: a retry only looks for the
+ *                earlier post. It leaves this state when that post is found
+ *                and read back, or when a person settles it.
  */
 export const CONTENT_PUBLISH_STATES = ["NONE", "PUBLISHING", "UNCONFIRMED"] as const;
 export type ContentPublishState = (typeof CONTENT_PUBLISH_STATES)[number];
@@ -156,6 +158,7 @@ export const MARKETING_TOOL_IDS = Object.freeze({
   contentMarkPublished: "marketing.content.mark_published",
   publishPrepare: "marketing.publish.prepare",
   contentPublish: "marketing.content.publish",
+  publishResolve: "marketing.publish.resolve",
   seoAudit: "marketing.seo.audit",
   competitorAnalyze: "marketing.competitor.analyze",
   researchList: "marketing.research.list",
@@ -218,11 +221,26 @@ export const MARKETING_PUBLISH_TOOL_IDS: readonly string[] = Object.freeze([
   MARKETING_TOOL_IDS.contentPublish,
 ]);
 
+/**
+ * A person's decision about an unconfirmed publish.
+ *
+ * `publish.resolve` is how an item leaves UNCONFIRMED when the earlier post
+ * could not be found: a person says it is not on the Page, JARVIS looks once
+ * more, and only then is the attempt cleared. It is on NO agent's allowlist —
+ * a model can ask for a publish, never decide that an earlier one did not
+ * happen — and is reached from the Marketing page alone. Registered with the
+ * publish tools.
+ */
+export const MARKETING_DECISION_TOOL_IDS: readonly string[] = Object.freeze([
+  MARKETING_TOOL_IDS.publishResolve,
+]);
+
 export const ALL_MARKETING_TOOL_IDS: readonly string[] = Object.freeze([
   ...MARKETING_READ_TOOL_IDS,
   ...MARKETING_WORKSPACE_TOOL_IDS,
   ...MARKETING_RESEARCH_TOOL_IDS,
   ...MARKETING_PUBLISH_TOOL_IDS,
+  ...MARKETING_DECISION_TOOL_IDS,
 ]);
 
 // ---------------------------------------------------------------------------
@@ -329,11 +347,29 @@ export interface ContentPublication {
   verifiedAt: string | null;
 }
 
-/** The last attempt to publish that did not end in a verified post. */
+/** What JARVIS found the last time it looked for an unconfirmed attempt's post. */
+export interface ContentPublishLookup {
+  at: string;
+  /**
+   * NOT_FOUND: the Page was read and the post was not on it.
+   * TEXT_MISMATCH: a post from the attempt is there, with different text.
+   */
+  result: "NOT_FOUND" | "TEXT_MISMATCH";
+}
+
+/**
+ * The last attempt to publish that did not end in a verified post.
+ *
+ * While an attempt is UNCONFIRMED this record is the ORIGINAL attempt and is
+ * kept as it is across retries: where it was sent, and a hash of exactly what
+ * was sent. A retry is held to both — it may not name another Page, and it may
+ * not be for other words.
+ */
 export interface ContentPublishAttempt {
   /**
    * UNCONFIRMED: the request went out and its outcome is not known.
-   * FAILED: the provider refused, or nothing was sent. Nothing was published.
+   * FAILED: the provider refused, nothing was sent, or a person settled an
+   * unconfirmed attempt as not published. Nothing was published.
    */
   state: "UNCONFIRMED" | "FAILED";
   at: string;
@@ -343,6 +379,10 @@ export interface ContentPublishAttempt {
   targetName: string | null;
   /** Set when the provider accepted the post but it could not be read back. */
   externalId: string | null;
+  /** A hash of the text and link that were sent. Never the text. Absent on records written before it existed. */
+  textHash?: string | null;
+  /** The last time JARVIS looked for this attempt's post and did not confirm it. */
+  lastLookup?: ContentPublishLookup | null;
 }
 
 export interface ContentItemView {
@@ -718,6 +758,13 @@ export interface PublishTarget {
  * At execution every one of them is checked again against the saved content
  * and the provider, so text a model wrote can never be published in place of
  * the text that was approved.
+ *
+ * They also say WHICH of two things was approved. An item with no publish
+ * outstanding is sent; an item whose earlier publish has an outcome that is
+ * not known is only looked for. `earlierAttempt` is how the parameters say so,
+ * and at execution the item must still be in the state the approval was made
+ * for — an approval to look can never send, and an approval to send never
+ * runs against an item that has since become unconfirmed.
  */
 export interface PublishParams {
   contentId: string;
@@ -725,6 +772,13 @@ export interface PublishParams {
   targetName: string;
   message: string;
   link?: string;
+  /**
+   * Present only when the approval is for a LOOK: the identity of the earlier
+   * attempt whose post is to be looked for — when it was recorded, where it
+   * went and a hash of what it sent, as one opaque value. Never the text.
+   * Absent: the approval is for a send.
+   */
+  earlierAttempt?: string;
 }
 
 export interface PublishPreparation {
@@ -739,6 +793,22 @@ export interface PublishPreparation {
   publishParams: PublishParams | null;
   /** Set when an earlier attempt's outcome is unknown. */
   warning: string | null;
+}
+
+/**
+ * How a person's decision about an unconfirmed publish came out.
+ *
+ *   FOUND_PUBLISHED  JARVIS looked once more and the post IS on the Page, with
+ *                    the item's text. It is recorded as published and verified.
+ *   CLEARED          the Page was read, the post was not on it, and the person
+ *                    said it was not published. The attempt is cleared; the
+ *                    item can be edited and published again.
+ */
+export interface PublishResolution {
+  resolution: "FOUND_PUBLISHED" | "CLEARED";
+  /** A fixed, plain-English sentence. */
+  message: string;
+  item: ContentItemView;
 }
 
 export type PublishOutcomeStatus =
@@ -756,8 +826,18 @@ export type PublishOutcomeStatus =
   | "IN_PROGRESS"
   /** The provider refused, or nothing was transmitted. Nothing was published. */
   | "FAILED"
-  /** A request was sent and its outcome is not known. NOT published. */
+  /**
+   * A request was sent — now or in an earlier attempt — and its outcome is not
+   * known. NOT published, and nothing further is sent while it stays so.
+   */
   | "UNCONFIRMED";
+
+/**
+ * UNCONFIRMED outcomes of a retry that only LOOKED for an earlier attempt's
+ * post. The item is still unconfirmed, but THIS execution sent nothing — which
+ * is what its own journal record must say.
+ */
+export const PUBLISH_LOOK_ONLY_CODES: readonly string[] = Object.freeze(["NOT_FOUND_ON_PAGE", "RECONCILE_MISMATCH"]);
 
 export interface PublishOutcome {
   status: PublishOutcomeStatus;

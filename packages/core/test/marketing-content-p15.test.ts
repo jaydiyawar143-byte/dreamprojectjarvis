@@ -10,10 +10,12 @@ import {
   ContentPlanSchema,
   ContentUpdateSchema,
   MARKETING_LIMITS,
+  MARKETING_DECISION_TOOL_IDS,
   MARKETING_PUBLISH_TOOL_IDS,
   MARKETING_READ_TOOL_IDS,
   MARKETING_RESEARCH_TOOL_IDS,
   MARKETING_TOOL_IDS,
+  PUBLISH_LOOK_ONLY_CODES,
   MARKETING_WORKSPACE_TOOL_IDS,
   SETTABLE_CONTENT_STATUSES,
   describeMarketingIssues,
@@ -69,6 +71,7 @@ describe("tool ids", () => {
       ...MARKETING_WORKSPACE_TOOL_IDS,
       ...MARKETING_RESEARCH_TOOL_IDS,
       ...MARKETING_PUBLISH_TOOL_IDS,
+      ...MARKETING_DECISION_TOOL_IDS,
     ];
     expect(new Set(grouped).size).toBe(grouped.length);
     expect([...grouped].sort()).toEqual(Object.values(MARKETING_TOOL_IDS).sort());
@@ -85,6 +88,21 @@ describe("tool ids", () => {
   it("publishing is never in the read or workspace groups", () => {
     expect(MARKETING_READ_TOOL_IDS).not.toContain(MARKETING_TOOL_IDS.contentPublish);
     expect(MARKETING_WORKSPACE_TOOL_IDS).not.toContain(MARKETING_TOOL_IDS.contentPublish);
+  });
+
+  it("settling an unconfirmed publish is a group of its own — in none of the groups an agent is granted", () => {
+    expect(MARKETING_DECISION_TOOL_IDS).toEqual([MARKETING_TOOL_IDS.publishResolve]);
+    for (const group of [MARKETING_READ_TOOL_IDS, MARKETING_WORKSPACE_TOOL_IDS, MARKETING_RESEARCH_TOOL_IDS, MARKETING_PUBLISH_TOOL_IDS]) {
+      expect(group).not.toContain(MARKETING_TOOL_IDS.publishResolve);
+    }
+  });
+
+  it("names the unconfirmed outcomes in which the retry sent nothing", () => {
+    expect([...PUBLISH_LOOK_ONLY_CODES].sort()).toEqual(["NOT_FOUND_ON_PAGE", "RECONCILE_MISMATCH"]);
+    // An outcome in which something WAS sent is never among them.
+    for (const sent of ["AMBIGUOUS_OUTCOME", "VERIFY_FAILED", "VERIFY_MISMATCH", "VERIFY_NO_TEXT", "RECORD_FAILED"]) {
+      expect(PUBLISH_LOOK_ONLY_CODES).not.toContain(sent);
+    }
   });
 
   it("PUBLISHED is not a status anyone may set", () => {

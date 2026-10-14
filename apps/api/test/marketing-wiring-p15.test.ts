@@ -25,6 +25,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   MARKETING_LIMITS,
+  MARKETING_DECISION_TOOL_IDS,
   MARKETING_PUBLISH_TOOL_IDS,
   MARKETING_READ_TOOL_IDS,
   MARKETING_RESEARCH_TOOL_IDS,
@@ -47,6 +48,8 @@ const NO_CHROME = "Z:\\p15\\no-such-browser.exe";
 interface Environment {
   pageReads?: boolean;
   meta?: boolean;
+  /** MARKETING_PUBLISH_ENABLED=true. Off unless a test says otherwise, as on a real server. */
+  publishing?: boolean;
   openai?: boolean;
 }
 
@@ -61,6 +64,7 @@ function useEnvironment(env: Environment): void {
   vi.stubEnv("BROWSER_DOMAIN_ALLOWLIST", undefined);
   vi.stubEnv("META_ACCESS_TOKEN", env.meta ? FAKE_META_TOKEN : undefined);
   vi.stubEnv("META_AD_ACCOUNT_ID", env.meta ? FAKE_META_ACCOUNT : undefined);
+  vi.stubEnv("MARKETING_PUBLISH_ENABLED", env.publishing ? "true" : undefined);
   vi.stubEnv("OPENAI_API_KEY", env.openai ? FAKE_OPENAI_KEY : undefined);
 }
 
@@ -73,6 +77,13 @@ function offeredTo(agentId: string): string[] {
 
 /** A registry id as a model is shown it: dots are not legal in a function name. */
 const asOffered = (toolId: string): string => toolId.replace(/\./g, "-");
+
+/** The prompt an agent sends as its own, read beside the definitions it was handed. */
+function promptOf(agentId: string): string {
+  const agent = getContainer().agentRegistry.get(agentId) as unknown as { providerSystemPrompt?: string } | undefined;
+  expect(agent, `${agentId} should be registered`).toBeDefined();
+  return agent!.providerSystemPrompt ?? "";
+}
 
 const registered = (toolId: string): boolean => getContainer().toolRegistry.get(toolId) !== undefined;
 
@@ -136,8 +147,9 @@ describe("Phase 15 — a server with nothing connected", () => {
 
     const lines = logged.filter((line) => line.includes('"marketing_wiring"'));
     expect(lines).toHaveLength(1);
-    const line = JSON.parse(lines[0]!) as { pageResearch: string; publishers: string[]; timestamp: string; service: string; component: string };
+    const line = JSON.parse(lines[0]!) as { pageResearch: string; publishing: string; publishers: string[]; timestamp: string; service: string; component: string };
     expect(line.pageResearch).toMatch(/^disabled/);
+    expect(line.publishing).toBe("disabled (MARKETING_PUBLISH_ENABLED is not set to true)");
     expect(line.publishers).toEqual([]);
     // Written through the operational log, not a bare console line: an
     // operator following a deployment gets when, and which component.
@@ -183,34 +195,170 @@ describe("Phase 15 — page reads are switched on by the operator, and need no b
 
 // ---------------------------------------------------------------------------
 
-describe("Phase 15 — publishing exists only where a publisher could be built", () => {
-  it("registers both publish tools when the Meta integration is configured", () => {
-    useEnvironment({ meta: true });
+describe("Phase 15 — publishing is switched on by the operator, and never by credentials alone", () => {
+  const PUBLISH_AND_SETTLE = [...MARKETING_PUBLISH_TOOL_IDS, ...MARKETING_DECISION_TOOL_IDS];
 
-    for (const id of MARKETING_PUBLISH_TOOL_IDS) expect(registered(id), id).toBe(true);
+  it("with the Meta integration configured and the switch untouched, nothing can publish", () => {
+    useEnvironment({ meta: true, openai: true, pageReads: true });
+    const container = getContainer();
+
+    // The ad account is read as before...
+    expect(registered("meta.insights")).toBe(true);
+    // ...and no tool that could publish, check a publish or settle one exists.
+    for (const id of PUBLISH_AND_SETTLE) expect(registered(id), id).toBe(false);
+    expect(container.marketing.publishableChannels()).toEqual([]);
+    // So no agent is offered one,
+    for (const agent of container.agentRegistry.getAll()) {
+      const offered = offeredTo(agent.id);
+      for (const id of PUBLISH_AND_SETTLE) expect(offered, `${agent.id} / ${id}`).not.toContain(asOffered(id));
+    }
+    // and the page is told why, in terms an operator can act on.
+    expect(container.marketingPublishingUnavailableReason).toMatch(/switched off/);
+    expect(container.marketingPublishingUnavailableReason).toContain("MARKETING_PUBLISH_ENABLED=true");
+  });
+
+  it.each([
+    ["unset", undefined],
+    ["empty", ""],
+    ["false", "false"],
+    ["1", "1"],
+    ["a truthy word that is not exactly true", "yes"],
+    ["TRUE in capitals", "TRUE"],
+    ["true with a space", " true"],
+  ])("stays off when MARKETING_PUBLISH_ENABLED is %s", (_label, value) => {
+    useEnvironment({ meta: true });
+    vi.stubEnv("MARKETING_PUBLISH_ENABLED", value);
+
+    for (const id of PUBLISH_AND_SETTLE) expect(registered(id), id).toBe(false);
+    expect(getContainer().marketing.publishableChannels()).toEqual([]);
+    expect(getContainer().marketingPublishingUnavailableReason).toMatch(/switched off/);
+  });
+
+  it("asking the page's publish flow for a publish, with the switch off, creates no approval and says why", async () => {
+    useEnvironment({ meta: true });
+    const { marketingPublishFlow, marketingPublishingUnavailableReason } = getContainer();
+    const caller = { userId: "user-wiring", role: "owner" as const };
+
+    const asked = await marketingPublishFlow.request(caller, "content-1");
+    const executed = await marketingPublishFlow.execute(caller, "content-1", "approval-1");
+
+    // Answered before any store is touched: there is no publish tool to ask about.
+    expect(asked).toEqual({ status: "UNAVAILABLE", message: marketingPublishingUnavailableReason });
+    expect(executed).toEqual({ status: "UNAVAILABLE", message: marketingPublishingUnavailableReason });
+  });
+
+  it("says in the start-up line that publishing is off, and builds no publisher", () => {
+    useEnvironment({ meta: true });
+    getContainer();
+
+    const line = JSON.parse(logged.filter((entry) => entry.includes('"marketing_wiring"'))[0]!) as { publishing: string; publishers: string[] };
+    expect(line.publishing).toBe("disabled (MARKETING_PUBLISH_ENABLED is not set to true)");
+    expect(line.publishers).toEqual([]);
+  });
+
+  it("the switch alone publishes nothing either: with no Meta integration there is no publisher", () => {
+    useEnvironment({ publishing: true });
+
+    for (const id of PUBLISH_AND_SETTLE) expect(registered(id), id).toBe(false);
+    expect(getContainer().marketing.publishableChannels()).toEqual([]);
+    expect(getContainer().marketingPublishingUnavailableReason).toMatch(/switched on, but no publishing connection/);
+  });
+
+  it("registers the publish tools, and the tool that settles an unconfirmed publish, with the switch on AND the integration configured", () => {
+    useEnvironment({ meta: true, publishing: true });
+
+    for (const id of PUBLISH_AND_SETTLE) expect(registered(id), id).toBe(true);
     expect(getContainer().marketing.publishableChannels()).toEqual(["FACEBOOK"]);
+    expect(getContainer().marketingPublishingUnavailableReason).toBeNull();
+    const line = JSON.parse(logged.filter((entry) => entry.includes('"marketing_wiring"'))[0]!) as { publishing: string; publishers: string[] };
+    expect(line.publishing).toBe("enabled");
+    expect(line.publishers).toEqual(["meta-graph:FACEBOOK"]);
   });
 
   it.each([
     ["only the token", { META_ACCESS_TOKEN: FAKE_META_TOKEN, META_AD_ACCOUNT_ID: undefined }],
     ["only the account id", { META_ACCESS_TOKEN: undefined, META_AD_ACCOUNT_ID: FAKE_META_ACCOUNT }],
-  ])("registers neither with %s", (_label, values) => {
-    useEnvironment({});
+  ])("registers neither with %s, even with the switch on", (_label, values) => {
+    useEnvironment({ publishing: true });
     for (const [name, value] of Object.entries(values)) vi.stubEnv(name, value);
 
-    for (const id of MARKETING_PUBLISH_TOOL_IDS) expect(registered(id), id).toBe(false);
+    for (const id of PUBLISH_AND_SETTLE) expect(registered(id), id).toBe(false);
     expect(getContainer().marketing.publishableChannels()).toEqual([]);
   });
 
+  it("settling an unconfirmed publish is offered to NO agent and is on no agent's allowlist, even where it is registered", () => {
+    useEnvironment({ meta: true, publishing: true, openai: true, pageReads: true });
+    const settle = MARKETING_TOOL_IDS.publishResolve;
+
+    expect(registered(settle)).toBe(true);
+    for (const agent of getContainer().agentRegistry.getAll()) expect(offeredTo(agent.id), agent.id).not.toContain(asOffered(settle));
+    for (const [agentId, policy] of Object.entries(AGENT_POLICIES)) expect(policy.allowedTools, agentId).not.toContain(settle);
+    // It is a person's own-store decision: no approval, but it needs write.
+    const tool = getContainer().toolRegistry.get(settle)!;
+    expect(tool.requiresApproval).toBe(false);
+    expect(tool.risk).toBe("LOW_IMPACT");
+    expect(tool.requiredPermissions).toEqual(["read", "write"]);
+  });
+
+  // Second audit, M1 — what the marketing agent is TOLD follows what it was
+  // handed. A prompt that said "call the publish tool" on a server with no
+  // publish tool sent a model after something that is not there.
+
+  it("with the switch off, the marketing agent is told publishing is off and how an operator switches it on — and never to call a publish tool", () => {
+    useEnvironment({ meta: true, openai: true });
+    const { marketingPublishingUnavailableReason } = getContainer();
+
+    const prompt = promptOf(AGENT_IDS.marketing);
+
+    expect(prompt).toContain("=== PUBLISHING IS NOT AVAILABLE ON THIS SERVER ===");
+    // The very sentence the Marketing page is given: one place says why.
+    expect(prompt).toContain(marketingPublishingUnavailableReason!);
+    expect(prompt).toContain("MARKETING_PUBLISH_ENABLED=true");
+    expect(prompt).toContain("You have no publish tool and no publish-check tool here. Do not call one");
+    expect(prompt).not.toContain("=== PUBLISHING ===");
+    expect(prompt).not.toContain("call the publish-check tool");
+    expect(prompt).not.toContain("call the publish tool");
+    expect(prompt).not.toContain("publishParams");
+    // And it is handed neither tool, so the two agree.
+    for (const id of MARKETING_PUBLISH_TOOL_IDS) expect(offeredTo(AGENT_IDS.marketing), id).not.toContain(asOffered(id));
+  });
+
+  it("with the switch on and no connection, it is told that instead — still nothing about how to publish", () => {
+    useEnvironment({ publishing: true, openai: true });
+
+    const prompt = promptOf(AGENT_IDS.marketing);
+
+    expect(prompt).toContain("=== PUBLISHING IS NOT AVAILABLE ON THIS SERVER ===");
+    expect(prompt).toContain("Publishing is switched on, but no publishing connection is configured on this server.");
+    expect(prompt).not.toContain("call the publish tool");
+    // It is not told to set a switch that is already set.
+    expect(prompt).not.toContain("MARKETING_PUBLISH_ENABLED");
+  });
+
+  it("with the switch on AND the integration configured, it is told how to publish — and what an unconfirmed publish means now", () => {
+    useEnvironment({ meta: true, publishing: true, openai: true });
+
+    const prompt = promptOf(AGENT_IDS.marketing);
+
+    expect(getContainer().marketingPublishingUnavailableReason).toBeNull();
+    expect(prompt).toContain("=== PUBLISHING ===");
+    expect(prompt).toContain("(1) call the publish-check tool for the item");
+    expect(prompt).toContain("only LOOKS for the earlier post on the same Page");
+    expect(prompt).toContain("Only the user can settle it, on the Marketing page");
+    expect(prompt).not.toContain("PUBLISHING IS NOT AVAILABLE");
+    expect(prompt).not.toContain("the Page should be checked before trying again");
+    for (const id of MARKETING_PUBLISH_TOOL_IDS) expect(offeredTo(AGENT_IDS.marketing), id).toContain(asOffered(id));
+  });
+
   it("offers the publish tools to the marketing agent", () => {
-    useEnvironment({ meta: true });
+    useEnvironment({ meta: true, publishing: true });
 
     const offered = offeredTo(AGENT_IDS.marketing);
     for (const id of MARKETING_PUBLISH_TOOL_IDS) expect(offered, id).toContain(asOffered(id));
   });
 
   it("offers them to no other agent", () => {
-    useEnvironment({ meta: true, openai: true, pageReads: true });
+    useEnvironment({ meta: true, publishing: true, openai: true, pageReads: true });
 
     for (const agent of getContainer().agentRegistry.getAll()) {
       if (agent.id === AGENT_IDS.marketing) continue;
@@ -227,7 +375,7 @@ describe("Phase 15 — publishing exists only where a publisher could be built",
   });
 
   it("marks the publish tool as approval-gated and an external side effect", () => {
-    useEnvironment({ meta: true });
+    useEnvironment({ meta: true, publishing: true });
 
     const publish = getContainer().toolRegistry.get(MARKETING_TOOL_IDS.contentPublish)!;
     expect(publish.requiresApproval).toBe(true);
@@ -246,7 +394,7 @@ describe("Phase 15 — publishing exists only where a publisher could be built",
   });
 
   it("never puts the access token in the start-up line", () => {
-    useEnvironment({ meta: true });
+    useEnvironment({ meta: true, publishing: true });
     getContainer();
 
     const line = logged.find((entry) => entry.includes('"marketing_wiring"'))!;
@@ -327,7 +475,7 @@ describe("Phase 15 — the page's publish flow is built over the same parts as e
   });
 
   it("refuses a role that cannot publish before any approval could be created", async () => {
-    useEnvironment({ meta: true });
+    useEnvironment({ meta: true, publishing: true });
 
     // A viewer holds `read` and nothing else. Nothing is read from the
     // database to reach this answer — the refusal comes first.

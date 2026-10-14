@@ -35,14 +35,18 @@
 // never the development (5432) or deployment (5433) one.
 // ---------------------------------------------------------------------------
 
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import express from "express";
 import type { AddressInfo } from "node:net";
 import {
+  MARKETING_LIMITS,
+  MARKETING_PUBLISH_TOOL_IDS,
+  MARKETING_RESEARCH_TOOL_IDS,
   MARKETING_TOOL_IDS,
   computeParamsHash,
   type AICompletionRequest,
   type AICompletionResponse,
+  type AIToolDefinition,
   type IAIProvider,
   type IToolExecutor,
   type MetaDateRange,
@@ -52,7 +56,7 @@ import {
   type ReportSourceStatus,
   type ToolExecutionRequest,
 } from "@jarvis/core";
-import { AGENT_IDS, AgentRegistry, ConversationalAssistant, MarketingAgent, Orchestrator, PendingActionService } from "@jarvis/agents";
+import { AGENT_IDS, AGENT_POLICIES, AgentRegistry, ConversationalAssistant, MarketingAgent, Orchestrator, PendingActionService, isToolAllowed } from "@jarvis/agents";
 import {
   MetaGetAccountsTool,
   MetaGetCampaignsTool,
@@ -60,6 +64,7 @@ import {
   PublisherError,
   ToolExecutor,
   ToolRegistry,
+  createMarketingDecisionTools,
   createMarketingPublishTools,
   createMarketingResearchTools,
   createMarketingWorkspaceTools,
@@ -190,6 +195,16 @@ class FakeAdAccount implements MetaAdsProvider, MetaAccountAuthorizer {
 // ---------------------------------------------------------------------------
 
 const PAGE: PublishTarget = { id: "1234567890", name: "P15 Shop Page", channel: "FACEBOOK", provider: "p15-fake-page" };
+const PAGE_B: PublishTarget = { id: "9876543210", name: "P15 Second Page", channel: "FACEBOOK", provider: "p15-fake-page" };
+
+/**
+ * One counter for every stand-in Page in this file. A provider never hands out
+ * the same post id twice, and JARVIS relies on that: one post is one item's
+ * post. Each world builds its own Page, so a counter per Page would repeat ids
+ * across worlds — and a post recorded in one would look, to the next, like a
+ * post that already belongs to something else.
+ */
+let postSequence = 0;
 
 class FakePage implements ContentPublisher {
   readonly channel = "FACEBOOK" as const;
@@ -201,14 +216,22 @@ class FakePage implements ContentPublisher {
   /** Whether a post can be read back. */
   readable: "yes" | "not-found" | "unreachable" = "yes";
   listable = true;
+  /** The provider stores other words than it was sent. */
+  alterText = false;
+  /** A read returns the post without its text. */
+  withholdText = false;
+  /** How many times the provider was asked which Pages it may post to. */
+  listCalls = 0;
 
   readonly posts = new Map<string, PublishedPost & { targetId: string }>();
   readonly publishCalls: Array<{ targetId: string; message: string; link?: string }> = [];
   readCalls = 0;
   findCalls = 0;
-  private seq = 0;
+  /** What each look through the Page's posts was told to pass over. */
+  readonly passedOver: string[][] = [];
 
   async listTargets(): Promise<PublishTarget[]> {
+    this.listCalls += 1;
     if (!this.listable) throw new PublisherError("UNAVAILABLE", "The Facebook connection could not be reached.");
     return this.targets.map((target) => ({ ...target }));
   }
@@ -220,11 +243,11 @@ class FakePage implements ContentPublisher {
     if (mode === "refuse") throw new PublisherError("REJECTED", "Facebook refused the post.");
     if (mode === "fail-before-sending") throw new PublisherError("NOT_PERMITTED", "The Facebook connection is not allowed to post to this Page.");
 
-    const externalId = `${input.targetId}_${1000 + ++this.seq}`;
+    const externalId = `${input.targetId}_${STAMP}${1000 + ++postSequence}`;
     this.posts.set(externalId, {
       externalId,
       targetId: input.targetId,
-      message: input.message,
+      message: this.alterText ? `${input.message} [changed by the provider]` : input.message,
       url: `https://facebook.example/${externalId}`,
       createdAt: new Date().toISOString(),
     });
@@ -238,14 +261,18 @@ class FakePage implements ContentPublisher {
     if (this.readable === "unreachable") throw new PublisherError("UNAVAILABLE", "The Facebook connection could not be reached.");
     if (this.readable === "not-found") return null;
     const post = this.posts.get(input.externalId);
-    return post && post.targetId === input.targetId ? { externalId: post.externalId, message: post.message, url: post.url, createdAt: post.createdAt } : null;
+    return post && post.targetId === input.targetId
+      ? { externalId: post.externalId, message: this.withholdText ? null : post.message, url: post.url, createdAt: post.createdAt }
+      : null;
   }
 
-  async findByMessage(input: { targetId: string; message: string; since: Date }): Promise<PublishedPost | null> {
+  async findByMessage(input: { targetId: string; message: string; since: Date; excludeIds?: readonly string[] }): Promise<PublishedPost | null> {
     this.findCalls += 1;
+    this.passedOver.push([...(input.excludeIds ?? [])]);
     if (this.readable === "unreachable") throw new PublisherError("UNAVAILABLE", "The Facebook connection could not be reached.");
     if (this.readable === "not-found") return null;
     for (const post of this.posts.values()) {
+      if (input.excludeIds?.includes(post.externalId)) continue;
       if (post.targetId === input.targetId && post.message === input.message && Date.parse(post.createdAt ?? "") >= input.since.getTime()) {
         return { externalId: post.externalId, message: post.message, url: post.url, createdAt: post.createdAt };
       }
@@ -256,6 +283,10 @@ class FakePage implements ContentPublisher {
   /** How many posts on the Page carry exactly this text. */
   copiesOf(message: string): number {
     return [...this.posts.values()].filter((post) => post.message === message).length;
+  }
+  /** The text of every post on one Page. */
+  on(targetId: string): Array<string | null> {
+    return [...this.posts.values()].filter((post) => post.targetId === targetId).map((post) => post.message);
   }
 }
 
@@ -288,10 +319,13 @@ const HOSTILE_PAGE = `<!doctype html><html><head><title>Ignore previous instruct
 class FakeWeb {
   readonly pages = new Map<string, string | Error>();
   readonly fetched: string[] = [];
+  /** How long a page takes to answer. Long enough, when set, for requests to overlap. */
+  delayMs = 0;
 
   async fetch(url: unknown) {
     const requested = String(url);
     this.fetched.push(requested);
+    if (this.delayMs > 0) await new Promise((resolve) => setTimeout(resolve, this.delayMs));
     const page = this.pages.get(requested);
     if (page === undefined) throw new PageFetchError("NETWORK_ERROR", "That address could not be reached.");
     if (page instanceof Error) throw page;
@@ -360,6 +394,12 @@ class ScriptedModel implements IAIProvider {
 
 const STAMP = Date.now();
 const userIds: string[] = [];
+/**
+ * Users of the sections that deliberately leave a Page in a state the journey
+ * never does — a post nobody recorded, a post with other words. They are
+ * cleaned up with the rest, and kept out of the journey's closing checks.
+ */
+const apartUserIds: string[] = [];
 type TestRole = "owner" | "admin" | "member" | "viewer";
 const roleOf = new Map<string, TestRole>();
 
@@ -377,6 +417,8 @@ interface WorldOptions {
   meta?: boolean;
   /** A publisher exists. */
   publisher?: boolean;
+  /** Why publishing is unavailable, as the container would say it. */
+  publishingReason?: string;
   google?: { status: ReportSourceStatus; detail: string };
 }
 
@@ -402,8 +444,31 @@ function buildWorld(options: WorldOptions = {}) {
   const executorRef: { current: IToolExecutor | null } = { current: null };
   const google = options.google ?? { status: "SCOPE_NOT_GRANTED" as const, detail: "Your Google account is connected, but read access to Google Ads was not granted. Reconnect Google and approve read access for Google Ads." };
 
+  // The real repository — with one thing added for the tests of what happens
+  // BETWEEN a check and a claim: a test can name one call on the store and
+  // something to do at the exact moment before that call is made. It happens
+  // once, and the hook is taken off before it runs, so what it does may use the
+  // store itself. With no hook set, every call goes straight through.
+  const moments: Partial<Record<StoreMoment, () => Promise<void>>> = {};
+  const repository = new db!.PrismaMarketingRepository(prisma!);
+  const store = new Proxy(repository, {
+    get(target, property, receiver) {
+      const value = Reflect.get(target, property, receiver) as unknown;
+      if (typeof value !== "function") return value;
+      return (...args: unknown[]) => {
+        const moment = moments[property as StoreMoment];
+        if (!moment) return (value as (...a: unknown[]) => unknown).apply(target, args);
+        delete moments[property as StoreMoment];
+        return moment().then(() => (value as (...a: unknown[]) => unknown).apply(target, args));
+      };
+    },
+  });
+  const justBefore = (call: StoreMoment, happens: () => Promise<void>): void => {
+    moments[call] = happens;
+  };
+
   const marketing = new src!.service.MarketingService({
-    store: new db!.PrismaMarketingRepository(prisma!),
+    store,
     projects,
     conversations: conversationRepo,
     executor: () => executorRef.current,
@@ -412,14 +477,17 @@ function buildWorld(options: WorldOptions = {}) {
     pages: options.pages !== false ? web : null,
     publishers: options.publisher !== false ? [page] : [],
     audit: auditLogger,
-    // The real limiter, counting in the real audit table.
-    researchLimiter: new src!.limiter.DbBackedRateLimiter(auditLogger, src!.limiter.RATE_LIMIT_NAMESPACES.marketing),
+    // The real limiter, reserving slots in the real audit table.
+    limiter: new src!.limiter.AtomicRateLimiter(auditRepo, src!.limiter.RATE_LIMIT_NAMESPACES.marketing),
     verifyRetryDelayMs: 5,
   });
 
   for (const tool of createMarketingWorkspaceTools(marketing)) registry.register(tool);
   if (options.pages !== false) for (const tool of createMarketingResearchTools(marketing)) registry.register(tool);
-  if (options.publisher !== false) for (const tool of createMarketingPublishTools(marketing, journal, approvalRepo)) registry.register(tool);
+  if (options.publisher !== false) {
+    for (const tool of createMarketingPublishTools(marketing, journal, approvalRepo)) registry.register(tool);
+    for (const tool of createMarketingDecisionTools(marketing)) registry.register(tool);
+  }
 
   const real = new ToolExecutor(registry, permissions, new ApprovalService(approvalRepo), auditLogger);
   /** Every request the one executor was given, in order. */
@@ -432,18 +500,49 @@ function buildWorld(options: WorldOptions = {}) {
   } as IToolExecutor;
   executorRef.current = executor;
 
-  const publishFlow = new src!.flow.MarketingPublishFlow({ executor, approvals: approvalRepo, tools: registry, permissions });
+  const publishFlow = new src!.flow.MarketingPublishFlow({
+    executor,
+    approvals: approvalRepo,
+    tools: registry,
+    permissions,
+    ...(options.publishingReason ? { unavailableMessage: options.publishingReason } : {}),
+  });
   const pendingActionService = new PendingActionService({ approvalRepo, toolRegistry: registry });
 
   const model = new ScriptedModel();
   const agents = new AgentRegistry({ requirePolicy: true });
   agents.register(new ConversationalAssistant({ provider: model, systemPrompt: "You are JARVIS." }));
-  agents.register(new MarketingAgent({ provider: model }));
+  // As the container does it: the marketing agent is handed the definitions of
+  // the tools that were registered AND that its policy grants — so what it is
+  // told about publishing follows what this server can do — and the
+  // orchestrator is told which publish tools are switched off here, and why.
+  const marketingTools: AIToolDefinition[] = registry
+    .getAll()
+    .filter((tool) => isToolAllowed(tool.id, AGENT_POLICIES[AGENT_IDS.marketing]!.allowedTools))
+    .map((tool) => ({
+      name: tool.id.replace(/[^a-zA-Z0-9_-]/g, "-"),
+      description: tool.description,
+      parameters: {
+        type: "object",
+        properties: Object.fromEntries(tool.parameters.map((p) => [p.name, { type: p.type, description: p.description }])),
+        required: tool.parameters.filter((p) => p.required).map((p) => p.name),
+      },
+    }));
+  agents.register(new MarketingAgent({ provider: model, tools: marketingTools, publishingUnavailableReason: options.publishingReason ?? null }));
+  const switchedOffTools: Record<string, string> = {};
+  if (options.publishingReason) {
+    for (const id of MARKETING_PUBLISH_TOOL_IDS) if (registry.get(id) === undefined) switchedOffTools[id] = options.publishingReason;
+  }
+  // And the two page reads, where page reads are off — in the service's own sentence.
+  if (options.pages === false) {
+    for (const id of MARKETING_RESEARCH_TOOL_IDS) if (registry.get(id) === undefined) switchedOffTools[id] = src!.service.PAGE_RESEARCH_OFF;
+  }
   const orchestrator = new Orchestrator(agents, executor, auditLogger, {
     toolRegistry: registry,
     toolApprovalService: new ToolApprovalService(approvalRepo, auditRepo, permissions),
     permissionChecker: permissions,
     pendingActionService: pendingActionService as unknown,
+    switchedOffTools,
   } as never);
 
   const tokens = new Map<string, string>();
@@ -456,7 +555,18 @@ function buildWorld(options: WorldOptions = {}) {
 
   const app = express();
   app.use(express.json());
-  app.use("/marketing", src!.marketingRouter.createMarketingRouter({ tokenService, executor, toolRegistry: registry, marketing, publishFlow, permissions }));
+  app.use(
+    "/marketing",
+    src!.marketingRouter.createMarketingRouter({
+      tokenService,
+      executor,
+      toolRegistry: registry,
+      marketing,
+      publishFlow,
+      permissions,
+      ...(options.publishingReason ? { publishingUnavailableReason: options.publishingReason } : {}),
+    })
+  );
   app.use("/chat", src!.chat.createChatRouter({ tokenService, conversationRepo, orchestrator, executor, pendingActionService, googleWrites: null, projects }));
   app.use("/pending-actions", src!.pending.createPendingActionsRouter({ tokenService, pendingActionService, executor, toolRegistry: registry, googleWrites: null } as never));
   app.use("/approvals", src!.approvals.createApprovalsRouter({ tokenService, auditLogger, toolRegistry: registry, approvalRepo, executionJournal: journal } as never));
@@ -488,21 +598,29 @@ function buildWorld(options: WorldOptions = {}) {
     return { first, conversationId, say: (text: string) => call(userId, "POST", "/chat", { message: text, conversationId }) };
   }
 
-  return { call, open, model, ads, page, web, executed, marketing, registry, close: () => server.close() };
+  /** Take off any hook a test set and that never ran, so it cannot run in the next test. */
+  const forgetMoments = (): void => {
+    for (const call of Object.keys(moments) as StoreMoment[]) delete moments[call];
+  };
+
+  return { call, open, model, ads, page, web, executed, marketing, registry, justBefore, forgetMoments, close: () => server.close() };
 }
+
+/** The store calls a test may run something just before. Each is where a claim, or a record, is made. */
+type StoreMoment = "claimForPublish" | "claimUnconfirmed" | "finalizePublished";
 
 type World = ReturnType<typeof buildWorld>;
 
-async function newUser(tag: string, role: TestRole = "member"): Promise<string> {
+async function newUser(tag: string, role: TestRole = "member", apart = false): Promise<string> {
   const user = await prisma!.user.create({
     data: {
-      email: `p15-e2e-${tag}-${STAMP}-${userIds.length}@jarvis-test.local`,
+      email: `p15-e2e-${tag}-${STAMP}-${userIds.length + apartUserIds.length}@jarvis-test.local`,
       name: `P15 E2E ${tag}`,
       password: "not-a-real-password-hash",
       role: role.toUpperCase() as "MEMBER",
     },
   });
-  userIds.push(user.id);
+  (apart ? apartUserIds : userIds).push(user.id);
   roleOf.set(user.id, role);
   return user.id;
 }
@@ -578,8 +696,9 @@ describe.skipIf(!SAFE_TARGET && !REQUIRED)("Phase 15 — marketing end to end (P
 
   afterAll(async () => {
     world?.close();
-    if (dbUp && userIds.length > 0) {
-      const mine = { userId: { in: userIds } };
+    if (dbUp && userIds.length + apartUserIds.length > 0) {
+      const everyone = [...userIds, ...apartUserIds];
+      const mine = { userId: { in: everyone } };
       await prisma!.contentItem.deleteMany({ where: mine });
       await prisma!.marketingResearch.deleteMany({ where: mine });
       await prisma!.marketingReport.deleteMany({ where: mine });
@@ -591,7 +710,7 @@ describe.skipIf(!SAFE_TARGET && !REQUIRED)("Phase 15 — marketing end to end (P
       await prisma!.approval.deleteMany({ where: mine });
       await prisma!.auditLog.deleteMany({ where: mine });
       await prisma!.project.deleteMany({ where: mine });
-      await prisma!.user.deleteMany({ where: { id: { in: userIds } } });
+      await prisma!.user.deleteMany({ where: { id: { in: everyone } } });
     }
     await prisma?.$disconnect();
   });
@@ -1039,6 +1158,41 @@ describe.skipIf(!SAFE_TARGET && !REQUIRED)("Phase 15 — marketing end to end (P
       }
     });
 
+    it("and in chat there, a model that names the audit tool is ANSWERED, not failed — and no page is read", async () => {
+      const off = buildWorld({ pages: false });
+      try {
+        const asker = await newUser("research-off-chat", "member", true);
+        off.model.propose(T.seoAudit, { url: "https://kiln.example/" });
+
+        const conversation = await off.open(asker, "Run an SEO audit of https://kiln.example/ for my content calendar campaign.");
+        off.model.clear();
+
+        // Before this the call reached the executor as "Tool not found", and a turn whose only tool call
+        // failed came back HTTP 500, "Data retrieval failed." — an error, for a setting.
+        expect(conversation.first.status, JSON.stringify(conversation.first.body)).toBe(200);
+        expect(conversation.first.body.success).toBe(true);
+        expect(conversation.first.body.error).toBeUndefined();
+        expect(conversation.first.body.data.agentId).toBe(AGENT_IDS.marketing);
+        const said = `${src!.service.PAGE_RESEARCH_OFF} Nothing was done.`;
+        expect(
+          conversation.first.body.data.metadata.toolExecution.executions.map((entry: { toolId: string; status: string; error: string }) => [entry.toolId, entry.status, entry.error])
+        ).toEqual([[T.seoAudit, "unavailable", said]]);
+        // The model was told why, and how an operator switches it on.
+        expect(off.model.toolResultsSeen()).toContain("STATUS: UNAVAILABLE");
+        expect(off.model.toolResultsSeen()).toContain("Reading web pages is switched off on this server");
+        expect(off.model.toolResultsSeen()).toContain("BROWSER_ENABLED=true");
+        expect(off.model.toolResultsSeen()).not.toContain("Tool not found");
+        // Nothing ran, no page was read, and nothing was saved.
+        expect(off.executed.filter((request) => request.conversationId === conversation.conversationId)).toEqual([]);
+        expect(off.web.fetched).toEqual([]);
+        expect(await prisma!.marketingResearch.count({ where: { userId: asker } })).toBe(0);
+        expect(await auditOf(asker, "tool.execute")).toEqual([]);
+        expect((await auditOf(asker, "agent.tool_unavailable")).map((row) => [row.toolId, row.result, row.agentId])).toEqual([[T.seoAudit, "REJECTED", AGENT_IDS.marketing]]);
+      } finally {
+        off.close();
+      }
+    });
+
     it("stops a user who reads too many pages too quickly, and reads nothing more for them", async () => {
       const rita = await newUser("rita");
       const limit = src!.service.RESEARCH_RATE_LIMIT.limit;
@@ -1337,9 +1491,9 @@ describe.skipIf(!SAFE_TARGET && !REQUIRED)("Phase 15 — marketing end to end (P
       const status = (await world.call(alice, "GET", "/marketing/status")).body.data;
 
       expect(status.publishing).toEqual({ available: true, channels: ["FACEBOOK"], reason: null });
-      expect(status.caller).toEqual({ canEdit: true, canResearch: true, canPublish: true });
+      expect(status.caller).toEqual({ canEdit: true, canResearch: true, canPublish: true, canResolve: true });
       // A viewer is told the truth about their own role, from the same table the executor uses.
-      expect((await world.call(vera, "GET", "/marketing/status")).body.data.caller).toEqual({ canEdit: false, canResearch: true, canPublish: false });
+      expect((await world.call(vera, "GET", "/marketing/status")).body.data.caller).toEqual({ canEdit: false, canResearch: true, canPublish: false, canResolve: false });
     });
 
     it("will not ask for approval of a draft: nothing is requested and nothing is posted", async () => {
@@ -1849,7 +2003,1696 @@ describe.skipIf(!SAFE_TARGET && !REQUIRED)("Phase 15 — marketing end to end (P
   });
 
   // =========================================================================
-  // 9. What was left behind
+  // 9. An unconfirmed publish (audit findings H1 and M1)
+  //
+  // Its own world and its own users: these tests leave the Page in states the
+  // journey above never does — a post with other words, a post nobody recorded.
+  // =========================================================================
+
+  describe("an unconfirmed publish is held to its own Page and words, and nothing more is sent for it", () => {
+    let w: World;
+    let carol: string;
+    let dave: string;
+    let mallory: string;
+    let viewer: string;
+    /** The final safety pass's own people, one group of cases each: approving is limited per person per minute. */
+    let erin: string;
+    let frank: string;
+    let gina: string;
+    let harry: string;
+    let iris: string;
+    /** The races: retries (jack), settles (kate), and the two at once (liam). */
+    let jack: string;
+    let kate: string;
+    let liam: string;
+    let editedId: string;
+    let twoPageId: string;
+    let lostId: string;
+
+    type Attempt = {
+      state: string;
+      at: string;
+      code: string;
+      targetId: string | null;
+      targetName: string | null;
+      externalId: string | null;
+      textHash?: string | null;
+      lastLookup?: { at: string; result: string } | null;
+    };
+    const attemptOf = async (id: string) => (await itemRow(id)).publishAttempt as unknown as Attempt | null;
+    const executionOf = (userId: string, approvalId: string) => prisma!.toolExecution.findFirstOrThrow({ where: { userId, approvalId } });
+    const resolve = (userId: string, id: string, body: Record<string, unknown> = { decision: "NOT_PUBLISHED" }) =>
+      w.call(userId, "POST", `/marketing/content/${id}/publish/resolve`, body);
+
+    /** The provider goes back to behaving. What it already holds stays as it is. */
+    const behave = () => {
+      w.page.readable = "yes";
+      w.page.alterText = false;
+      w.page.withholdText = false;
+      w.page.onPublish = "accept";
+    };
+
+    /** Publish an item in a way that leaves its outcome unknown, and return its id. */
+    async function leaveUnconfirmed(userId: string, title: string, body: string, how: "lost" | "unreadable" | "altered" | "no-text", targetId?: string): Promise<string> {
+      const id = await readyItem(w, userId, title, body);
+      const asked = await w.call(userId, "POST", `/marketing/content/${id}/publish`, targetId ? { targetId } : {});
+      expect(asked.status, JSON.stringify(asked.body)).toBe(202);
+      const approvalId = asked.body.data.approvalId as string;
+      expect((await w.call(userId, "POST", `/approvals/${approvalId}/approve`)).status).toBe(200);
+      if (how === "lost") w.page.onPublish = "lose-the-answer";
+      if (how === "unreadable") w.page.readable = "not-found";
+      if (how === "altered") w.page.alterText = true;
+      if (how === "no-text") w.page.withholdText = true;
+
+      const reply = await execute(w, userId, id, approvalId);
+      behave();
+
+      expect(reply.status, JSON.stringify(reply.body)).toBe(502);
+      expect(reply.body.error).toMatchObject({ code: "UNCONFIRMED", published: false });
+      expect((await itemRow(id)).publishState).toBe("UNCONFIRMED");
+      return id;
+    }
+
+    /** Ask again, approve, execute — the whole retry a person would make from the page. */
+    async function retry(userId: string, id: string): Promise<{ reply: Reply; approvalId: string }> {
+      const asked = await w.call(userId, "POST", `/marketing/content/${id}/publish`, {});
+      expect(asked.status, JSON.stringify(asked.body)).toBe(202);
+      const approvalId = asked.body.data.approvalId as string;
+      expect((await w.call(userId, "POST", `/approvals/${approvalId}/approve`)).status).toBe(200);
+      return { reply: await execute(w, userId, id, approvalId), approvalId };
+    }
+
+    beforeAll(async () => {
+      w = buildWorld();
+      carol = await newUser("carol", "member", true);
+      dave = await newUser("dave", "member", true);
+      mallory = await newUser("mallory", "member", true);
+      viewer = await newUser("vic", "viewer", true);
+      erin = await newUser("erin", "member", true);
+      frank = await newUser("frank", "member", true);
+      gina = await newUser("gina", "member", true);
+      harry = await newUser("harry", "member", true);
+      iris = await newUser("iris", "member", true);
+      jack = await newUser("jack", "member", true);
+      kate = await newUser("kate", "member", true);
+      liam = await newUser("liam", "member", true);
+    });
+    afterEach(() => {
+      behave();
+      w.page.targets = [PAGE];
+      w.page.listable = true;
+      w.model.clear();
+      w.forgetMoments();
+    });
+    afterAll(() => w.close());
+
+    // --- H1, first scenario: the text that came back is not the item's text -----
+
+    it("H1 — a post read back with other words is not published, and asking again does not make it so", async () => {
+      const body = "Sale starts Friday.";
+      const id = await leaveUnconfirmed(carol, "Altered by the provider", body, "altered");
+      const first = (await attemptOf(id))!;
+      expect(first).toMatchObject({ state: "UNCONFIRMED", code: "VERIFY_MISMATCH", targetId: PAGE.id, targetName: PAGE.name });
+      expect(first.externalId).toMatch(/^1234567890_/);
+      // A hash of what was sent — never the words.
+      expect(first.textHash).toBe(computeParamsHash({ message: body, link: null }));
+      const sentBefore = w.page.publishCalls.length;
+
+      const { reply, approvalId } = await retry(carol, id);
+
+      expect(reply.status).toBe(502);
+      expect(reply.body.error).toMatchObject({ code: "UNCONFIRMED", reason: "RECONCILE_MISMATCH", sentNothing: true, published: false });
+      expect(reply.body.error?.message).toMatch(/could not be confirmed as this item's text/);
+      const row = await itemRow(id);
+      expect(row).toMatchObject({ status: "READY", publishState: "UNCONFIRMED", publicationMode: null, externalId: null, verifiedAt: null, publishedAt: null });
+      // The Page holds the provider's words, not the item's — and no record says otherwise.
+      expect(w.page.on(PAGE.id)).toContain(`${body} [changed by the provider]`);
+      expect(w.page.copiesOf(body)).toBe(0);
+      expect(w.page.publishCalls.length).toBe(sentBefore);
+      // The original attempt is kept exactly as it was, with what the look found beside it.
+      expect(await attemptOf(id)).toMatchObject({ ...first, lastLookup: { result: "TEXT_MISMATCH" } });
+      // This run sent nothing, and its own record says so.
+      expect((await executionOf(carol, approvalId)).status).toBe("FAILED");
+
+      // Nor can a person clear it while that post is sitting on the Page.
+      const settled = await resolve(carol, id);
+      expect(settled.status).toBe(409);
+      expect(settled.body.error?.code).toBe("CONFLICT");
+      expect(settled.body.error?.message).toMatch(/was not cleared/);
+      expect((await itemRow(id)).publishState).toBe("UNCONFIRMED");
+    });
+
+    it("H1 — a post read back with no text at all is not called published, on the first attempt or the next", async () => {
+      const body = "A post whose text the provider withholds.";
+      const id = await leaveUnconfirmed(carol, "No text back", body, "no-text");
+      expect(await attemptOf(id)).toMatchObject({ state: "UNCONFIRMED", code: "VERIFY_NO_TEXT" });
+
+      w.page.withholdText = true;
+      const { reply } = await retry(carol, id);
+
+      expect(reply.body.error).toMatchObject({ code: "UNCONFIRMED", reason: "RECONCILE_MISMATCH", sentNothing: true });
+      expect(await itemRow(id)).toMatchObject({ status: "READY", publishState: "UNCONFIRMED", publicationMode: null });
+      expect(w.page.copiesOf(body)).toBe(1);
+    });
+
+    // --- H1, second scenario: the words are changed after the attempt ----------
+
+    it("H1 — an unconfirmed item cannot be edited, so other words can never be approved as the same publish", async () => {
+      const body = "Old text T1.";
+      editedId = await leaveUnconfirmed(carol, "Unreadable then edited", body, "unreadable");
+      const before = await itemRow(editedId);
+
+      const patches: Array<Record<string, unknown>> = [
+        { body: "New text T2, approved later." },
+        { body: "New text T2, approved later.", status: "READY" },
+        { title: "Renamed" },
+        { link: "https://example.com/x" },
+        { status: "DRAFT" },
+        { status: "ARCHIVED" },
+        { scheduledDate: day(3) },
+        { notes: "a note" },
+      ];
+      for (const patch of patches) {
+        const reply = await w.call(carol, "PATCH", `/marketing/content/${editedId}`, patch);
+        expect(reply.status, JSON.stringify(patch)).toBe(409);
+        expect(reply.body.error?.code, JSON.stringify(patch)).toBe("CONFLICT");
+        expect(reply.body.error?.message, JSON.stringify(patch)).toMatch(/outcome is not known/);
+      }
+
+      const after = await itemRow(editedId);
+      expect(after).toMatchObject({ body, title: before.title, link: null, status: "READY", notes: null, scheduledDate: null, publishState: "UNCONFIRMED" });
+      expect(after.updatedAt.getTime()).toBe(before.updatedAt.getTime());
+    });
+
+    it("H1 — once it can be read, the post is recorded because its text IS the item's text — and nothing new is sent", async () => {
+      const sentBefore = w.page.publishCalls.length;
+
+      const { reply } = await retry(carol, editedId);
+
+      expect(reply.status).toBe(200);
+      expect(reply.body.data).toMatchObject({ status: "PUBLISHED", published: true, alreadyPublished: true });
+      const row = await itemRow(editedId);
+      expect(row).toMatchObject({ status: "PUBLISHED", publicationMode: "VERIFIED", body: "Old text T1.", publishedTarget: PAGE.name });
+      expect(w.page.posts.get(row.externalId!)!.message).toBe(row.body);
+      expect(w.page.publishCalls.length).toBe(sentBefore);
+    });
+
+    it("H1 — words changed underneath an unconfirmed item are refused: before an approval exists, and after one", async () => {
+      const id = await leaveUnconfirmed(carol, "Changed underneath", "The words that were sent.", "unreadable");
+      // Which attempt a look would be for, as the publish check says it while the item still holds its words.
+      const earlierAttempt = (await w.call(carol, "GET", `/marketing/content/${id}/publish`)).body.data.publishParams.earlierAttempt as string;
+      expect(earlierAttempt).toMatch(/^[a-f0-9]{32}$/);
+      // Not through the service, which refuses, but straight into the row — as a fault or a hand might.
+      await prisma!.contentItem.update({ where: { id }, data: { body: "Words nobody sent." } });
+      const approvalsBefore = (await approvalsOf(carol)).length;
+      const sentBefore = w.page.publishCalls.length;
+
+      const check = (await w.call(carol, "GET", `/marketing/content/${id}/publish`)).body.data;
+      const asked = await w.call(carol, "POST", `/marketing/content/${id}/publish`, {});
+
+      expect(check.ready).toBe(false);
+      expect(check.publishParams).toBeNull();
+      expect(check.blockers.join(" ")).toMatch(/not the text of the earlier attempt/);
+      expect(asked.status).toBe(409);
+      expect((await approvalsOf(carol)).length).toBe(approvalsBefore);
+
+      // And with an approval that names the new words — a model's call that a person confirms — nothing is sent either.
+      // Marked as the look it would have to be, it is held to the words the attempt sent...
+      w.model.propose(T.contentPublish, { contentId: id, targetId: PAGE.id, targetName: PAGE.name, message: "Words nobody sent.", earlierAttempt });
+      const conversation = await w.open(carol, "Publish the Changed underneath post to our Facebook page.");
+      const pending = conversation.first.body.data?.pendingAction;
+      expect(pending, JSON.stringify(conversation.first.body)).toBeDefined();
+      const confirmed = await w.call(carol, "POST", `/pending-actions/${pending.id}/confirm`, { conversationId: conversation.conversationId });
+
+      expect(confirmed.body.data.executionResult.status).toBe("failed");
+      expect(confirmed.body.data.executionResult.error).toMatch(/not the text of the earlier attempt/);
+
+      // ...and with the mark left out, which would make it a send: nothing is sent for an item whose publish is unconfirmed.
+      w.model.propose(T.contentPublish, { contentId: id, targetId: PAGE.id, targetName: PAGE.name, message: "Words nobody sent." });
+      const unmarked = await w.open(carol, "Publish the Changed underneath post to our Facebook page.");
+      const unmarkedPending = unmarked.first.body.data?.pendingAction;
+      expect(unmarkedPending, JSON.stringify(unmarked.first.body)).toBeDefined();
+      const unmarkedConfirmed = await w.call(carol, "POST", `/pending-actions/${unmarkedPending.id}/confirm`, { conversationId: unmarked.conversationId });
+
+      expect(unmarkedConfirmed.body.data.executionResult.status).toBe("failed");
+      expect(unmarkedConfirmed.body.data.executionResult.error).toMatch(/this approval was for sending the post, not for looking for that one/);
+      expect(w.page.publishCalls.length).toBe(sentBefore);
+      expect(w.page.copiesOf("Words nobody sent.")).toBe(0);
+      expect(await itemRow(id)).toMatchObject({ publishState: "UNCONFIRMED", publicationMode: null });
+    });
+
+    // --- H1, third scenario: the retry names another Page -----------------------
+
+    it("H1 — the retry cannot be aimed at another Page: it is not offered, cannot be approved, and is not executed", async () => {
+      w.page.targets = [PAGE, PAGE_B];
+      const body = "Two-page item.";
+      twoPageId = await leaveUnconfirmed(carol, "Two pages", body, "unreadable", PAGE.id);
+      w.page.targets = [PAGE, PAGE_B];
+      expect(await attemptOf(twoPageId)).toMatchObject({ targetId: PAGE.id, targetName: PAGE.name });
+      const approvalsBefore = (await approvalsOf(carol)).length;
+      const sentBefore = w.page.publishCalls.length;
+
+      // Asked about the other Page: refused, in words that name where the attempt went.
+      const checkB = (await w.call(carol, "GET", `/marketing/content/${twoPageId}/publish?targetId=${PAGE_B.id}`)).body.data;
+      expect(checkB.ready).toBe(false);
+      expect(checkB.publishParams).toBeNull();
+      expect(checkB.blockers.join(" ")).toContain(PAGE.name);
+      expect(checkB.blockers.join(" ")).toMatch(/cannot be sent to a different Page/);
+      // With no Page named, the only one offered is the one the attempt went to.
+      const check = (await w.call(carol, "GET", `/marketing/content/${twoPageId}/publish`)).body.data;
+      expect(check.targets.map((target: PublishTarget) => target.id)).toEqual([PAGE.id]);
+      expect(check.publishParams).toMatchObject({ targetId: PAGE.id, targetName: PAGE.name });
+      expect(check.warning).toMatch(/only LOOKS/);
+
+      // No approval can be made for the other Page from the page...
+      const askedB = await w.call(carol, "POST", `/marketing/content/${twoPageId}/publish`, { targetId: PAGE_B.id });
+      expect(askedB.status).toBe(409);
+      expect((await approvalsOf(carol)).length).toBe(approvalsBefore);
+
+      // ...and one made in chat — a model naming the other Page, a person saying yes — sends nothing.
+      // Marked as the look it would have to be, it is held to the Page the attempt went to...
+      w.model.propose(T.contentPublish, { contentId: twoPageId, targetId: PAGE_B.id, targetName: PAGE_B.name, message: body, earlierAttempt: check.publishParams.earlierAttempt });
+      const conversation = await w.open(carol, "Publish the Two pages post to our Facebook page.");
+      const pending = conversation.first.body.data?.pendingAction;
+      expect(pending, JSON.stringify(conversation.first.body)).toBeDefined();
+      const confirmed = await w.call(carol, "POST", `/pending-actions/${pending.id}/confirm`, { conversationId: conversation.conversationId });
+
+      expect(confirmed.body.data.executionResult.status).toBe("failed");
+      expect(confirmed.body.data.executionResult.error).toMatch(/cannot be sent to a different Page/);
+
+      // ...and with the mark left out, which would make it a send to the other Page: nothing is sent either.
+      w.model.propose(T.contentPublish, { contentId: twoPageId, targetId: PAGE_B.id, targetName: PAGE_B.name, message: body });
+      const unmarked = await w.open(carol, "Publish the Two pages post to our Facebook page.");
+      const unmarkedPending = unmarked.first.body.data?.pendingAction;
+      expect(unmarkedPending, JSON.stringify(unmarked.first.body)).toBeDefined();
+      const unmarkedConfirmed = await w.call(carol, "POST", `/pending-actions/${unmarkedPending.id}/confirm`, { conversationId: unmarked.conversationId });
+
+      expect(unmarkedConfirmed.body.data.executionResult.status).toBe("failed");
+      expect(unmarkedConfirmed.body.data.executionResult.error).toMatch(/this approval was for sending the post, not for looking for that one/);
+      expect(w.page.publishCalls.length).toBe(sentBefore);
+      expect(w.page.on(PAGE_B.id)).toEqual([]);
+      expect(await itemRow(twoPageId)).toMatchObject({ status: "READY", publishState: "UNCONFIRMED", publicationMode: null, publishedTarget: null });
+      expect(await attemptOf(twoPageId)).toMatchObject({ targetId: PAGE.id, targetName: PAGE.name });
+    });
+
+    it("H1 — found on the Page it was sent to, it is recorded under THAT Page's name, and the other holds nothing", async () => {
+      w.page.targets = [PAGE, PAGE_B];
+
+      const { reply } = await retry(carol, twoPageId);
+
+      expect(reply.status).toBe(200);
+      const row = await itemRow(twoPageId);
+      expect(row).toMatchObject({ status: "PUBLISHED", publicationMode: "VERIFIED", publishedTarget: PAGE.name });
+      expect(w.page.posts.get(row.externalId!)).toMatchObject({ targetId: PAGE.id, message: "Two-page item." });
+      expect(w.page.on(PAGE_B.id)).toEqual([]);
+    });
+
+    // --- M1: a lost answer never becomes a second post ---------------------------
+
+    it("M1 — when the earlier post cannot be found, NOTHING is sent: the item stays unconfirmed however often it is asked", async () => {
+      const body = "A post whose answer was lost.";
+      lostId = await leaveUnconfirmed(dave, "Lost and not found", body, "lost");
+      expect(w.page.copiesOf(body)).toBe(1);
+      const sentBefore = w.page.publishCalls.length;
+
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        // The Page's listing does not return the post.
+        w.page.readable = "not-found";
+        const { reply, approvalId } = await retry(dave, lostId);
+
+        expect(reply.status, `retry ${attempt}`).toBe(502);
+        expect(reply.body.error, `retry ${attempt}`).toMatchObject({ code: "UNCONFIRMED", reason: "NOT_FOUND_ON_PAGE", sentNothing: true, published: false });
+        expect(reply.body.error?.message).toMatch(/did not find it\. Nothing new was posted/);
+        expect((await executionOf(dave, approvalId)).status, `retry ${attempt}`).toBe("FAILED");
+      }
+
+      // Three approved retries later: still exactly the one post the lost answer left.
+      expect(w.page.publishCalls.length).toBe(sentBefore);
+      expect(w.page.copiesOf(body)).toBe(1);
+      expect(await itemRow(lostId)).toMatchObject({ status: "READY", publishState: "UNCONFIRMED", publicationMode: null });
+      expect(await attemptOf(lostId)).toMatchObject({ state: "UNCONFIRMED", code: "AMBIGUOUS_OUTCOME", targetId: PAGE.id, lastLookup: { result: "NOT_FOUND" } });
+    });
+
+    it("M1 — a person's decision clears it, after JARVIS has looked once more — and the decision is audited", async () => {
+      // The person looked: the post really is not on the Page.
+      for (const [key, post] of w.page.posts) if (post.message === "A post whose answer was lost.") w.page.posts.delete(key);
+      const looksBefore = w.page.findCalls;
+
+      const settled = await resolve(dave, lostId);
+
+      expect(settled.status, JSON.stringify(settled.body)).toBe(200);
+      expect(settled.body.data).toMatchObject({ resolution: "CLEARED" });
+      expect(settled.body.data.message).toMatch(/did not find the post/);
+      // JARVIS looked again before taking the person's word for it.
+      expect(w.page.findCalls).toBe(looksBefore + 1);
+      expect(await itemRow(lostId)).toMatchObject({ status: "READY", publishState: "NONE", publicationMode: null });
+      expect(await attemptOf(lostId)).toMatchObject({ state: "FAILED", code: "CLEARED_BY_USER", targetId: PAGE.id, lastLookup: { result: "NOT_FOUND" } });
+      // Who decided, what they decided, and what JARVIS saw — ids only.
+      const decisions = await auditOf(dave, "marketing.publish.resolve");
+      expect(decisions).toHaveLength(1);
+      expect(decisions[0]).toMatchObject({ result: "SUCCESS" });
+      expect(decisions[0]!.parameters).toEqual({ contentId: lostId, decision: "NOT_PUBLISHED", outcome: "CLEARED", targetId: PAGE.id });
+      // And it ran through the one executor, as the person, with no agent in between.
+      const run = w.executed.filter((request) => request.toolId === T.publishResolve).at(-1)!;
+      expect(run).toMatchObject({ userId: dave, role: "member", params: { contentId: lostId, decision: "NOT_PUBLISHED" } });
+      expect(run.agentId).toBeUndefined();
+      expect(run.conversationId).toBeUndefined();
+    });
+
+    it("M1 — only after that decision can the item be edited, and published again — which posts exactly once", async () => {
+      expect((await w.call(dave, "PATCH", `/marketing/content/${lostId}`, { notes: "checked the Page myself" })).status).toBe(200);
+      const sentBefore = w.page.publishCalls.length;
+
+      const { reply } = await retry(dave, lostId);
+
+      expect(reply.status).toBe(200);
+      expect(reply.body.data).toMatchObject({ status: "PUBLISHED", published: true, alreadyPublished: false });
+      expect(w.page.publishCalls.length).toBe(sentBefore + 1);
+      expect(w.page.copiesOf("A post whose answer was lost.")).toBe(1);
+    });
+
+    it("M1 — if JARVIS finds the post after all, the decision clears nothing: it is recorded as published instead", async () => {
+      const body = "Thought lost, actually live.";
+      const id = await leaveUnconfirmed(dave, "Actually live", body, "lost");
+      const sentBefore = w.page.publishCalls.length;
+
+      const settled = await resolve(dave, id);
+
+      expect(settled.status).toBe(200);
+      expect(settled.body.data).toMatchObject({ resolution: "FOUND_PUBLISHED" });
+      const row = await itemRow(id);
+      expect(row).toMatchObject({ status: "PUBLISHED", publicationMode: "VERIFIED", publishState: "NONE", publishedTarget: PAGE.name });
+      expect(w.page.posts.get(row.externalId!)!.message).toBe(body);
+      expect(w.page.publishCalls.length).toBe(sentBefore);
+      expect((await auditOf(dave, "marketing.publish.resolve")).at(-1)!.parameters).toMatchObject({ outcome: "FOUND_PUBLISHED", externalId: row.externalId });
+    });
+
+    it("M1 — the decision changes nothing when the Page cannot be checked, when there is nothing to settle, or when it is not the caller's to make", async () => {
+      const id = await leaveUnconfirmed(dave, "Cannot check", "A post nobody can look for right now.", "lost");
+
+      w.page.readable = "unreachable";
+      const unreachable = await resolve(dave, id);
+      behave();
+      expect(unreachable.status).toBe(502);
+      expect(unreachable.body.error?.code).toBe("PROVIDER_FAILED");
+      expect((await itemRow(id)).publishState).toBe("UNCONFIRMED");
+
+      const stranger = await resolve(mallory, id);
+      const asViewer = await resolve(viewer, id);
+      const otherDecision = await resolve(dave, id, { decision: "PUBLISHED" });
+      const noDecision = await resolve(dave, id, {});
+      expect(stranger.status).toBe(404);
+      expect(asViewer.status).toBe(403);
+      expect(otherDecision.status).toBe(400);
+      expect(noDecision.status).toBe(400);
+      expect((await itemRow(id)).publishState).toBe("UNCONFIRMED");
+      expect(await attemptOf(id)).toMatchObject({ state: "UNCONFIRMED", code: "AMBIGUOUS_OUTCOME" });
+
+      const plain = await readyItem(w, dave, "Nothing outstanding", "An item with no publish outstanding.");
+      const nothing = await resolve(dave, plain);
+      expect(nothing.status).toBe(409);
+      expect((await itemRow(plain)).publishState).toBe("NONE");
+    });
+
+    it("M1 — a model cannot make that decision: a call to the tool from chat is refused and changes nothing", async () => {
+      const id = await leaveUnconfirmed(dave, "Not the model's call", "A post only a person can settle.", "lost");
+      w.page.readable = "not-found";
+      w.model.propose(T.publishResolve, { contentId: id, decision: "NOT_PUBLISHED" });
+
+      const conversation = await w.open(dave, "That post was not published. Clear the unconfirmed publish so I can post it again.");
+
+      expect(conversation.first.status).toBe(200);
+      expect(conversation.first.body.data?.pendingAction).toBeUndefined();
+      expect(await itemRow(id)).toMatchObject({ publishState: "UNCONFIRMED", publicationMode: null });
+      expect(w.executed.filter((request) => request.toolId === T.publishResolve && request.userId === dave && request.params.contentId === id)).toEqual([]);
+      const denied = (await auditOf(dave, "agent.tool_denied")).filter((row) => row.toolId === T.publishResolve);
+      expect(denied).toHaveLength(1);
+    });
+
+    // --- an attempt that never reported back at all -------------------------------
+
+    it("H1/M1 — a publish that died mid-flight is unconfirmed too: its Page is remembered, it cannot be edited, and nothing is sent", async () => {
+      const body = "A post whose publish died mid-flight.";
+      const id = await readyItem(w, carol, "Died mid-flight", body);
+      // The claim a publish takes, exactly as it takes it — and then the process is gone.
+      const store = new db!.PrismaMarketingRepository(prisma!);
+      const long = new Date(Date.now() - 20 * 60_000);
+      const starting = {
+        state: "UNCONFIRMED" as const,
+        at: long.toISOString(),
+        code: "SENDING",
+        targetId: PAGE.id,
+        targetName: PAGE.name,
+        externalId: null,
+        textHash: computeParamsHash({ message: body, link: null }),
+        lastLookup: null,
+      };
+      expect(await store.claimForPublish(carol, id, { channel: "FACEBOOK", body, link: null }, { from: "NONE", attempt: starting })).toBe("FRESH");
+      await prisma!.contentItem.update({ where: { id }, data: { publishClaimedAt: long } });
+      const sentBefore = w.page.publishCalls.length;
+
+      const { item } = (await w.call(carol, "GET", `/marketing/content/${id}`)).body.data;
+      expect(item.publishUnconfirmed).toBe(true);
+      expect((await w.call(carol, "PATCH", `/marketing/content/${id}`, { body: "Other words" })).status).toBe(409);
+
+      const { reply } = await retry(carol, id);
+
+      expect(reply.body.error).toMatchObject({ code: "UNCONFIRMED", reason: "NOT_FOUND_ON_PAGE", sentNothing: true });
+      expect(w.page.publishCalls.length).toBe(sentBefore);
+      expect(w.page.copiesOf(body)).toBe(0);
+      expect(await attemptOf(id)).toMatchObject({ code: "SENDING", targetId: PAGE.id, targetName: PAGE.name, lastLookup: { result: "NOT_FOUND" } });
+    });
+
+    // =======================================================================
+    // The final safety pass — the second audit's L1, L2, L3 and L6
+    // =======================================================================
+
+    /** Take a post off the stand-in Page, as if it had never reached it. */
+    const dropFromPage = (body: string) => {
+      for (const [key, post] of w.page.posts) if (post.message === body) w.page.posts.delete(key);
+    };
+    /** The parameters an approval is bound to, as the database holds them. */
+    const boundTo = async (approvalId: string) => (await prisma!.approval.findUniqueOrThrow({ where: { id: approvalId } })).params as Record<string, unknown>;
+    /**
+     * Make the audit log refuse one user's rows for one action — in the
+     * database, inside whatever transaction is writing them — until the
+     * returned function is called. Scoped to one test user and one action.
+     */
+    async function refuseAuditRows(userId: string, action: string): Promise<() => Promise<void>> {
+      if (!/^[A-Za-z0-9_-]+$/.test(userId) || !/^[a-z_.]+$/.test(action)) throw new Error("not a plain id or action");
+      const name = `p15_e2e_refuse_audit_${userId.replace(/[^A-Za-z0-9]/g, "").toLowerCase()}`;
+      await prisma!.$executeRawUnsafe(
+        `CREATE OR REPLACE FUNCTION ${name}() RETURNS trigger LANGUAGE plpgsql AS $fn$ BEGIN IF NEW."userId" = '${userId}' AND NEW."action" = '${action}' THEN RAISE EXCEPTION 'p15 test: the audit log refused this row'; END IF; RETURN NEW; END $fn$`
+      );
+      await prisma!.$executeRawUnsafe(`CREATE TRIGGER ${name} BEFORE INSERT ON "AuditLog" FOR EACH ROW EXECUTE FUNCTION ${name}()`);
+      return async () => {
+        await prisma!.$executeRawUnsafe(`DROP TRIGGER IF EXISTS ${name} ON "AuditLog"`);
+        await prisma!.$executeRawUnsafe(`DROP FUNCTION IF EXISTS ${name}()`);
+      };
+    }
+
+    // --- L1: an approval to LOOK can never send -----------------------------------
+
+    it("L1 — what is approved for an unconfirmed item is a LOOK, and the approval says so: it is bound to that state and that attempt", async () => {
+      const body = "Bound to the attempt it is for.";
+      const id = await leaveUnconfirmed(erin, "Bound", body, "unreadable");
+
+      const check = (await w.call(erin, "GET", `/marketing/content/${id}/publish`)).body.data;
+      const asked = await w.call(erin, "POST", `/marketing/content/${id}/publish`, {});
+
+      expect(check.publishParams.earlierAttempt).toMatch(/^[a-f0-9]{32}$/);
+      const bound = await boundTo(asked.body.data.approvalId);
+      expect(bound).toEqual({ contentId: id, targetId: PAGE.id, targetName: PAGE.name, message: body, earlierAttempt: check.publishParams.earlierAttempt });
+      // Never the words that were sent, and nothing a person could not be shown.
+      expect(JSON.stringify(bound.earlierAttempt)).not.toContain("Bound to the attempt");
+      // An item with no publish outstanding is approved as a send: it names no earlier attempt.
+      const fresh = await readyItem(w, erin, "Bound, fresh", "A post with nothing outstanding.");
+      const freshAsked = await w.call(erin, "POST", `/marketing/content/${fresh}/publish`, {});
+      expect(await boundTo(freshAsked.body.data.approvalId)).toEqual({ contentId: fresh, targetId: PAGE.id, targetName: PAGE.name, message: "A post with nothing outstanding." });
+    });
+
+    it("L1 — the person approving a look is shown a look, not a post that is about to go out", async () => {
+      const body = "Shown as a look.";
+      const id = await leaveUnconfirmed(erin, "Shown", body, "unreadable");
+      const asked = await w.call(erin, "POST", `/marketing/content/${id}/publish`, {});
+
+      const shown = await w.call(erin, "GET", `/approvals/${asked.body.data.approvalId}`);
+
+      expect(shown.status, JSON.stringify(shown.body)).toBe(200);
+      expect(shown.body.data.actionSummary).toBe(`Look on ${PAGE.name} for the post an earlier attempt may have made. Nothing new will be posted.`);
+      expect(shown.body.data.detailLines).toEqual([
+        { label: "Look on", value: PAGE.name },
+        { label: "Text to look for", value: body },
+      ]);
+      expect(JSON.stringify(shown.body.data)).not.toMatch(/Publish this post publicly|Text to be posted/);
+      // An item with nothing outstanding is still shown as the post it is.
+      const fresh = await readyItem(w, erin, "Shown, fresh", "A post that will really go out.");
+      const freshAsked = await w.call(erin, "POST", `/marketing/content/${fresh}/publish`, {});
+      const freshShown = (await w.call(erin, "GET", `/approvals/${freshAsked.body.data.approvalId}`)).body.data;
+      expect(freshShown.actionSummary).toBe(`Publish this post publicly to ${PAGE.name}. JARVIS cannot undo it.`);
+      expect(freshShown.detailLines).toEqual([
+        { label: "Publish to", value: PAGE.name },
+        { label: "Text to be posted", value: "A post that will really go out." },
+      ]);
+    });
+
+    it("L1 — two tabs: a look is approved in one, the attempt is cleared in the other, and the look then posts NOTHING", async () => {
+      const body = "Approved as a look, cleared in another tab.";
+      const id = await leaveUnconfirmed(erin, "Two tabs", body, "unreadable");
+      // The post never reached the Page.
+      dropFromPage(body);
+
+      // Tab one: the person asks again, is told it only looks, and approves that.
+      const check = (await w.call(erin, "GET", `/marketing/content/${id}/publish`)).body.data;
+      expect(check.warning).toMatch(/only LOOKS/);
+      const approvalId = await requestAndApprove(w, erin, id);
+      expect((await boundTo(approvalId)).earlierAttempt).toBe(check.publishParams.earlierAttempt);
+
+      // Tab two: the same person says it was not published. JARVIS looks, finds nothing, and clears the attempt.
+      const settled = await resolve(erin, id);
+      expect(settled.body.data, JSON.stringify(settled.body)).toMatchObject({ resolution: "CLEARED" });
+      expect(await itemRow(id)).toMatchObject({ status: "READY", publishState: "NONE" });
+      const sentBefore = w.page.publishCalls.length;
+      const looksBefore = w.page.findCalls;
+
+      // Tab one again: the approval that was only ever for a look is run.
+      const reply = await execute(w, erin, id, approvalId);
+
+      // It is refused, in words — and nothing was sent. Before this rule the
+      // claim was taken as fresh and a post went out that nobody approved.
+      expect(reply.status).toBe(409);
+      expect(reply.body.error).toMatchObject({ code: "NOT_READY", reason: "STALE", published: false });
+      expect(reply.body.error!.message).toBe(
+        "This approval was only to look for an earlier post, and that attempt has been settled since. Nothing was sent and nothing was published. Ask again to publish the item."
+      );
+      expect(w.page.publishCalls.length).toBe(sentBefore);
+      expect(w.page.copiesOf(body)).toBe(0);
+      // Nothing was even looked for, and the item is exactly as the settling left it.
+      expect(w.page.findCalls).toBe(looksBefore);
+      expect(await itemRow(id)).toMatchObject({ status: "READY", publishState: "NONE", publicationMode: null, publishClaimedAt: null });
+      expect(await attemptOf(id)).toMatchObject({ state: "FAILED", code: "CLEARED_BY_USER" });
+      // The approval is spent, its execution is recorded as one that did not happen, and the refusal is audited.
+      expect((await prisma!.approval.findUniqueOrThrow({ where: { id: approvalId } })).status).toBe("CONSUMED");
+      expect(await executionOf(erin, approvalId)).toMatchObject({ status: "FAILED", errorCode: "STATE_CHANGED" });
+      expect((await auditOf(erin, "marketing.publish")).at(-1)).toMatchObject({ result: "REJECTED", parameters: { contentId: id, targetId: PAGE.id, outcome: "STATE_CHANGED" } });
+    });
+
+    it("L1 — after that refusal the person is asked afresh, and what they approve now is a send: exactly one post", async () => {
+      const body = "Approved as a look, cleared in another tab.";
+      const id = (await prisma!.contentItem.findFirstOrThrow({ where: { userId: erin, title: "Two tabs" } })).id;
+      const sentBefore = w.page.publishCalls.length;
+
+      const check = (await w.call(erin, "GET", `/marketing/content/${id}/publish`)).body.data;
+      const { reply } = await retry(erin, id);
+
+      expect(check.warning).toBeNull();
+      expect(check.publishParams).not.toHaveProperty("earlierAttempt");
+      expect(reply.status, JSON.stringify(reply.body)).toBe(200);
+      expect(reply.body.data).toMatchObject({ status: "PUBLISHED", published: true, alreadyPublished: false });
+      expect(w.page.publishCalls.length).toBe(sentBefore + 1);
+      expect(w.page.copiesOf(body)).toBe(1);
+    });
+
+    it("L1 — the same race from chat: a look confirmed after the attempt was cleared posts nothing", async () => {
+      const body = "Confirmed in chat after it was cleared.";
+      const id = await leaveUnconfirmed(erin, "Chat tab", body, "unreadable");
+      dropFromPage(body);
+      const check = (await w.call(erin, "GET", `/marketing/content/${id}/publish`)).body.data;
+
+      // The model does as it is told: the publish check's parameters, unchanged.
+      w.model.propose(T.contentPublish, { ...check.publishParams });
+      const conversation = await w.open(erin, "Publish the Chat tab post to our Facebook page.");
+      const pending = conversation.first.body.data?.pendingAction;
+      expect(pending, JSON.stringify(conversation.first.body)).toBeDefined();
+      // What the person is asked to confirm is a look.
+      expect(pending.summary).toContain(`Look on: ${PAGE.name}`);
+      expect(pending.summary).toContain("This only looks for that post");
+      expect(pending.summary).not.toContain("posted publicly");
+
+      expect((await resolve(erin, id)).body.data).toMatchObject({ resolution: "CLEARED" });
+      const sentBefore = w.page.publishCalls.length;
+      const confirmed = await w.call(erin, "POST", `/pending-actions/${pending.id}/confirm`, { conversationId: conversation.conversationId });
+
+      expect(confirmed.body.data.executionResult.status).toBe("failed");
+      expect(confirmed.body.data.executionResult.error).toMatch(/only to look for an earlier post, and that attempt has been settled since/);
+      expect(w.page.publishCalls.length).toBe(sentBefore);
+      expect(w.page.copiesOf(body)).toBe(0);
+      expect(await itemRow(id)).toMatchObject({ status: "READY", publishState: "NONE", publicationMode: null });
+    });
+
+    it("L1 — the other direction: an approval to SEND is not run as a look once the item has become unconfirmed", async () => {
+      const body = "Two sends approved before either ran.";
+      const id = await readyItem(w, erin, "Two sends", body);
+      // Two tabs, two approvals to send — made while nothing was outstanding. The first is run and its answer is lost.
+      const first = await requestAndApprove(w, erin, id);
+      const second = (
+        await prisma!.approval.create({
+          data: {
+            userId: erin,
+            toolId: T.contentPublish,
+            action: "Publish content item",
+            params: (await boundTo(first)) as never,
+            paramsHash: computeParamsHash(await boundTo(first)),
+            riskLevel: "EXTERNAL_SIDE_EFFECT",
+            status: "APPROVED",
+            expiresAt: new Date(Date.now() + 600_000),
+          },
+        })
+      ).id;
+      w.page.onPublish = "lose-the-answer";
+      expect((await execute(w, erin, id, first)).body.error).toMatchObject({ code: "UNCONFIRMED", reason: "AMBIGUOUS_OUTCOME" });
+      const sentBefore = w.page.publishCalls.length;
+      const looksBefore = w.page.findCalls;
+
+      const reply = await execute(w, erin, id, second);
+
+      // Refused: what was approved was a send, and nothing is sent for an
+      // unconfirmed item. It is not quietly turned into something else.
+      expect(reply.status).toBe(409);
+      expect(reply.body.error).toMatchObject({ code: "NOT_READY", reason: "STALE", published: false });
+      expect(reply.body.error!.message).toMatch(/this approval was for sending the post, not for looking for that one/);
+      expect(w.page.publishCalls.length).toBe(sentBefore);
+      expect(w.page.findCalls).toBe(looksBefore);
+      expect(w.page.copiesOf(body)).toBe(1);
+      expect(await itemRow(id)).toMatchObject({ publishState: "UNCONFIRMED", publicationMode: null });
+      // Asked again, it is a look — and that finds the post the first attempt made.
+      const { reply: looked } = await retry(erin, id);
+      expect(looked.body.data).toMatchObject({ status: "PUBLISHED", alreadyPublished: true });
+      expect(w.page.copiesOf(body)).toBe(1);
+    });
+
+    it("L1 — a look approved for one attempt does not run against a later one", async () => {
+      const body = "Unconfirmed, cleared, and unconfirmed again.";
+      const id = await leaveUnconfirmed(erin, "Twice unconfirmed", body, "unreadable");
+      dropFromPage(body);
+      const stale = await requestAndApprove(w, erin, id);
+      const firstAttempt = (await boundTo(stale)).earlierAttempt;
+
+      // The first attempt is cleared, and the item is sent again — with an answer that is lost again.
+      expect((await resolve(erin, id)).body.data).toMatchObject({ resolution: "CLEARED" });
+      const again = await requestAndApprove(w, erin, id);
+      w.page.onPublish = "lose-the-answer";
+      expect((await execute(w, erin, id, again)).body.error).toMatchObject({ code: "UNCONFIRMED", reason: "AMBIGUOUS_OUTCOME" });
+      const secondAttempt = (await w.call(erin, "GET", `/marketing/content/${id}/publish`)).body.data.publishParams.earlierAttempt;
+      expect(secondAttempt).toMatch(/^[a-f0-9]{32}$/);
+      expect(secondAttempt).not.toBe(firstAttempt);
+      const sentBefore = w.page.publishCalls.length;
+      const before = await attemptOf(id);
+
+      const reply = await execute(w, erin, id, stale);
+
+      expect(reply.status).toBe(409);
+      expect(reply.body.error!.message).toMatch(/The earlier attempt this approval was made to look for is not the one outstanding now/);
+      expect(w.page.publishCalls.length).toBe(sentBefore);
+      // The item is given back exactly as it was: unconfirmed, the outstanding attempt untouched.
+      expect(await itemRow(id)).toMatchObject({ publishState: "UNCONFIRMED", publicationMode: null, publishClaimedAt: null });
+      expect(await attemptOf(id)).toEqual(before);
+      expect(await executionOf(erin, stale)).toMatchObject({ status: "FAILED", errorCode: "ATTEMPT_CHANGED" });
+    });
+
+    // --- L2: one post is one item's post ------------------------------------------
+
+    it("L2 — two items with identical text: the second cannot claim the first one's post", async () => {
+      const body = "Identical words on two calendar items.";
+      const first = await readyItem(w, frank, "Twin one", body);
+      expect((await retry(frank, first)).reply.body.data).toMatchObject({ status: "PUBLISHED", published: true });
+      const firstPost = (await itemRow(first)).externalId!;
+      // The second item's publish never reaches the Page: refused by the network, as far as anyone can tell.
+      const second = await leaveUnconfirmed(frank, "Twin two", body, "lost");
+      const secondPost = [...w.page.posts.values()].find((post) => post.message === body && post.externalId !== firstPost)!.externalId;
+      w.page.posts.delete(secondPost);
+      expect(w.page.copiesOf(body)).toBe(1);
+      const sentBefore = w.page.publishCalls.length;
+      const looks = w.page.passedOver.length;
+
+      // Asked again, JARVIS looks — and the only post with these words is the first item's.
+      const { reply, approvalId } = await retry(frank, second);
+
+      // Before this rule the second item was recorded VERIFIED with the first item's post.
+      expect(reply.status).toBe(502);
+      expect(reply.body.error).toMatchObject({ code: "UNCONFIRMED", reason: "NOT_FOUND_ON_PAGE", sentNothing: true, published: false });
+      expect(await itemRow(second)).toMatchObject({ status: "READY", publicationMode: null, externalId: null, verifiedAt: null, publishState: "UNCONFIRMED" });
+      expect(await attemptOf(second)).toMatchObject({ code: "AMBIGUOUS_OUTCOME", lastLookup: { result: "NOT_FOUND" } });
+      // The first item still holds its post, and it alone.
+      expect(await itemRow(first)).toMatchObject({ status: "PUBLISHED", publicationMode: "VERIFIED", externalId: firstPost });
+      expect(await prisma!.contentItem.count({ where: { externalId: firstPost } })).toBe(1);
+      expect(w.page.publishCalls.length).toBe(sentBefore);
+      // It looked twice: once finding the first item's post, once passing over it.
+      expect(w.page.passedOver.slice(looks)).toEqual([[], [firstPost]]);
+      expect(await executionOf(frank, approvalId)).toMatchObject({ status: "FAILED", errorCode: "NOT_FOUND_ON_PAGE" });
+    });
+
+    it("L2 — and when the second item's own post IS there, it is found beside the first one's and recorded as its own", async () => {
+      const body = "Identical words, and both were posted.";
+      const first = await readyItem(w, frank, "Both posted one", body);
+      await retry(frank, first);
+      const firstPost = (await itemRow(first)).externalId!;
+      const second = await leaveUnconfirmed(frank, "Both posted two", body, "lost");
+      expect(w.page.copiesOf(body)).toBe(2);
+      const secondPost = [...w.page.posts.values()].find((post) => post.message === body && post.externalId !== firstPost)!.externalId;
+      const sentBefore = w.page.publishCalls.length;
+
+      const { reply } = await retry(frank, second);
+
+      expect(reply.status, JSON.stringify(reply.body)).toBe(200);
+      expect(reply.body.data).toMatchObject({ status: "PUBLISHED", alreadyPublished: true });
+      expect(await itemRow(second)).toMatchObject({ status: "PUBLISHED", publicationMode: "VERIFIED", externalId: secondPost });
+      expect(await itemRow(first)).toMatchObject({ externalId: firstPost });
+      expect(secondPost).not.toBe(firstPost);
+      expect(w.page.publishCalls.length).toBe(sentBefore);
+      expect(w.page.copiesOf(body)).toBe(2);
+    });
+
+    it("L2 — holds across users: one person's item cannot be recorded with a post that is another person's", async () => {
+      const body = "The same words from two people.";
+      const daves = await readyItem(w, gina, "Dave's twin", body);
+      await retry(gina, daves);
+      const davesPost = (await itemRow(daves)).externalId!;
+      const carols = await leaveUnconfirmed(frank, "Carol's twin", body, "lost");
+      for (const [key, post] of w.page.posts) if (post.message === body && key !== davesPost) w.page.posts.delete(key);
+
+      const { reply } = await retry(frank, carols);
+
+      expect(reply.body.error).toMatchObject({ code: "UNCONFIRMED", reason: "NOT_FOUND_ON_PAGE", sentNothing: true });
+      expect(await itemRow(carols)).toMatchObject({ publicationMode: null, externalId: null, publishState: "UNCONFIRMED" });
+      expect(await itemRow(daves)).toMatchObject({ publicationMode: "VERIFIED", externalId: davesPost });
+      // And nothing Carol is told says whose post it was, or that there was one.
+      expect(JSON.stringify(reply.body)).not.toContain(davesPost);
+      expect(JSON.stringify(reply.body)).not.toContain(daves);
+    });
+
+    it("L2 — settling does not take another item's post for this one's either: with only that post on the Page, the attempt is cleared", async () => {
+      const body = "Identical words, settled by a person.";
+      const first = await readyItem(w, frank, "Settled twin one", body);
+      await retry(frank, first);
+      const firstPost = (await itemRow(first)).externalId!;
+      const second = await leaveUnconfirmed(frank, "Settled twin two", body, "lost");
+      for (const [key, post] of w.page.posts) if (post.message === body && key !== firstPost) w.page.posts.delete(key);
+
+      const settled = await resolve(frank, second);
+
+      // Before this rule the look found the first item's post and recorded the
+      // second item as published with it.
+      expect(settled.status, JSON.stringify(settled.body)).toBe(200);
+      expect(settled.body.data).toMatchObject({ resolution: "CLEARED" });
+      expect(await itemRow(second)).toMatchObject({ status: "READY", publicationMode: null, externalId: null, publishState: "NONE" });
+      expect(await prisma!.contentItem.count({ where: { externalId: firstPost } })).toBe(1);
+    });
+
+    it("L2 — a first attempt whose answer names a post another item holds is not called published", async () => {
+      const body = "The provider answered with somebody else's post.";
+      const first = await readyItem(w, frank, "Answered twin one", body);
+      await retry(frank, first);
+      const firstPost = (await itemRow(first)).externalId!;
+      const second = await readyItem(w, frank, "Answered twin two", body);
+      const approvalId = await requestAndApprove(w, frank, second);
+      // A provider that folds a repeated post into the one it already has, and answers with that one's id.
+      const publish = w.page.publish.bind(w.page);
+      w.page.publish = async (input) => {
+        w.page.publishCalls.push({ ...input });
+        return { externalId: firstPost };
+      };
+      let reply: Reply;
+      try {
+        reply = await execute(w, frank, second, approvalId);
+      } finally {
+        w.page.publish = publish;
+      }
+
+      expect(reply.status).toBe(502);
+      expect(reply.body.error).toMatchObject({ code: "UNCONFIRMED", reason: "POST_RECORDED_ELSEWHERE", published: false });
+      expect(reply.body.error!.message).toMatch(/already recorded as a different calendar item's post, so this item is NOT marked as published/);
+      expect(await itemRow(second)).toMatchObject({ status: "READY", publicationMode: null, externalId: null, publishState: "UNCONFIRMED" });
+      expect(await attemptOf(second)).toMatchObject({ code: "POST_RECORDED_ELSEWHERE", externalId: firstPost });
+      expect(await prisma!.contentItem.count({ where: { externalId: firstPost } })).toBe(1);
+      // Something was sent by this run, so its own record is not "nothing happened".
+      expect(await executionOf(frank, approvalId)).toMatchObject({ status: "UNKNOWN", errorCode: "POST_RECORDED_ELSEWHERE" });
+      // Asked again it only looks, passes over the other item's post, and still does not claim it.
+      const { reply: looked } = await retry(frank, second);
+      expect(looked.body.error).toMatchObject({ code: "UNCONFIRMED", reason: "NOT_FOUND_ON_PAGE", sentNothing: true });
+      expect(await itemRow(second)).toMatchObject({ publicationMode: null, externalId: null });
+    });
+
+    // --- L3: settling is held to the attempt's words and Page ---------------------
+
+    it("L3 — a row whose words were changed underneath cannot be settled: nothing is looked for, and nothing is cleared", async () => {
+      const body = "The words the attempt sent.";
+      const id = await leaveUnconfirmed(harry, "Settled against other words", body, "unreadable");
+      dropFromPage(body);
+      const original = await attemptOf(id);
+      // Not through the service, which refuses an edit, but straight into the row.
+      await prisma!.contentItem.update({ where: { id }, data: { body: "Other words entirely." } });
+      const looksBefore = w.page.findCalls + w.page.readCalls + w.page.listCalls;
+      const slotsBefore = await prisma!.auditLog.count({ where: { userId: harry, action: "marketing.limit.publish_check" } });
+
+      const settled = await resolve(harry, id);
+
+      // Before this rule JARVIS looked for the NEW words, found nothing, and
+      // cleared the attempt — making an item sendable whose real post it never looked for.
+      expect(settled.status).toBe(409);
+      expect(settled.body.error!.code).toBe("CONFLICT");
+      expect(settled.body.error!.message).toBe(
+        "This item's text is not the text the earlier attempt sent, so looking for it on the Page would prove nothing. The attempt was not cleared and nothing was changed. If the post is live, record this item as published yourself."
+      );
+      expect(await itemRow(id)).toMatchObject({ status: "READY", publishState: "UNCONFIRMED", publicationMode: null, publishClaimedAt: null });
+      expect(await attemptOf(id)).toEqual(original);
+      // Refused before the Page was asked anything, and before a slot was taken.
+      expect(w.page.findCalls + w.page.readCalls + w.page.listCalls).toBe(looksBefore);
+      expect(await prisma!.auditLog.count({ where: { userId: harry, action: "marketing.limit.publish_check" } })).toBe(slotsBefore);
+      expect((await auditOf(harry, "marketing.publish.resolve")).at(-1)).toMatchObject({
+        result: "REJECTED",
+        parameters: { contentId: id, decision: "NOT_PUBLISHED", outcome: "TEXT_CHANGED", targetId: PAGE.id },
+      });
+      // It still cannot be published or edited, so nothing can be sent for it.
+      expect((await w.call(harry, "POST", `/marketing/content/${id}/publish`, {})).status).toBe(409);
+      expect((await w.call(harry, "PATCH", `/marketing/content/${id}`, { notes: "x" })).status).toBe(409);
+    });
+
+    it("L3 — once the row holds the attempt's words again, the same decision goes through", async () => {
+      const id = (await prisma!.contentItem.findFirstOrThrow({ where: { userId: harry, title: "Settled against other words" } })).id;
+      await prisma!.contentItem.update({ where: { id }, data: { body: "The words the attempt sent." } });
+
+      const settled = await resolve(harry, id);
+
+      expect(settled.status, JSON.stringify(settled.body)).toBe(200);
+      expect(settled.body.data).toMatchObject({ resolution: "CLEARED" });
+    });
+
+    it("L3 — a link changed underneath is a change to what was sent, too", async () => {
+      const body = "Sent without a link.";
+      const id = await leaveUnconfirmed(harry, "Link changed underneath", body, "unreadable");
+      dropFromPage(body);
+      await prisma!.contentItem.update({ where: { id }, data: { link: "https://shop.example/added-later" } });
+
+      const settled = await resolve(harry, id);
+
+      expect(settled.status).toBe(409);
+      expect(settled.body.error!.message).toMatch(/not the text the earlier attempt sent/);
+      expect((await itemRow(id)).publishState).toBe("UNCONFIRMED");
+    });
+
+    it("L3 — an attempt that kept no hash of what it sent cannot be cleared: JARVIS cannot tell what to look for", async () => {
+      const body = "An attempt with no record of its words.";
+      const id = await leaveUnconfirmed(harry, "No hash", body, "unreadable");
+      dropFromPage(body);
+      const withoutHash = { ...((await attemptOf(id)) as Record<string, unknown>) };
+      delete withoutHash.textHash;
+      await prisma!.contentItem.update({ where: { id }, data: { publishAttempt: withoutHash as never } });
+
+      const settled = await resolve(harry, id);
+
+      expect(settled.status).toBe(409);
+      expect(settled.body.error!.message).toMatch(/no record of the text the earlier attempt sent/);
+      expect((await itemRow(id)).publishState).toBe("UNCONFIRMED");
+      expect((await auditOf(harry, "marketing.publish.resolve")).at(-1)!.parameters).toMatchObject({ outcome: "NO_RECORD_OF_TEXT" });
+    });
+
+    it("L3 — the Page the attempt went to must still be one this connection can read: otherwise 'not found' means nothing, and nothing is cleared", async () => {
+      w.page.targets = [PAGE, PAGE_B];
+      const body = "Sent to a Page that was later taken away.";
+      const id = await leaveUnconfirmed(harry, "Page taken away", body, "unreadable", PAGE_B.id);
+      dropFromPage(body);
+      const original = await attemptOf(id);
+      expect(original).toMatchObject({ targetId: PAGE_B.id, targetName: PAGE_B.name });
+      // The connection can no longer see that Page.
+      w.page.targets = [PAGE];
+      const looksBefore = w.page.findCalls + w.page.readCalls;
+
+      const settled = await resolve(harry, id);
+
+      expect(settled.status).toBe(409);
+      expect(settled.body.error!.message).toBe(
+        `The earlier attempt went to ${PAGE_B.name}, which this connection can no longer publish to, so JARVIS cannot check whether the post is there. The attempt was not cleared. If the post is live, record this item as published yourself.`
+      );
+      expect(await itemRow(id)).toMatchObject({ publishState: "UNCONFIRMED", publicationMode: null, publishClaimedAt: null });
+      expect(await attemptOf(id)).toEqual(original);
+      expect(w.page.findCalls + w.page.readCalls).toBe(looksBefore);
+      expect((await auditOf(harry, "marketing.publish.resolve")).at(-1)).toMatchObject({ result: "REJECTED", parameters: { outcome: "TARGET_CHANGED", targetId: PAGE_B.id } });
+
+      // And when the list of Pages cannot be read at all, that is "could not check" — not "not there".
+      w.page.targets = [PAGE, PAGE_B];
+      w.page.listable = false;
+      const unreachable = await resolve(harry, id);
+      w.page.listable = true;
+      expect(unreachable.status).toBe(502);
+      expect(unreachable.body.error!.code).toBe("PROVIDER_FAILED");
+      expect((await itemRow(id)).publishState).toBe("UNCONFIRMED");
+      expect(await attemptOf(id)).toEqual(original);
+
+      // With the Page back, the decision goes through.
+      expect((await resolve(harry, id)).body.data).toMatchObject({ resolution: "CLEARED" });
+    });
+
+    // --- L6: the decision and its audit row are one thing ---------------------------
+
+    it("L6 — when the audit row for the decision cannot be written, the attempt is NOT cleared", async () => {
+      const body = "A decision the audit log could not take.";
+      const id = await leaveUnconfirmed(iris, "Audit refused", body, "unreadable");
+      dropFromPage(body);
+      const original = (await attemptOf(id))!;
+      const decisionsBefore = (await auditOf(iris, "marketing.publish.resolve")).length;
+      const sentBefore = w.page.publishCalls.length;
+
+      const stop = await refuseAuditRows(iris, "marketing.publish.resolve");
+      let settled: Reply;
+      try {
+        settled = await resolve(iris, id);
+      } finally {
+        await stop();
+      }
+
+      // Before this rule the attempt was cleared first and the audit row written
+      // afterwards, its failure swallowed: an item made sendable with no record of who decided it.
+      expect(settled.status).toBe(503);
+      expect(settled.body.error!.code).toBe("UNAVAILABLE");
+      expect(settled.body.error!.message).toBe(
+        "Your decision could not be recorded, so the earlier attempt was NOT cleared and nothing was changed. The item is still waiting to be settled. Try again."
+      );
+      const row = await itemRow(id);
+      expect(row).toMatchObject({ status: "READY", publishState: "UNCONFIRMED", publicationMode: null, publishClaimedAt: null });
+      // The attempt is the original one — its Page, its hash, its time — with what was just seen beside it.
+      expect(await attemptOf(id)).toMatchObject({ state: "UNCONFIRMED", code: original.code, at: original.at, targetId: original.targetId, textHash: original.textHash, lastLookup: { result: "NOT_FOUND" } });
+      // No decision row exists, and none claims a clearing.
+      const decisions = await auditOf(iris, "marketing.publish.resolve");
+      expect(decisions).toHaveLength(decisionsBefore);
+      expect(decisions.filter((entry) => (entry.parameters as { contentId?: string; outcome?: string }).contentId === id)).toEqual([]);
+      // So nothing can be sent for it: it cannot be edited, and asking to publish only looks.
+      expect((await w.call(iris, "PATCH", `/marketing/content/${id}`, { notes: "x" })).status).toBe(409);
+      const { reply } = await retry(iris, id);
+      expect(reply.body.error).toMatchObject({ code: "UNCONFIRMED", reason: "NOT_FOUND_ON_PAGE", sentNothing: true });
+      expect(w.page.publishCalls.length).toBe(sentBefore);
+    });
+
+    it("L6 — once the audit log takes the row, the same decision clears the attempt — with exactly one audit row, written with it", async () => {
+      const id = (await prisma!.contentItem.findFirstOrThrow({ where: { userId: iris, title: "Audit refused" } })).id;
+
+      const settled = await resolve(iris, id);
+
+      expect(settled.status, JSON.stringify(settled.body)).toBe(200);
+      expect(settled.body.data).toMatchObject({ resolution: "CLEARED" });
+      expect(await itemRow(id)).toMatchObject({ publishState: "NONE" });
+      const mine = (await auditOf(iris, "marketing.publish.resolve")).filter((entry) => (entry.parameters as { contentId?: string }).contentId === id);
+      expect(mine).toHaveLength(1);
+      expect(mine[0]).toMatchObject({ result: "SUCCESS", parameters: { contentId: id, decision: "NOT_PUBLISHED", outcome: "CLEARED", targetId: PAGE.id } });
+    });
+
+    it("L6 — the same holds when the look FINDS the post: it is not recorded as published without its audit row", async () => {
+      const body = "Found, but the audit log would not take the row.";
+      const id = await leaveUnconfirmed(iris, "Found, audit refused", body, "lost");
+      const original = await attemptOf(id);
+
+      const stop = await refuseAuditRows(iris, "marketing.publish.resolve");
+      let settled: Reply;
+      try {
+        settled = await resolve(iris, id);
+      } finally {
+        await stop();
+      }
+
+      expect(settled.status).toBe(503);
+      expect(settled.body.error!.message).toBe(`The post IS on ${PAGE.name}, but JARVIS could not record that, so nothing was changed. Try again.`);
+      expect(await itemRow(id)).toMatchObject({ status: "READY", publicationMode: null, externalId: null, publishState: "UNCONFIRMED", publishClaimedAt: null });
+      expect(await attemptOf(id)).toEqual(original);
+      // Tried again with the log working, it is recorded — once, with its row.
+      const again = await resolve(iris, id);
+      expect(again.body.data).toMatchObject({ resolution: "FOUND_PUBLISHED" });
+      const mine = (await auditOf(iris, "marketing.publish.resolve")).filter((entry) => (entry.parameters as { contentId?: string }).contentId === id);
+      expect(mine.map((entry) => (entry.parameters as { outcome: string }).outcome)).toEqual(["FOUND_PUBLISHED"]);
+    });
+
+    // =======================================================================
+    // The final review — what happens BETWEEN a check and a claim
+    //
+    // A publish and a settle each read the item, decide, and then take it with
+    // one conditional write. Each case below forces something to happen in
+    // that gap: `w.justBefore(call, …)` runs a complete second operation —
+    // through the same API a second tab would use — at the exact moment before
+    // the first operation's claim, or its record, is written. Nothing is left
+    // to timing, except in the two cases that say "at the same moment".
+    // =======================================================================
+
+    /** A second approval bound to exactly what another one is bound to — what a second tab, or a second conversation, would hold. */
+    async function twinApproval(userId: string, approvalId: string): Promise<string> {
+      const params = await boundTo(approvalId);
+      const twin = await prisma!.approval.create({
+        data: {
+          userId,
+          toolId: T.contentPublish,
+          action: "Publish content item",
+          params: params as never,
+          paramsHash: computeParamsHash(params),
+          riskLevel: "EXTERNAL_SIDE_EFFECT",
+          status: "APPROVED",
+          expiresAt: new Date(Date.now() + 600_000),
+        },
+      });
+      return twin.id;
+    }
+    /** Send the item again and lose the answer: it is unconfirmed once more — by a NEW attempt. */
+    async function sendAndLoseTheAnswer(userId: string, id: string, targetId?: string): Promise<void> {
+      const asked = await w.call(userId, "POST", `/marketing/content/${id}/publish`, targetId ? { targetId } : {});
+      expect(asked.status, JSON.stringify(asked.body)).toBe(202);
+      const approvalId = asked.body.data.approvalId as string;
+      expect((await w.call(userId, "POST", `/approvals/${approvalId}/approve`)).status).toBe(200);
+      w.page.onPublish = "lose-the-answer";
+      const reply = await execute(w, userId, id, approvalId);
+      expect(reply.body.error, JSON.stringify(reply.body)).toMatchObject({ code: "UNCONFIRMED", reason: "AMBIGUOUS_OUTCOME" });
+    }
+    const looks = () => w.page.findCalls + w.page.readCalls;
+    const decisionsAbout = async (userId: string, id: string) =>
+      (await auditOf(userId, "marketing.publish.resolve"))
+        .filter((entry) => (entry.parameters as { contentId?: string }).contentId === id)
+        .map((entry) => [(entry.parameters as { outcome: string }).outcome, entry.result]);
+
+    // --- the retry (the second audit's L4) ------------------------------------------
+
+    it("L4 — two retries of one unconfirmed publish at the same moment: one of them looks, and neither sends", async () => {
+      const body = "Two retries at once.";
+      const id = await leaveUnconfirmed(jack, "Two retries at once", body, "lost");
+      const first = await requestAndApprove(w, jack, id);
+      const second = await twinApproval(jack, first);
+      const sentBefore = w.page.publishCalls.length;
+
+      const replies = await Promise.all([execute(w, jack, id, first), execute(w, jack, id, second)]);
+
+      const recorded = replies.filter((reply) => reply.status === 200);
+      const refused = replies.filter((reply) => reply.status !== 200);
+      expect(recorded).toHaveLength(1);
+      expect(recorded[0]!.body.data).toMatchObject({ status: "PUBLISHED", alreadyPublished: true });
+      expect(refused).toHaveLength(1);
+      expect(refused[0]!.status).toBe(409);
+      expect(refused[0]!.body.error).toMatchObject({ code: "NOT_READY", published: false });
+      expect(w.page.publishCalls.length).toBe(sentBefore);
+      expect(w.page.copiesOf(body)).toBe(1);
+      expect(await itemRow(id)).toMatchObject({ status: "PUBLISHED", publicationMode: "VERIFIED", publishState: "NONE", publishClaimedAt: null });
+    });
+
+    it("L4 — a second retry finishes in the moment between the first one's check and its claim: the first takes nothing, and says what is true — the item is already published", async () => {
+      const body = "A retry inside another retry's window.";
+      const id = await leaveUnconfirmed(jack, "Retry in the window", body, "lost");
+      const first = await requestAndApprove(w, jack, id);
+      const second = await twinApproval(jack, first);
+      const sentBefore = w.page.publishCalls.length;
+      let inner: Reply | undefined;
+      w.justBefore("claimForPublish", async () => {
+        inner = await execute(w, jack, id, second);
+      });
+
+      const outer = await execute(w, jack, id, first);
+
+      expect(inner?.status, JSON.stringify(inner?.body)).toBe(200);
+      expect(inner!.body.data).toMatchObject({ status: "PUBLISHED", alreadyPublished: true });
+      expect(outer.status).toBe(409);
+      expect(outer.body.error).toMatchObject({ code: "NOT_READY", published: false });
+      // Not "nothing was published — ask again to publish it": it has just been recorded as published.
+      expect(outer.body.error!.message).toBe("This item is already published. Nothing new was posted.");
+      expect(w.page.publishCalls.length).toBe(sentBefore);
+      expect(w.page.copiesOf(body)).toBe(1);
+      expect(await itemRow(id)).toMatchObject({ status: "PUBLISHED", publicationMode: "VERIFIED", publishState: "NONE", publishClaimedAt: null });
+      expect(await executionOf(jack, first)).toMatchObject({ status: "FAILED" });
+    });
+
+    it("L4 — the attempt is settled in the moment between a retry's check and its claim: the claim takes nothing, and nothing is sent", async () => {
+      const body = "Cleared inside a retry's window.";
+      const id = await leaveUnconfirmed(jack, "Cleared in the window", body, "unreadable");
+      dropFromPage(body);
+      const look = await requestAndApprove(w, jack, id);
+      const sentBefore = w.page.publishCalls.length;
+      let settled: Reply | undefined;
+      let looksAfterSettle = -1;
+      w.justBefore("claimForPublish", async () => {
+        settled = await resolve(jack, id);
+        looksAfterSettle = looks();
+      });
+
+      const reply = await execute(w, jack, id, look);
+
+      // The retry's own check saw an unconfirmed item — it was one. The claim is what decided.
+      expect(settled?.body.data, JSON.stringify(settled?.body)).toMatchObject({ resolution: "CLEARED" });
+      expect(reply.status).toBe(409);
+      expect(reply.body.error).toMatchObject({ code: "NOT_READY", reason: "STALE", published: false });
+      expect(reply.body.error!.message).toMatch(/only to look for an earlier post, and that attempt has been settled since/);
+      expect(w.page.publishCalls.length).toBe(sentBefore);
+      expect(w.page.copiesOf(body)).toBe(0);
+      expect(looks()).toBe(looksAfterSettle);
+      expect(await itemRow(id)).toMatchObject({ status: "READY", publishState: "NONE", publicationMode: null, publishClaimedAt: null });
+      expect(await attemptOf(id)).toMatchObject({ state: "FAILED", code: "CLEARED_BY_USER" });
+      expect(await executionOf(jack, look)).toMatchObject({ status: "FAILED", errorCode: "STATE_CHANGED" });
+    });
+
+    it("L4 — the attempt is settled AND the item sent again in that moment: the retry holds a claim, finds a different attempt under it, and gives it back untouched", async () => {
+      const body = "Sent again inside a retry's window.";
+      const id = await leaveUnconfirmed(jack, "Sent again in the window", body, "unreadable");
+      dropFromPage(body);
+      const look = await requestAndApprove(w, jack, id);
+      const named = (await boundTo(look)).earlierAttempt;
+      let after: { attempt: unknown; sent: number; looks: number } | undefined;
+      w.justBefore("claimForPublish", async () => {
+        expect((await resolve(jack, id)).body.data).toMatchObject({ resolution: "CLEARED" });
+        await sendAndLoseTheAnswer(jack, id);
+        after = { attempt: await attemptOf(id), sent: w.page.publishCalls.length, looks: looks() };
+      });
+
+      const reply = await execute(w, jack, id, look);
+
+      // The item IS unconfirmed, so the claim was taken — and what lay under it was not the attempt the approval named.
+      expect(after, "the moment never came").toBeDefined();
+      expect(w.page.copiesOf(body)).toBe(1);
+      expect(reply.status).toBe(409);
+      expect(reply.body.error).toMatchObject({ code: "NOT_READY", reason: "STALE", published: false });
+      expect(reply.body.error!.message).toMatch(/The earlier attempt this approval was made to look for is not the one outstanding now/);
+      // The retry sent nothing, looked for nothing and recorded nothing — though the new attempt's post is there to be found.
+      expect(w.page.publishCalls.length).toBe(after!.sent);
+      expect(looks()).toBe(after!.looks);
+      expect(await itemRow(id)).toMatchObject({ status: "READY", publishState: "UNCONFIRMED", publicationMode: null, externalId: null, publishClaimedAt: null });
+      // The new attempt's record is exactly as its own publish left it, and it is not the one that was named.
+      expect(await attemptOf(id)).toEqual(after!.attempt);
+      expect((await w.call(jack, "GET", `/marketing/content/${id}/publish`)).body.data.publishParams.earlierAttempt).not.toBe(named);
+      expect(await executionOf(jack, look)).toMatchObject({ status: "FAILED", errorCode: "ATTEMPT_CHANGED" });
+    });
+
+    it("L4 — and when the item was sent again to ANOTHER Page in that moment, the retry is refused under its claim: nothing is recorded under the wrong Page's name", async () => {
+      w.page.targets = [PAGE, PAGE_B];
+      const body = "Sent to another Page inside a retry's window.";
+      const id = await leaveUnconfirmed(jack, "Another Page in the window", body, "unreadable", PAGE.id);
+      w.page.targets = [PAGE, PAGE_B];
+      dropFromPage(body);
+      const look = await requestAndApprove(w, jack, id);
+      expect(await boundTo(look)).toMatchObject({ targetId: PAGE.id, targetName: PAGE.name });
+      let after: { attempt: unknown; sent: number; looks: number } | undefined;
+      w.justBefore("claimForPublish", async () => {
+        expect((await resolve(jack, id)).body.data).toMatchObject({ resolution: "CLEARED" });
+        await sendAndLoseTheAnswer(jack, id, PAGE_B.id);
+        after = { attempt: await attemptOf(id), sent: w.page.publishCalls.length, looks: looks() };
+      });
+
+      const reply = await execute(w, jack, id, look);
+
+      expect(after, "the moment never came").toBeDefined();
+      expect(after!.attempt).toMatchObject({ targetId: PAGE_B.id, targetName: PAGE_B.name });
+      expect(reply.status).toBe(409);
+      expect(reply.body.error).toMatchObject({ code: "NOT_READY", reason: "TARGET_REFUSED", published: false });
+      expect(reply.body.error!.message).toContain(PAGE_B.name);
+      expect(reply.body.error!.message).toMatch(/cannot be sent to a different Page/);
+      // The second attempt's post IS on the other Page. It was not looked for, and nothing says this item was published to the first.
+      expect(w.page.on(PAGE_B.id)).toContain(body);
+      expect(looks()).toBe(after!.looks);
+      expect(w.page.publishCalls.length).toBe(after!.sent);
+      expect(await itemRow(id)).toMatchObject({ status: "READY", publishState: "UNCONFIRMED", publicationMode: null, publishedTarget: null, externalId: null, publishClaimedAt: null });
+      expect(await attemptOf(id)).toEqual(after!.attempt);
+    });
+
+    it("L4 — a send goes out, unconfirmed, in the moment between another send's check and its claim: the second sends nothing", async () => {
+      const body = "Two sends, one inside the other's window.";
+      const id = await readyItem(w, jack, "Send in the window", body);
+      const first = await requestAndApprove(w, jack, id);
+      const second = await twinApproval(jack, first);
+      let inner: Reply | undefined;
+      let looksAfter = -1;
+      w.justBefore("claimForPublish", async () => {
+        w.page.onPublish = "lose-the-answer";
+        inner = await execute(w, jack, id, first);
+        looksAfter = looks();
+      });
+
+      const outer = await execute(w, jack, id, second);
+
+      expect(inner?.body.error, JSON.stringify(inner?.body)).toMatchObject({ code: "UNCONFIRMED", reason: "AMBIGUOUS_OUTCOME" });
+      expect(outer.status).toBe(409);
+      expect(outer.body.error).toMatchObject({ code: "NOT_READY", reason: "STALE", published: false });
+      expect(outer.body.error!.message).toMatch(/this approval was for sending the post, not for looking for that one/);
+      // One post went out — the first send's. The second approval sent nothing and looked for nothing.
+      expect(w.page.copiesOf(body)).toBe(1);
+      expect(looks()).toBe(looksAfter);
+      expect(await itemRow(id)).toMatchObject({ status: "READY", publishState: "UNCONFIRMED", publicationMode: null, publishClaimedAt: null });
+      expect(await executionOf(jack, second)).toMatchObject({ status: "FAILED", errorCode: "STATE_CHANGED" });
+    });
+
+    // --- the settle ------------------------------------------------------------------
+
+    it("settle race — a retry finds the post and records it in the moment between a settle's check and its claim: the settle clears nothing", async () => {
+      const body = "Found inside a settle's window.";
+      const id = await leaveUnconfirmed(kate, "Found in the settle window", body, "lost");
+      const look = await requestAndApprove(w, kate, id);
+      let inner: Reply | undefined;
+      w.justBefore("claimUnconfirmed", async () => {
+        inner = await execute(w, kate, id, look);
+      });
+
+      const settled = await resolve(kate, id);
+
+      expect(inner?.status, JSON.stringify(inner?.body)).toBe(200);
+      expect(settled.status).toBe(409);
+      expect(settled.body.error).toMatchObject({ code: "CONFLICT" });
+      expect(settled.body.error!.message).toBe("This item's publish is no longer waiting to be settled. Nothing was changed.");
+      const row = await itemRow(id);
+      expect(row).toMatchObject({ status: "PUBLISHED", publicationMode: "VERIFIED", publishState: "NONE", publishClaimedAt: null });
+      expect(w.page.posts.get(row.externalId!)!.message).toBe(body);
+      expect(await decisionsAbout(kate, id)).toEqual([]);
+    });
+
+    it("settle race — the attempt is cleared and the item sent again in that moment: the settle does not clear the NEW attempt on a decision made about the old one", async () => {
+      const body = "Sent again inside a settle's window.";
+      const id = await leaveUnconfirmed(kate, "Sent again in the settle window", body, "unreadable");
+      dropFromPage(body);
+      let after: { attempt: unknown; sent: number; looks: number } | undefined;
+      w.justBefore("claimUnconfirmed", async () => {
+        // Another tab settles the first attempt and publishes again; that answer is lost too...
+        expect((await resolve(kate, id)).body.data).toMatchObject({ resolution: "CLEARED" });
+        await sendAndLoseTheAnswer(kate, id);
+        // ...and, as can happen, the Page does not return the new post when it is looked for.
+        dropFromPage(body);
+        after = { attempt: await attemptOf(id), sent: w.page.publishCalls.length, looks: looks() };
+      });
+
+      const settled = await resolve(kate, id);
+
+      // The settle's first read saw one attempt; the claim it then took holds another. A decision made about
+      // the first is not carried out on the second.
+      expect(after, "the moment never came").toBeDefined();
+      expect(settled.status).toBe(409);
+      expect(settled.body.error).toMatchObject({ code: "CONFLICT" });
+      expect(settled.body.error!.message).toBe("The earlier attempt changed while it was being settled, so nothing was cleared. Look at the item again and decide again.");
+      // The new attempt is still outstanding, exactly as its own publish left it: not cleared, and not looked for.
+      expect(await itemRow(id)).toMatchObject({ status: "READY", publishState: "UNCONFIRMED", publicationMode: null, publishClaimedAt: null });
+      expect(await attemptOf(id)).toEqual(after!.attempt);
+      expect(looks()).toBe(after!.looks);
+      expect(w.page.publishCalls.length).toBe(after!.sent);
+      // One clearing is on the record — the one made in the other tab — and this refusal beside it.
+      expect(await decisionsAbout(kate, id)).toEqual([
+        ["CLEARED", "SUCCESS"],
+        ["ATTEMPT_CHANGED", "REJECTED"],
+      ]);
+      // So nothing can be sent for it: it cannot be edited, and asking to publish only looks.
+      expect((await w.call(kate, "PATCH", `/marketing/content/${id}`, { notes: "x" })).status).toBe(409);
+      expect((await w.call(kate, "GET", `/marketing/content/${id}/publish`)).body.data.warning).toMatch(/only LOOKS/);
+    });
+
+    it("settle race — the row's words are changed underneath in that moment: the check made UNDER the claim refuses, and nothing is looked for or cleared", async () => {
+      const body = "Changed inside a settle's window.";
+      const id = await leaveUnconfirmed(kate, "Changed in the settle window", body, "unreadable");
+      dropFromPage(body);
+      const original = await attemptOf(id);
+      let asksBefore = -1;
+      w.justBefore("claimUnconfirmed", async () => {
+        // Not through the service, which refuses an edit — straight into the row, as a fault or a hand might.
+        await prisma!.contentItem.update({ where: { id }, data: { body: "Other words entirely." } });
+        asksBefore = looks() + w.page.listCalls;
+      });
+
+      const settled = await resolve(kate, id);
+
+      // The settle's first check saw the words the attempt sent — they were there. The one under the claim is what refused.
+      expect(asksBefore).toBeGreaterThanOrEqual(0);
+      expect(settled.status).toBe(409);
+      expect(settled.body.error!.message).toMatch(/not the text the earlier attempt sent, so looking for it on the Page would prove nothing/);
+      expect(looks() + w.page.listCalls).toBe(asksBefore);
+      expect(await itemRow(id)).toMatchObject({ status: "READY", publishState: "UNCONFIRMED", publicationMode: null, publishClaimedAt: null });
+      expect(await attemptOf(id)).toEqual(original);
+      expect(await decisionsAbout(kate, id)).toEqual([["TEXT_CHANGED", "REJECTED"]]);
+    });
+
+    it("settle race — another item records the very post a settle has just found: the post is not recorded twice", async () => {
+      const body = "One post, two settles.";
+      const mine = await leaveUnconfirmed(kate, "One post, mine", body, "lost");
+      const post = [...w.page.posts.values()].find((entry) => entry.message === body)!.externalId;
+      const twin = await leaveUnconfirmed(kate, "One post, twin", body, "lost");
+      // The twin's own send left nothing on the Page: the one post with these words is the first item's.
+      for (const [key, entry] of w.page.posts) if (entry.message === body && key !== post) w.page.posts.delete(key);
+      const original = await attemptOf(mine);
+      let came = false;
+      w.justBefore("finalizePublished", async () => {
+        // At the moment this settle is about to record the post it found, the twin — settled at the same
+        // time, having found the same post — records it first.
+        const direct = new db!.PrismaMarketingRepository(prisma!);
+        expect(await direct.claimUnconfirmed(kate, twin)).toBe(true);
+        const recorded = await direct.finalizePublished(kate, twin, {
+          provider: "p15-fake-page",
+          targetName: PAGE.name,
+          externalId: post,
+          url: null,
+          publishedAt: new Date(),
+          verifiedAt: new Date(),
+        });
+        expect(recorded).not.toBeNull();
+        came = true;
+      });
+
+      const settled = await resolve(kate, mine);
+
+      expect(came).toBe(true);
+      expect(settled.status).toBe(409);
+      expect(settled.body.error).toMatchObject({ code: "CONFLICT" });
+      expect(settled.body.error!.message).toMatch(/has just been recorded as another calendar item's post, so it was not recorded as this one's/);
+      expect(await itemRow(mine)).toMatchObject({ status: "READY", publicationMode: null, externalId: null, publishState: "UNCONFIRMED", publishClaimedAt: null });
+      expect(await attemptOf(mine)).toEqual(original);
+      expect(await itemRow(twin)).toMatchObject({ status: "PUBLISHED", publicationMode: "VERIFIED", externalId: post });
+      expect(await prisma!.contentItem.count({ where: { externalId: post } })).toBe(1);
+      expect(await decisionsAbout(kate, mine)).toEqual([["POST_RECORDED_ELSEWHERE", "REJECTED"]]);
+    });
+
+    it("settle race — a settle and a retry at the same moment, several times over: nothing is sent, nothing is recorded, and the attempt is cleared only by the settle", async () => {
+      for (let round = 0; round < 3; round += 1) {
+        const body = `Settled and retried at once, round ${round}.`;
+        const id = await leaveUnconfirmed(liam, `Both at once ${round}`, body, "unreadable");
+        dropFromPage(body);
+        const look = await requestAndApprove(w, liam, id);
+        const sentBefore = w.page.publishCalls.length;
+
+        const [settled, looked] = await Promise.all([resolve(liam, id), execute(w, liam, id, look)]);
+
+        const row = await itemRow(id);
+        const cleared = (await decisionsAbout(liam, id)).filter(([outcome]) => outcome === "CLEARED");
+        expect(w.page.publishCalls.length, `round ${round}`).toBe(sentBefore);
+        expect(w.page.copiesOf(body), `round ${round}`).toBe(0);
+        expect(looked.status, `round ${round}`).not.toBe(200);
+        expect(row.publicationMode, `round ${round}`).toBeNull();
+        expect(row.publishClaimedAt, `round ${round}`).toBeNull();
+        if (settled.status === 200) {
+          expect(settled.body.data, `round ${round}`).toMatchObject({ resolution: "CLEARED" });
+          expect(row.publishState, `round ${round}`).toBe("NONE");
+          expect(cleared, `round ${round}`).toHaveLength(1);
+        } else {
+          expect(settled.status, `round ${round}`).toBe(409);
+          expect(row.publishState, `round ${round}`).toBe("UNCONFIRMED");
+          expect(cleared, `round ${round}`).toHaveLength(0);
+        }
+      }
+    });
+
+    it("none of it put the text of a post into a publish or a decision audit row", async () => {
+      const rows = await prisma!.auditLog.findMany({
+        where: {
+          userId: { in: [carol, dave, erin, frank, gina, harry, iris, jack, kate, liam] },
+          action: { in: ["marketing.publish", "marketing.publish.resolve"] },
+        },
+      });
+
+      expect(rows.length).toBeGreaterThan(10);
+      for (const row of rows) {
+        const keys = Object.keys((row.parameters ?? {}) as Record<string, unknown>);
+        expect(keys.every((key) => ["contentId", "decision", "externalId", "outcome", "targetId"].includes(key)), JSON.stringify(row.parameters)).toBe(true);
+      }
+    });
+  });
+
+  // =========================================================================
+  // 10. Limits that hold when requests arrive together (audit findings M2, M3)
+  // =========================================================================
+
+  describe("work that reaches outside JARVIS takes a slot first — also when requests arrive together", () => {
+    let w: World;
+    const reservations = (userId: string, bucket: string) => prisma!.auditLog.count({ where: { userId, action: `marketing.${bucket}` } });
+    const providerReads = () => w.ads.insightCalls.length + w.ads.campaignCalls.length;
+    const count = (replies: Reply[], status: number) => replies.filter((reply) => reply.status === status).length;
+
+    beforeAll(() => {
+      w = buildWorld();
+      w.web.pages.set("https://kiln.example/", OWN_PAGE);
+      w.web.pages.set("https://mudhouse.example/", RIVAL_PAGE_V1);
+    });
+    afterAll(() => w.close());
+
+    it("M2 — sixty page reads asked for at the same moment: exactly the limit is read", async () => {
+      const user = await newUser("burst-reader", "member", true);
+      const { limit, bucket } = src!.service.RESEARCH_RATE_LIMIT;
+      // Slow enough that every request is in flight before the first finishes.
+      w.web.delayMs = 200;
+      const fetchedBefore = w.web.fetched.length;
+
+      const replies = await Promise.all(Array.from({ length: 60 }, () => w.call(user, "POST", "/marketing/research/seo-audit", { url: "https://kiln.example/" })));
+      w.web.delayMs = 0;
+
+      expect(count(replies, 201)).toBe(limit);
+      expect(count(replies, 429)).toBe(60 - limit);
+      for (const refused of replies.filter((reply) => reply.status === 429)) expect(refused.body.error?.code).toBe("RATE_LIMITED");
+      // The pages that were fetched are exactly the reads that were allowed.
+      expect(w.web.fetched.length - fetchedBefore).toBe(limit);
+      expect(await prisma!.marketingResearch.count({ where: { userId: user } })).toBe(limit);
+      expect(await reservations(user, bucket)).toBe(limit);
+      expect(await auditOf(user, "marketing.research.throttled")).toHaveLength(60 - limit);
+    }, 60_000);
+
+    it("M2 — the slot is taken per page: a comparison's second read is refused, and is not fetched", async () => {
+      const user = await newUser("two-pages", "member", true);
+      const { limit, bucket } = src!.service.RESEARCH_RATE_LIMIT;
+      for (let i = 0; i < limit - 1; i += 1) {
+        expect((await w.call(user, "POST", "/marketing/research/seo-audit", { url: "https://kiln.example/" })).status, `read ${i + 1}`).toBe(201);
+      }
+      const fetchedBefore = w.web.fetched.length;
+
+      const reply = await w.call(user, "POST", "/marketing/research/competitor", { competitorUrl: "https://mudhouse.example/", ownUrl: "https://kiln.example/" });
+
+      // The competitor's page took the last slot. The user's own page was never requested.
+      expect(reply.status).toBe(201);
+      expect(w.web.fetched.slice(fetchedBefore)).toEqual(["https://mudhouse.example/"]);
+      expect(await reservations(user, bucket)).toBe(limit);
+    }, 60_000);
+
+    it("M3 — repeated reports: the limit, then refusals that read nothing from the ad account", async () => {
+      const user = await newUser("report-repeat", "member", true);
+      const { limit, bucket } = src!.service.REPORT_RATE_LIMIT;
+      for (let i = 0; i < limit; i += 1) {
+        expect((await w.call(user, "POST", "/marketing/reports", {})).status, `report ${i + 1}`).toBe(201);
+      }
+      const readsBefore = providerReads();
+      const toolRunsBefore = w.executed.filter((request) => request.toolId.startsWith("meta.")).length;
+
+      const over = await w.call(user, "POST", "/marketing/reports", {});
+      const again = await w.call(user, "POST", "/marketing/reports", { kind: "CLIENT" });
+
+      expect(over.status).toBe(429);
+      expect(over.body.error?.code).toBe("RATE_LIMITED");
+      expect(again.status).toBe(429);
+      // Refused BEFORE the provider: not one read tool was run for either request.
+      expect(providerReads()).toBe(readsBefore);
+      expect(w.executed.filter((request) => request.toolId.startsWith("meta.")).length).toBe(toolRunsBefore);
+      expect(await prisma!.marketingReport.count({ where: { userId: user } })).toBe(limit);
+      expect(await reservations(user, bucket)).toBe(limit);
+      expect(await auditOf(user, "marketing.report.throttled")).toHaveLength(2);
+      // Opening saved reports is not metered: it reads nothing outside JARVIS.
+      expect((await w.call(user, "GET", "/marketing/reports")).status).toBe(200);
+    }, 120_000);
+
+    it("M3 — thirty reports asked for at the same moment: exactly the limit read the ad account", async () => {
+      const probe = await newUser("report-probe", "member", true);
+      const before = providerReads();
+      expect((await w.call(probe, "POST", "/marketing/reports", {})).status).toBe(201);
+      const readsPerReport = providerReads() - before;
+      expect(readsPerReport).toBeGreaterThan(0);
+
+      const user = await newUser("report-burst", "member", true);
+      const { limit, bucket } = src!.service.REPORT_RATE_LIMIT;
+      const readsBefore = providerReads();
+
+      const replies = await Promise.all(Array.from({ length: 30 }, () => w.call(user, "POST", "/marketing/reports", {})));
+
+      expect(count(replies, 201)).toBe(limit);
+      expect(count(replies, 429)).toBe(30 - limit);
+      expect(providerReads() - readsBefore).toBe(limit * readsPerReport);
+      expect(await prisma!.marketingReport.count({ where: { userId: user } })).toBe(limit);
+      expect(await reservations(user, bucket)).toBe(limit);
+    }, 120_000);
+
+    it("M3 — a user at the report cap is refused before the ad account is read, and uses no slot", async () => {
+      const user = await newUser("report-cap", "member", true);
+      const cap = MARKETING_LIMITS.reportsPerUser;
+      await prisma!.marketingReport.createMany({
+        data: Array.from({ length: cap }, (_, index) => ({
+          userId: user,
+          kind: "PERFORMANCE",
+          title: `Filler ${index}`,
+          periodStart: new Date("2026-01-01T00:00:00.000Z"),
+          periodEnd: new Date("2026-01-31T00:00:00.000Z"),
+          document: {},
+        })),
+      });
+      const readsBefore = providerReads();
+
+      const reply = await w.call(user, "POST", "/marketing/reports", {});
+
+      expect(reply.status).toBe(409);
+      expect(reply.body.error?.code).toBe("LIMIT");
+      expect(providerReads()).toBe(readsBefore);
+      expect(await reservations(user, src!.service.REPORT_RATE_LIMIT.bucket)).toBe(0);
+      expect(await prisma!.marketingReport.count({ where: { userId: user } })).toBe(cap);
+    }, 60_000);
+
+    it("M3 — repeated publish checks: the limit, then refusals that never ask the provider — and no approval is created", async () => {
+      const user = await newUser("check-repeat", "member", true);
+      const id = await readyItem(w, user, "Checked often", "A post that is checked again and again.");
+      const { limit, bucket } = src!.service.PUBLISH_CHECK_RATE_LIMIT;
+      for (let i = 0; i < limit; i += 1) {
+        expect((await w.call(user, "GET", `/marketing/content/${id}/publish`)).status, `check ${i + 1}`).toBe(200);
+      }
+      const asksBefore = w.page.listCalls;
+
+      const over = await w.call(user, "GET", `/marketing/content/${id}/publish`);
+      const asked = await w.call(user, "POST", `/marketing/content/${id}/publish`, {});
+
+      expect(over.status).toBe(429);
+      expect(over.body.error?.code).toBe("RATE_LIMITED");
+      expect(asked.status).toBe(429);
+      expect(asked.body.error).toMatchObject({ code: "RATE_LIMITED", published: false });
+      expect(w.page.listCalls).toBe(asksBefore);
+      expect(await approvalsOf(user)).toHaveLength(0);
+      expect(await reservations(user, bucket)).toBe(limit);
+      expect(await auditOf(user, "marketing.publish.check_throttled")).toHaveLength(2);
+    }, 120_000);
+
+    it("M3 — a hundred publish checks at the same moment: exactly the limit reach the provider", async () => {
+      const user = await newUser("check-burst", "member", true);
+      const id = await readyItem(w, user, "Checked at once", "A post checked a hundred times at once.");
+      const { limit, bucket } = src!.service.PUBLISH_CHECK_RATE_LIMIT;
+      const asksBefore = w.page.listCalls;
+
+      const replies = await Promise.all(Array.from({ length: 100 }, () => w.call(user, "GET", `/marketing/content/${id}/publish`)));
+
+      expect(count(replies, 200)).toBe(limit);
+      expect(count(replies, 429)).toBe(100 - limit);
+      expect(w.page.listCalls - asksBefore).toBe(limit);
+      expect(await reservations(user, bucket)).toBe(limit);
+    }, 120_000);
+
+    it("one user's limits are not another's, and one kind of work does not use another's slots", async () => {
+      const spent = await newUser("limit-spent", "member", true);
+      const fresh = await newUser("limit-fresh", "member", true);
+      const { limit } = src!.service.REPORT_RATE_LIMIT;
+      for (let i = 0; i < limit; i += 1) await w.call(spent, "POST", "/marketing/reports", {});
+      expect((await w.call(spent, "POST", "/marketing/reports", {})).status).toBe(429);
+
+      // Another user is untouched; and the first user's page reads are a different window.
+      expect((await w.call(fresh, "POST", "/marketing/reports", {})).status).toBe(201);
+      expect((await w.call(spent, "POST", "/marketing/research/seo-audit", { url: "https://kiln.example/" })).status).toBe(201);
+    }, 120_000);
+  });
+
+  // =========================================================================
+  // 11. Publishing switched off (audit finding M4)
+  // =========================================================================
+
+  describe("where publishing is switched off, nothing can ask for a publish — from the page or from chat", () => {
+    const OFF = "Publishing is switched off on this server. An administrator can switch it on by setting MARKETING_PUBLISH_ENABLED=true and restarting.";
+    let off: World;
+    let user: string;
+    let id: string;
+
+    beforeAll(async () => {
+      off = buildWorld({ publisher: false, publishingReason: OFF });
+      user = await newUser("switched-off", "member", true);
+      id = await readyItem(off, user, "Ready, nowhere to go", "A ready post on a server that cannot publish.");
+    });
+    afterAll(() => off.close());
+
+    it("the page is told so, in the operator's terms, and is offered no publish or settle control", async () => {
+      const status = (await off.call(user, "GET", "/marketing/status")).body.data;
+
+      expect(status.publishing).toEqual({ available: false, channels: [], reason: OFF });
+      expect(status.caller).toMatchObject({ canEdit: true, canPublish: false, canResolve: false });
+    });
+
+    it("asking, executing, checking and settling from the page are all refused — and no approval comes to exist", async () => {
+      const asked = await off.call(user, "POST", `/marketing/content/${id}/publish`, {});
+      const executed = await off.call(user, "POST", `/marketing/content/${id}/publish`, { approvalId: "an-approval-id" });
+      const check = await off.call(user, "GET", `/marketing/content/${id}/publish`);
+      const settle = await off.call(user, "POST", `/marketing/content/${id}/publish/resolve`, { decision: "NOT_PUBLISHED" });
+
+      expect(asked.status).toBe(503);
+      expect(asked.body.error).toMatchObject({ code: "UNAVAILABLE", message: OFF, published: false });
+      expect(executed.status).toBe(503);
+      expect(executed.body.error).toMatchObject({ code: "UNAVAILABLE", message: OFF, published: false });
+      expect(check.status).toBe(503);
+      expect(settle.status).toBe(503);
+      expect(await approvalsOf(user)).toHaveLength(0);
+      expect(off.page.publishCalls).toHaveLength(0);
+      expect(off.page.listCalls).toBe(0);
+    });
+
+    it("a model that calls the publish tools in chat is ANSWERED, not failed — and nothing comes to exist: no pending action, no approval, no execution, no post", async () => {
+      off.model
+        .propose(T.publishPrepare, { contentId: id })
+        .propose(T.contentPublish, { contentId: id, targetId: PAGE.id, targetName: PAGE.name, message: "A ready post on a server that cannot publish." });
+      const requestsBefore = off.model.requests.length;
+
+      const conversation = await off.open(user, "Publish the Ready, nowhere to go post to our Facebook page.");
+      off.model.clear();
+
+      // The turn is answered. Before this (second audit, M1) both calls reached the executor, came back
+      // "Tool not found", and a turn whose every tool call failed was HTTP 500 "Data retrieval failed." —
+      // an error, for what is a setting.
+      expect(conversation.first.status, JSON.stringify(conversation.first.body)).toBe(200);
+      expect(conversation.first.body.success).toBe(true);
+      expect(conversation.first.body.error).toBeUndefined();
+      expect(conversation.first.body.data.agentId).toBe(AGENT_IDS.marketing);
+      expect(conversation.first.body.data.message).toBe("Done.");
+      expect(conversation.first.body.data.pendingAction).toBeUndefined();
+
+      // Each call was answered as switched off, in the server's own words: not failed, and not denied.
+      const summary = conversation.first.body.data.metadata.toolExecution;
+      expect(summary).toMatchObject({ total: 2, failed: 0, denied: 0, allFailed: false });
+      expect(summary.executions.map((entry: { toolId: string; status: string; error: string }) => [entry.toolId, entry.status, entry.error])).toEqual([
+        [T.publishPrepare, "unavailable", `${OFF} Nothing was done.`],
+        [T.contentPublish, "unavailable", `${OFF} Nothing was done.`],
+      ]);
+
+      // The model was told so plainly — what is off, how it is switched on and by whom, and not to try another way.
+      const shown = off.model.toolResultsSeen();
+      expect(shown).toContain("STATUS: UNAVAILABLE");
+      expect(shown).toContain(`ERROR: ${OFF} Nothing was done.`);
+      expect(shown).toContain("MARKETING_PUBLISH_ENABLED=true");
+      expect(shown).toContain("Do NOT retry it and do NOT look for another way");
+      expect(shown).not.toContain("Tool not found");
+
+      // And it was never told it could publish here, nor handed a tool that could.
+      const first = off.model.requests[requestsBefore]!;
+      const system = String(first.messages.find((message) => message.role === "system")?.content ?? "");
+      expect(system).toContain("=== PUBLISHING IS NOT AVAILABLE ON THIS SERVER ===");
+      expect(system).toContain(OFF);
+      expect(system).not.toContain("call the publish tool");
+      expect(system).not.toContain("publishParams");
+      const handed = (first.tools ?? []).map((tool) => tool.name);
+      expect(handed).toContain("marketing-content-list");
+      expect(handed).not.toContain("marketing-publish-prepare");
+      expect(handed).not.toContain("marketing-content-publish");
+
+      // WHAT DID NOT COME TO EXIST. The executor was never asked to run anything for this conversation...
+      expect(off.executed.filter((request) => request.conversationId === conversation.conversationId)).toEqual([]);
+      // ...so no run of the publish tool was ever recorded here, and the only runs of the publish check are the
+      // page's own, above, which found no tool.
+      const runs = await prisma!.auditLog.findMany({ where: { userId: user, action: "tool.execute", toolId: { in: [T.publishPrepare, T.contentPublish] } } });
+      expect(runs.filter((row) => row.toolId === T.contentPublish)).toHaveLength(0);
+      expect(runs.every((row) => row.result === "FAILURE")).toBe(true);
+      // Each refusal is on the audit log, by tool and by agent, with none of the post in it.
+      const refused = await auditOf(user, "agent.tool_unavailable");
+      expect(refused.map((row) => [row.toolId, row.result, row.agentId])).toEqual([
+        [T.publishPrepare, "REJECTED", AGENT_IDS.marketing],
+        [T.contentPublish, "REJECTED", AGENT_IDS.marketing],
+      ]);
+      expect(JSON.stringify(refused)).not.toContain("A ready post on a server that cannot publish.");
+      expect(await approvalsOf(user)).toHaveLength(0);
+      expect(await prisma!.toolExecution.count({ where: { userId: user } })).toBe(0);
+      expect(off.page.publishCalls).toHaveLength(0);
+      expect(off.page.listCalls).toBe(0);
+      expect((await itemRow(id)).status).toBe("READY");
+    });
+
+    it("the conversation carries on afterwards: the same person can still read their calendar in it", async () => {
+      off.model.propose(T.contentList, {});
+
+      const conversation = await off.open(user, "What is on the content calendar?");
+      off.model.clear();
+
+      expect(conversation.first.status).toBe(200);
+      expect(conversation.first.body.data.metadata.toolExecution).toMatchObject({ total: 1, succeeded: 1, allSucceeded: true });
+      expect(off.model.toolResultsSeen()).toContain("Ready, nowhere to go");
+    });
+
+    it("where publishing IS available the same call is not answered as switched off: it becomes the pending action it always did", async () => {
+      const on = buildWorld();
+      try {
+        const member = await newUser("switched-on", "member", true);
+        const item = await readyItem(on, member, "Ready, somewhere to go", "A ready post on a server that can publish.");
+        on.model.propose(T.contentPublish, { contentId: item, targetId: PAGE.id, targetName: PAGE.name, message: "A ready post on a server that can publish." });
+
+        const conversation = await on.open(member, "Publish the Ready, somewhere to go post to our Facebook page.");
+
+        expect(conversation.first.status).toBe(200);
+        expect(conversation.first.body.data.pendingAction).toMatchObject({ toolId: T.contentPublish });
+        expect(await auditOf(member, "agent.tool_unavailable")).toHaveLength(0);
+        // And there, the agent IS told how to publish, and is handed the tools to do it.
+        const system = String(on.model.requests[0]!.messages.find((message) => message.role === "system")?.content ?? "");
+        expect(system).toContain("=== PUBLISHING ===");
+        expect(system).not.toContain("PUBLISHING IS NOT AVAILABLE");
+        expect((on.model.requests[0]!.tools ?? []).map((tool) => tool.name)).toEqual(expect.arrayContaining(["marketing-publish-prepare", "marketing-content-publish"]));
+        expect(on.page.publishCalls).toHaveLength(0);
+      } finally {
+        on.close();
+      }
+    });
+  });
+
+  // =========================================================================
+  // 12. What was left behind
   // =========================================================================
 
   describe("what the whole journey left behind", () => {

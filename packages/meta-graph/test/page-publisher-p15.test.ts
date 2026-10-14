@@ -12,6 +12,7 @@ import { describe, it, expect } from "vitest";
 import { PublisherError } from "@jarvis/tools";
 import { MetaRequestAbortedError, type MetaHttpClient, type MetaHttpRequest, type MetaHttpResponse } from "../src/client.js";
 import { META_PAGE_PUBLISHER_ID, createMetaPagePublisher } from "../src/page-publisher.js";
+import { isPagePublishingEnabled } from "../src/config.js";
 
 const USER_TOKEN = "EAAuserTokenNeverShown";
 const PAGE_TOKEN = "EAApageTokenNeverShown";
@@ -332,5 +333,85 @@ describe("looking for a post an earlier attempt may have made", () => {
   it("a failure while looking is 'could not check' — never 'not found'", async () => {
     const { publisher } = harness(withPages(() => metaError(500, 1)));
     expect(((await failure(publisher.findByMessage({ targetId: PAGE_ID, message: "x", since }))) as PublisherError).code).toBe("UNAVAILABLE");
+  });
+
+  // Second audit, L2 — two calendar items can hold the same words. A post
+  // that is already known to be another item's is passed over, so that this
+  // item's own post, further down, can still be found.
+  describe("passing over posts the caller knows are something else's", () => {
+    const twins = () =>
+      feed([
+        entry("7", "Festive offer is live.", "2026-10-12T10:02:00+0000"),
+        entry("8", "A different post", "2026-10-12T10:01:00+0000"),
+        entry("9", "Festive offer is live.", "2026-10-12T10:00:30+0000"),
+      ]);
+    const look = (publisher: ReturnType<typeof feed>["publisher"], excludeIds?: readonly string[]) =>
+      publisher.findByMessage({ targetId: PAGE_ID, message: "Festive offer is live.", since, ...(excludeIds ? { excludeIds } : {}) });
+
+    it("with nothing to pass over, the first post with the text is the answer — as before", async () => {
+      expect((await look(twins().publisher))!.externalId).toBe(`${PAGE_ID}_7`);
+      expect((await look(twins().publisher, []))!.externalId).toBe(`${PAGE_ID}_7`);
+    });
+
+    it("passes over a post it was told is another's, and finds the next one with the same text", async () => {
+      expect((await look(twins().publisher, [`${PAGE_ID}_7`]))!.externalId).toBe(`${PAGE_ID}_9`);
+    });
+
+    it("says not found when every post with the text is one it was told to pass over", async () => {
+      expect(await look(twins().publisher, [`${PAGE_ID}_7`, `${PAGE_ID}_9`])).toBeNull();
+    });
+
+    it("never hands back a post it was told to pass over", async () => {
+      const { publisher } = feed([entry("7", "Festive offer is live.", "2026-10-12T10:02:00+0000")]);
+      expect(await look(publisher, [`${PAGE_ID}_7`])).toBeNull();
+    });
+
+    it("an id that is not on the Page changes nothing", async () => {
+      expect((await look(twins().publisher, [`${PAGE_ID}_404`]))!.externalId).toBe(`${PAGE_ID}_7`);
+    });
+
+    it("sends the provider nothing about what it passes over: the same single read", async () => {
+      const { publisher, recorded } = twins();
+      await look(publisher, [`${PAGE_ID}_7`]);
+
+      const reads = recorded.filter((r) => r.request.path === `${PAGE_ID}/published_posts`);
+      expect(reads).toHaveLength(1);
+      expect(JSON.stringify(reads[0]!.request.params)).not.toContain(`${PAGE_ID}_7`);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The switch. Having the credentials is not the same as being asked to publish.
+// ---------------------------------------------------------------------------
+
+describe("publishing is switched on by the operator, exactly", () => {
+  it("is off when the variable is absent", () => {
+    expect(isPagePublishingEnabled({})).toBe(false);
+  });
+
+  it("is on for exactly the word true", () => {
+    expect(isPagePublishingEnabled({ MARKETING_PUBLISH_ENABLED: "true" })).toBe(true);
+  });
+
+  it.each(["", "false", "0", "1", "yes", "on", "TRUE", "True", " true", "true ", "enabled"])("stays off for %j", (value) => {
+    expect(isPagePublishingEnabled({ MARKETING_PUBLISH_ENABLED: value })).toBe(false);
+  });
+
+  it("is not switched on by the credentials that read the ad account", () => {
+    expect(isPagePublishingEnabled({ META_ACCESS_TOKEN: "not-a-real-token", META_AD_ACCOUNT_ID: "act_000000000000015" })).toBe(false);
+  });
+
+  it("reads the process environment when given nothing", () => {
+    const before = process.env.MARKETING_PUBLISH_ENABLED;
+    try {
+      delete process.env.MARKETING_PUBLISH_ENABLED;
+      expect(isPagePublishingEnabled()).toBe(false);
+      process.env.MARKETING_PUBLISH_ENABLED = "true";
+      expect(isPagePublishingEnabled()).toBe(true);
+    } finally {
+      if (before === undefined) delete process.env.MARKETING_PUBLISH_ENABLED;
+      else process.env.MARKETING_PUBLISH_ENABLED = before;
+    }
   });
 });

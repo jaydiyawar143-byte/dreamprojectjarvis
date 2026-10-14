@@ -47,7 +47,7 @@ type Step =
   | { kind: "choose-target"; targets: PublishTarget[]; message: string }
   | { kind: "confirm"; ask: MarketingPublishAsk; error: string | null }
   | { kind: "published"; message: string; url: string | null; alreadyPublished: boolean }
-  | { kind: "unconfirmed"; message: string }
+  | { kind: "unconfirmed"; message: string; sentNothing: boolean }
   | { kind: "declined" }
   | { kind: "refused"; title: string; message: string };
 
@@ -58,6 +58,7 @@ const REFUSAL_TITLE: Record<string, string> = {
   NOT_FOUND: "Not found",
   FORBIDDEN: "Your role cannot publish",
   UNAVAILABLE: "Publishing is not available here",
+  RATE_LIMITED: "Too many checks — nothing was posted",
   FAILED: "Not published",
 };
 
@@ -113,7 +114,7 @@ export function PublishPanel({
       const message = error.message || "The publish did not go through. Nothing is marked as published.";
 
       if (error.code === "UNCONFIRMED") {
-        setStep({ kind: "unconfirmed", message });
+        setStep({ kind: "unconfirmed", message, sentNothing: error.sentNothing === true });
         onChanged();
         return;
       }
@@ -219,6 +220,12 @@ export function PublishPanel({
               {step.error}
             </p>
           )}
+          {item.publishUnconfirmed && (
+            <p data-testid="publish-look-only" className="rounded border border-amber-400/35 bg-amber-400/10 px-3 py-2 text-sm text-sys-text">
+              An earlier attempt to publish this item was sent and its outcome is not known. Approving this only LOOKS for that post on the Page: if it
+              is there with this text it is recorded as published, and if it is not found nothing is posted.
+            </p>
+          )}
           <p className="text-sm text-sys-text">{step.ask.summary.actionSummary}</p>
           <dl className="space-y-2">
             {step.ask.summary.detailLines.map((line) => (
@@ -231,7 +238,7 @@ export function PublishPanel({
           <p className="font-mono text-xs text-sys-dim">This request expires {formatInstant(step.ask.expiresAt)}.</p>
           <div className="flex flex-wrap gap-2">
             <Button variant="primary" onClick={() => void approveAndPublish(step.ask)} disabled={busy}>
-              Approve and publish
+              {item.publishUnconfirmed ? "Approve and look for the post" : "Approve and publish"}
             </Button>
             <Button variant="danger" onClick={() => void decline(step.ask)} disabled={busy}>
               Decline
@@ -259,7 +266,9 @@ export function PublishPanel({
 
       {step.kind === "unconfirmed" && (
         <div className="space-y-3" role="alert" data-testid="publish-unconfirmed">
-          <p className="font-mono text-xs uppercase tracking-hud text-amber-300">Not confirmed — do not assume it was posted</p>
+          <p className="font-mono text-xs uppercase tracking-hud text-amber-300">
+            {step.sentNothing ? "Still not confirmed — nothing new was posted" : "Not confirmed — do not assume it was posted"}
+          </p>
           <p className="text-sm text-sys-text">{step.message}</p>
           <Button onClick={onClose}>Close</Button>
         </div>

@@ -274,9 +274,12 @@ export function createMetaPagePublisher(config: MetaPagePublisherConfig): Conten
 
       const data = asRecord(response.body).data;
       if (!Array.isArray(data)) return null;
+      // Posts the caller knows belong to something else. Passed over, never returned.
+      const excluded = new Set(input.excludeIds ?? []);
       for (const entry of data) {
         const post = toPost(entry);
         if (!post || post.message === null) continue;
+        if (excluded.has(post.externalId)) continue;
         if (!sameText(post.message, input.message)) continue;
         if (post.createdAt !== null && new Date(post.createdAt).getTime() < input.since.getTime()) continue;
         return post;

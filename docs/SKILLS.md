@@ -58,11 +58,14 @@ Both are defined in `packages/agents/src/agent-policy.ts`. Adding a capability m
 > how JARVIS decides anything — there is no learning here.
 
 >
-> **Phase 15 (2026-10-12)** added a tenth agent, `marketing-agent`, seventeen
+> **Phase 15 (2026-10-12)** added a tenth agent, `marketing-agent`, eighteen
 > `marketing.*` tools and a ninth skill, `marketing` ("Marketing workspace").
 > Fifteen of the tools are also held by the general assistant; the two that
-> publish are held by the marketing agent alone. Publishing is approval-gated
-> and bound to the exact text and Page. See [MARKETING.md](./MARKETING.md).
+> publish are held by the marketing agent alone; and one —
+> `marketing.publish.resolve`, a person's decision about a publish whose
+> outcome is not known — is held by **no agent**. Publishing is approval-gated,
+> bound to the exact text and Page, and off unless
+> `MARKETING_PUBLISH_ENABLED=true`. See [MARKETING.md](./MARKETING.md).
 
 Verified against the code on 2026-10-05, commit `68628c0`; the marketing groups and the tenth agent on 2026-10-12.
 
@@ -95,7 +98,8 @@ Named groups keep each policy readable as a capability rather than a list of str
 | `MARKETING_READ_TOOLS` (ids in `packages/core/src/types/marketing.ts`) | `marketing.campaign.list`, `marketing.campaign.get`, `marketing.content.list`, `marketing.research.list`, `marketing.report.generate`, `marketing.report.list`, `marketing.report.get`, `marketing.recommendations` | read-only. `report.generate` reads the ad account through `ToolExecutor` and saves a record of what it read; it changes nothing outside JARVIS |
 | `MARKETING_WORKSPACE_TOOLS` | `marketing.campaign.create`, `marketing.campaign.update`, `marketing.content.plan`, `marketing.content.update`, `marketing.content.mark_published` | write only to JARVIS's own store; no approval. Saving is never publishing |
 | `MARKETING_RESEARCH_TOOLS` | `marketing.seo.audit`, `marketing.competitor.analyze` | read one public web page; registered only while `BROWSER_ENABLED=true`; metered per user |
-| `MARKETING_PUBLISH_TOOLS` | `marketing.publish.prepare`, `marketing.content.publish` | `publish.prepare` is a read; `content.publish` is approval-gated and bound to the exact text and Page. Registered only when a publisher exists. Held by `marketing-agent` alone |
+| `MARKETING_PUBLISH_TOOLS` | `marketing.publish.prepare`, `marketing.content.publish` | `publish.prepare` is a read; `content.publish` is approval-gated and bound to the exact text and Page. Registered only when a publisher exists — which needs `MARKETING_PUBLISH_ENABLED=true` as well as the Meta credentials. Held by `marketing-agent` alone |
+| `MARKETING_DECISION_TOOL_IDS` (in `packages/core/src/types/marketing.ts`; in no agent's allowlist) | `marketing.publish.resolve` | a person's decision that an unconfirmed publish did not happen: JARVIS looks once more and clears the attempt only if the post is not there. Reached from the Marketing page alone; refuses a call that carries an agent or a conversation. Registered with the publish tools |
 | `BROWSER_READ_TOOL_IDS` (in `packages/core/src/types/browser.ts`) | `browser.navigate`, `browser.inspect`, `browser.extract`, `browser.screenshot` | read-only |
 | `BROWSER_ACTION_TOOL_IDS` (same file) | `browser.click`, `browser.type`, `browser.select`, `browser.submit`, `browser.download`, `browser.upload` | every one approval-gated |
 

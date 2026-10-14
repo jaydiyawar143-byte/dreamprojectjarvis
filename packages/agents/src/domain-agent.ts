@@ -308,6 +308,12 @@ export abstract class DomainAgent extends BaseAgent {
       );
     }
 
+    if (tr.status === "unavailable") {
+      lines.push(
+        "ACTION: This tool is switched off on this server, so it did not run and nothing was changed. Tell the user so plainly, giving the reason below in its own words, including how it can be switched on and by whom. Do NOT retry it and do NOT look for another way to do the same thing."
+      );
+    }
+
     if (tr.status === "not_requested") {
       lines.push(
         "ACTION: The user did not request this action — the message was a statement, a question, or a planning/preparation request. Do NOT perform it. Answer conversationally; if a plan was requested, present the recommendation/analysis flow instead of acting."

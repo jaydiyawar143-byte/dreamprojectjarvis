@@ -20,7 +20,7 @@ export { GoogleAdsAgent } from "./agents/google-ads-agent.js";
 export { BrowserAgent } from "./agents/browser-agent.js";
 export { LocationAgent } from "./agents/location-agent.js";
 // Phase 15 — the marketing workspace agent.
-export { MarketingAgent } from "./agents/marketing-agent.js";
+export { MarketingAgent, marketingPrompt, publishingOffered, type MarketingAgentConfig } from "./agents/marketing-agent.js";
 export { Orchestrator } from "./orchestrator.js";
 export { MockAIProvider } from "./mock-ai-provider.js";
 export { ToolPlanValidator, ToolPlanParser, ToolDescriptionBuilder } from "./tool-planner.js";

@@ -8,6 +8,7 @@
 
 import { describe, it, expect, beforeEach } from "vitest";
 import {
+  MARKETING_DECISION_TOOL_IDS,
   MARKETING_PUBLISH_TOOL_IDS,
   MARKETING_READ_TOOL_IDS,
   MARKETING_RESEARCH_TOOL_IDS,
@@ -28,7 +29,7 @@ import {
 import { rankAgentCandidates } from "../src/agent-router.js";
 import { classifyWriteIntent } from "../src/write-intent-gate.js";
 import { detectWorkRequest } from "../src/work-request-detector.js";
-import { MarketingAgent } from "../src/agents/marketing-agent.js";
+import { MarketingAgent, marketingPrompt, publishingOffered } from "../src/agents/marketing-agent.js";
 import { MetaAdsAgent } from "../src/agents/meta-ads-agent.js";
 import { ConversationalAssistant } from "../src/agents/conversational-assistant.js";
 import { PendingActionConflictError, PendingActionService } from "../src/pending-action-service.js";
@@ -124,6 +125,16 @@ describe("publishing is held by one agent", () => {
       expect(general.allowedTools, id).toContain(id);
     }
     for (const id of MARKETING_PUBLISH_TOOL_IDS) expect(general.allowedTools, id).not.toContain(id);
+  });
+
+  it("no agent at all — not even the marketing agent — may settle an unconfirmed publish: that is a person's decision", () => {
+    for (const policy of Object.values(AGENT_POLICIES)) {
+      for (const id of MARKETING_DECISION_TOOL_IDS) {
+        expect(policy.allowedTools, `${policy.agentId} / ${id}`).not.toContain(id);
+        expect(isToolAllowed(id.replace(/./g, "-"), policy.allowedTools), `${policy.agentId} / ${id}`).toBe(false);
+      }
+    }
+    expect(MARKETING_DECISION_TOOL_IDS).toContain("marketing.publish.resolve");
   });
 
   it("no other specialised agent holds any marketing tool", () => {
@@ -634,5 +645,438 @@ describe("a publish waiting for confirmation", () => {
     });
     const changed = await pendingService.modifyPendingAction("conv-2", "user-1", { dailyBudget: 700 });
     expect(changed.pendingAction.params).toEqual({ campaignId: "1", dailyBudget: 700 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A look is not a post: what a person is asked to confirm says which it is
+// ---------------------------------------------------------------------------
+
+describe("a look for an earlier post, waiting for confirmation", () => {
+  /** What the publish check returns for an item whose earlier publish is unconfirmed. */
+  const LOOK_PARAMS = { ...PUBLISH_PARAMS, earlierAttempt: "a".repeat(64) };
+
+  function pendingService() {
+    const approvals = new Map<string, Record<string, unknown>>();
+    const approvalRepo = {
+      async create(data: Record<string, unknown>) {
+        const approval = { ...data, id: `ap-${approvals.size + 1}`, status: "pending", createdAt: new Date().toISOString() };
+        approvals.set(approval.id, approval);
+        return approval as never;
+      },
+      async findById(id: string) {
+        return (approvals.get(id) ?? null) as never;
+      },
+      async updateStatus() {
+        return null as never;
+      },
+      async findPendingByConversationId(conversationId: string, userId: string) {
+        const found = [...approvals.values()].reverse().find((a) => a.conversationId === conversationId && a.userId === userId && a.status === "pending");
+        return (found ?? null) as never;
+      },
+      async updateParams() {
+        return null as never;
+      },
+      async decideApproval() {
+        return { outcome: "conflict" };
+      },
+    };
+    return { service: new PendingActionService({ approvalRepo, toolRegistry: toolRegistryOf(productionLikeTools()) }), approvals };
+  }
+
+  const ask = (service: PendingActionService, params: Record<string, unknown>, conversationId = "conv-1") =>
+    service.createPendingAction({ conversationId, userId: "user-1", toolId: PUBLISH, action: PUBLISH, params, riskLevel: "EXTERNAL_SIDE_EFFECT" });
+
+  it("is described as a look — where, for which words, and that nothing will be posted", async () => {
+    const { message } = await ask(pendingService().service, LOOK_PARAMS);
+
+    expect(message).toContain("Look on: Shop Page");
+    expect(message).toContain("Text to look for:\nFestive offer is live.");
+    expect(message).toContain("This only looks for that post");
+    expect(message).toContain("if it is not, nothing is posted");
+    expect(message).toContain("Reply 'yes' to look for the post, or 'no' to cancel.");
+  });
+
+  it("is never worded as a post that is about to go out", async () => {
+    const { message } = await ask(pendingService().service, LOOK_PARAMS);
+
+    expect(message).not.toContain("Publish to:");
+    expect(message).not.toContain("Text to be posted");
+    expect(message).not.toContain("posted publicly");
+    expect(message).not.toContain("to publish it");
+  });
+
+  it("is bound to the attempt it is for: the approval holds the parameter exactly as the publish check gave it", async () => {
+    const { service, approvals } = pendingService();
+    const { pendingAction } = await ask(service, LOOK_PARAMS);
+
+    expect(pendingAction.params).toEqual(LOOK_PARAMS);
+    expect([...approvals.values()][0]).toMatchObject({ params: LOOK_PARAMS });
+  });
+
+  it("cannot be turned into a send while it waits — nor a send into a look", async () => {
+    const look = pendingService();
+    await ask(look.service, LOOK_PARAMS, "conv-9");
+    await expect(look.service.modifyPendingAction("conv-9", "user-1", { earlierAttempt: undefined })).rejects.toBeInstanceOf(PendingActionConflictError);
+    expect([...look.approvals.values()][0]).toMatchObject({ params: LOOK_PARAMS });
+
+    const send = pendingService();
+    await ask(send.service, PUBLISH_PARAMS, "conv-9");
+    await expect(send.service.modifyPendingAction("conv-9", "user-1", { earlierAttempt: "b".repeat(64) })).rejects.toBeInstanceOf(PendingActionConflictError);
+    expect([...send.approvals.values()][0]).toMatchObject({ params: PUBLISH_PARAMS });
+  });
+
+  it("leaves a send worded as a send", async () => {
+    const { message } = await ask(pendingService().service, PUBLISH_PARAMS);
+
+    expect(message).toContain("Publish to: Shop Page");
+    expect(message).toContain("This will be posted publicly and JARVIS cannot undo it.");
+    expect(message).toContain("Reply 'yes' to publish it, or 'no' to cancel.");
+    expect(message).not.toContain("looks for that post");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Publishing switched off (second audit, M1)
+//
+// The grant is compile-time: the marketing agent's policy names the publish
+// tools on every server. Whether they EXIST is a deployment's choice. These
+// cases are a server where they do not.
+// ---------------------------------------------------------------------------
+
+const OFF = "Publishing is switched off on this server. An administrator can switch it on by setting MARKETING_PUBLISH_ENABLED=true and restarting.";
+const PREPARE = MARKETING_TOOL_IDS.publishPrepare;
+
+/** A function definition as an agent is handed one: dots are not legal in a function name. */
+const offered = (toolId: string) => ({ name: toolId.replace(/\./g, "-"), description: toolId, parameters: { type: "object", properties: {} } });
+const WORKSPACE_ONLY = [...MARKETING_READ_TOOL_IDS, ...MARKETING_WORKSPACE_TOOL_IDS].map(offered);
+const WITH_PUBLISHING = [...WORKSPACE_ONLY, ...MARKETING_PUBLISH_TOOL_IDS.map(offered)];
+/** Every marketing tool except the two that publish — as a server with publishing off registers them. */
+const toolsWithoutPublishing = () => toolRegistryOf(productionLikeTools().filter((tool) => !MARKETING_PUBLISH_TOOL_IDS.includes(tool.id)));
+
+describe("the marketing agent's publishing instructions follow the tools it was given", () => {
+  /** The prompt the agent sends, read where the wiring test reads the tools it was handed. */
+  const promptOf = (agent: MarketingAgent) => (agent as unknown as { providerSystemPrompt: string }).providerSystemPrompt;
+
+  it("knows publishing was offered only when BOTH publish tools were — by either spelling of their names", () => {
+    expect(publishingOffered(WITH_PUBLISHING)).toBe(true);
+    expect(publishingOffered(MARKETING_PUBLISH_TOOL_IDS.map((id) => ({ name: id, description: id, parameters: {} })))).toBe(true);
+
+    expect(publishingOffered(WORKSPACE_ONLY)).toBe(false);
+    expect(publishingOffered([...WORKSPACE_ONLY, offered(PREPARE)])).toBe(false);
+    expect(publishingOffered([...WORKSPACE_ONLY, offered(PUBLISH)])).toBe(false);
+    expect(publishingOffered([])).toBe(false);
+    expect(publishingOffered(undefined)).toBe(false);
+  });
+
+  it("with the publish tools: it is told how to publish", () => {
+    const prompt = promptOf(new MarketingAgent({ provider: new ScriptedAIProvider(), tools: WITH_PUBLISHING }));
+
+    expect(prompt).toContain("=== PUBLISHING ===");
+    expect(prompt).toContain("(1) call the publish-check tool for the item");
+    expect(prompt).toContain("call the publish tool with the publishParams it returned, UNCHANGED");
+    expect(prompt).not.toContain("PUBLISHING IS NOT AVAILABLE");
+    expect(prompt).not.toContain("You have no publish tool");
+  });
+
+  it("without them: it is told publishing is off, why, and how an operator switches it on — and never to call a publish tool", () => {
+    const prompt = promptOf(new MarketingAgent({ provider: new ScriptedAIProvider(), tools: WORKSPACE_ONLY, publishingUnavailableReason: OFF }));
+
+    expect(prompt).toContain("=== PUBLISHING IS NOT AVAILABLE ON THIS SERVER ===");
+    expect(prompt).toContain(OFF);
+    expect(prompt).toContain("MARKETING_PUBLISH_ENABLED=true");
+    expect(prompt).toContain("You have no publish tool and no publish-check tool here. Do not call one");
+    expect(prompt).toContain("that nothing was published");
+    expect(prompt).toContain("there is nothing to confirm, and no approval is waiting");
+
+    // Not one instruction that needs a tool it does not have.
+    expect(prompt).not.toContain("=== PUBLISHING ===");
+    expect(prompt).not.toContain("call the publish-check tool");
+    expect(prompt).not.toContain("call the publish tool");
+    expect(prompt).not.toContain("publishParams");
+    expect(prompt).not.toContain("and publishing that the user approves");
+    expect(prompt).toContain("You cannot publish from this server.");
+  });
+
+  it("without them and with no reason given, it still says publishing is not available — it invents no way to switch it on", () => {
+    const prompt = promptOf(new MarketingAgent({ provider: new ScriptedAIProvider(), tools: WORKSPACE_ONLY }));
+
+    expect(prompt).toContain("Publishing from JARVIS is not available on this server.");
+    expect(prompt).toContain("decided by the server's administrator");
+    expect(prompt).not.toContain("MARKETING_PUBLISH_ENABLED");
+    expect(prompt).not.toContain("call the publish tool");
+  });
+
+  it("an agent handed no tools at all is not told it can publish", () => {
+    const prompt = promptOf(new MarketingAgent({ provider: new ScriptedAIProvider() }));
+
+    expect(prompt).toContain("=== PUBLISHING IS NOT AVAILABLE ON THIS SERVER ===");
+    expect(prompt).not.toContain("call the publish tool");
+  });
+
+  it("a reason cannot switch the instructions off where the tools ARE there: the tools decide", () => {
+    const prompt = promptOf(new MarketingAgent({ provider: new ScriptedAIProvider(), tools: WITH_PUBLISHING, publishingUnavailableReason: OFF }));
+
+    expect(prompt).toContain("=== PUBLISHING ===");
+    expect(prompt).not.toContain(OFF);
+  });
+
+  it("only what it says about publishing differs between the two", () => {
+    const on = marketingPrompt({ publishing: true }).split("\n");
+    const off = marketingPrompt({ publishing: false, unavailableReason: OFF }).split("\n");
+    const from = (lines: string[], heading: string) => lines.slice(lines.indexOf(heading));
+
+    // Everything from research onwards, and everything before publishing, is the same text.
+    expect(from(off, "=== RESEARCH: SEO AND COMPETITORS ===")).toEqual(from(on, "=== RESEARCH: SEO AND COMPETITORS ==="));
+    expect(off.slice(1, off.indexOf("=== PUBLISHING IS NOT AVAILABLE ON THIS SERVER ==="))).toEqual(on.slice(1, on.indexOf("=== PUBLISHING ===")));
+    expect(on.indexOf("=== PUBLISHING ===")).toBeGreaterThan(1);
+    for (const rule of [
+      "Never say 'published', 'posted', 'sent' or 'live' about an item unless a tool result in this conversation says so.",
+      "A calendar item marked REPORTED_BY_USER was posted by the user and not checked by JARVIS. Never describe it as verified.",
+    ]) {
+      expect(on).toContain(rule);
+      expect(off).toContain(rule);
+    }
+  });
+
+  it("what it is told about an unconfirmed publish is the settle flow: a retry only looks, and only a person settles it", () => {
+    const prompt = marketingPrompt({ publishing: true });
+
+    expect(prompt).toContain("WHEN AN EARLIER PUBLISH IS NOT CONFIRMED");
+    expect(prompt).toContain("The item then cannot be edited, and JARVIS sends nothing more for it.");
+    expect(prompt).toContain("asking to publish such an item again only LOOKS for the earlier post on the same Page");
+    expect(prompt).toContain("If it is not found, nothing is posted and the item stays unconfirmed.");
+    expect(prompt).toContain("A look that finds nothing is not permission to post again, and you have no tool that decides it.");
+    expect(prompt).toContain("Only the user can settle it, on the Marketing page");
+    expect(prompt).toContain("every field, including any you do not recognise");
+    // The sentence it replaced invited exactly the thing that must not happen.
+    expect(prompt).not.toContain("the Page should be checked before trying again");
+    expect(prompt).not.toContain("say the post was sent but could not be confirmed");
+  });
+
+  it("is what the model is actually sent, with the tools it was actually offered", async () => {
+    const provider = new ScriptedAIProvider();
+    const registry = new AgentRegistry({ requirePolicy: true });
+    registry.register(new ConversationalAssistant({ provider }));
+    registry.register(new MarketingAgent({ provider, tools: WORKSPACE_ONLY, publishingUnavailableReason: OFF }));
+    const tools = toolsWithoutPublishing();
+    const orchestrator = new Orchestrator(registry, new RecordingToolExecutor(tools), new RecordingAuditLogger(), { toolRegistry: tools });
+
+    const res = await orchestrator.process(
+      { message: "Publish the Diwali post to our Facebook page.", conversationId: "conv-off", stream: false },
+      sessionFor("user-1")
+    );
+
+    expect(res.data?.agentId).toBe(AGENT_IDS.marketing);
+    expect(provider.lastSystemPrompt()).toContain(OFF);
+    expect(provider.lastSystemPrompt()).not.toContain("call the publish tool");
+    expect(provider.lastOfferedTools()).not.toContain("marketing-content-publish");
+    expect(provider.lastOfferedTools()).not.toContain("marketing-publish-prepare");
+    expect(provider.lastOfferedTools()).toContain("marketing-content-list");
+  });
+});
+
+describe("a model that calls a publish tool this server has switched off", () => {
+  let provider: ScriptedAIProvider;
+  let audit: RecordingAuditLogger;
+  let executor: RecordingToolExecutor;
+  let registry: AgentRegistry;
+  let tools: ReturnType<typeof toolRegistryOf>;
+  let approval: RiskTableApprovalService;
+  let pending: ReturnType<typeof pendingSpy>;
+
+  beforeEach(() => {
+    provider = new ScriptedAIProvider();
+    audit = new RecordingAuditLogger();
+    tools = toolsWithoutPublishing();
+    executor = new RecordingToolExecutor(tools);
+    approval = new RiskTableApprovalService();
+    pending = pendingSpy();
+    registry = new AgentRegistry({ requirePolicy: true });
+    registry.register(new ConversationalAssistant({ provider }));
+    registry.register(new MarketingAgent({ provider, tools: WORKSPACE_ONLY, publishingUnavailableReason: OFF }));
+  });
+
+  const SWITCHED_OFF = { [PREPARE]: OFF, [PUBLISH]: OFF };
+  /** `null`: an orchestrator that was told of no switched-off tool at all. */
+  const orchestrator = (switchedOffTools: Record<string, string> | null = SWITCHED_OFF, registryOfTools = tools) =>
+    new Orchestrator(registry, executor, audit, {
+      toolRegistry: registryOfTools,
+      permissionChecker: new FakePermissionChecker(),
+      toolApprovalService: approval,
+      pendingActionService: pending.service,
+      ...(switchedOffTools ? { switchedOffTools } : {}),
+    });
+  const send = (message: string, role: "member" | "viewer" = "member", orch = orchestrator()) =>
+    orch.process({ message, conversationId: "conv-off", stream: false }, sessionFor("user-1", role));
+  const ASK = "Publish the Diwali post to our Facebook page.";
+  /** Everything the model was shown as a tool's result on its latest request. */
+  const toolResultsShown = () =>
+    (provider.requests[provider.requests.length - 1]?.messages ?? [])
+      .filter((message) => message.role === "tool")
+      .map((message) => String(message.content ?? ""))
+      .join("\n");
+  type Summary = { failed: number; denied: number; allFailed: boolean; executions: Array<{ toolId: string; status: string; error?: string }> };
+  const summaryOf = (res: Awaited<ReturnType<typeof send>>) => (res.data?.metadata as { toolExecution?: Summary } | undefined)?.toolExecution;
+  const executionsOf = (res: Awaited<ReturnType<typeof send>>) => summaryOf(res)?.executions ?? [];
+
+  it("gets an answer, not an error: the turn succeeds and the model's reply reaches the user", async () => {
+    provider.pushToolCall(PUBLISH, PUBLISH_PARAMS, "c1").pushText("Publishing is switched off on this server, so nothing was published.");
+
+    const res = await send(ASK);
+
+    expect(res.success).toBe(true);
+    expect(res.error).toBeUndefined();
+    expect(res.data?.agentId).toBe(AGENT_IDS.marketing);
+    expect(res.data?.message).toBe("Publishing is switched off on this server, so nothing was published.");
+  });
+
+  it("creates nothing: no execution, no approval check, no pending action", async () => {
+    provider.pushToolCall(PUBLISH, PUBLISH_PARAMS, "c1");
+
+    const res = await send(ASK);
+
+    expect(executor.requests).toHaveLength(0);
+    expect(approval.checked).toHaveLength(0);
+    expect(pending.calls).toHaveLength(0);
+    expect((res.data?.metadata as { pendingAction?: unknown } | undefined)?.pendingAction).toBeUndefined();
+  });
+
+  it("reports the call as unavailable — not failed, not denied — with the server's own reason", async () => {
+    provider.pushToolCall(PUBLISH, PUBLISH_PARAMS, "c1");
+
+    const res = await send(ASK);
+
+    expect(executionsOf(res)).toEqual([expect.objectContaining({ toolId: PUBLISH, status: "unavailable", error: `${OFF} Nothing was done.` })]);
+    expect(summaryOf(res)).toMatchObject({ failed: 0, denied: 0, allFailed: false });
+  });
+
+  it("tells the model plainly: switched off, why, how it is switched on, and not to try another way", async () => {
+    provider.pushToolCall(PUBLISH, PUBLISH_PARAMS, "c1");
+
+    await send(ASK);
+
+    const shown = toolResultsShown();
+    expect(shown).toContain("STATUS: UNAVAILABLE");
+    expect(shown).toContain(`ERROR: ${OFF} Nothing was done.`);
+    expect(shown).toContain("This tool is switched off on this server, so it did not run and nothing was changed.");
+    expect(shown).toContain("including how it can be switched on and by whom");
+    expect(shown).toContain("Do NOT retry it and do NOT look for another way");
+    expect(shown).toContain("DATA: (no result — tool did not execute)");
+    // It is not told the agent lacks permission, and not that a tool failed.
+    expect(shown).not.toContain("not authorized");
+    expect(shown).not.toContain("Tool not found");
+  });
+
+  it("is audited as a refusal, with the tool and the agent and none of the post", async () => {
+    provider.pushToolCall(PUBLISH, PUBLISH_PARAMS, "c1");
+
+    await send(ASK);
+
+    const rows = audit.byAction("agent.tool_unavailable");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ userId: "user-1", agentId: AGENT_IDS.marketing, toolId: PUBLISH, result: "rejected" });
+    expect(JSON.stringify(rows[0])).not.toContain(PUBLISH_PARAMS.message);
+    expect(JSON.stringify(rows[0])).not.toContain(PUBLISH_PARAMS.targetId);
+  });
+
+  it("the publish check is answered the same way", async () => {
+    provider.pushToolCall(PREPARE, { contentId: "c1" }, "c1");
+
+    const res = await send(ASK);
+
+    expect(res.success).toBe(true);
+    expect(executor.requests).toHaveLength(0);
+    expect(executionsOf(res)).toEqual([expect.objectContaining({ toolId: PREPARE, status: "unavailable" })]);
+  });
+
+  it("and so is the name as a model spells it", async () => {
+    provider.pushToolCall("marketing-content-publish", PUBLISH_PARAMS, "c1");
+
+    const res = await send(ASK);
+
+    expect(res.success).toBe(true);
+    expect(executor.requests).toHaveLength(0);
+    expect(executionsOf(res)).toEqual([expect.objectContaining({ toolId: PUBLISH, status: "unavailable" })]);
+  });
+
+  it("check and publish in one turn: still an answer, still nothing created", async () => {
+    provider.pushToolCall(PREPARE, { contentId: "c1" }, "c1").pushToolCall(PUBLISH, PUBLISH_PARAMS, "c2").pushText("Nothing was published.");
+
+    const res = await send(ASK);
+
+    expect(res.success).toBe(true);
+    expect(executionsOf(res).map((entry) => entry.status)).toEqual(["unavailable", "unavailable"]);
+    expect(executor.requests).toHaveLength(0);
+    expect(pending.calls).toHaveLength(0);
+    expect(audit.byAction("agent.tool_unavailable")).toHaveLength(2);
+  });
+
+  it("a viewer who asks is told the same thing — it is a setting, not their role", async () => {
+    provider.pushToolCall(PUBLISH, PUBLISH_PARAMS, "c1");
+
+    const res = await send(ASK, "viewer");
+
+    expect(res.success).toBe(true);
+    expect(executionsOf(res)).toEqual([expect.objectContaining({ status: "unavailable" })]);
+    expect(audit.byAction("agent.tool_role_denied")).toHaveLength(0);
+  });
+
+  it("does not hide a real read that ran beside it", async () => {
+    provider.push({
+      message: {
+        role: "assistant",
+        content: "",
+        toolCalls: [
+          { id: "c1", name: MARKETING_TOOL_IDS.contentList, arguments: {} },
+          { id: "c2", name: PUBLISH, arguments: PUBLISH_PARAMS },
+        ],
+      },
+      finishReason: "tool_calls",
+      model: "scripted-model",
+    });
+
+    const res = await send(ASK);
+
+    expect(res.success).toBe(true);
+    expect(executor.toolIds()).toEqual([MARKETING_TOOL_IDS.contentList]);
+    expect(executionsOf(res).map((entry) => [entry.toolId, entry.status])).toEqual([
+      [MARKETING_TOOL_IDS.contentList, "completed"],
+      [PUBLISH, "unavailable"],
+    ]);
+  });
+
+  it("another agent that names it is still refused by policy, before any of this", async () => {
+    provider.pushToolCall(PUBLISH, PUBLISH_PARAMS, "c1");
+
+    const res = await orchestrator().process({ message: ASK, conversationId: "conv-off", stream: false, agentId: AGENT_IDS.general }, sessionFor("user-1"));
+
+    expect(res.success).toBe(true);
+    expect(audit.byAction("agent.tool_denied")).toHaveLength(1);
+    expect(audit.byAction("agent.tool_unavailable")).toHaveLength(0);
+  });
+
+  it("is only for tools the server NAMED as switched off: any other missing tool fails exactly as before", async () => {
+    provider.pushToolCall(PUBLISH, PUBLISH_PARAMS, "c1");
+
+    const res = await send(ASK, "member", orchestrator(null));
+
+    // No reason was given for this tool, so it is handed to the executor, which
+    // finds nothing to run — and a turn whose only call failed is an error.
+    expect(executor.toolIds()).toEqual([PUBLISH]);
+    expect(res.success).toBe(false);
+    expect(res.error?.code).toBe("TOOL_EXECUTION_FAILED");
+    expect(audit.byAction("agent.tool_unavailable")).toHaveLength(0);
+  });
+
+  it("a tool that IS registered is never treated as switched off, whatever was named", async () => {
+    const everything = toolRegistryOf(productionLikeTools());
+    provider.pushToolCall(PUBLISH, PUBLISH_PARAMS, "c1");
+
+    const res = await send(ASK, "member", orchestrator(SWITCHED_OFF, everything));
+
+    expect(res.success).toBe(true);
+    expect(pending.calls).toEqual([{ toolId: PUBLISH, params: PUBLISH_PARAMS, riskLevel: "EXTERNAL_SIDE_EFFECT" }]);
+    expect(audit.byAction("agent.tool_unavailable")).toHaveLength(0);
   });
 });
