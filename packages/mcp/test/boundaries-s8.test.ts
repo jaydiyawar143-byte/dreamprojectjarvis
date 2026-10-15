@@ -50,13 +50,20 @@ describe("the MCP SDK lives only in packages/mcp", () => {
     }
   });
 
+  // Only client-side SDK modules are allowed: the Client, the two client
+  // transports JARVIS uses (its own stdio framing, and Streamable HTTP for a
+  // dynamic server such as n8n's), the HTTP auth helper, and the shared types.
+  // `server/*` is absent so JARVIS never becomes an MCP server, and
+  // `client/stdio.js` is absent so JARVIS keeps its own stdio framing.
   it("is used for its client only — no SDK server, and no SDK stdio transport", () => {
     // The SDK's StdioClientTransport always merges part of the parent's
     // environment into the child; this package spawns servers itself.
     for (const file of sources("packages/mcp/src")) {
       const imports = [...read(file).matchAll(/from\s+["'](@modelcontextprotocol\/[^"']+)["']/g)].map((m) => m[1]);
       for (const specifier of imports) {
-        expect(specifier, file).toMatch(/^@modelcontextprotocol\/sdk\/(?:client\/index|shared\/stdio|shared\/transport|types)\.js$/);
+        expect(specifier, file).toMatch(
+          /^@modelcontextprotocol\/sdk\/(?:client\/(?:index|streamableHttp|auth)|shared\/(?:stdio|transport)|types)\.js$/
+        );
       }
     }
   });

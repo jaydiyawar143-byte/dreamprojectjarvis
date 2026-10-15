@@ -39,6 +39,30 @@ const baseEnvSchema = z.object({
   N8N_CALLBACK_SECRET: z.string().optional(),
   N8N_TIMEOUT_MS: z.coerce.number().int().positive().max(120000).optional(),
 
+  // The SECOND n8n surface: its MCP server, for discovering and invoking
+  // automation tools. Three things the REST vars are not:
+  //
+  //   N8N_MCP_TOKEN  a BEARER token, not an API key. The MCP endpoint does not
+  //                  accept N8N_API_KEY — it runs OAuth 2.1 and answers a REST
+  //                  key with a 401 advertising resource metadata. A separate
+  //                  name keeps the two from ever being swapped.
+  //   N8N_MCP_ENDPOINT  an override for the derived default. The endpoint is
+  //                  normally built from N8N_BASE_URL + /mcp-server/http; this
+  //                  exists only for a self-hosted instance that mounts it
+  //                  elsewhere. Business logic never names a host.
+  //   N8N_MCP_ENABLED  off unless exactly "true" (BROWSER_ENABLED's rule).
+  //
+  // Off means no connection is built and no tool is discovered — never a
+  // half-configured surface that 401s at the first use.
+  N8N_MCP_ENABLED: z.string().optional(),
+  N8N_MCP_ENDPOINT: z.string().url().optional(),
+  N8N_MCP_TOKEN: z.string().optional(),
+  N8N_MCP_TIMEOUT_MS: z.coerce.number().int().positive().max(120000).optional(),
+  // Comma-separated origins the endpoint may belong to, for a deployment that
+  // serves MCP from a different host than the REST API. The base origin is
+  // always allowed and needs no entry here.
+  N8N_MCP_ALLOWED_ORIGINS: z.string().optional(),
+
   // Sprint 5.3 — WhatsApp Business Cloud API.
   // Four DISTINCT secrets: the access token authenticates us to Meta, the app
   // secret verifies Meta to us (webhook HMAC), and the verify token is a

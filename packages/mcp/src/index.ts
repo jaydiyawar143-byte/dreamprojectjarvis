@@ -6,3 +6,7 @@
 export { McpConnection, type McpConnectionOptions, type McpConnectionState } from "./connection.js";
 export * from "./normalize.js";
 export * from "./config.js";
+// S8.7 — the remote MCP transport: Streamable HTTP, for a server JARVIS does
+// not spawn and cannot review (an MCP endpoint behind OAuth or a bearer token).
+// Discovery and invocation only; it never claims a discovered tool was reviewed.
+export * from "./http-connection.js";
