@@ -84,6 +84,10 @@ import {
   createN8nProvider,
   createN8nConfig,
   isN8nConfigured,
+  createN8nMcpConfig,
+  createN8nMcpConnector,
+  isN8nMcpConfigured,
+  type N8nMcpConnector,
   hashPayload,
   buildIdempotencyKey,
 } from "@jarvis/n8n";
@@ -159,7 +163,7 @@ import {
 // S8.4 — MCP: the reviewed manifest, the runtime and the tool adapter.
 import { MARKETING_PUBLISH_TOOL_IDS, MARKETING_RESEARCH_TOOL_IDS, MCP_MANIFEST, MEMORY_PURGE_TOOL_ID, validateMcpManifest, type McpManifest } from "@jarvis/core";
 import { randomUUID } from "node:crypto";
-import { McpConnection, isMcpEnabled } from "@jarvis/mcp";
+import { McpConnection, isMcpEnabled, HttpMcpConnection } from "@jarvis/mcp";
 import { createMcpTools } from "@jarvis/tools";
 // Phase 15 — the marketing workspace: one service, the tools that hold it as
 // their port, and the publisher contract a provider package implements.
@@ -463,6 +467,16 @@ let _browserRuntime: BrowserRuntime | null = null;
 let _mcpConnections: readonly McpConnection[] = [];
 
 /**
+ * S8.7 — the n8n MCP connector, or null when the surface is switched off.
+ *
+ * Held for the same reason the browser runtime and the MCP connections are: so
+ * shutdown can close the HTTP session rather than orphaning it. It is built
+ * here and never reached from a route — a caller goes through the connector's
+ * own gate, and any action it takes is approval-gated above it.
+ */
+let _n8nMcpConnector: N8nMcpConnector | null = null;
+
+/**
  * S8.5 — MCP as the integration layer sees it: the deployment switch, and the
  * managed connections tool calls use — never a second connection. Read late,
  * because the integration layer is built before the tools register. Handed to
@@ -664,6 +678,49 @@ function createMetaToolRegistry(
         event: "n8n_registration_skipped",
         reason: err instanceof Error ? err.message : "unknown",
       }));
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // S8.7 — n8n MCP, the SECOND n8n surface (discovery and invocation)
+  // -------------------------------------------------------------------------
+  // Off unless N8N_MCP_ENABLED=true AND an endpoint and token are present. It is
+  // built here and never reached from a route: the connector owns the discovery
+  // gate, and any action it takes is approval-gated above it, exactly as the
+  // reviewed MCP servers are.
+  //
+  // Nothing connects at boot. Building the connector only validates config and
+  // constructs an HTTP session object; the first request happens on the first
+  // discovery, and a failure there is reported as a value rather than thrown
+  // here — a deployment that switched MCP on but has not finished its OAuth
+  // grant must still start, and say why discovery failed when asked.
+  //
+  // The transport is built in @jarvis/mcp and injected, so this package never
+  // imports the MCP SDK — the boundary the package test holds.
+  // -------------------------------------------------------------------------
+  if (isN8nMcpConfigured()) {
+    try {
+      const mcpConfig = createN8nMcpConfig();
+      const transport = new HttpMcpConnection({
+        url: mcpConfig.endpoint,
+        // A bearer token goes in a header and never in the URL, where it would
+        // be written to every access log that captures a request line.
+        headers: mcpConfig.token ? { Authorization: `Bearer ${mcpConfig.token}` } : {},
+        allowedOrigins: mcpConfig.allowedOrigins,
+        connectTimeoutMs: mcpConfig.timeoutMs,
+        callTimeoutMs: mcpConfig.timeoutMs,
+      });
+      _n8nMcpConnector = createN8nMcpConnector(transport);
+      operationalLog.child("n8n-mcp").info("n8n_mcp_configured", {
+        // The ENDPOINT only. Never the token, which is a credential.
+        endpoint: transport.url,
+      });
+    } catch (err) {
+      _n8nMcpConnector = null;
+      operationalLog.child("n8n-mcp").warn("n8n_mcp_registration_skipped", {
+        // The configuration error names fields, never values.
+        reason: err instanceof Error ? err.message : "unknown",
+      });
     }
   }
 
@@ -2032,8 +2089,19 @@ export function getMcpConnections(): readonly McpConnection[] {
   return _mcpConnections;
 }
 
+/**
+ * S8.7 — the n8n MCP connector, or null when that surface is off or could not
+ * be built. Exposed so the shutdown controller closes its HTTP session during
+ * RELEASE_RESOURCES, and so a test can assert the gate rather than reach a
+ * network.
+ */
+export function getN8nMcpConnector(): N8nMcpConnector | null {
+  return _n8nMcpConnector;
+}
+
 export function resetContainer(): void {
   _container = null;
   _browserRuntime = null;
   _mcpConnections = [];
+  _n8nMcpConnector = null;
 }

@@ -79,6 +79,10 @@ export type {
 // tools and the API all speak, so one command service can serve both paths.
 export * from "./types/integration.js";
 export * from "./integration-catalog.js";
+// The Automation Registry — one normalized view over everything JARVIS can
+// reach through a connector (n8n REST and n8n MCP today), with deduplication
+// and operation-based routing. Pure: connectors collect, this decides.
+export * from "./automation-registry.js";
 
 // Capability discovery — what this build can do, and what can actually run now.
 // Derived from the live tool registry, agent policies and integration state;

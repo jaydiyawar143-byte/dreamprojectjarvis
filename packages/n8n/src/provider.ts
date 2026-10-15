@@ -6,6 +6,18 @@ import {
   N8nRequestError,
   type N8nHttpClient,
 } from "./client.js";
+import {
+  createN8nApiClient,
+  type N8nApiClient,
+  type N8nApiResult,
+  type N8nExecutionPage,
+  type N8nListAllWorkflowsOptions,
+  type N8nListExecutionsParams,
+  type N8nListWorkflowsParams,
+  type N8nRemoteExecution,
+  type N8nWorkflowPage,
+  type N8nWorkflowTraversal,
+} from "./api-client.js";
 import { truncateSummary, type N8nConfig } from "./config.js";
 
 // ---------------------------------------------------------------------------
@@ -40,9 +52,32 @@ export interface N8nProvider {
   ): Promise<N8nTriggerResult>;
 }
 
+/**
+ * The READ-ONLY management surface of the same n8n instance the trigger uses:
+ * is the key accepted, which workflows exist, how an execution ended.
+ *
+ * It is a separate interface from `N8nProvider` on purpose. A caller that only
+ * needs to start a workflow is handed the trigger port and nothing else; the
+ * broader surface is opt-in. Every method returns errors as values, and none of
+ * them writes to n8n.
+ */
+export interface N8nApiProvider {
+  /** One authenticated read that proves the origin and the key. */
+  checkConnection(): Promise<N8nApiResult<{ workflowCount: number }>>;
+  /** One page of workflows, with n8n's `nextCursor` when there is more. */
+  listWorkflows(params?: N8nListWorkflowsParams): Promise<N8nApiResult<N8nWorkflowPage>>;
+  /** Follows `nextCursor` for a bounded number of pages. */
+  listAllWorkflows(options?: N8nListAllWorkflowsOptions): Promise<N8nApiResult<N8nWorkflowTraversal>>;
+  /** One page of executions, for status monitoring. */
+  listExecutions(params?: N8nListExecutionsParams): Promise<N8nApiResult<N8nExecutionPage>>;
+  /** Reads one execution's status by its n8n id. */
+  getExecution(id: string): Promise<N8nApiResult<N8nRemoteExecution>>;
+}
+
 export interface N8nCloudProviderConfig {
   config: N8nConfig;
   httpClient?: N8nHttpClient;
+  apiClient?: N8nApiClient;
 }
 
 /** Reads n8n's execution id from any of the shapes it uses. */
@@ -57,13 +92,41 @@ function extractRemoteExecutionId(body: unknown): string | null {
   return null;
 }
 
-export class N8nCloudProvider implements N8nProvider {
-  // Only the client is retained: it owns the config, including the base URL and
-  // API key, so the provider itself never holds credential material.
+export class N8nCloudProvider implements N8nProvider, N8nApiProvider {
+  // Only the clients are retained: they own the config, including the base URL
+  // and API key, so the provider itself never holds credential material.
   private readonly http: N8nHttpClient;
+  private readonly api: N8nApiClient;
 
   constructor(opts: N8nCloudProviderConfig) {
     this.http = opts.httpClient ?? createN8nHttpClient(opts.config);
+    this.api = opts.apiClient ?? createN8nApiClient(opts.config);
+  }
+
+  // --- Read-only management surface (never writes to n8n) -------------------
+
+  checkConnection(): Promise<N8nApiResult<{ workflowCount: number }>> {
+    return this.api.checkConnection();
+  }
+
+  listWorkflows(params?: N8nListWorkflowsParams): Promise<N8nApiResult<N8nWorkflowPage>> {
+    return this.api.listWorkflows(params);
+  }
+
+  listAllWorkflows(
+    options?: N8nListAllWorkflowsOptions
+  ): Promise<N8nApiResult<N8nWorkflowTraversal>> {
+    return this.api.listAllWorkflows(options);
+  }
+
+  listExecutions(
+    params?: N8nListExecutionsParams
+  ): Promise<N8nApiResult<N8nExecutionPage>> {
+    return this.api.listExecutions(params);
+  }
+
+  getExecution(id: string): Promise<N8nApiResult<N8nRemoteExecution>> {
+    return this.api.getExecution(id);
   }
 
   async triggerWorkflow(

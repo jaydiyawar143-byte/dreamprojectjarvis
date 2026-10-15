@@ -234,7 +234,42 @@ Document the names; never the values.
 |---|---|
 | `META_ACCESS_TOKEN`, `META_AD_ACCOUNT_ID`, `META_GRAPH_API_VERSION` | Meta Ads fallback credentials |
 | `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_VERIFY_TOKEN`, `WHATSAPP_APP_SECRET` | WhatsApp Cloud API |
-| `N8N_BASE_URL`, `N8N_API_KEY`, `N8N_CALLBACK_SECRET` | n8n |
+| `N8N_BASE_URL`, `N8N_API_KEY`, `N8N_CALLBACK_SECRET`, `N8N_TIMEOUT_MS` | n8n REST — list workflows, read executions, trigger |
+
+### n8n MCP (optional — the second n8n surface)
+
+| Variable | Purpose |
+|---|---|
+| `N8N_MCP_ENABLED` | Off unless exactly `true`. Off means no connection is built and no tool is discovered. |
+| `N8N_MCP_TOKEN` | **A bearer token, not `N8N_API_KEY`.** The MCP endpoint runs OAuth 2.1 and answers a REST API key with a 401 advertising its resource metadata. |
+| `N8N_MCP_ENDPOINT` | Override for the derived default. Not normally set — see below. |
+| `N8N_MCP_ALLOWED_ORIGINS` | Comma-separated extra origins, for a deployment serving MCP from another host. |
+| `N8N_MCP_TIMEOUT_MS` | Ceiling for one discovery or one invocation (default 15000). |
+
+**Two surfaces, one instance.** The REST API answers *which workflows exist and
+how did they run*; MCP answers *which automation tools may be discovered and
+invoked*. Neither can do the other's job: the REST client cannot invoke a
+discovered tool, and the MCP connector cannot list an inactive workflow's
+metadata or read an execution.
+
+**The endpoint is derived, not hard-coded.** It is `N8N_BASE_URL` + the n8n
+standard mount `/mcp-server/http`. `N8N_MCP_ENDPOINT` exists only for a
+self-hosted instance that mounts it elsewhere; business logic never names a
+host. It must be HTTPS, carry no embedded credentials, and belong to an allowed
+origin — the base origin always is.
+
+**MCP is off unless an operator switches it on**, matching `BROWSER_ENABLED` and
+`JARVIS_MCP_ENABLED`. Where it is off there is no MCP tool for a sentence to
+name and no route to reach one, so no approval for an MCP action can exist.
+
+**Discovery is the gate for invocation.** A tool can only be invoked if the most
+recent discovery returned its name. A failed discovery closes that gate, so a
+later call cannot ride on a stale listing.
+
+**These variables are deliberately not in the n8n descriptor's `envVars`.** That
+list is all-must-be-present and drives the "missing server configuration"
+report, so including an optional surface would call a working REST-only
+deployment broken.
 
 ---
 

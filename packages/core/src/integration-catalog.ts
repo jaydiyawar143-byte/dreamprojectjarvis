@@ -488,7 +488,14 @@ export const INTEGRATION_CATALOG: readonly IntegrationDescriptor[] = [
       { id: "n8n.trigger", label: "Trigger a workflow", writesExternally: true, toolId: "n8n.trigger" },
     ],
     commands: [...UNIVERSAL_COMMANDS, "executeAction"],
-    envVars: ["N8N_BASE_URL", "N8N_API_KEY", "N8N_CALLBACK_SECRET"],
+    // N8N_MCP_* is deliberately ABSENT from this list. `envVars` is an
+    // all-must-be-present list — the command service reports the integration
+    // "missing server configuration" when any of them is unset — so including
+    // the optional MCP vars would declare a perfectly working REST integration
+    // broken on a deployment that never switched MCP on. The MCP surface is
+    // opt-in and separate; its vars are documented in .env.example and
+    // docs/INTEGRATIONS.md, and it reports its own state through discovery.
+    envVars: ["N8N_BASE_URL", "N8N_API_KEY", "N8N_CALLBACK_SECRET", "N8N_TIMEOUT_MS"],
   },
   {
     // S8.5 — the reviewed MCP servers, as one server-managed integration.

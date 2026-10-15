@@ -42,7 +42,7 @@ import {
   SOCKET_MAX_BUFFER_BYTES,
   secureSocketServer,
 } from "./socket/socket-auth.js";
-import { getContainer, getBrowserRuntime, getMcpConnections, mcpIntegrationRuntime } from "./services/container.js";
+import { getContainer, getBrowserRuntime, getMcpConnections, getN8nMcpConnector, mcpIntegrationRuntime } from "./services/container.js";
 import { requestId } from "./middleware/request-id.js";
 import { accessLog } from "./middleware/access-log.js";
 import {
@@ -652,11 +652,13 @@ const jarvisShutdown = createShutdownController({
   closeIo: () => io.close(),
   // Sprint 7 — close the shared Chrome, if browsing is switched on at all.
   // S8.4 — and stop every MCP server process, if MCP is switched on at all.
+  // S8.7 — and close the n8n MCP session, if that surface is switched on at all.
   releaseExternalResources: async () => {
     await taskSchedulerLoop?.stop();
     await memoryRetentionSweep?.stop();
     await getBrowserRuntime()?.shutdown();
     await Promise.all(getMcpConnections().map((connection) => connection.close()));
+    await getN8nMcpConnector()?.close();
   },
   disconnectDatabase: async () => {
     const { prisma } = await import("@jarvis/db");

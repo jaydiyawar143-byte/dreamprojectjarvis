@@ -477,6 +477,44 @@ describe("connection tests are reads, and are contained", () => {
     expect(result?.detail).toMatch(/api key/i);
   });
 
+  it("reports a 5xx as DEGRADED, not as unreachable", async () => {
+    process.env.N8N_BASE_URL = "https://n8n.example.test";
+    process.env.N8N_API_KEY = "k";
+    process.env.N8N_CALLBACK_SECRET = "c";
+
+    stubFetch({ message: "bad gateway" }, { ok: false, status: 503 });
+    const result = await runCheck(USER, "n8n", deps());
+    expect(result?.health).toBe("DEGRADED");
+    expect(result?.detail).toMatch(/HTTP 503/);
+  });
+
+  it("reports a malformed 200 body as ERROR, never as connected", async () => {
+    process.env.N8N_BASE_URL = "https://n8n.example.test";
+    process.env.N8N_API_KEY = "k";
+    process.env.N8N_CALLBACK_SECRET = "c";
+
+    // A 200 that is not a workflow page proves nothing about the key.
+    stubFetch("not-a-page");
+    const result = await runCheck(USER, "n8n", deps());
+    expect(result?.health).toBe("ERROR");
+  });
+
+  it("reports an unusable base URL as ERROR instead of throwing", async () => {
+    // Present but not an absolute URL — the shape a missing scheme produces.
+    // The integrations page and this check must both survive it.
+    process.env.N8N_BASE_URL = "n8n-without-a-scheme.test";
+    process.env.N8N_API_KEY = "k";
+    process.env.N8N_CALLBACK_SECRET = "c";
+
+    const result = await runCheck(USER, "n8n", deps());
+    expect(result?.health).toBe("ERROR");
+    expect(result?.detail).toMatch(/configuration is invalid/i);
+
+    // And the list must not throw either.
+    const list = await listIntegrations(USER, deps());
+    expect(find(list, "n8n")).toBeTruthy();
+  });
+
   it("refuses to test an unconfigured integration instead of reporting failure", async () => {
     // "Not configured" and "broken" are different problems with different
     // fixes, and an operator should not have to guess which one they have.

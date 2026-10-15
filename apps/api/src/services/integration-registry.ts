@@ -34,7 +34,7 @@
 import { mcpFailure, type McpConnectResult, type McpDriftKind, type McpFailureCode } from "@jarvis/core";
 import { createMetaGraphProvider } from "@jarvis/meta-graph";
 import { createWhatsAppConfig, isWhatsAppConfigured } from "@jarvis/whatsapp";
-import { createN8nConfig, isN8nConfigured } from "@jarvis/n8n";
+import { createN8nConfig, createN8nProvider, isN8nConfigured, type N8nConfig } from "@jarvis/n8n";
 import {
   createGoogleMapsConfig,
   describeGoogleMapsStatus,
@@ -422,8 +422,26 @@ function describeWhatsApp(userId: string): IntegrationView {
   };
 }
 
+/**
+ * The configured n8n origin, or null when it is unset OR does not validate.
+ *
+ * `isN8nConfigured()` answers "are the variables present"; this answers "can
+ * the values actually be used". A base URL with no scheme is present but
+ * unparseable, and `createN8nConfig()` throws on it — which must not take down
+ * the integrations page. Never throws, never returns a credential.
+ */
+function readN8nBaseUrl(): string | null {
+  if (!isN8nConfigured()) return null;
+  try {
+    return createN8nConfig().baseUrl;
+  } catch {
+    return null;
+  }
+}
+
 function describeN8n(userId: string): IntegrationView {
-  const configured = isN8nConfigured();
+  const baseUrl = readN8nBaseUrl();
+  const configured = baseUrl !== null;
 
   const capabilities: IntegrationCapability[] = [
     { id: "n8n.workflows", label: "Workflow registry", available: configured },
@@ -449,7 +467,7 @@ function describeN8n(userId: string): IntegrationView {
     capabilities,
     // The base URL is operator configuration, not a secret — the API key is the
     // secret and never appears here.
-    account: configured ? { label: createN8nConfig().baseUrl } : null,
+    account: baseUrl ? { label: baseUrl } : null,
     usage: null,
     effectiveSource: "server environment",
     actions: { testable: configured },
@@ -737,37 +755,51 @@ async function testN8n(): Promise<CheckResult> {
     return { health: "CONFIG_REQUIRED", detail: "n8n is not configured on the server.", checkedAt: now };
   }
 
-  const config = createN8nConfig();
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 8000);
-
+  let config: N8nConfig;
   try {
-    // SSRF containment: the URL is built from the SERVER-CONFIGURED base only.
-    // No part of it comes from the request, so there is nothing for a caller to
-    // redirect. The `URL` construction plus the origin re-check mirrors what
-    // buildWebhookUrl does for triggers.
-    const target = new URL("/api/v1/workflows?limit=1", config.baseUrl);
-    if (target.origin !== new URL(config.baseUrl).origin) {
-      return { health: "ERROR", detail: "Refusing to test outside the configured n8n origin.", checkedAt: now };
-    }
-
-    const res = await fetch(target, {
-      signal: controller.signal,
-      headers: { "X-N8N-API-KEY": config.apiKey, Accept: "application/json" },
-    });
-
-    if (res.ok) {
-      return { health: "CONNECTED", detail: `n8n reachable at ${new URL(config.baseUrl).origin} and the API key was accepted.`, checkedAt: now };
-    }
-    if (res.status === 401 || res.status === 403) {
-      return { health: "ERROR", detail: "n8n rejected the API key.", checkedAt: now };
-    }
-    return { health: "DEGRADED", detail: `n8n answered with HTTP ${res.status}.`, checkedAt: now };
+    config = createN8nConfig();
   } catch (error) {
-    return { health: "ERROR", detail: safeMessage(error, "n8n could not be reached."), checkedAt: now };
-  } finally {
-    clearTimeout(timer);
+    // Present but unusable — most often a base URL with no scheme. The thrown
+    // message names FIELDS only, never values, so it is safe to surface. This
+    // is the difference between "not configured" and "configured wrongly",
+    // which are different fixes.
+    return {
+      health: "ERROR",
+      detail: `n8n configuration is invalid: ${error instanceof Error ? error.message : "unknown"}`,
+      checkedAt: now,
+    };
   }
+
+  // One read through the SAME provider the trigger tool uses. The URL is built
+  // from the server-configured origin only (no caller input can redirect it),
+  // the key travels in the X-N8N-API-KEY header, and nothing is written.
+  const result = await createN8nProvider({ config }).checkConnection();
+
+  if (result.ok) {
+    return {
+      health: "CONNECTED",
+      detail: `n8n reachable at ${new URL(config.baseUrl).origin} and the API key was accepted.`,
+      checkedAt: now,
+    };
+  }
+
+  const { error } = result;
+  if (error.httpStatus === 401 || error.httpStatus === 403) {
+    return { health: "ERROR", detail: "n8n rejected the API key.", checkedAt: now };
+  }
+  if (error.code === "TOOL_TIMEOUT") {
+    return { health: "ERROR", detail: "n8n did not respond in time.", checkedAt: now };
+  }
+  if (error.httpStatus !== undefined) {
+    return { health: "DEGRADED", detail: `n8n answered with HTTP ${error.httpStatus}.`, checkedAt: now };
+  }
+  // No HTTP status means the request never produced a response, or n8n answered
+  // with a shape this integration cannot read. Neither is a working connection.
+  return {
+    health: "ERROR",
+    detail: "n8n could not be reached or answered with an unexpected response.",
+    checkedAt: now,
+  };
 }
 
 async function testMeta(userId: string, deps: IntegrationDeps): Promise<CheckResult> {
