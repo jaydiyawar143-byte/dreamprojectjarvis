@@ -22,7 +22,13 @@ export interface ToolApprovalConfig {
 // defines its own divergent default.
 const DEFAULT_APPROVAL_TTL_MS = APPROVAL_TTL_MS;
 
-const RISK_REQUIRES_APPROVAL: Record<RiskLevel, boolean> = {
+/**
+ * Risk → approval required. THE single mapping: `ToolExecutor`'s gate reads it
+ * through `ToolApprovalService`, and the Phase 17 automation authz engine
+ * imports this same table rather than keeping a copy that could drift. A
+ * change here changes what both gates require.
+ */
+export const RISK_REQUIRES_APPROVAL: Record<RiskLevel, boolean> = {
   READ_ONLY: false,
   LOW_IMPACT: false,
   EXTERNAL_SIDE_EFFECT: true,

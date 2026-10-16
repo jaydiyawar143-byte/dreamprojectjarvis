@@ -1,5 +1,19 @@
 export { AuthService } from "./auth.js";
 export { PermissionService } from "./permissions.js";
+export {
+  authorizeAutomationOperation,
+  classifyAutomationRisk,
+  capabilityKindForRisk,
+  grantsForAutomationRole,
+  AUTOMATION_PERMISSIONS,
+  type AutomationSurface,
+  type AutomationPermission,
+  type AutomationCallSubject,
+  type AutomationResourceScope,
+  type AutomationAuthzInput,
+  type AutomationAuthzDecision,
+  type AutomationAuthzDenyCode,
+} from "./automation-authz.js";
 export { AuditLogger, redactAuditParams } from "./audit.js";
 export { ApprovalService } from "./approval.js";
 export { ToolApprovalService } from "./tool-approval.js";
