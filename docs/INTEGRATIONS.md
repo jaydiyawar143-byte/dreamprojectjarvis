@@ -41,6 +41,7 @@ single service instance and asserting both arms arrive there.
 | `meta` | Meta Ads | Encrypted form credentials | `GET /me/adaccounts` via Graph API |
 | `whatsapp` | WhatsApp Business Cloud API | Server environment | Reads the phone number's own metadata |
 | `n8n` | n8n Automations | Server environment | `GET /api/v1/workflows?limit=1` |
+| `omniroute` | OmniRoute AI gateway | Server environment | `GET /v1/models` with the key, then once without it |
 
 Every connection test is a **read**. Testing a connection never sends a message,
 triggers a workflow or changes a campaign.
@@ -241,7 +242,7 @@ Document the names; never the values.
 | Variable | Purpose |
 |---|---|
 | `N8N_MCP_ENABLED` | Off unless exactly `true`. Off means no connection is built and no tool is discovered. |
-| `N8N_MCP_TOKEN` | **A bearer token, not `N8N_API_KEY`.** The MCP endpoint runs OAuth 2.1 and answers a REST API key with a 401 advertising its resource metadata. |
+| `N8N_MCP_TOKEN` | **A bearer token, not `N8N_API_KEY`.** n8n's MCP server accepts an OAuth 2.1 grant (recommended) or a personal access token sent as `Authorization: Bearer` (n8n ≥ 2.33). JARVIS implements the bearer path; a REST API key is never accepted. |
 | `N8N_MCP_ENDPOINT` | Override for the derived default. Not normally set — see below. |
 | `N8N_MCP_ALLOWED_ORIGINS` | Comma-separated extra origins, for a deployment serving MCP from another host. |
 | `N8N_MCP_TIMEOUT_MS` | Ceiling for one discovery or one invocation (default 15000). |
@@ -270,6 +271,36 @@ later call cannot ride on a stale listing.
 list is all-must-be-present and drives the "missing server configuration"
 report, so including an optional surface would call a working REST-only
 deployment broken.
+
+### OmniRoute
+
+| Variable | Purpose |
+|---|---|
+| `OMNIROUTE_BASE_URL` | The gateway's OpenAI-compatible base, e.g. `http://localhost:20128/v1`. A bare origin is completed with `/v1`. Must not embed a username or password, a query or a fragment — the card displays it. |
+| `OMNIROUTE_API_KEY` | An endpoint key from OmniRoute's Endpoints page, sent as a Bearer token. Never a provider key. |
+
+**What it is for, today.** A verified connection to the gateway: reachable,
+OpenAI-compatible, and its key actually checked. The descriptor lists **no
+actions** — the chat adapter still talks to OpenAI directly, and the catalogue
+does not claim what the build cannot do.
+
+**The test reads the model list twice.** Once with the key, once without.
+OmniRoute ships with `REQUIRE_API_KEY` off, and such a gateway answers anyone;
+a test that only sent the key would report "key accepted" about a key nothing
+looked at. So:
+
+| Keyed request | Keyless request | Health |
+|---|---|---|
+| model list | 401 / 403 | `CONNECTED` — the key was checked |
+| model list | model list | `DEGRADED` — the gateway is open; set `REQUIRE_API_KEY=true` |
+| model list | anything else | `CONNECTED`, saying the key requirement could not be confirmed |
+| empty model list | 401 / 403 | `DEGRADED` — connect a provider in the OmniRoute dashboard |
+| 401 / 403 | — | `ERROR` — the key was rejected |
+| 404 | — | `ERROR` — the base URL is not the gateway's `/v1` base |
+| 3xx | — | `ERROR` — redirects are never followed with the key |
+
+**From inside Docker,** `localhost` is the API container. A gateway running on
+the host is `http://host.docker.internal:20128/v1`.
 
 ---
 

@@ -46,6 +46,8 @@ const ENV_KEYS = [
   "N8N_CALLBACK_SECRET",
   "META_ACCESS_TOKEN",
   "META_AD_ACCOUNT_ID",
+  "OMNIROUTE_BASE_URL",
+  "OMNIROUTE_API_KEY",
 ] as const;
 
 const saved: Record<string, string | undefined> = {};
@@ -259,6 +261,8 @@ describe("no secret reaches the response", () => {
     process.env.N8N_CALLBACK_SECRET = "N8N-CALLBACK-SECRET";
     process.env.META_ACCESS_TOKEN = "META-TOKEN-SECRET";
     process.env.META_AD_ACCOUNT_ID = "act_999";
+    process.env.OMNIROUTE_BASE_URL = "http://omniroute.example.test:20128/v1";
+    process.env.OMNIROUTE_API_KEY = "OMNI-KEY-SECRET";
 
     const serialised = JSON.stringify(
       await listIntegrations(
@@ -277,6 +281,7 @@ describe("no secret reaches the response", () => {
       "N8N-CALLBACK-SECRET",
       "META-TOKEN-SECRET",
       "STORED-META-SECRET",
+      "OMNI-KEY-SECRET",
     ]) {
       expect(serialised).not.toContain(secret);
     }
@@ -290,12 +295,15 @@ describe("no secret reaches the response", () => {
     process.env.N8N_BASE_URL = "https://n8n.example.test";
     process.env.N8N_API_KEY = "k";
     process.env.N8N_CALLBACK_SECRET = "c";
+    process.env.OMNIROUTE_BASE_URL = "http://omniroute.example.test:20128";
+    process.env.OMNIROUTE_API_KEY = "k";
 
     const list = await listIntegrations(USER, deps());
     // A phone number id and a base URL are operator configuration, not secrets,
     // and without them the cards cannot say WHICH account is connected.
     expect(find(list, "whatsapp").account?.label).toContain("1234567890");
     expect(find(list, "n8n").account?.label).toContain("n8n.example.test");
+    expect(find(list, "omniroute").account?.label).toBe("http://omniroute.example.test:20128/v1");
   });
 
   it("never puts a provider's raw failure into a field that could hold a URL with a token", async () => {
@@ -521,6 +529,112 @@ describe("connection tests are reads, and are contained", () => {
     expect((await runCheck(USER, "whatsapp", deps()))?.health).toBe("CONFIG_REQUIRED");
     expect((await runCheck(USER, "n8n", deps()))?.health).toBe("CONFIG_REQUIRED");
     expect((await runCheck(USER, "google-maps", deps()))?.health).toBe("CONFIG_REQUIRED");
+    expect((await runCheck(USER, "omniroute", deps()))?.health).toBe("CONFIG_REQUIRED");
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe("OmniRoute", () => {
+  const MODELS = { object: "list", data: [{ id: "openai/gpt-4o" }, { id: "anthropic/claude" }] };
+
+  const reply = (status: number, body: unknown = "") =>
+    ({ ok: status >= 200 && status < 300, status, text: async () => JSON.stringify(body) }) as Response;
+
+  /** The keyed request and the keyless probe answered separately, by header. */
+  function stubGateway(withKey: Response, withoutKey: Response = reply(401)) {
+    return vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      const headers = (init?.headers ?? {}) as Record<string, string>;
+      return headers.Authorization ? withKey : withoutKey;
+    });
+  }
+
+  beforeEach(() => {
+    process.env.OMNIROUTE_BASE_URL = "http://omniroute.example.test:20128";
+    process.env.OMNIROUTE_API_KEY = "OMNI-KEY";
+  });
+
+  it("is UNVERIFIED, not CONNECTED, until a check has run", async () => {
+    const card = find(await listIntegrations(USER, deps()), "omniroute");
+    expect(card.health).toBe("UNVERIFIED");
+    expect(card.category).toBe("ai");
+  });
+
+  it("reads the model list only from the SERVER-CONFIGURED base", async () => {
+    const spy = stubGateway(reply(200, MODELS));
+    await runCheck(USER, "omniroute", deps());
+
+    const url = new URL(String(spy.mock.calls[0]![0]));
+    expect(url.origin).toBe("http://omniroute.example.test:20128");
+    expect(url.pathname).toBe("/v1/models");
+  });
+
+  it("is CONNECTED only when the gateway also refuses a request without the key", async () => {
+    stubGateway(reply(200, MODELS), reply(401));
+    const result = await runCheck(USER, "omniroute", deps());
+    expect(result?.health).toBe("CONNECTED");
+    expect(result?.detail).toMatch(/API key was accepted and 2 models/);
+    expect(find(await listIntegrations(USER, deps()), "omniroute").health).toBe("CONNECTED");
+  });
+
+  it("is DEGRADED, never CONNECTED, when the gateway answers without a key", async () => {
+    // OmniRoute's default (REQUIRE_API_KEY off): the key was never looked at.
+    stubGateway(reply(200, MODELS), reply(200, MODELS));
+    const result = await runCheck(USER, "omniroute", deps());
+    expect(result?.health).toBe("DEGRADED");
+    expect(result?.detail).toMatch(/REQUIRE_API_KEY=true/);
+    expect(result?.detail).not.toMatch(/accepted/);
+  });
+
+  it("is DEGRADED when the key works but no model is offered", async () => {
+    stubGateway(reply(200, { data: [] }));
+    const result = await runCheck(USER, "omniroute", deps());
+    expect(result?.health).toBe("DEGRADED");
+    expect(result?.detail).toMatch(/no models/);
+  });
+
+  it("reports a rejected key as ERROR", async () => {
+    stubGateway(reply(401));
+    const result = await runCheck(USER, "omniroute", deps());
+    expect(result?.health).toBe("ERROR");
+    expect(result?.detail).toMatch(/rejected the API key/);
+  });
+
+  it("names the URL it tried when there is no model list there", async () => {
+    stubGateway(reply(404));
+    const result = await runCheck(USER, "omniroute", deps());
+    expect(result?.health).toBe("ERROR");
+    expect(result?.detail).toContain("http://omniroute.example.test:20128/v1/models");
+  });
+
+  it("reports a 5xx as DEGRADED and a non-list 200 as ERROR", async () => {
+    stubGateway(reply(503));
+    expect((await runCheck(USER, "omniroute", deps()))?.health).toBe("DEGRADED");
+
+    vi.restoreAllMocks();
+    stubGateway(reply(200, "<html>login</html>"));
+    expect((await runCheck(USER, "omniroute", deps()))?.health).toBe("ERROR");
+  });
+
+  it("points at host.docker.internal when the gateway cannot be reached", async () => {
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("fetch failed"));
+    const result = await runCheck(USER, "omniroute", deps());
+    expect(result?.health).toBe("ERROR");
+    expect(result?.detail).toMatch(/host\.docker\.internal/);
+  });
+
+  it("says what is wrong with an unusable base URL instead of throwing", async () => {
+    process.env.OMNIROUTE_BASE_URL = "http://admin:HUNTER2@omniroute.example.test/v1";
+
+    const card = find(await listIntegrations(USER, deps()), "omniroute");
+    expect(card.health).toBe("CONFIG_REQUIRED");
+    expect(card.detail).toMatch(/must not embed credentials/);
+    expect(card.account).toBeNull();
+    expect(JSON.stringify(card)).not.toContain("HUNTER2");
+
+    const result = await runCheck(USER, "omniroute", deps());
+    expect(result?.health).toBe("ERROR");
+    expect(result?.detail).not.toContain("HUNTER2");
   });
 });
 

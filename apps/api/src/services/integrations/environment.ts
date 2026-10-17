@@ -21,6 +21,7 @@ export {
 
 export { isWhatsAppConfigured, createWhatsAppConfig } from "@jarvis/whatsapp";
 export { isN8nConfigured, createN8nConfig } from "@jarvis/n8n";
+export { isOmniRouteConfigured } from "@jarvis/omniroute";
 
 /**
  * The monthly Maps request ceiling.

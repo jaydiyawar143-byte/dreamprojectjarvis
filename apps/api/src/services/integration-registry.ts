@@ -36,6 +36,13 @@ import { createMetaGraphProvider } from "@jarvis/meta-graph";
 import { createWhatsAppConfig, isWhatsAppConfigured } from "@jarvis/whatsapp";
 import { createN8nConfig, createN8nProvider, isN8nConfigured, type N8nConfig } from "@jarvis/n8n";
 import {
+  checkOmniRouteConnection,
+  createOmniRouteConfig,
+  isOmniRouteConfigured,
+  omniRouteModelsUrl,
+  type OmniRouteConfig,
+} from "@jarvis/omniroute";
+import {
   createGoogleMapsConfig,
   describeGoogleMapsStatus,
   isGoogleMapsBrowserConfigured,
@@ -77,7 +84,8 @@ export type IntegrationCategory =
   | "maps"
   | "communication"
   | "automation"
-  | "advertising";
+  | "advertising"
+  | "ai";
 
 export interface IntegrationCapability {
   id: string;
@@ -561,6 +569,51 @@ function describeMcp(userId: string, deps: IntegrationDeps): IntegrationView {
   };
 }
 
+/**
+ * The OmniRoute configuration as the environment states it: absent, present
+ * and usable, or present and unusable — three states with three different
+ * fixes. Never throws; an unusable value is described by its field names and
+ * rules only, never by the value.
+ */
+function readOmniRoute(): { config: OmniRouteConfig } | { invalid: string } | null {
+  if (!isOmniRouteConfigured()) return null;
+  try {
+    return { config: createOmniRouteConfig() };
+  } catch (error) {
+    return { invalid: error instanceof Error ? error.message : "OmniRoute configuration error" };
+  }
+}
+
+function describeOmniRoute(userId: string): IntegrationView {
+  const read = readOmniRoute();
+  const config = read && "config" in read ? read.config : null;
+  const invalid = read && "invalid" in read ? read.invalid : null;
+
+  const base = config
+    ? { health: "UNVERIFIED" as const, detail: "Configured from server environment. Test to verify the gateway and its API key." }
+    : invalid
+      ? { health: "CONFIG_REQUIRED" as const, detail: `${invalid}. Fix it and restart.` }
+      : {
+          health: "CONFIG_REQUIRED" as const,
+          detail: "Not configured on the server. OmniRoute needs OMNIROUTE_BASE_URL and OMNIROUTE_API_KEY set at deploy time.",
+        };
+
+  return {
+    id: "omniroute",
+    name: "OmniRoute",
+    subtitle: "AI gateway — one OpenAI-compatible endpoint in front of many model providers",
+    category: "ai",
+    ...withCheck(base, recallCheck(userId, "omniroute")),
+    capabilities: [{ id: "omniroute.models", label: "Model catalogue", available: config !== null }],
+    // The base URL is operator configuration, not a secret, and the config
+    // refuses one that embeds a credential — so it is safe to display.
+    account: config ? { label: config.baseUrl } : null,
+    usage: null,
+    effectiveSource: "server environment",
+    actions: { testable: config !== null },
+  };
+}
+
 /** Current Maps usage, or null when the guard is not installed. */
 async function readMapsUsage(): Promise<IntegrationUsage | null> {
   const guard = getMapsUsageGuard();
@@ -599,6 +652,7 @@ export async function listIntegrations(
     describeN8n(userId),
     meta,
     describeMcp(userId, deps),
+    describeOmniRoute(userId),
   ];
 }
 
@@ -835,6 +889,91 @@ async function testMeta(userId: string, deps: IntegrationDeps): Promise<CheckRes
   }
 }
 
+/**
+ * OmniRoute: the model list, read with the key, and once more without it.
+ *
+ * A gateway that answers the keyless request too is DEGRADED, never CONNECTED:
+ * it works, but "the key was accepted" would be a claim about a key nothing
+ * checked, and the providers behind it are open to anyone who can reach it.
+ * "Key accepted" is said only when the keyless request was refused. Every
+ * detail is fixed wording plus the configured origin and a status code;
+ * nothing the gateway says is repeated.
+ */
+async function testOmniRoute(): Promise<CheckResult> {
+  const now = new Date().toISOString();
+  const read = readOmniRoute();
+  if (!read) {
+    return { health: "CONFIG_REQUIRED", detail: "OmniRoute is not configured on the server.", checkedAt: now };
+  }
+  if ("invalid" in read) {
+    return { health: "ERROR", detail: `${read.invalid}.`, checkedAt: now };
+  }
+
+  const { config } = read;
+  const at = new URL(config.baseUrl).origin;
+  const result = await checkOmniRouteConnection(config);
+
+  if (!result.ok) {
+    switch (result.reason) {
+      case "UNAUTHORIZED":
+        return { health: "ERROR", detail: "OmniRoute rejected the API key.", checkedAt: now };
+      case "NOT_FOUND":
+        return {
+          health: "ERROR",
+          detail: `OmniRoute has no model list at ${omniRouteModelsUrl(config)}. Check that OMNIROUTE_BASE_URL is the gateway's /v1 base.`,
+          checkedAt: now,
+        };
+      case "REDIRECTED":
+        return {
+          health: "ERROR",
+          detail: `OmniRoute answered with a redirect (HTTP ${result.httpStatus}), which JARVIS does not follow with the API key. Point OMNIROUTE_BASE_URL at the final address.`,
+          checkedAt: now,
+        };
+      case "HTTP_ERROR":
+        return { health: "DEGRADED", detail: `OmniRoute answered with HTTP ${result.httpStatus}.`, checkedAt: now };
+      case "TIMEOUT":
+        return { health: "ERROR", detail: "OmniRoute did not respond in time.", checkedAt: now };
+      case "UNREACHABLE":
+        return {
+          health: "ERROR",
+          detail: `OmniRoute could not be reached at ${at}. From inside Docker, the host's gateway is host.docker.internal, not localhost.`,
+          checkedAt: now,
+        };
+      case "UNEXPECTED_RESPONSE":
+        return {
+          health: "ERROR",
+          detail: "OmniRoute answered with something that is not an OpenAI-compatible model list.",
+          checkedAt: now,
+        };
+    }
+  }
+
+  const models = `${result.modelCount} model${result.modelCount === 1 ? "" : "s"}`;
+
+  if (result.keyRequired === false) {
+    return {
+      health: "DEGRADED",
+      detail: `OmniRoute at ${at} offers ${models}, but it answers without an API key too, so the key was not checked and anyone who can reach the gateway can use the providers behind it. Set REQUIRE_API_KEY=true on OmniRoute.`,
+      checkedAt: now,
+    };
+  }
+  if (result.modelCount === 0) {
+    return {
+      health: "DEGRADED",
+      detail: `OmniRoute at ${at} accepted the API key but offers no models. Connect a provider in the OmniRoute dashboard.`,
+      checkedAt: now,
+    };
+  }
+  return {
+    health: "CONNECTED",
+    detail:
+      result.keyRequired === true
+        ? `OmniRoute reachable at ${at}; the API key was accepted and ${models} are offered.`
+        : `OmniRoute reachable at ${at} with ${models}. Whether it requires an API key could not be confirmed.`,
+    checkedAt: now,
+  };
+}
+
 /** S8.5 — what went wrong with one server, in fixed words. Never the server's own text. */
 const MCP_FAILURE: Readonly<Record<McpFailureCode, string>> = {
   SERVER_UNAVAILABLE: "is unavailable",
@@ -960,6 +1099,9 @@ export async function runCheck(
     case "mcp":
       result = await testMcp(deps);
       break;
+    case "omniroute":
+      result = await testOmniRoute();
+      break;
     default:
       return null;
   }
@@ -969,4 +1111,4 @@ export async function runCheck(
 }
 
 /** The ids this registry knows. Used to reject unknown paths early. */
-export const INTEGRATION_IDS = ["google", "google-maps", "whatsapp", "n8n", "meta", "mcp"] as const;
+export const INTEGRATION_IDS = ["google", "google-maps", "whatsapp", "n8n", "meta", "mcp", "omniroute"] as const;

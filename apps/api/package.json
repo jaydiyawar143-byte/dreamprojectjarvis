@@ -7,7 +7,7 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "lint": "eslint src/",
+    "lint": "eslint src/ scripts/",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "typecheck:tests": "tsc --noEmit -p tsconfig.test.json"
@@ -26,6 +26,7 @@
     "@jarvis/memory": "workspace:*",
     "@jarvis/meta-graph": "workspace:*",
     "@jarvis/n8n": "workspace:*",
+    "@jarvis/omniroute": "workspace:*",
     "@jarvis/security": "workspace:*",
     "@jarvis/tools": "workspace:*",
     "@jarvis/whatsapp": "workspace:*",

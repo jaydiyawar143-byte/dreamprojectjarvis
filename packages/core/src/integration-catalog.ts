@@ -522,6 +522,41 @@ export const INTEGRATION_CATALOG: readonly IntegrationDescriptor[] = [
     commands: [...UNIVERSAL_COMMANDS],
     envVars: ["JARVIS_MCP_ENABLED"],
   },
+  {
+    // A self-hosted AI gateway: one OpenAI-compatible /v1 endpoint in front of
+    // many model providers. No action is listed, because none exists yet: the
+    // chat adapter still talks to OpenAI directly, and naming one here would
+    // be exactly the capability this catalogue must not claim. What this entry
+    // offers is a verified connection — reachable, OpenAI-compatible, and the
+    // key actually checked (see `testOmniRoute`).
+    id: "omniroute",
+    name: "OmniRoute",
+    subtitle: "AI gateway — one OpenAI-compatible endpoint in front of many model providers",
+    category: "ai",
+    configKind: "server-managed",
+    fields: [
+      {
+        name: "baseUrl",
+        label: "Base URL",
+        kind: "url",
+        required: true,
+        serverManaged: true,
+        placeholder: "http://localhost:20128/v1",
+        help: "The gateway's OpenAI-compatible base. A bare origin is completed with /v1. From inside Docker, the host's gateway is http://host.docker.internal:20128/v1.",
+      },
+      {
+        name: "apiKey",
+        label: "Endpoint API key",
+        kind: "secret",
+        required: true,
+        serverManaged: true,
+        help: "Created on OmniRoute's Endpoints page. Sent as a Bearer token. Set REQUIRE_API_KEY=true on the gateway, or it is not checked at all.",
+      },
+    ],
+    actions: [],
+    commands: [...UNIVERSAL_COMMANDS],
+    envVars: ["OMNIROUTE_BASE_URL", "OMNIROUTE_API_KEY"],
+  },
 ] as const;
 
 export function getIntegrationDescriptor(id: string): IntegrationDescriptor | undefined {
@@ -545,6 +580,10 @@ export function resolveIntegrationAlias(input: string): IntegrationId | null {
 
   // Before n8n's "automation" words: "MCP automation server" means MCP.
   if (/\bmcp\b/.test(text)) return "mcp";
+
+  // Before the provider names: "Google models through OmniRoute" means the
+  // gateway, not the Google integration.
+  if (/\bomni\s?route\b|\b(ai|llm|model) (gateway|router)\b/.test(text)) return "omniroute";
 
   // Maps before the bare "google" checks: "google maps" contains "google", and
   // the more specific match has to win or every Maps request becomes an Ads one.

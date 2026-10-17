@@ -352,6 +352,9 @@ describe("the JARVIS arm asks rather than guesses", () => {
       ["whatsapp", "whatsapp"],
       ["n8n", "n8n"],
       ["Facebook", "meta"],
+      ["OmniRoute", "omniroute"],
+      ["omni route", "omniroute"],
+      ["the AI gateway", "omniroute"],
     ] as const) {
       h.calls.length = 0;
       await toolNamed(h.service, "integration.status").execute(

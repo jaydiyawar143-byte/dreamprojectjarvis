@@ -122,6 +122,7 @@ import {
   PrismaPreferenceRepository,
   PrismaProjectRepository,
   PrismaMarketingRepository,
+  PrismaTenantRepository,
 } from "@jarvis/db";
 import { MemoryExtractionService, KnowledgeRetrievalService, MemoryManagementService, MemoryRetentionSweep } from "@jarvis/memory";
 import { createMemoryToolPort } from "./memory-tool-port.js";
@@ -309,6 +310,14 @@ export interface Container {
   memoryManagement: MemoryManagementService;
   /** Phase 14 — the user's own projects: the scope a memory may belong to. */
   projects: PrismaProjectRepository;
+  /**
+   * Phase 17 Stage 3A — tenant (Organization) READS: who owns a
+   * deployment-wide connection, and an account's role in that tenant. Read on
+   * every protected request, so a changed membership is in force at once.
+   * Nothing in the runtime writes a tenant or a membership; the operator
+   * command (apps/api/scripts/tenant-admin) does.
+   */
+  tenantRepo: PrismaTenantRepository;
   /**
    * Phase 14 — whether a statement may replace a memory, answered by the
    * memory writer. Absent when no writer is configured (no OPENAI_API_KEY).
@@ -2047,6 +2056,8 @@ export function getContainer(options?: {
     memoryManagement,
     // Phase 14 — projects, the correction check and the retention sweep.
     projects: projectRepo,
+    // Phase 17 Stage 3A — the tenant reads the n8n MCP routes authorize with.
+    tenantRepo: new PrismaTenantRepository(prisma),
     ...(memoryWriter.current
       ? { memoryCorrections: { check: (input: Parameters<MemoryCorrectionCheckPort["check"]>[0]) => memoryWriter.current!.checkCorrection(input) } }
       : {}),

@@ -12,11 +12,15 @@ import { z } from "zod";
 // than baked in. A self-hosted or differently-mounted instance overrides it with
 // N8N_MCP_ENDPOINT — business logic never names a host.
 //
-// THE TOKEN IS A SEPARATE SECRET from N8N_API_KEY. The MCP endpoint does not
-// accept the REST API key (verified against the live endpoint: a 401 with an
-// OAuth `resource_metadata` advert, not an API-key realm). It takes a bearer
-// token from n8n's MCP authorization flow, and it is kept under its own name so
-// the two can never be confused for one another.
+// THE TOKEN IS A SEPARATE SECRET from N8N_API_KEY, and it is NOT the REST API
+// key. n8n's instance-level MCP server authenticates a client either by OAuth
+// 2.1 (its recommended flow) or by a personal access token sent as
+// `Authorization: Bearer` — the "API key" tab in n8n's "Connect a client"
+// dialog, available since n8n 2.33. A REST API key is not accepted as an MCP
+// token. This module implements the bearer path only, and keeps the token under
+// its own name (N8N_MCP_TOKEN) so the two can never be confused for one
+// another. Live-verified 2026-10-16: "n8n MCP Server" v1.2.0 answered a bearer
+// `tools/list` with 58 tools.
 //
 // OFF UNLESS SWITCHED ON. `N8N_MCP_ENABLED` must be exactly "true" — the
 // repository's convention for a switch (BROWSER_ENABLED, JARVIS_MCP_ENABLED).

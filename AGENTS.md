@@ -386,7 +386,7 @@ Every capability has one home. Before creating a file, find that home.
 | `packages/config` | Environment schema and typed configuration |
 | `packages/ai-openai`, `ai-elevenlabs` | Model and voice providers |
 | `packages/ai-anthropic` | Claude adapter — built, not wired |
-| `packages/meta-graph`, `google-ads`, `google-workspace`, `whatsapp`, `n8n`, `browser` | Provider clients |
+| `packages/meta-graph`, `google-ads`, `google-workspace`, `whatsapp`, `n8n`, `omniroute`, `browser` | Provider clients |
 | `packages/mcp` | MCP runtime (the only home of the MCP SDK) and the reviewed stdio servers in `pilot/`; reviewed in core's `MCP_MANIFEST`, read-only, off unless `JARVIS_MCP_ENABLED=true` |
 
 ## Documentation precedence

@@ -39,6 +39,7 @@ export const INTEGRATION_IDS = [
   "n8n",
   "meta",
   "mcp",
+  "omniroute",
 ] as const;
 
 export type IntegrationId = (typeof INTEGRATION_IDS)[number];
@@ -52,7 +53,8 @@ export type IntegrationCategory =
   | "maps"
   | "communication"
   | "automation"
-  | "advertising";
+  | "advertising"
+  | "ai";
 
 /**
  * How an integration is configured. This decides which verbs are even

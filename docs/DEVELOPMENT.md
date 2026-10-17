@@ -136,11 +136,11 @@ The rest of the marketing tests need no database: `pnpm --filter @jarvis/api exe
 |---|---|
 | Install | `pnpm install --frozen-lockfile` |
 | Prisma client | `pnpm --filter @jarvis/db exec prisma generate` |
-| Lint | `pnpm lint` |
+| Lint | `pnpm lint` — each package's `src/`, and the API's `scripts/` too |
 | Typecheck | `pnpm typecheck` |
-| Typecheck test files | `pnpm typecheck:tests` — the API's test files |
+| Typecheck test files | `pnpm typecheck:tests` — the API's test files and scripts (except `scripts/phase116b`), and the Phase 17 test files of `@jarvis/db` and `@jarvis/security` |
 | Build | `pnpm build` |
-| Tests | `pnpm --filter <name> test` for `@jarvis/api`, `@jarvis/memory`, `@jarvis/n8n` and `@jarvis/web` |
+| Tests | `pnpm --filter <name> test` for `@jarvis/api`, `@jarvis/memory`, `@jarvis/n8n` and `@jarvis/web`; `@jarvis/security` (Phase 17) in its own step after the marketing contracts |
 | Memory contracts (Phase 14) | `vitest run memory learning` in `@jarvis/core`, `vitest run memory-tools` in `@jarvis/tools`, `vitest run memory` in `@jarvis/agents` — by file name; those workspaces' other tests are still not gated |
 | Marketing contracts (Phase 15) | `vitest run marketing seo-audit` in `@jarvis/core`, `vitest run marketing-tools` in `@jarvis/tools`, `vitest run marketing-agent` in `@jarvis/agents`, `vitest run page-fetcher` in `@jarvis/browser`, `vitest run page-publisher` in `@jarvis/meta-graph` — by file name, for the same reason as the memory contracts |
 | Migrations | `pnpm --filter @jarvis/db exec prisma migrate deploy`, against the CI database |
@@ -164,18 +164,20 @@ Phase 14 (2026-10-08) added one migration and seven database test files, picked 
 
 Phase 15 (2026-10-12) added one migration and two database test files — `packages/db/test/marketing-p15-pg.integration.test.ts` and `apps/api/test/marketing-e2e-pg.integration.test.ts` — both picked up by the names above, and **added one step** to the workflow: the marketing-contract step in the table. It adds a gate and changes no existing one. The tests it selects would otherwise not run in CI at all, because `@jarvis/core`, `tools`, `agents`, `browser` and `meta-graph` are not gated as workspaces. No step reaches a provider: the Page publisher and the page reader are tested against stand-ins. The same local replay, on a brand-new `pgvector/pgvector:pg16` container (the tag, not CI's pinned digest) with every migration applied from scratch, gave 30 migrations applied; `@jarvis/db` 327/327 (25 files), `@jarvis/memory` 93/93 (9 files), `@jarvis/api` 155/155 (7 files), the evaluation 13/13; the skip check reported 0 not run in all four reports; the marketing-contract step 203 + 74 + 106 + 58 + 46. Those are local counts, taken on Windows with Node 24 on 2026-10-12; the changed workflow has not run on GitHub yet. The audit fixes of 2026-10-13 changed no step of the workflow. They added one test file to `apps/api` that needs no database (`marketing-limits-p15`, run by "Test @jarvis/api") and tests to files CI already selects; the counts after them are in the paragraph "After the Phase 15 audit fixes" above.
 
-**Protected `main`.** Since 2026-10-05 the active GitHub ruleset "Protect main" applies to `main`, the default branch, and GitHub reports it as protected:
+Phase 17 (2026-10-17) added one migration and two database test files — `packages/db/test/tenant-foundation-p17-pg.integration.test.ts` and `apps/api/test/n8n-mcp-tenancy-p17-pg.integration.test.ts` — both picked up by the names above, and changed the workflow in two ways: **one new step**, `Test @jarvis/security`, and a wider `typecheck:tests` (the API's `scripts/`, except `scripts/phase116b`; the Phase 17 test files of `@jarvis/db` and `@jarvis/security`), with the API's lint now covering `scripts/` as well. It adds gates and changes no existing one. The new step reaches no provider and needs no database: the authorization engine is pure. The same local replay, on a brand-new `pgvector/pgvector:pg16` container (the tag, not CI's pinned digest) with every migration applied from scratch, gave 31 migrations applied; `@jarvis/db` 387/387 (26 files), `@jarvis/memory` 93/93 (9 files), `@jarvis/api` 220/220 (8 files), the evaluation 13/13; the skip check reported 0 not run in all four reports. Those are local counts, taken on Windows with Node 24 on 2026-10-17; the changed workflow has not run on GitHub yet.
 
-- A change reaches `main` only through a pull request; pushing to `main` directly is refused. The required number of approvals is 0, "Require approval of the most recent reviewable push" is on, and every review conversation must be resolved.
-- The status check "Lint, typecheck, build and tests" — the job in `ci.yml` — must pass, on a branch that is up to date with `main`.
+**Protected `main`.** The active GitHub ruleset "Protect main" applies to `main`, the default branch. As the GitHub API reports its rules on 2026-10-17:
+
+- The status check "Lint, typecheck, build and tests" — the job in `ci.yml` — is required, **non-strict**: the branch need not be up to date with `main`, so the merge result of a stale branch is not re-tested.
 - Force pushes and deleting `main` are blocked. The ruleset has no bypass list.
+- There is **no pull-request rule**: no approval and no resolved-conversation requirement. A direct push is still held to the required check — GitHub accepts it only for a commit on which that check has already passed, in a pull request or a run started on demand.
 
-So CI blocks merges into `main`. Other branches are not protected. No pull request has been merged through the ruleset yet.
+From 2026-10-05 this paragraph said a pull request was required, with "Require approval of the most recent reviewable push" on, every conversation resolved and an up-to-date branch. The API reports none of those rules today; when they stopped applying is not recorded here. Other branches are not protected. The ruleset was read, not changed.
 
 **Not covered yet:**
 
-- **Test files outside `apps/api`.** `typecheck:tests` exists only in that workspace, so other packages' test files are not type-checked. (Ledger R-18, the API's own 60 errors, is closed: they were fixed in `1c1c1bd` and CI gates the script.)
-- **The other workspaces' tests** — `@jarvis/agents`, `tools`, `security`, `core`, `config` and the provider packages. Run them locally with `pnpm test`. Two slices of them are gated by file name: the memory contracts (Phase 14) and the marketing contracts (Phase 15). Everything else in those workspaces — including the pinned agent-policy and skill censuses that Phase 15 updated — still runs only locally.
+- **Most test files outside `apps/api`.** `typecheck:tests` runs in `apps/api` and, for their Phase 17 test files only, in `@jarvis/db` and `@jarvis/security`; other packages' test files are not type-checked. Left out by name until they are fixed or retired: the older test files of `@jarvis/db` (13 errors in seven Phase 10–11 files) and `@jarvis/security` (2 errors in two files), and `apps/api/scripts/phase116b` (23 errors in four files, which no longer match the code they call). (Ledger R-18, the API's own 60 errors, is closed: they were fixed in `1c1c1bd` and CI gates the script.)
+- **The other workspaces' tests** — `@jarvis/agents`, `tools`, `core`, `config` and the provider packages. Run them locally with `pnpm test`. Two slices of them are gated by file name: the memory contracts (Phase 14) and the marketing contracts (Phase 15). Everything else in those workspaces — including the pinned agent-policy and skill censuses that Phase 15 updated — still runs only locally.
 - **Secret scanning and dependency audits** — audit finding SEC-7.
 
 **Status, 2026-10-05:** the workflow runs on GitHub on every push to `main` and on pull requests, since its first run on 2026-09-14 (`df1d099`). Run 37306626267, for `68628c0`, passed every step.

@@ -104,3 +104,21 @@ export {
   type ResearchWrite,
   type ReportWrite,
 } from "./repositories/marketing-repository.js";
+
+// Phase 17 Stage 3A — tenants (Organizations). The repository READS what an
+// authorization boundary asks on every protected request. The writer is
+// operator-driven only (apps/api/scripts/tenant-admin): nothing in the
+// runtime creates or changes a tenant, a membership or a connector owner.
+export { PrismaTenantRepository } from "./repositories/tenant-repository.js";
+export {
+  runTenantAdminCommand,
+  validateTenantAdminCommand,
+  TENANT_ADMIN_VERBS,
+  type TenantAdminCommand,
+  type TenantAdminVerb,
+  type TenantAdminResult,
+  type TenantAdminRefusalCode,
+  type TenantAdminDetail,
+  type TenantAdminOptions,
+  type TenantAuditRow,
+} from "./maintenance/tenant-admin.js";

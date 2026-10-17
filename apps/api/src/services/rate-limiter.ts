@@ -51,6 +51,11 @@ export const RATE_LIMIT_NAMESPACES = {
   // the provider which Pages it may post to). Counted by `AtomicRateLimiter`
   // below, which reserves a slot before the work starts.
   marketing: "marketing",
+  // Phase 16 — read-only n8n MCP discovery. Each call reaches the n8n MCP
+  // server, so it is metered apart from every other budget: a burst of
+  // discovery cannot spend the budget that a chat turn or a workflow read
+  // needs, and this ceiling can be tuned without touching them.
+  n8n_mcp: "n8n_mcp",
 } as const;
 
 export type RateLimitNamespace =

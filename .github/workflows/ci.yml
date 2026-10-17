@@ -3,7 +3,7 @@
 # Gated here; any genuine failure fails the run:
 #   lint, typecheck and build for every workspace, the TEST-FILE typecheck of
 #   @jarvis/api, and the test suites of @jarvis/api, @jarvis/memory,
-#   @jarvis/n8n and @jarvis/web.
+#   @jarvis/n8n, @jarvis/omniroute and @jarvis/web.
 #   The PostgreSQL-backed tests, against a fresh pgvector database that exists
 #   for this run only: every migration is applied to it first, then all of
 #   @jarvis/db, the `pg.integration` files of @jarvis/memory and @jarvis/api,
@@ -25,14 +25,22 @@
 #   PostgreSQL-backed and run in the database steps, where a skip fails the
 #   run. No step reaches a provider: the Page publisher and the page reader are
 #   tested against stand-ins.
+#   Phase 17 — the whole test suite of @jarvis/security (the automation
+#   Permission and Risk Engine), and the TEST-FILE typecheck widened: the
+#   Phase 17 test files of @jarvis/db and @jarvis/security, and the API's
+#   operator scripts (`apps/api/scripts`, which the API's lint now covers too).
 #
 # Deliberately not gated yet (docs/DEVELOPMENT.md, "Continuous integration"):
-#   - Test files OUTSIDE @jarvis/api. `typecheck:tests` exists only in that
-#     workspace, and every other package's tsconfig covers `src/**` alone, so
-#     a green run says nothing about their test files. `apps/web` is the one
-#     exception: its tsconfig already includes tests, so `Typecheck` covers it.
-#     The task is defined in turbo.json rather than inlined here, so adding the
-#     script to another workspace gates it automatically.
+#   - Most test files OUTSIDE @jarvis/api. `typecheck:tests` runs in
+#     @jarvis/api (its sources, tests and scripts) and, for their Phase 17
+#     test files only, in @jarvis/db and @jarvis/security; every other
+#     package's tsconfig covers `src/**` alone. The older test files of
+#     @jarvis/db and @jarvis/security (15 errors) and `apps/api/scripts/
+#     phase116b` (23 errors) do not type-check today and are left out by name
+#     until they are fixed or retired. `apps/web` is the exception: its
+#     tsconfig already includes tests, so `Typecheck` covers it. The task is
+#     defined in turbo.json rather than inlined here, so adding the script to
+#     another workspace gates it automatically.
 #   - The tests of the other workspaces, secret scanning and dependency audits
 #     (audit finding SEC-7).
 
@@ -139,6 +147,10 @@ jobs:
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: pnpm --filter @jarvis/n8n test
 
+      - name: Test @jarvis/omniroute
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: pnpm --filter @jarvis/omniroute test
+
       - name: Test @jarvis/web
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: pnpm --filter @jarvis/web test
@@ -171,6 +183,14 @@ jobs:
           pnpm --filter @jarvis/agents exec vitest run marketing-agent
           pnpm --filter @jarvis/browser exec vitest run page-fetcher
           pnpm --filter @jarvis/meta-graph exec vitest run page-publisher
+
+      # Phase 17 — the automation Permission and Risk Engine. Its own tests are
+      # the only ones that exercise grant-checked fallback across REST and MCP,
+      # every membership role and every refusal code; the API's route tests
+      # reach it through MCP alone. The whole workspace, as for @jarvis/n8n.
+      - name: Test @jarvis/security
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: pnpm --filter @jarvis/security test
 
       # From here on, the PostgreSQL-backed tests. DATABASE_URL is set on these
       # steps only, so nothing above ever sees a database. Applying every

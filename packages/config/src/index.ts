@@ -42,10 +42,12 @@ const baseEnvSchema = z.object({
   // The SECOND n8n surface: its MCP server, for discovering and invoking
   // automation tools. Three things the REST vars are not:
   //
-  //   N8N_MCP_TOKEN  a BEARER token, not an API key. The MCP endpoint does not
-  //                  accept N8N_API_KEY — it runs OAuth 2.1 and answers a REST
-  //                  key with a 401 advertising resource metadata. A separate
-  //                  name keeps the two from ever being swapped.
+  //   N8N_MCP_TOKEN  a BEARER token, NOT the REST API key. n8n's MCP server
+  //                  accepts either an OAuth 2.1 grant (recommended) or a
+  //                  personal access token sent as `Authorization: Bearer`
+  //                  (the "API key" tab, n8n >= 2.33). JARVIS implements the
+  //                  bearer path; a REST key is never accepted as an MCP
+  //                  token, and this separate name keeps the two apart.
   //   N8N_MCP_ENDPOINT  an override for the derived default. The endpoint is
   //                  normally built from N8N_BASE_URL + /mcp-server/http; this
   //                  exists only for a self-hosted instance that mounts it
@@ -62,6 +64,13 @@ const baseEnvSchema = z.object({
   // serves MCP from a different host than the REST API. The base origin is
   // always allowed and needs no entry here.
   N8N_MCP_ALLOWED_ORIGINS: z.string().optional(),
+
+  // OmniRoute — a self-hosted AI gateway. Plain optional strings: a malformed
+  // base URL must not stop the API booting over an integration that is only
+  // reported on. `createOmniRouteConfig()` in @jarvis/omniroute validates them,
+  // and the integration card says what is wrong.
+  OMNIROUTE_BASE_URL: z.string().optional(),
+  OMNIROUTE_API_KEY: z.string().optional(),
 
   // Sprint 5.3 — WhatsApp Business Cloud API.
   // Four DISTINCT secrets: the access token authenticates us to Meta, the app

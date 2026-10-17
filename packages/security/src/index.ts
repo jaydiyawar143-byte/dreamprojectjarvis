@@ -4,7 +4,7 @@ export {
   authorizeAutomationOperation,
   classifyAutomationRisk,
   capabilityKindForRisk,
-  grantsForAutomationRole,
+  grantsForTenantRole,
   AUTOMATION_PERMISSIONS,
   type AutomationSurface,
   type AutomationPermission,

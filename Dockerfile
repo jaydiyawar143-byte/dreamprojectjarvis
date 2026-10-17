@@ -61,6 +61,7 @@ COPY packages/mcp/package.json ./packages/mcp/
 COPY packages/memory/package.json ./packages/memory/
 COPY packages/meta-graph/package.json ./packages/meta-graph/
 COPY packages/n8n/package.json ./packages/n8n/
+COPY packages/omniroute/package.json ./packages/omniroute/
 COPY packages/security/package.json ./packages/security/
 COPY packages/tools/package.json ./packages/tools/
 COPY packages/whatsapp/package.json ./packages/whatsapp/

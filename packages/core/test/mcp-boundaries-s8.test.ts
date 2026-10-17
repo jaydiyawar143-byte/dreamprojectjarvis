@@ -143,8 +143,17 @@ describe("MCP stays where it was put", () => {
     // health check, the command service's MCP branches, and index.ts handing
     // the no-key route the same runtime. packages/mcp itself is still imported
     // by the container alone (packages/mcp/test/boundaries-s8.test.ts).
+    //
+    // Phase 16 added one more: a route that REPORTS a connection the container
+    // built. It belongs on this list because its error codes and its failure-code
+    // type spell MCP, and it belongs on the right side of the line because it
+    // wires no connection, registers no tool and reaches no transport — it calls
+    // `discoverTools()` on a connector it is handed and projects names. The list
+    // below is still exhaustive; it just now records a reporter as well as the
+    // wirers.
     expect(mcpReferences(["apps/api/src"]).sort()).toEqual([
       "apps/api/src/index.ts",
+      "apps/api/src/routes/n8n-mcp.ts",
       "apps/api/src/services/container.ts",
       "apps/api/src/services/integration-registry.ts",
       "apps/api/src/services/integrations/command-service.ts",
