@@ -98,6 +98,9 @@ model User {
   contentItems       ContentItem[]
   marketingReports   MarketingReport[]
   marketingResearch  MarketingResearch[]
+  // Phase 17 — the tenants (Organizations) this account is a member of. A
+  // relation only: no column, and `role` above keeps its meaning.
+  tenantMemberships TenantMembership[]
 }
 
 model RefreshToken {
@@ -1149,4 +1152,82 @@ model MarketingResearch {
   @@index([userId, projectId])
   @@index([userId, campaignId])
   @@map("MarketingResearch")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 17, Stage 3A — tenants. A tenant is called an Organization in the
+// product; the design is docs/tenant-model-design.md.
+//
+// A tenant is a business: the ownership and data boundary for TENANT-OWNED
+// resources. Today that is only the automation connections the deployment
+// configures for everyone (`AutomationConnectorOwner`). Every other row is
+// still owned by its user, exactly as before — nothing here re-scopes them.
+//
+// `TenantRole` is deliberately not `Role`. `Role` is the account-wide role and
+// keeps every job it has; on a tenant's resource only the MEMBERSHIP role
+// counts, so an account-wide owner who is not a member has no access to it.
+//
+// Additive: three new tables and one enum, and no row is written by the
+// migration. Memberships and connector owners are written ONLY by the operator
+// command (packages/db/src/maintenance/tenant-admin.ts), each change in one
+// transaction with its audit row.
+// ---------------------------------------------------------------------------
+enum TenantRole {
+  OWNER
+  ADMIN
+  MEMBER
+  VIEWER
+}
+
+model Tenant {
+  id        String   @id @default(cuid())
+  /// The Organization's display name. Not an identifier; never used to find it.
+  name      String
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  memberships     TenantMembership[]
+  connectorOwners AutomationConnectorOwner[]
+
+  @@map("Tenant")
+}
+
+// One account's membership in one tenant — the only source of a tenant role.
+// It is read by BOTH ids (the unique key below), never by user alone, so a
+// membership cannot be found for a tenant other than the one asked about.
+model TenantMembership {
+  id        String     @id @default(cuid())
+  tenantId  String     @map("tenant_id")
+  userId    String     @map("user_id")
+  role      TenantRole
+  createdAt DateTime   @default(now()) @map("created_at")
+  updatedAt DateTime   @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, userId])
+  @@index([userId])
+  @@map("TenantMembership")
+}
+
+// Which tenant owns a connection configured for the WHOLE deployment by its
+// environment — keyed by provider and connector, e.g. n8n's automation
+// connection. At most one owner per key. No row: the connection belongs to no
+// one, and every request for it is refused. Never inferred from a caller or
+// from an account-wide role. `Restrict`: the owning tenant cannot be deleted
+// while it owns the connection — ownership is moved or removed first.
+model AutomationConnectorOwner {
+  id         String   @id @default(cuid())
+  providerId String   @map("provider_id")
+  connector  String
+  tenantId   String   @map("tenant_id")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+
+  @@unique([providerId, connector])
+  @@index([tenantId])
+  @@map("AutomationConnectorOwner")
 }

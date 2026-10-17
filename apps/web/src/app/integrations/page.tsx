@@ -63,6 +63,7 @@ const CATEGORY_LABEL: Record<IntegrationCategory, string> = {
   communication: "Communication",
   automation: "Automation",
   advertising: "Advertising",
+  ai: "AI models",
 };
 
 /** Which bucket a health value falls into for the filter row. */

@@ -2040,7 +2040,8 @@ export type IntegrationCategory =
   | "maps"
   | "communication"
   | "automation"
-  | "advertising";
+  | "advertising"
+  | "ai";
 
 export type IntegrationConfigKind = "oauth" | "form" | "server-managed";
 

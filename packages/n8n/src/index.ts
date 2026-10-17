@@ -93,3 +93,11 @@ export {
   type N8nMcpTransport,
 } from "./mcp-connector.js";
 
+export {
+  buildAutomationCatalog,
+  type AutomationCatalog,
+  type AutomationCatalogInput,
+  type AutomationSource,
+  type AutomationSourceReport,
+} from "./automation-catalog.js";
+

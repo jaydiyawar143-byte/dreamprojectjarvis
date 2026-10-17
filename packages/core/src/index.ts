@@ -83,6 +83,9 @@ export * from "./integration-catalog.js";
 // reach through a connector (n8n REST and n8n MCP today), with deduplication
 // and operation-based routing. Pure: connectors collect, this decides.
 export * from "./automation-registry.js";
+// Phase 17 Stage 3A — tenants (Organizations): roles, the membership context
+// and the two read ports. Contract only; the reads live in @jarvis/db.
+export * from "./types/tenant.js";
 
 // Capability discovery — what this build can do, and what can actually run now.
 // Derived from the live tool registry, agent policies and integration state;

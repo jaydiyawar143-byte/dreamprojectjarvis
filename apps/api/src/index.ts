@@ -36,6 +36,7 @@ import { IntegrationHealthService } from "./services/health/health-service.js";
 import { checkGoogleHealth } from "./services/health/google-health-check.js";
 import { createWhatsAppRouter } from "./routes/whatsapp.js";
 import { createN8nRouter } from "./routes/n8n.js";
+import { createN8nMcpRouter } from "./routes/n8n-mcp.js";
 import { createVoiceRouter } from "./routes/voice.js";
 import {
   SOCKET_CONNECT_TIMEOUT_MS,
@@ -297,6 +298,18 @@ app.use("/api/v1/activity", createActivityRouter(container));
 // and "JARVIS_ENCRYPTION_KEY is not set" is.
 // ---------------------------------------------------------------------------
 app.use("/api/v1/capabilities", createCapabilitiesRouter(container));
+
+// ---------------------------------------------------------------------------
+// Phase 16, Stage 1 — read-only n8n MCP discovery.
+//
+// Mounted UNCONDITIONALLY, beside the REST n8n router (which is gated on
+// `isN8nConfigured`), for the same reason as /capabilities above: whether the
+// MCP surface is switched on is a server fact, and the route says so
+// (`MCP_NOT_CONFIGURED`) rather than 404ing. It never builds a connector, so a
+// request cannot turn the surface on; it only reads the one the container may
+// have built. It reads and nothing else — no invocation, no write.
+// ---------------------------------------------------------------------------
+app.use("/api/v1/n8n/mcp", createN8nMcpRouter(container));
 
 // ---------------------------------------------------------------------------
 // Phase 12 — real read-only Gmail, Drive and Calendar.

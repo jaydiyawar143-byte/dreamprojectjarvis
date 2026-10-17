@@ -79,6 +79,7 @@ import {
   googleMapsMonthlyLimit,
   isGoogleMapsBrowserConfigured,
   isGoogleMapsServerConfigured,
+  isOmniRouteConfigured,
   isWhatsAppConfigured,
 } from "./environment.js";
 import { maskConfig, validateConfig, type ValidationIssue } from "./config-validation.js";
@@ -602,6 +603,12 @@ export class IntegrationCommandService {
       return { baseUrl: on, apiKey: on, callbackSecret: Boolean(process.env.N8N_CALLBACK_SECRET) };
     }
     if (id === "mcp") return { enabled: Boolean(this.deps.mcp?.enabled()) };
+    if (id === "omniroute") {
+      return {
+        baseUrl: Boolean(process.env.OMNIROUTE_BASE_URL?.trim()),
+        apiKey: Boolean(process.env.OMNIROUTE_API_KEY?.trim()),
+      };
+    }
     return {};
   }
 
@@ -649,6 +656,13 @@ export class IntegrationCommandService {
 
     // Set up, not working: whether a server actually runs is health's question.
     if (id === "mcp") return this.mcpRegistered() ? "CONNECTED" : "NOT_CONNECTED";
+
+    // Set up, not working: whether the gateway answers is health's question.
+    if (id === "omniroute") {
+      if (isOmniRouteConfigured()) return "CONNECTED";
+      const partial = Boolean(process.env.OMNIROUTE_BASE_URL?.trim() || process.env.OMNIROUTE_API_KEY?.trim());
+      return partial ? "PARTIAL" : "NOT_CONNECTED";
+    }
 
     // meta
     const hasStored = Boolean(stored?.accessToken && stored?.adAccountId);
@@ -1085,6 +1099,19 @@ export class IntegrationCommandService {
           id: "mcp_tools_read",
           label: "Use reviewed read-only MCP tools (owners and admins)",
           granted: this.mcpRegistered(),
+          access: "read",
+        },
+      ];
+    }
+
+    if (id === "omniroute") {
+      // The one thing this build does with the gateway is read its model
+      // list. What its key may spend is decided on the gateway, not here.
+      return [
+        {
+          id: "models_read",
+          label: "List the models the gateway offers",
+          granted: isOmniRouteConfigured(),
           access: "read",
         },
       ];

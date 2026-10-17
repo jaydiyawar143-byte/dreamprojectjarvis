@@ -14,29 +14,33 @@
 // in front of that routing decision, and it is deliberately the only one, so
 // REST and MCP cannot be gated by two subtly different rules.
 //
-// THE DECISION ORDER (cheap identity checks first, routing last):
+// THE DECISION ORDER (cheap identity checks first, routing last; the tenant
+// steps are Stage 3A's, described below):
 //
-//   identity → operation → risk → scope → role → per-surface capability
+//   identity → operation → risk → ownership → membership → owner/agent
+//            → membership role → per-surface capability
 //
 // Every step DEFAULT-DENIES. An unverified identity, an unrecognized role, an
 // operation that is not in the declared set, or an operation with no risk
 // classification all end in a refusal with a fixed code and a fixed sentence.
 // There is no fall-through that answers "yes" because nothing above objected.
 //
-// TRUSTED IDENTITY ONLY. `subject.auth` is the `AuthContext` a verified
-// session token produced (`requireAuth`); `subject.agentId` is the session's
-// agent, set server-side from the conversation row (`SessionContext`). Neither
+// TRUSTED INPUTS ONLY. `subject.auth` is the `AuthContext` a verified session
+// token produced (`requireAuth`); `subject.membership` is what the server read
+// from the database for this request; `subject.agentId` is the session's
+// agent, set server-side from the conversation row (`SessionContext`). None
 // comes from a request body, a tool parameter or a provider payload. The scope
-// (`ownerUserId`, `agentId`) is resolved the same way — e.g. from
-// `findWorkflowForUser`, where the owning user id is part of the query filter,
-// not a post-hoc check. This engine performs no lookup itself: it compares two
-// things the caller already resolved through trusted means.
+// (`tenantId`, `ownerUserId`, `agentId`) is resolved the same way — from a
+// stored ownership record, where the owner is part of the query filter, never a
+// post-hoc check. This engine performs no lookup itself: it compares things the
+// caller already resolved through trusted means.
 //
 // SCOPE IS HARD, ROLE IS NOT AN OVERRIDE. Role says WHAT a principal may do;
-// scope says WHOSE resource it may be done to. Both must pass. An `owner` role
-// (which holds every capability) still receives `SCOPE_OWNER_MISMATCH` for
-// another principal's resource — matching the repository rule that the user
-// filter is written in the query, never applied afterwards.
+// scope says WHOSE resource it may be done to. Both must pass. An `owner`
+// membership (which holds every capability) still receives
+// `SCOPE_TENANT_MISMATCH` for another tenant's resource and
+// `SCOPE_OWNER_MISMATCH` for another principal's — matching the repository
+// rule that the owner filter is written in the query, never applied afterwards.
 //
 // REST AND MCP ARE DISTINCT GRANTS. `rest:read` is not `mcp:read`. A fallback
 // from one surface to the other is permitted ONLY to a surface that
@@ -48,11 +52,31 @@
 // requirement: `manage` and `execute` demand approval on REST exactly as on
 // MCP — the same table ToolExecutor's gate reads (`RISK_REQUIRES_APPROVAL`).
 //
-// WHAT THIS STAGE IS NOT. Nothing here is wired into a route, a tool or the
-// connector, and nothing here can reach a provider: wiring is Stage 2, and
-// execution stays out of scope until the approval architecture (Phase 16 Stage
-// 3 spec) is implemented. This module contains no code path that invokes
-// anything.
+// WHAT THIS MODULE IS NOT. It reaches no provider and invokes nothing; the
+// n8n MCP read routes consult it (Stage 2), and execution stays out of scope
+// until the approval architecture (Phase 16 Stage 3 spec) is implemented.
+//
+// STAGE 3A — TENANTS (Organizations in the product). A resource now belongs
+// to a TENANT, and the role that counts is the caller's MEMBERSHIP role in
+// that tenant, never the account-wide `auth.role`:
+//
+//   • `scope.tenantId` is required — a resource with no recorded owning
+//     tenant is refused (`RESOURCE_OWNERSHIP_MISSING`), never assumed to be
+//     the caller's.
+//   • `subject.membership` is the caller's membership IN THAT TENANT, read by
+//     the server from the database for this request. Absent, or belonging to
+//     another account: `TENANT_MEMBERSHIP_REQUIRED`. For another tenant:
+//     `SCOPE_TENANT_MISMATCH`.
+//   • Grants come from the membership role alone (`grantsForTenantRole`).
+//     An account-wide owner or admin who is not a member of the tenant holds
+//     nothing on its resources; this module does not read `auth.role` at all.
+//   • `scope.ownerUserId`, when a resource also belongs to one user inside the
+//     tenant, is checked BESIDE the tenant, never instead of it.
+//
+// The decision order becomes:
+//
+//   identity → operation → risk → ownership → membership in that tenant
+//            → owner (if any) → agent (if any) → membership role → per-surface capability
 // ---------------------------------------------------------------------------
 
 import type {
@@ -61,6 +85,7 @@ import type {
   AutomationConnectorStatus,
   AutomationOperation,
   RiskLevel,
+  TenantMembershipContext,
 } from "@jarvis/core";
 import { AUTOMATION_OPERATIONS, resolveAutomationRoute } from "@jarvis/core";
 import { RISK_REQUIRES_APPROVAL } from "./tool-approval.js";
@@ -145,20 +170,19 @@ export function capabilityKindForRisk(risk: RiskLevel): "read" | "write" {
 }
 
 // ---------------------------------------------------------------------------
-// Role → grants. Explicit, reviewed, and default-deny for anything unknown.
+// Membership role → grants. Explicit, reviewed, and default-deny for anything
+// unknown. Keyed by the TENANT membership role (Stage 3A); the account-wide
+// role is not an input to this table.
 //
-// POLICY (Stage 1 decision, flagged for review — changing it is this table
-// only):
-//   • `rest:read`   — every recognized role. Reading workflow metadata is the
-//                     least-privilege base every role already holds for tools.
+// POLICY (Stage 3A, approved — docs/tenant-model-design.md §4.4; changing it
+// is this table only, and there is no per-tenant override):
+//   • `rest:read`   — every recognized role.
 //   • `rest:write`  — owner/admin only (`manage` changes external state).
-//   • `mcp:read`    — owner/admin only. The reviewed-MCP precedent is
-//                     OWNER/ADMIN for anything that reaches an instance
-//                     (Phase 16 execution spec §2.3).
-//   • `mcp:write`   — owner/admin only, and in practice still approval-gated
-//                     (writes are out of scope for this stage entirely).
-// `member`/`viewer` therefore hold NO MCP grant and NO write grant: their most
-// powerful decision is a refusal.
+//   • `mcp:read`    — owner, admin and member. A viewer holds none.
+//   • `mcp:write`   — owner/admin only, and still approval-gated: no write
+//                     path exists for any role in this phase.
+// A member's read grant implies nothing else — there is no stored
+// per-account grant, so this table is every grant there is.
 // ---------------------------------------------------------------------------
 
 const ROLE_GRANTS: ReadonlyMap<string, readonly AutomationPermission[]> = new Map<
@@ -167,16 +191,16 @@ const ROLE_GRANTS: ReadonlyMap<string, readonly AutomationPermission[]> = new Ma
 >([
   ["owner", ["rest:read", "rest:write", "mcp:read", "mcp:write"]],
   ["admin", ["rest:read", "rest:write", "mcp:read", "mcp:write"]],
-  ["member", ["rest:read"]],
+  ["member", ["rest:read", "mcp:read"]],
   ["viewer", ["rest:read"]],
 ]);
 
 /**
- * The capabilities a role holds for automation operations. An unrecognized
- * role — a value outside the `Role` enum, a typo, a forged claim — holds
- * nothing.
+ * The capabilities a TENANT membership role holds for automation operations.
+ * An unrecognized role — a typo, an upper-case database value that was not
+ * mapped, a forged claim — holds nothing.
  */
-export function grantsForAutomationRole(role: string): readonly AutomationPermission[] {
+export function grantsForTenantRole(role: string): readonly AutomationPermission[] {
   if (typeof role !== "string") return [];
   return ROLE_GRANTS.get(role) ?? [];
 }
@@ -186,24 +210,30 @@ export function grantsForAutomationRole(role: string): readonly AutomationPermis
 // ---------------------------------------------------------------------------
 
 /**
- * The trusted caller. `auth` is what the verified access token produced;
- * `agentId` is the session's agent, set server-side. A caller that has neither
- * resolved through trusted means must pass `null`/`undefined` — guessing is
- * worse than admitting absence, because the engine denies absence.
+ * The trusted caller. `auth` is what the verified access token produced — only
+ * its `userId` is read; its account-wide `role` is not an input. `membership`
+ * is the caller's membership in the resource's tenant, read by the server from
+ * the database for THIS request (`findMembership(userId, tenantId)`).
+ * `agentId` is the session's agent, set server-side. Whatever was not resolved
+ * through trusted means must be `null`/`undefined` — guessing is worse than
+ * admitting absence, because the engine denies absence.
  */
 export interface AutomationCallSubject {
   auth: AuthContext | null | undefined;
+  membership: TenantMembershipContext | null | undefined;
   agentId?: string | undefined;
 }
 
 /**
- * The target resource's ownership, resolved server-side BEFORE this call (for
- * example by `findWorkflowForUser(userId, id)`, where the owner is part of the
- * query, not a follow-up check). `agentId` is present only for a resource that
- * belongs to a specific agent.
+ * The target resource's ownership, resolved server-side BEFORE this call:
+ * `tenantId` is the tenant that owns it (for a deployment-wide connection,
+ * `findConnectorOwner`); `ownerUserId` is present when the resource also
+ * belongs to one user inside that tenant, and is checked beside the tenant;
+ * `agentId` is present only for a resource that belongs to a specific agent.
  */
 export interface AutomationResourceScope {
-  ownerUserId: string;
+  tenantId: string;
+  ownerUserId?: string | undefined;
   agentId?: string | undefined;
 }
 
@@ -225,6 +255,9 @@ export type AutomationAuthzDenyCode =
   | "ROLE_UNRECOGNIZED"
   | "OPERATION_UNKNOWN"
   | "RISK_UNCLASSIFIED"
+  | "RESOURCE_OWNERSHIP_MISSING"
+  | "TENANT_MEMBERSHIP_REQUIRED"
+  | "SCOPE_TENANT_MISMATCH"
   | "SCOPE_OWNER_MISMATCH"
   | "AGENT_CONTEXT_REQUIRED"
   | "AGENT_SCOPE_MISMATCH"
@@ -233,15 +266,20 @@ export type AutomationAuthzDenyCode =
 
 /**
  * Fixed sentences. None of them echoes an input — not the operation string
- * (an attacker-supplied value must not be reflected), not a user id, not an
- * agent id. The caller maps a code to an HTTP status; this module says only
- * what was refused and why, in words we chose.
+ * (an attacker-supplied value must not be reflected), not a user id, not a
+ * tenant id, not an agent id. The caller maps a code to an HTTP status (and
+ * may answer several codes with one uniform refusal); this module says only
+ * what was refused and why, in words we chose. A tenant is an "organization"
+ * in every sentence, because that is the product's word for it.
  */
 const DENY_MESSAGES: Readonly<Record<AutomationAuthzDenyCode, string>> = {
   IDENTITY_REQUIRED: "A verified session identity is required for this operation.",
-  ROLE_UNRECOGNIZED: "The session's role is not recognized for automation operations.",
+  ROLE_UNRECOGNIZED: "The session's organization role is not recognized for automation operations.",
   OPERATION_UNKNOWN: "The requested automation operation is not recognized.",
   RISK_UNCLASSIFIED: "The requested automation operation has no risk classification.",
+  RESOURCE_OWNERSHIP_MISSING: "This resource has no recorded owning organization.",
+  TENANT_MEMBERSHIP_REQUIRED: "The session is not a member of the organization that owns this resource.",
+  SCOPE_TENANT_MISMATCH: "The session's membership is for a different organization than this resource's.",
   SCOPE_OWNER_MISMATCH: "This resource belongs to another principal.",
   AGENT_CONTEXT_REQUIRED:
     "This resource is agent-scoped and the session carries no agent context.",
@@ -280,10 +318,12 @@ function deny(code: AutomationAuthzDenyCode): AutomationAuthzDecision {
  * resolved resource scope.
  *
  * The ONLY way to `allowed: true` is to pass every step: a recognized
- * identity, a declared operation, a risk classification, an owner match (and
- * agent match, where the resource is agent-scoped), a recognized role, and a
- * surface that both supports the operation AND is granted its capability —
- * where every fallback candidate is checked with the same rule as the first.
+ * identity, a declared operation, a risk classification, a recorded owning
+ * tenant, the caller's own membership in exactly that tenant, an owner match
+ * where the resource also belongs to one user (and agent match, where it is
+ * agent-scoped), a recognized membership role, and a surface that both
+ * supports the operation AND is granted its capability — where every fallback
+ * candidate is checked with the same rule as the first.
  */
 export function authorizeAutomationOperation(
   input: AutomationAuthzInput
@@ -309,16 +349,36 @@ export function authorizeAutomationOperation(
   }
   const operation = input.operation as AutomationOperation;
 
-  // 4. Scope — whose resource this is. Hard: no role, grant or fallback
-  // overrides it.
+  // 4. Ownership — which tenant this resource belongs to. Hard: no role, grant
+  // or fallback overrides it, and a resource with no recorded owner is not one
+  // this engine will authorize for anybody.
   const scope = input.scope;
-  if (!scope || typeof scope.ownerUserId !== "string" || scope.ownerUserId.length === 0) {
-    // A resource with no resolvable owner is not a resource this engine will
-    // authorize.
-    return deny("SCOPE_OWNER_MISMATCH");
+  if (!scope || typeof scope.tenantId !== "string" || scope.tenantId.length === 0) {
+    return deny("RESOURCE_OWNERSHIP_MISSING");
   }
-  if (scope.ownerUserId !== auth.userId) {
-    return deny("SCOPE_OWNER_MISMATCH");
+
+  // 5. Membership — the caller's own, in exactly that tenant. A membership the
+  // server read for another account is not this caller's; one for another
+  // tenant does not reach this resource.
+  const membership = input.subject.membership;
+  if (
+    !membership ||
+    typeof membership.userId !== "string" ||
+    membership.userId !== auth.userId ||
+    typeof membership.tenantId !== "string"
+  ) {
+    return deny("TENANT_MEMBERSHIP_REQUIRED");
+  }
+  if (membership.tenantId !== scope.tenantId) {
+    return deny("SCOPE_TENANT_MISMATCH");
+  }
+
+  // 6. Owner and agent — checked BESIDE the tenant, for a resource that also
+  // belongs to one user or one agent inside it.
+  if (scope.ownerUserId !== undefined && scope.ownerUserId !== null) {
+    if (typeof scope.ownerUserId !== "string" || scope.ownerUserId !== auth.userId) {
+      return deny("SCOPE_OWNER_MISMATCH");
+    }
   }
   if (scope.agentId !== undefined && scope.agentId !== null) {
     if (
@@ -332,15 +392,17 @@ export function authorizeAutomationOperation(
     }
   }
 
-  // 5. Role. Unrecognized: nothing. Recognized: its explicit grants. (Every
-  // recognized role holds at least one grant, so "no grants" and "unknown
-  // role" are the same answer: refuse.)
-  const grants = grantsForAutomationRole(auth.role);
-  if (!ROLE_GRANTS.has(auth.role)) {
+  // 7. Membership role. Unrecognized: nothing. Recognized: its explicit grants.
+  // (Every recognized role holds at least one grant, so "no grants" and
+  // "unknown role" are the same answer: refuse.) `auth.role` is deliberately
+  // not consulted: on a tenant's resource, only the membership counts.
+  const role = membership.role;
+  if (typeof role !== "string" || !ROLE_GRANTS.has(role)) {
     return deny("ROLE_UNRECOGNIZED");
   }
+  const grants = grantsForTenantRole(role);
 
-  // 6. Per-surface capability, with fallback that cannot bypass. The registry
+  // 8. Per-surface capability, with fallback that cannot bypass. The registry
   // decides which surface PREFERED the operation; if that surface lacks the
   // grant it is removed and the registry re-consulted — the next candidate is
   // checked with the identical rule. There is no branch that hands the

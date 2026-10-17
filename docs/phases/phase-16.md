@@ -1034,30 +1034,118 @@ For a fresh image instead:
 docker compose up -d --build api
 ```
 
-### Blockers (unchanged by this work)
+### Blockers
 
-1. **A valid n8n REST key** is needed; the stored one is rejected with 401.
-2. **An OAuth 2.1 grant** is needed for MCP; there is no static-token grant, so
-   this requires an interactive consent flow that this task did not perform.
+1. **A valid n8n REST key** is needed; the stored one is rejected with 401, and
+   the instance's plan currently refuses REST calls. The REST surface therefore
+   stays unavailable until that is resolved.
+2. ~~**An OAuth 2.1 grant** is needed for MCP; there is no static-token grant.~~
+   **Resolved 2026-10-16.** n8n's instance-level MCP server also accepts a
+   personal access token sent as `Authorization: Bearer` — the "API key" tab in
+   its "Connect a client" dialog, available since n8n 2.33. With such a token,
+   discovery was live-verified, read-only (see §15). The earlier OAuth-only
+   reading was incomplete, not wrong about OAuth's existence.
 
-Because of (2), the MCP surface is **implemented and wired but not live-verified
-against a real tool list**. Its behaviour is pinned by the injected-transport
-tests, and it reports `AUTH_FAILURE` honestly when discovery cannot authenticate.
+Because of (1) the REST surface is unavailable; the MCP surface is now
+**live-verified for read-only discovery only** (§15). It reports `AUTH_FAILURE`
+honestly when discovery cannot authenticate.
 
 ### Not done, deliberately
 
 - **No invocation tool was added to an agent allowlist.** Invoking an n8n MCP
   tool is an external write, so it must be approval-gated; that tool, its
-  approval path and its allowlist decision are M1's work, and cannot be verified
-  live until the OAuth grant above exists.
+  approval path and its allowlist decision are M1's work. Authentication is no
+  longer the blocker (§15) — but authentication is not authorization, and
+  nothing executes until an approval path exists.
 - **No workflow was read, activated, modified, executed or deleted**, and no
   production workflow was touched. All live probes were read-only.
 
 ---
 
-*Status: PARTIAL — 2026-10-15. The dual-connector foundation of §14 is built,
-typechecked, linted, built and tested; the live n8n surfaces remain blocked (REST
-401, MCP OAuth). No migration was written or run, no workflow was read,
-activated, modified, executed or triggered, and nothing was committed, pushed,
-merged or opened as a pull request by this task.*
+## 15. Stages 0–3 — discovery surface, unified view, execution spec (2026-10-16)
+
+Four stages, all read-only or documentary. They build on the §14 foundation
+rather than changing it. Nothing in this section reads, activates, modifies,
+executes or deletes a workflow.
+
+### Stage 0 — live evidence, and the stale wording it corrected
+
+§14 recorded a blocker saying MCP needed an OAuth 2.1 grant with "no static
+token". That reading was incomplete: n8n's instance-level MCP server offers **two
+tabs** in its *Connect a client* dialog — OAuth (recommended) and **API key**,
+which sends a personal access token as `Authorization: Bearer` (n8n ≥ 2.33).
+JARVIS implements the bearer path.
+
+Live, read-only evidence (2026-10-16):
+
+| | |
+|---|---|
+| Endpoint | `<N8N_BASE_URL>/mcp-server/http`, derived by `resolveN8nMcpEndpoint()` |
+| Server | `n8n MCP Server`, version **1.2.0** |
+| Authentication | `Authorization: Bearer <N8N_MCP_TOKEN>` — accepted |
+| Calls sent | `initialize`, `tools/list` — **only** |
+| Tools returned | **58** |
+| Writes | **none**: no `tools/call`, no activation, no execution, no mutation of any kind |
+
+**An MCP Bearer token and a REST API key are separate credentials.** The token
+authenticates the MCP surface; `N8N_API_KEY` authenticates the Public REST API
+under `X-N8N-API-KEY`. Neither is accepted by the other, and JARVIS never uses
+one where the other belongs. The stale "OAuth-only / no static token" wording was
+corrected in `packages/n8n/src/mcp-config.ts`, `packages/config/src/index.ts`,
+`.env.example` and `docs/INTEGRATIONS.md` — **comments only, no runtime change,
+no switch flipped, no secret added.**
+
+### Stage 1 — `GET /api/v1/n8n/mcp/tools`
+
+`apps/api/src/routes/n8n-mcp.ts`, mounted unconditionally from
+`apps/api/src/index.ts` at `/api/v1/n8n/mcp`. Authenticated by the JARVIS
+session (`requireAuth`); metered under the new `n8n_mcp` namespace and audited
+once per attempt; reuses `getN8nMcpConnector().discoverTools()` and nothing
+else.
+
+It returns tool **names and annotation flags only** (`readOnly`,
+`destructive`), plus server name/version and `truncated`. Withheld: descriptions,
+input schemas, upstream error text, and every credential. An absent connector
+answers `MCP_NOT_CONFIGURED`; an upstream auth failure answers `MCP_AUTH_FAILURE`
+with a fixed sentence of our own. **No invocation is reachable from this route**,
+and the REST and MCP credentials stay independent.
+
+### Stage 2 — `GET /api/v1/n8n/mcp/automations`
+
+`packages/n8n/src/automation-catalog.ts` (`buildAutomationCatalog`) composes the
+two surfaces through `@jarvis/core`'s Automation Registry: normalized records,
+explicit provenance (`observedVia`, `handles`), collision-safe ids, deterministic
+ordering. The builder is **pure and holds no connector**, so it cannot execute
+anything.
+
+The REST surface is reported **unread, with a reason** — never as an empty list,
+which is the difference between "we did not try" and "there is nothing there".
+This stage performs no REST read, so it invents no REST record. The wire
+projection withholds descriptions for the same reason Stage 1 does.
+
+### Stage 3 — execution architecture, specification only
+
+`docs/n8n-mcp-execution-architecture.md`: authorization and least privilege,
+risk classification gating approval, confirmation bound to the exact action /
+arguments / target / expiry, durable records and idempotency, audit without
+secrets, timeout and uncertain-outcome handling with an `UNKNOWN` state (never
+auto-retried), retry and cancellation, revalidation immediately before executing,
+and the decision that **writes do not go through MCP**. **None of it is
+implemented**: no invocation path, no callable MCP tool, no allowlist entry.
+
+### Not changed
+
+No OmniRoute behaviour, `packages/core/src/integration-catalog.ts`,
+`apps/api/src/services/integration-registry.ts` or any `.env` value was touched.
+No migration was written or run.
+
+---
+
+*Status: PARTIAL — updated 2026-10-16. The §14 dual-connector foundation is
+unchanged; Stage 0 corrects its MCP blocker with live read-only evidence (58
+tools over Bearer, discovery only), Stage 1 adds an authenticated read-only
+discovery route, Stage 2 a unified read-only view, and Stage 3 an execution
+specification that implements nothing. No workflow was read, activated, modified,
+executed or triggered; no production workflow was touched; and nothing was
+committed, pushed, merged or opened as a pull request by this task.*
 
