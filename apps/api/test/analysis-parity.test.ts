@@ -19,6 +19,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import type { Router } from "express";
 import { createAnalysisRouter } from "../src/routes/analysis.js";
 import { AnalysisGenerator, MetaAnalyzeTool } from "@jarvis/tools";
+import { accessOver, organizationOwningEverything } from "./helpers/shared-access.js";
 import type {
   AnalysisCaller,
   AnalysisInput,
@@ -300,6 +301,9 @@ async function fromButton(
     });
   };
   await Promise.resolve(runAt(idx));
+  // The handler runs inside the auth middleware's `next()`, whose promise the
+  // middleware does not return: wait — bounded — until it has answered.
+  for (let i = 0; i < 200 && !responded(); i++) await new Promise((r) => setImmediate(r));
 
   return {
     status: (res as unknown as { _status: number })._status,
@@ -321,8 +325,13 @@ describe("one AnalysisGenerator, two callers", () => {
   it("routes the button and the tool to the SAME instrumented instance", async () => {
     const h = harness();
 
-    // The button.
-    const container = { tokenService: tokenSvc, analysisService: h.service } as unknown as Container;
+    // The button. Phase 17: user-alice is a member of the Organization that
+    // owns the deployment's Meta connection — the route asks before it runs.
+    const container = {
+      tokenService: tokenSvc,
+      analysisService: h.service,
+      sharedAccess: accessOver(organizationOwningEverything({ "user-alice": "member" })),
+    } as unknown as Container;
     const router = createAnalysisRouter(container);
     await fromButton(router, token, {});
 

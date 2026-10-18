@@ -46,6 +46,7 @@ import {
   type RateLimitPort,
 } from "../src/services/integrations/command-service.js";
 import { getContainer, getMcpConnections, mcpIntegrationRuntime, resetContainer } from "../src/services/container.js";
+import { accessOver, organizationOwningEverything, unlimitedTestBudget } from "./helpers/shared-access.js";
 
 type Obj = Record<string, unknown>;
 
@@ -164,6 +165,10 @@ function service(mcp: ReturnType<typeof runtime>) {
     googleConfig: () => null,
     mapsUsage: async () => null,
     mcp,
+    // Phase 17 — USER is an owner of the Organization that owns the reviewed
+    // servers' connection: the setting this suite was written for.
+    sharedAccess: accessOver(organizationOwningEverything({ [USER]: "owner" })),
+    testBudget: unlimitedTestBudget,
   });
   const run = (command: IntegrationCommandInput["command"]) =>
     commands.execute({ command, integration: command === "list" ? null : "mcp" }, AS_USER);

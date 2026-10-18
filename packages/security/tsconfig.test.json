@@ -4,5 +4,5 @@
     "noEmit": true,
     "rootDir": "."
   },
-  "include": ["src/**/*.ts", "test/automation-authz.test.ts"]
+  "include": ["src/**/*.ts", "test/automation-authz.test.ts", "test/shared-connection-authz.test.ts"]
 }

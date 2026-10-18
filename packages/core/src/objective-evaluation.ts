@@ -224,6 +224,7 @@ const INTEGRATION_ERROR_CODE: Record<IntegrationErrorCode, true> = {
   PROVIDER_ERROR: true,
   TIMEOUT: true,
   UNSUPPORTED_COMMAND: true,
+  AUTHORIZATION_UNAVAILABLE: true,
   INTERNAL_ERROR: true,
 };
 const WRITE_VERIFICATION: Record<WriteVerification, true> = {

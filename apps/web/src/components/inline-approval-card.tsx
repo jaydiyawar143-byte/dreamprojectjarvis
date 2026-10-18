@@ -53,6 +53,9 @@ export function InlineApprovalCard({
       setMessage("This approval has expired.");
     } else if (code === "APPROVAL_ALREADY_CONSUMED") {
       setMessage("Already handled by another action.");
+    } else if (code === "APPROVAL_SELF_APPROVAL_FORBIDDEN") {
+      // Phase 17 — the server refused it; this only says why.
+      setMessage("This change must be approved by another owner or admin of your organization.");
     } else {
       setMessage("Something went wrong. Please try again.");
     }

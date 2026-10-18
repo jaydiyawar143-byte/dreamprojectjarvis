@@ -15,6 +15,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { Router } from "express";
 import { createDashboardRouter } from "../src/routes/dashboard.js";
 import type { ToolExecutionResult } from "@jarvis/core";
+import { accessOver, memoryTenancy, organizationOwningEverything, type MemoryTenancy } from "./helpers/shared-access.js";
 
 const USER_A = "user-alpha";
 const USER_B = "user-beta";
@@ -94,6 +95,12 @@ interface ContainerOptions {
   memory?: boolean;
   embeddings?: boolean;
   throwOnSummary?: boolean;
+  /**
+   * Phase 17 — who owns the deployment's Meta connection, and who is in that
+   * Organization. Default: one Organization owning everything, with both test
+   * accounts as members — the setting these suites were written for.
+   */
+  tenancy?: MemoryTenancy;
 }
 
 function makeContainer(options: ContainerOptions) {
@@ -101,6 +108,9 @@ function makeContainer(options: ContainerOptions) {
 
   return {
     _seenUserIds: seenUserIds,
+    sharedAccess: accessOver(
+      options.tenancy ?? organizationOwningEverything({ [USER_A]: "owner", [USER_B]: "member" })
+    ),
     tokenService: {
       verifyAccessToken: (token: string) => {
         if (token === TOKEN_A) return { userId: USER_A, role: "member", email: "a@example.com" };
@@ -820,5 +830,88 @@ describe("dashboard API — campaign comparison", () => {
 
     const res = await call(router, "GET", `/meta/campaigns?${RANGE}`, { token: TOKEN_A });
     expect(JSON.stringify(res.body)).not.toContain("SHOULD_NEVER_APPEAR");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 17 (review finding L11) — the deployment's Meta account belongs to the
+// Organization that owns the connection. Anyone outside it is answered EXACTLY
+// as a deployment with no Meta account is answered, and nothing is read for
+// them: the dashboard never tells an outsider that the operator has one.
+// ---------------------------------------------------------------------------
+
+describe("dashboard API — Meta belongs to its Organization (Phase 17)", () => {
+  const META_ROUTES = ["/meta/account", `/meta/overview?${RANGE}`, `/meta/timeseries?${RANGE}`, `/meta/campaigns?${RANGE}`];
+
+  /** USER_A belongs to no Organization; Meta is owned by one USER_B owns. */
+  const outsiderTenancy = () =>
+    memoryTenancy({
+      owners: { "meta/ads": "org-other" },
+      members: [{ userId: USER_B, tenantId: "org-other", role: "owner" }],
+    });
+
+  it("answers an outsider exactly as a deployment without Meta answers, and reads nothing", async () => {
+    const executor = new FakeExecutor();
+    const { router } = makeRouter({ executor, tenancy: outsiderTenancy() });
+    const outsider = [];
+    for (const route of META_ROUTES) outsider.push(await call(router, "GET", route, { token: TOKEN_A }));
+
+    delete process.env.META_AD_ACCOUNT_ID;
+    const { router: unconfigured } = makeRouter({ executor: new FakeExecutor() });
+    for (const [i, route] of META_ROUTES.entries()) {
+      const baseline = await call(unconfigured, "GET", route, { token: TOKEN_A });
+      expect(outsider[i]!.status, route).toBe(baseline.status);
+      expect(outsider[i]!.body.error, route).toEqual(baseline.body.error);
+      expect(outsider[i]!.body.error.code, route).toBe("ACCOUNT_NOT_CONFIGURED");
+    }
+    expect(executor.calls).toEqual([]);
+  });
+
+  it("tells an outsider, in the summary and the status, that there is no Meta account", async () => {
+    const executor = new FakeExecutor();
+    const { router, container } = makeRouter({ executor, tenancy: outsiderTenancy() }, 7);
+    const summary = await call(router, "GET", "/summary", { token: TOKEN_A });
+    expect(summary.body.data.metaConfigured).toBe(false);
+    // The opportunity queue is the Meta account's: not read for an outsider.
+    expect(summary.body.data.openOpportunities).toBe(0);
+    const status = await call(router, "GET", "/status", { token: TOKEN_A });
+    expect(status.body.data.capabilities.metaAds).toBe(false);
+    expect(executor.calls).toEqual([]);
+    expect(container._seenUserIds.filter((id) => id === USER_A).length).toBeGreaterThan(0);
+  });
+
+  it("refuses everyone — an account-wide owner included — while nobody owns the Meta connection", async () => {
+    const executor = new FakeExecutor();
+    const { router } = makeRouter({ executor, tenancy: memoryTenancy({}) });
+    for (const route of META_ROUTES) {
+      const res = await call(router, "GET", route, { token: TOKEN_A });
+      expect(res.body.error.code, route).toBe("ACCOUNT_NOT_CONFIGURED");
+    }
+    expect(executor.calls).toEqual([]);
+  });
+
+  it("serves a viewer of the owning Organization: reading is every member's", async () => {
+    const executor = new FakeExecutor();
+    executor.rows["meta.insights"] = [{ date_start: "2026-08-01", spend: "5.00" }];
+    const { router } = makeRouter({
+      executor,
+      tenancy: organizationOwningEverything({ [USER_A]: "viewer" }),
+    });
+    const res = await call(router, "GET", `/meta/overview?${RANGE}`, { token: TOKEN_A });
+    expect(res.status).toBe(200);
+    expect(executor.calls.map((c) => c.toolId)).toEqual(["meta.insights"]);
+  });
+
+  it("fails closed when Organization access cannot be read — and says so, not 'configured'", async () => {
+    const executor = new FakeExecutor();
+    const tenancy = organizationOwningEverything({ [USER_A]: "owner" });
+    tenancy.setFailing(true);
+    const { router } = makeRouter({ executor, tenancy });
+    for (const route of META_ROUTES) {
+      const res = await call(router, "GET", route, { token: TOKEN_A });
+      expect(res.status, route).toBe(503);
+      expect(res.body.error.code, route).toBe("AUTHORIZATION_UNAVAILABLE");
+    }
+    expect(executor.calls).toEqual([]);
   });
 });

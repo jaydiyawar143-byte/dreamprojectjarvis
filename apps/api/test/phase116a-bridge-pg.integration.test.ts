@@ -15,14 +15,25 @@
 // Every side effect flows through the REAL ToolExecutor + REAL Prisma
 // approval/journal repositories against the mock Meta provider — no network
 // is possible by construction. Dedicated test users are removed afterwards.
+//
+// Phase 17 (multi-business hardening): a Meta budget change runs through the
+// deployment's shared Meta connection, so it is an Organization's. The suite
+// sets one up as an operator would — an Organization owning the connection,
+// each requester one of its admins, and a separate owner who approves — and
+// runs the bridge on the REAL Organization authorizer and access gate. While
+// it holds the connection's one owner row it holds a lease on it, so another
+// suite that needs the same row waits its turn.
 // =============================================================================
 
 import { config } from "dotenv";
 import { resolve } from "node:path";
 config({ path: resolve(process.cwd(), "../../.env") });
 
-import { describe, it, expect, afterAll } from "vitest";
-import { prisma } from "@jarvis/db";
+import { describe, it, expect, afterAll, beforeAll } from "vitest";
+import { prisma, PrismaTenantRepository, runTenantAdminCommand } from "@jarvis/db";
+import { SharedConnectionAccess, createSharedConnectionToolGate } from "../src/services/tenancy/shared-connection-access.js";
+import { createOrganizationMetaAuthorizer } from "../src/services/tenancy/meta-ads-access.js";
+import { holdSharedConnection, type SharedConnectionLease } from "./helpers/shared-connection-lock.js";
 import {
   ShutdownLifecycle,
   buildExecutableParams,
@@ -53,12 +64,19 @@ import {
 } from "@jarvis/db";
 import { ApprovalService, AuditLogger } from "@jarvis/security";
 
+// Phase 17 — never the development (5432) or deployment (5433) database: the
+// suite writes Organizations and the Meta connection's owner. (A `.env` above
+// may point at the development one; that is not a target.)
+const SAFE_TARGET = !!process.env.DATABASE_URL && !/:(?:5432|5433)\//.test(process.env.DATABASE_URL);
+
 let dbUp = false;
-try {
-  await prisma.$queryRaw`SELECT 1`;
-  dbUp = true;
-} catch {
-  dbUp = false;
+if (SAFE_TARGET) {
+  try {
+    await prisma.$queryRaw`SELECT 1`;
+    dbUp = true;
+  } catch {
+    dbUp = false;
+  }
 }
 
 const ACCOUNT = "act_111111111"; // mock default account (USD)
@@ -88,6 +106,43 @@ const createdUserIds: string[] = [];
 // for the whole run regardless of how many harness users participate.
 let accountEnsured = false;
 
+// Phase 17 — the Organization that owns the shared Meta connection for this
+// run, its operator (who the operator command attributes changes to) and the
+// owner who approves every requester's change.
+let lease: SharedConnectionLease | null = null;
+let organizationId = "";
+let operatorId = "";
+let approverId = "";
+const sharedAccess = new SharedConnectionAccess(new PrismaTenantRepository(prisma));
+
+async function asOperator(command: Parameters<typeof runTenantAdminCommand>[1]) {
+  const result = await runTenantAdminCommand(prisma, command, { actorUserId: operatorId, execute: true });
+  if (!result.ok) throw new Error(`${command.verb} refused: ${result.code}`);
+  return result;
+}
+
+beforeAll(async () => {
+  if (!dbUp) return;
+  lease = await holdSharedConnection("meta/ads");
+  const taken = await prisma.automationConnectorOwner.findUnique({
+    where: { providerId_connector: { providerId: "meta", connector: "ads" } },
+  });
+  if (taken) throw new Error("meta/ads is already assigned on this database — run this suite against a fresh test database");
+  const stamp = `${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+  for (const [role, set] of [
+    ["operator", (id: string) => (operatorId = id)],
+    ["approver", (id: string) => (approverId = id)],
+  ] as const) {
+    const user = await prisma.user.create({
+      data: { email: `phase116a-${role}-${stamp}@jarvis-test.local`, name: `Bridge ${role}`, password: "not-a-real-password-hash", role: "MEMBER" },
+    });
+    set(user.id);
+  }
+  const created = await asOperator({ verb: "create-tenant", name: `Bridge Org ${stamp}`, ownerUserId: approverId });
+  organizationId = String(created.detail.tenantId);
+  await asOperator({ verb: "assign-connector", providerId: "meta", connector: "ads", tenantId: organizationId });
+}, 300_000);
+
 async function ensureMarketingAccount(userId: string): Promise<void> {
   if (accountEnsured) return;
   const existing = await prisma.marketingAccount.findUnique({ where: { accountId: ACCOUNT } });
@@ -110,6 +165,9 @@ async function buildPgHarness(opts: { lifecycle?: ShutdownLifecycle } = {}): Pro
   });
   createdUserIds.push(user.id);
   const userId = user.id;
+  // Phase 17 — an admin of the Organization that owns the Meta connection:
+  // allowed to ask for a change, never to approve its own.
+  await asOperator({ verb: "add-member", tenantId: organizationId, userId, role: "admin" });
 
   await ensureMarketingAccount(userId);
 
@@ -121,7 +179,14 @@ async function buildPgHarness(opts: { lifecycle?: ShutdownLifecycle } = {}): Pro
     return rawUpdate(accountId, campaignId, dailyBudget);
   }) as typeof provider.updateCampaignBudget;
 
-  const authorizer = createAuthorizer();
+  // Phase 17 — the production authorizer: the caller's membership in the
+  // Organization that owns the connection, on its one account, and then the
+  // token's own check (the double below).
+  const authorizer = createOrganizationMetaAuthorizer({
+    provider: createAuthorizer(),
+    access: sharedAccess,
+    configuredAccountId: ACCOUNT,
+  });
 
   // Real Phase 10/11 infrastructure.
   const repo = new PrismaRecommendationRepository(prisma);
@@ -142,6 +207,7 @@ async function buildPgHarness(opts: { lifecycle?: ShutdownLifecycle } = {}): Pro
 
   const executor = new ToolExecutor(registry, allowAllPerms, approvalService, auditLogger, {
     lifecycle: opts.lifecycle,
+    accessGate: createSharedConnectionToolGate(sharedAccess),
   });
 
   const service = new RecommendationExecutionService({
@@ -262,10 +328,17 @@ function makeRecord(
   return base;
 }
 
-/** Human approve step through the real Phase 10 workflow primitive. */
-async function humanApprove(approvalId: string, userId: string): Promise<void> {
+/**
+ * Human approve step through the real Phase 10 workflow primitive. Phase 17 —
+ * by the Organization's owner, never the requester: a Meta change is approved
+ * by someone else. The requester trying is refused, and changes nothing.
+ */
+async function humanApprove(approvalId: string, requesterId: string): Promise<void> {
   const decider = new PrismaApprovalRepository(prisma);
-  const decided = await decider.decideApproval(approvalId, userId, "approve");
+  expect(await decider.decideApproval(approvalId, requesterId, "approve", { approverRoles: ["owner", "admin"] })).toEqual({
+    outcome: "self_approval_forbidden",
+  });
+  const decided = await decider.decideApproval(approvalId, approverId, "approve", { approverRoles: ["owner", "admin"] });
   expect(decided).toMatchObject({ outcome: "approved" });
 }
 
@@ -279,7 +352,17 @@ afterAll(async () => {
       await prisma.performanceRecommendation.deleteMany({ where: { userId } }).catch(() => {});
       await prisma.user.delete({ where: { id: userId } }).catch(() => {});
     }
+    // Phase 17 — the Organization, after the approvals that belonged to it.
+    if (organizationId) {
+      await prisma.automationConnectorOwner.deleteMany({ where: { tenantId: organizationId } }).catch(() => {});
+      await prisma.tenant.deleteMany({ where: { id: organizationId } }).catch(() => {});
+    }
+    for (const userId of [operatorId, approverId].filter(Boolean)) {
+      await prisma.auditLog.deleteMany({ where: { userId } }).catch(() => {});
+      await prisma.user.delete({ where: { id: userId } }).catch(() => {});
+    }
   }
+  await lease?.release().catch(() => {});
   await prisma.$disconnect();
 });
 

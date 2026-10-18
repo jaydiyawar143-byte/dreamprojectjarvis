@@ -77,7 +77,9 @@ model User {
 
   conversations Conversation[]
   memories      Memory[]
-  approvals     Approval[]
+  approvals     Approval[] @relation("ApprovalRequester")
+  // Phase 17 — approvals this account decided for someone else.
+  decidedApprovals Approval[] @relation("ApprovalDecider")
   auditLogs     AuditLog[]
   settings      UserSetting[]
   refreshTokens RefreshToken[]
@@ -271,11 +273,24 @@ model Approval {
   expiresAt      DateTime
   resolvedAt     DateTime?
   createdAt      DateTime       @default(now())
+  // Phase 17 multi-business hardening. Set by the approval store ALONE, from
+  // the owner record, when the approval is for a write through a connection
+  // the deployment configures for everyone: the Organization the write acts
+  // for. Such an approval is decided by one of that Organization's owners or
+  // admins who is not the requester, and consumed only while that still holds.
+  // Never written from a request. `Restrict`: an Organization with approvals
+  // on record is not deleted out from under them.
+  tenantId       String?
+  /// Who decided it, when someone other than the requester did.
+  decidedById    String?
 
-  user User @relation(fields: [userId], references: [id])
+  user      User    @relation("ApprovalRequester", fields: [userId], references: [id])
+  decidedBy User?   @relation("ApprovalDecider", fields: [decidedById], references: [id], onDelete: SetNull)
+  tenant    Tenant? @relation(fields: [tenantId], references: [id], onDelete: Restrict)
 
   @@index([conversationId])
   @@index([conversationId, status])
+  @@index([tenantId, status])
 }
 
 model AuditLog {
@@ -1188,6 +1203,7 @@ model Tenant {
 
   memberships     TenantMembership[]
   connectorOwners AutomationConnectorOwner[]
+  approvals       Approval[]
 
   @@map("Tenant")
 }

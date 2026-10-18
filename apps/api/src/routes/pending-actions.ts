@@ -39,6 +39,9 @@ import {
 function refusalOf(reason: PendingActionRefusal | undefined): { status: number; code: string } {
   if (reason === "MISMATCH") return { status: 409, code: "PENDING_ACTION_MISMATCH" };
   if (reason === "ALREADY_RESOLVED") return { status: 409, code: "PENDING_ACTION_ALREADY_RESOLVED" };
+  // Phase 17 — an Organization's write: its requester cannot confirm it. It
+  // keeps waiting for one of the Organization's owners or admins.
+  if (reason === "NEEDS_INDEPENDENT_APPROVAL") return { status: 403, code: "PENDING_ACTION_NEEDS_INDEPENDENT_APPROVAL" };
   return { status: 404, code: "PENDING_ACTION_NOT_FOUND" };
 }
 

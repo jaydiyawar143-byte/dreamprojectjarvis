@@ -30,6 +30,7 @@ import { Router } from "express";
 import type { Response } from "express";
 import { createAuthMiddleware, type AuthenticatedRequest } from "../middleware/auth.js";
 import type { Container } from "../services/container.js";
+import { metaAvailability } from "../services/tenancy/meta-ads-access.js";
 import type { AnalysisNoAnalysisReason, AnalysisOutcome } from "@jarvis/tools";
 
 function fail(
@@ -79,6 +80,19 @@ export function createAnalysisRouter(container: Container): Router {
   router.post("/", requireAuth, async (req: AuthenticatedRequest, res: Response) => {
     if (!req.auth) return fail(res, 401, "AUTH_REQUIRED", "Authentication required");
     const { userId, role } = req.auth;
+
+    // Phase 17 (review finding L11) — the deployment's Meta Ads is analysed
+    // only for a caller it is available to, and that is asked FIRST: anyone
+    // else is answered exactly as a deployment without a Meta account is,
+    // before anything about this deployment's setup — its AI provider
+    // included — is said. The reads check again as they run.
+    const availability = await metaAvailability(container.sharedAccess, userId);
+    if (availability === "unverified") {
+      return fail(res, 503, "AUTHORIZATION_UNAVAILABLE", "Organization access could not be verified");
+    }
+    if (availability === "unavailable") {
+      return fail(res, 503, "ACCOUNT_NOT_CONFIGURED", "Meta ad account not configured on this server");
+    }
 
     const service = container.analysisService;
     if (!service) {

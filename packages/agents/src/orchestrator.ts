@@ -25,6 +25,7 @@ import type {
   RetrievedChunk,
   MemoryRecallPort,
   MemoryLearningControl,
+  ToolAccessGate,
 } from "@jarvis/core";
 import { JarvisError, decideSurface, classifyToolFailures, toClientErrorDetails, rankMemories, scoreMemoryRelevance, MEMORY_SIMILARITY_FLOOR } from "@jarvis/core";
 import type { SurfaceDecision } from "@jarvis/core";
@@ -121,6 +122,8 @@ export class Orchestrator implements IOrchestrator {
   private readonly toolRegistry: { get(toolId: string): ITool | undefined; getAll(): ITool[] } | null;
   private readonly toolApprovalService: IToolApprovalService | null;
   private readonly permissionChecker: IPermissionChecker | null;
+  /** Phase 17 — who may use a tool at all, asked before a pending action exists. */
+  private readonly accessGate: ToolAccessGate | null;
   private readonly pendingActionService: import("./pending-action-service.js").PendingActionService | null;
   /** S3 — semantic planning context. Null keeps the prompt exactly as it was. */
   private readonly skillContextProvider: ISkillContextProvider | null;
@@ -160,6 +163,7 @@ export class Orchestrator implements IOrchestrator {
     this.toolRegistry = config.toolRegistry ?? null;
     this.toolApprovalService = config.toolApprovalService ?? null;
     this.permissionChecker = config.permissionChecker ?? null;
+    this.accessGate = config.accessGate ?? null;
     this.pendingActionService = (config as unknown as { pendingActionService?: import("./pending-action-service.js").PendingActionService }).pendingActionService ?? null;
     this.skillContextProvider = config.skillContext ?? null;
     this.switchedOffTools = { ...(config.switchedOffTools ?? {}) };
@@ -1361,6 +1365,51 @@ export class Orchestrator implements IOrchestrator {
         }
       }
 
+      // ---------------------------------------------------------------------
+      // Phase 17 — the caller's Organization, before a pending action exists.
+      //
+      // A write through a shared connection (a Meta change) is for an
+      // Organization's owners and admins, and is approved by another of them.
+      // Asked here, one step before the pending action, for the reason the
+      // role check above is: a request the caller could never be allowed to
+      // make is refused now, not shown with a Confirm button and put in front
+      // of an approver. It narrows and never widens: the executor, the tool
+      // and the approval store still check. A gate that cannot answer refuses.
+      // ---------------------------------------------------------------------
+      if (needsConfirmation && tool && this.accessGate && this.pendingActionService && context.conversationId) {
+        let gate: { allowed: true } | { allowed: false; reason: string };
+        try {
+          gate = await this.accessGate.check({ toolId: tool.id ?? action.toolId, userId: context.auth.userId });
+        } catch {
+          gate = { allowed: false, reason: "Organization access could not be verified, so nothing was done." };
+        }
+        if (!gate.allowed) {
+          results.push({
+            executionId,
+            toolId: action.toolId,
+            toolCallId: action.toolCallId,
+            status: "permission_denied",
+            error: gate.reason,
+            startedAt: stepStartedAt,
+            completedAt: new Date(),
+            durationMs: Date.now() - stepStartedAt.getTime(),
+          });
+
+          await this.auditLogger.log({
+            userId: context.auth.userId,
+            agentId: policy?.agentId ?? context.agentId,
+            toolId: action.toolId,
+            action: "agent.tool_access_denied",
+            result: "rejected",
+            traceId: context.traceId,
+            ipAddress: context.ipAddress,
+            metadata: { risk: tool.risk, domain: policy?.domain, executionId, stepIndex: i },
+          });
+
+          continue;
+        }
+      }
+
       if (needsConfirmation && this.pendingActionService && context.conversationId) {
         // Create a pending action instead of executing directly
         const pendingService = this.pendingActionService as import("./pending-action-service.js").PendingActionService;
@@ -1397,6 +1446,9 @@ export class Orchestrator implements IOrchestrator {
             approvalId: pendingAction.approvalId,
             expiresAt: pendingAction.expiresAt,
             summary: message,
+            // Phase 17 — so the chat card says it waits for another owner or
+            // admin. Presentation only: the approval store enforces it.
+            ...(pendingAction.needsIndependentApproval ? { needsIndependentApproval: true } : {}),
           };
           continue;
         } catch {

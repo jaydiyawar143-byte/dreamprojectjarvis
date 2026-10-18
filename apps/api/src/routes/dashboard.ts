@@ -37,6 +37,7 @@ import type { Response } from "express";
 import { randomUUID } from "node:crypto";
 import { createAuthMiddleware, type AuthenticatedRequest } from "../middleware/auth.js";
 import type { Container } from "../services/container.js";
+import { metaAvailability } from "../services/tenancy/meta-ads-access.js";
 import { PrismaRecommendationRepository, prisma } from "@jarvis/db";
 import type { Role, ToolExecutionResult } from "@jarvis/core";
 
@@ -256,6 +257,29 @@ export function createDashboardRouter(
   /** The server's configured ad account. Never read from the request. */
   const configuredAccountId = (): string | undefined => process.env.META_AD_ACCOUNT_ID;
 
+  const NOT_CONFIGURED = { status: 503, code: "ACCOUNT_NOT_CONFIGURED", message: "Ad account not configured on this server" };
+
+  /**
+   * Phase 17 (review finding L11) — the configured ad account, for a caller
+   * to whom the deployment's Meta Ads is available: a member of the
+   * Organization that owns it. Anyone else is answered EXACTLY as a deployment
+   * without Meta is answered, so these pages never tell an outsider that the
+   * operator has an ad account. The read tools check again as they run.
+   */
+  async function metaAccountFor(
+    userId: string
+  ): Promise<{ accountId: string } | { refusal: { status: number; code: string; message: string } }> {
+    // Access first, configuration second: what an outsider is told must not
+    // depend on what this deployment has configured.
+    const availability = await metaAvailability(container.sharedAccess, userId);
+    if (availability === "unverified") {
+      return { refusal: { status: 503, code: "AUTHORIZATION_UNAVAILABLE", message: "Organization access could not be verified" } };
+    }
+    if (availability === "unavailable") return { refusal: NOT_CONFIGURED };
+    const accountId = configuredAccountId();
+    return accountId ? { accountId } : { refusal: NOT_CONFIGURED };
+  }
+
   /**
    * Runs one allow-listed read-only tool on the caller's behalf.
    *
@@ -337,7 +361,10 @@ export function createDashboardRouter(
     const { userId } = req.auth;
 
     try {
-      const accountId = configuredAccountId();
+      // Phase 17 (L11) — "Meta is configured" is said only to a caller it is
+      // available to; to anyone else this deployment has no Meta account.
+      const meta = await metaAccountFor(userId);
+      const accountId = "accountId" in meta ? meta.accountId : undefined;
 
       // Independent reads, issued together. Each is individually owner-scoped
       // by the repository it comes from.
@@ -372,10 +399,13 @@ export function createDashboardRouter(
   // -------------------------------------------------------------------------
   // GET /status — which capabilities this deployment actually has
   // -------------------------------------------------------------------------
-  router.get("/status", requireAuth, (req: AuthenticatedRequest, res: Response) => {
+  router.get("/status", requireAuth, async (req: AuthenticatedRequest, res: Response) => {
     if (!req.auth) return fail(res, 401, "AUTHENTICATION_REQUIRED", "Authentication required");
 
     // Booleans only. Whether a key is present is useful; the key is not.
+    // Phase 17 (L11) — and `metaAds` is true only for a caller Meta Ads is
+    // available to: it is the operator's account, not everyone's.
+    const meta = await metaAccountFor(req.auth.userId);
     ok(res, {
       service: "jarvis-api",
       uptimeSeconds: Math.round(process.uptime()),
@@ -384,7 +414,7 @@ export function createDashboardRouter(
         retrieval: container.knowledgeRetriever !== null,
         memory: container.memoryStore !== null,
         embeddings: container.embeddingProvider !== null,
-        metaAds: Boolean(configuredAccountId()),
+        metaAds: "accountId" in meta,
       },
     });
   });
@@ -402,10 +432,9 @@ export function createDashboardRouter(
   router.get("/meta/account", requireAuth, async (req: AuthenticatedRequest, res: Response) => {
     if (!req.auth) return fail(res, 401, "AUTHENTICATION_REQUIRED", "Authentication required");
 
-    const accountId = configuredAccountId();
-    if (!accountId) {
-      return fail(res, 503, "ACCOUNT_NOT_CONFIGURED", "Ad account not configured on this server");
-    }
+    const meta = await metaAccountFor(req.auth.userId);
+    if ("refusal" in meta) return fail(res, meta.refusal.status, meta.refusal.code, meta.refusal.message);
+    const accountId = meta.accountId;
 
     try {
       const result = await runReadTool("meta.accounts", { limit: 50 }, req.auth);
@@ -454,10 +483,9 @@ export function createDashboardRouter(
   router.get("/meta/overview", requireAuth, async (req: AuthenticatedRequest, res: Response) => {
     if (!req.auth) return fail(res, 401, "AUTHENTICATION_REQUIRED", "Authentication required");
 
-    const accountId = configuredAccountId();
-    if (!accountId) {
-      return fail(res, 503, "ACCOUNT_NOT_CONFIGURED", "Ad account not configured on this server");
-    }
+    const meta = await metaAccountFor(req.auth.userId);
+    if ("refusal" in meta) return fail(res, meta.refusal.status, meta.refusal.code, meta.refusal.message);
+    const accountId = meta.accountId;
 
     const range = parseDateRange(req.query as Record<string, unknown>);
     if (!range.ok) return fail(res, 400, range.code, range.message);
@@ -489,10 +517,9 @@ export function createDashboardRouter(
   router.get("/meta/timeseries", requireAuth, async (req: AuthenticatedRequest, res: Response) => {
     if (!req.auth) return fail(res, 401, "AUTHENTICATION_REQUIRED", "Authentication required");
 
-    const accountId = configuredAccountId();
-    if (!accountId) {
-      return fail(res, 503, "ACCOUNT_NOT_CONFIGURED", "Ad account not configured on this server");
-    }
+    const meta = await metaAccountFor(req.auth.userId);
+    if ("refusal" in meta) return fail(res, meta.refusal.status, meta.refusal.code, meta.refusal.message);
+    const accountId = meta.accountId;
 
     const range = parseDateRange(req.query as Record<string, unknown>);
     if (!range.ok) return fail(res, 400, range.code, range.message);
@@ -536,10 +563,9 @@ export function createDashboardRouter(
   router.get("/meta/campaigns", requireAuth, async (req: AuthenticatedRequest, res: Response) => {
     if (!req.auth) return fail(res, 401, "AUTHENTICATION_REQUIRED", "Authentication required");
 
-    const accountId = configuredAccountId();
-    if (!accountId) {
-      return fail(res, 503, "ACCOUNT_NOT_CONFIGURED", "Ad account not configured on this server");
-    }
+    const meta = await metaAccountFor(req.auth.userId);
+    if ("refusal" in meta) return fail(res, meta.refusal.status, meta.refusal.code, meta.refusal.message);
+    const accountId = meta.accountId;
 
     const range = parseDateRange(req.query as Record<string, unknown>);
     if (!range.ok) return fail(res, 400, range.code, range.message);

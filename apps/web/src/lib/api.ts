@@ -575,6 +575,18 @@ export interface ApprovalRecord extends ApprovalSummaryInfo {
   params: Record<string, unknown>;
   executionId?: string;
   executionStatus?: string;
+  /**
+   * Phase 17 — a change to an Organization's shared connection (a Meta write):
+   * approved by another owner or admin of that Organization, never by the
+   * person who asked for it. The server enforces it; these say what to show.
+   */
+  needsIndependentApproval?: boolean;
+  /** Whether THIS reader may approve it now, as the server decided. */
+  canApprove?: boolean;
+  /** Approved by an owner or admin other than its requester. */
+  decidedByAnother?: boolean;
+  /** Who asked for it — sent only to the approvers it waits for. */
+  requestedBy?: string;
 }
 
 export interface Paginated<T> {
@@ -585,13 +597,20 @@ export interface Paginated<T> {
   timestamp: string;
 }
 
+/**
+ * `scope: "review"` lists other members' changes waiting for this account's
+ * decision, in Organizations where it is an owner or admin (Phase 17). The
+ * server decides who is an approver; `status` does not apply to that list.
+ */
 export async function listApprovals(
   status?: ApprovalStatusValue,
   page = 1,
-  limit = 20
+  limit = 20,
+  scope?: "review"
 ): Promise<Paginated<ApprovalRecord>> {
   const qs = new URLSearchParams({ page: String(page), limit: String(limit) });
   if (status) qs.set("status", status);
+  if (scope) qs.set("scope", scope);
   return request(`/approvals?${qs.toString()}`);
 }
 

@@ -216,7 +216,7 @@ docker compose exec postgres psql -U jarvis -d jarvis -c "SELECT id, title, publ
 
 Nothing in Phase 15 starts a background loop. One environment variable was added, and it is optional: `MARKETING_PUBLISH_ENABLED`, off by default.
 
-### Organizations: the tenant tables, and who may read n8n MCP discovery
+### Organizations: the tenant tables, and who may use the shared connections
 
 Since Phase 17 Stage 3A, a deployment-wide connection can belong to an **Organization** (a *tenant* in the code and the schema). After a deploy, check that the migration arrived — `20261017120000_phase17_tenant_foundation` adds one enum (`TenantRole`) and three tables (`Tenant`, `TenantMembership`, `AutomationConnectorOwner`). It alters no existing table and writes no row; there is no backfill, and no account is put into an Organization by it:
 
@@ -251,6 +251,41 @@ An account's id is in the `User` table (`SELECT id, email FROM "User"`). `set-ro
 Each line of output is JSON. `tenant_admin_dry_run` means nothing was written; `tenant_admin_executed`, that it was; `tenant_admin_refused` carries a code (`LAST_OWNER`, `ALREADY_MEMBER`, …) and exits `65`; a usage error exits `64`, a failure `70` — and a failure has written nothing.
 
 **Limits.** Each account may call each of the two routes 30 times a minute, whether it is served or refused. The count is kept in the API's memory and taken before the database is read: past it the answer is `429 RATE_LIMITED` with `Retry-After`, nothing is read, and only the first request past the limit in each one-minute window writes anything — one audit row (`n8n_mcp.discover` or `.catalog`, marked `throttled`) and one `n8n_mcp_throttled` warning. An account that keeps being refused therefore writes at most 31 audit rows a minute on each route. The count belongs to one API instance and starts again when the API restarts. A request that was already allowed when a membership or the connection's owner changed still completes for its caller — it is never cancelled — and waits for n8n at most twice `N8N_MCP_TIMEOUT_MS` (30 seconds by default); the next request is decided on the new state.
+
+#### Every shared connection needs an owner (Phase 17 multi-business hardening)
+
+Since the hardening, the deployment's other shared connections belong to an Organization too, and **nobody can use or inspect one until it is assigned** — account-wide owners and admins included. After the deploy, check that the migration arrived — `20261018120000_phase17_shared_connection_approvals` adds two nullable columns to `Approval` (`tenantId`, `decidedById`), one index and two foreign keys. It rewrites no row and needs no backfill:
+
+```bash
+docker compose exec postgres psql -U jarvis -d jarvis -c '\d "Approval"'
+```
+
+Then assign each connection this deployment configures, with the same command and the same `$T` as above:
+
+```bash
+for key in meta/ads n8n/rest whatsapp/cloud-api google-maps/server-key mcp/servers omniroute/gateway; do
+  npx tsx scripts/tenant-admin/run.ts assign-connector --provider=${key%/*} --connector=${key#*/} --tenant=<tenant id> $T --execute
+done
+npx tsx scripts/tenant-admin/run.ts list --tenant=<tenant id> $T
+```
+
+Until a connection is assigned, the Integrations page shows it as not available to anyone and nobody can test it. For Meta Ads it means more: the dashboard, the analysis, the opportunity queue and marketing reports answer as on a deployment without Meta, and chat refuses every Meta tool with "Meta Ads is not available to your account."
+
+Once assigned, the Organization's membership role decides — never the account-wide role:
+
+| Membership role | Use it (read Meta Ads; see status) | See its details (ids, errors, quota) | Test it | Change Meta Ads | Approve someone else's Meta change |
+|---|---|---|---|---|---|
+| owner, admin | yes | yes | yes | yes | yes |
+| member, viewer | yes | no | no | no | no |
+| not a member | no | no | no | no | no |
+
+**A Meta change needs two people.** A pause, a budget change or a new campaign is approved by an owner or admin of the Organization **other than the person who asked** — on their Approvals page, under "Waiting for your decision" — and the person who asked then confirms it in chat to run it, within the approval's 10 minutes. An Organization with a single owner or admin cannot change Meta Ads through JARVIS until a second is added (`add-member --role=admin`). At the moment it runs, the change is checked again: the Organization must still own the connection and both people must still hold their roles.
+
+**Only `META_AD_ACCOUNT_ID`.** Reads and changes are limited to that one account, even when the token can reach others.
+
+**Connection tests are budgeted.** Each account may start 10 connection tests in 10 minutes, and each Organization 30 per integration per hour. Both are slots in the audit table, taken before the provider is called (`integration.test_slot`, `integration.test_budget.<tenant id>.<integration>`); while PostgreSQL cannot be reached, tests are refused. A test of the caller's **own** Meta credentials (Credentials page) takes their slot too.
+
+**Still decided per account, not by Organization:** sending a WhatsApp message (only the account the phone number is assigned to), triggering an n8n workflow (only the account's own registered workflows), the read-only Maps tools (any account, within `GOOGLE_MAPS_MONTHLY_LIMIT`) and the reviewed MCP servers. Publishing to a Facebook Page is off unless `MARKETING_PUBLISH_ENABLED=true`, and is not Organization-checked: leave it off on a deployment that serves more than one business.
 
 ## 8. After the deployment
 
@@ -322,6 +357,8 @@ That works because migrations here are additive. `20261006120000_phase13_confirm
 The Phase 15 migration is additive in the same way. `20261012120000_phase15_marketing_os` adds four tables and alters none; a release from before Phase 15 never reads or writes them. Its migration step was run against a database that already had the Phase 15 migration (2026-10-12): `29 migrations found`, `No pending migrations to apply.` Rolling back to before Phase 15 leaves the marketing rows in place and unreachable — the older release has no route, tool or page for them — and they are there again when the newer release returns. **A post that was published stays published**: rolling back does not, and cannot, take anything down from a Page.
 
 The Phase 17 migration is additive in the same way. `20261017120000_phase17_tenant_foundation` adds three tables and an enum and alters none; a release from before it never reads or writes them, so they stay in place across a rollback and are used again when the newer release returns. (Rolling back also takes away the Organization check on n8n MCP discovery: a release from before Phase 17 Stage 3A has its own rules for those routes. The routes have not been part of a deployed release yet.) It was applied on a fresh database after every earlier migration (2026-10-17, `31 migrations found`, all applied); it has not been run against the real stack.
+
+The Phase 17 hardening's migration is additive too. `20261018120000_phase17_shared_connection_approvals` adds two nullable columns to `Approval`, an index and two foreign keys; a release from before it never reads them, so they stay across a rollback. **Rolling back reopens finding H2**: the older release has no Organization check on Meta Ads, so any account can again read and change the deployment's ad account, and an approval waiting for another owner or admin can be approved by the person who asked for it. Coming forward again is safe: an approval approved by its own requester while the older release ran carries no independent approver, and the newer release refuses to run it. It was applied on a fresh database after every earlier migration (2026-10-18, `32 migrations found`, all applied); it has not been run against the real stack.
 
 A migration that **failed part-way** is different. Prisma records it as failed and will refuse to apply anything after it until it is resolved, and how to resolve it depends on what the migration had already done. Roll the application back so the service is up, then stop and work out the state of the database before touching it.
 

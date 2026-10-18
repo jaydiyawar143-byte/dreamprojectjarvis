@@ -52,7 +52,10 @@ import {
   installProcessErrorHandlers,
 } from "./middleware/error-handler.js";
 import { EncryptionService } from "@jarvis/security";
-import { prisma, PrismaGoogleConnectionRepository, PrismaOAuthStateRepository, PrismaWhatsAppRepository, PrismaN8nRepository, PrismaCredentialRepository, PrismaTaskRepository, PrismaPreferenceRepository, PrismaMapsUsageRepository, PrismaOutcomeRepository } from "@jarvis/db";
+import { prisma, PrismaGoogleConnectionRepository, PrismaOAuthStateRepository, PrismaWhatsAppRepository, PrismaN8nRepository, PrismaCredentialRepository, PrismaTaskRepository, PrismaPreferenceRepository, PrismaMapsUsageRepository, PrismaOutcomeRepository, PrismaAuditRepository } from "@jarvis/db";
+import { AtomicRateLimiter, RATE_LIMIT_NAMESPACES } from "./services/rate-limiter.js";
+import { SHARED_TEST_BUDGETS } from "./services/integrations/command-service.js";
+import { metaAvailability } from "./services/tenancy/meta-ads-access.js";
 import { createWhatsAppConfig, isWhatsAppConfigured } from "@jarvis/whatsapp";
 import { createN8nConfig, isN8nConfigured } from "@jarvis/n8n";
 import {
@@ -272,6 +275,8 @@ app.use(
     ...(container.marketingPublishingUnavailableReason ? { publishingUnavailableReason: container.marketingPublishingUnavailableReason } : {}),
     publishFlow: container.marketingPublishFlow,
     permissions: container.permissions,
+    // Phase 17 (L11) — the ad account is described only to its Organization.
+    metaAvailable: async (userId) => (await metaAvailability(container.sharedAccess, userId)) === "available",
   })
 );
 app.use("/api/v1/dashboard", createDashboardRouter(container));
@@ -414,6 +419,9 @@ if (isVoiceConfigured()) {
 
 const googleAdsMounted = Boolean(process.env.JARVIS_ENCRYPTION_KEY);
 
+// Phase 17 (M3) — connection tests take a slot before reaching a provider.
+const credentialTestSlots = new AtomicRateLimiter(new PrismaAuditRepository(prisma), RATE_LIMIT_NAMESPACES.integration);
+
 // ---------------------------------------------------------------------------
 // UI V2 — Agent Credential Center.
 //
@@ -430,6 +438,17 @@ if (process.env.JARVIS_ENCRYPTION_KEY) {
       repo: new PrismaCredentialRepository(prisma),
       encryption: EncryptionService.fromEnv(),
       googleAdsMounted,
+      // Phase 17 (M3) — the same per-account test budget the Integration
+      // Control Center reserves from: one window, held in PostgreSQL.
+      testBudget: {
+        reserveForUser: (userId: string) =>
+          credentialTestSlots.reserve(
+            userId,
+            "test_slot",
+            SHARED_TEST_BUDGETS.perUser.limit,
+            SHARED_TEST_BUDGETS.perUser.windowMs
+          ),
+      },
     })
   );
 } else {

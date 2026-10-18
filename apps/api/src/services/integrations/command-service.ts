@@ -48,6 +48,9 @@ import {
   GOOGLE_SERVICES,
   servicesFromGrantedScopes,
   isIntegrationId,
+  sharedConnectionOfTool,
+  sharedConnectorFor,
+  type SharedConnectorKey,
   type IntegrationAuditEntry,
   type IntegrationCommand,
   type IntegrationCommandContext,
@@ -65,7 +68,14 @@ import {
   type IOAuthStateRepository,
   type IToolExecutor,
 } from "@jarvis/core";
-import type { AuditLogger } from "@jarvis/security";
+import type { AuditLogger, SharedConnectionPermission } from "@jarvis/security";
+import { sharedConnectionGrantsFor } from "@jarvis/security";
+import {
+  SHARED_ACCESS_UNVERIFIED,
+  sharedConnectionUnavailable,
+  sharedRefusalMessage,
+  type SharedConnectionAccessPort,
+} from "../tenancy/shared-connection-access.js";
 import {
   buildAuthUrl,
   createPkcePair,
@@ -117,6 +127,103 @@ export interface RateLimitPort {
     limit: number,
     windowMs: number
   ): Promise<{ allowed: boolean; currentCount: number; limit: number }>;
+}
+
+/**
+ * Phase 17 (review finding M3) — what a connection test may spend, held in
+ * PostgreSQL and taken BEFORE the provider is called: the count and the
+ * reservation are one step (`reserveSlot`, `reserveSharedSlot`), so tests that
+ * arrive together cannot all pass, on one instance or several.
+ *
+ *   perUser          every test this account starts that reaches a provider.
+ *   perOrganization  every test of ONE shared integration by anyone in the
+ *                    Organization that owns it. The shared credential's quota
+ *                    is that Organization's: its members share one window, and
+ *                    nobody outside it can test the connection at all, so no
+ *                    other Organization ever spends it.
+ */
+export const SHARED_TEST_BUDGETS = {
+  perUser: { limit: 10, windowMs: 10 * 60_000 },
+  perOrganization: { limit: 30, windowMs: 60 * 60_000 },
+} as const;
+
+export type BudgetDecision = { allowed: boolean; reason?: "LIMIT" | "UNAVAILABLE" };
+
+export interface TestBudgetPort {
+  reserveForUser(userId: string, integration: IntegrationId): Promise<BudgetDecision>;
+  reserveForOrganization(tenantId: string, integration: IntegrationId, userId: string): Promise<BudgetDecision>;
+}
+
+/**
+ * Phase 17 (review findings M3, L11) — what this caller may see and do with one
+ * integration, decided before anything is read for them or spent on them.
+ *
+ *   personal  the caller's own connection: Google, or Meta with credentials of
+ *             their own. Everything it shows is theirs.
+ *   shared    a connection the deployment configures for everyone, owned by
+ *             one Organization. `grants` is what the caller's membership role
+ *             holds on it — nothing for an outsider, for a connection nobody
+ *             owns, or when the lookup failed (`unverified`).
+ */
+type Standing =
+  | { kind: "personal" }
+  | {
+      kind: "shared";
+      connector: SharedConnectorKey;
+      tenantId: string | null;
+      grants: readonly SharedConnectionPermission[];
+      /** A member of the owning Organization, whatever the role holds. */
+      member: boolean;
+      unverified: boolean;
+    };
+
+/** What everyone outside a shared integration's Organization is shown — the same whatever exists. */
+const UNAVAILABLE_DETAIL =
+  "Not available to your account. A connection the server configures for everyone is made available by an operator, who assigns it to an organization and adds its members.";
+
+/** What a member whose role cannot see diagnostics is told, by health. Names nothing. */
+function statusSentence(health: IntegrationHealth): string {
+  switch (health) {
+    case "CONNECTED":
+      return "Working for your organization. An owner or admin of your organization can see its details.";
+    case "UNVERIFIED":
+      return "Set up for your organization and not checked yet. An owner or admin of your organization can test it.";
+    case "DEGRADED":
+    case "ERROR":
+    case "NEEDS_REAUTH":
+      return "Not working right now. An owner or admin of your organization can see why.";
+    case "DISABLED":
+      return "Switched off for your organization.";
+    default:
+      return "Not set up for your organization yet. An owner or admin of your organization can set it up.";
+  }
+}
+
+/** The fixed view of a shared integration for someone outside its Organization. */
+function unavailableView(descriptor: IntegrationDescriptor): IntegrationView {
+  return {
+    id: descriptor.id,
+    name: descriptor.name,
+    subtitle: descriptor.subtitle,
+    category: descriptor.category,
+    configKind: descriptor.configKind,
+    connection: "NOT_CONNECTED",
+    health: "NOT_CONNECTED",
+    detail: UNAVAILABLE_DETAIL,
+    account: null,
+    config: [],
+    configComplete: false,
+    missingConfig: [],
+    permissions: [],
+    actions: descriptor.actions.map((a) => ({ ...a, available: false })),
+    enabledServices: [],
+    usage: null,
+    lastTestedAt: null,
+    lastSuccessfulSyncAt: null,
+    lastError: null,
+    effectiveSource: "none",
+    supportedCommands: descriptor.commands.filter((c) => c === "status" || c === "getHealth"),
+  };
 }
 
 export interface CredentialPort {
@@ -173,6 +280,18 @@ export interface IntegrationCommandDeps {
    * unavailable and says so.
    */
   executor?: IToolExecutor;
+  /**
+   * Phase 17 — who may see, test or change a connection the deployment
+   * configures for everyone (`SharedConnectionAccess`). Absent: nobody may —
+   * every shared integration is shown as unavailable and its test refused.
+   * There is no fallback that lets a signed-in account through.
+   */
+  sharedAccess?: SharedConnectionAccessPort;
+  /**
+   * Phase 17 — the budget a connection test spends, reserved before the
+   * provider is called. Absent: no test that reaches a provider runs.
+   */
+  testBudget?: TestBudgetPort;
   fetchImpl?: typeof fetch;
   now?: () => Date;
 }
@@ -260,8 +379,14 @@ export class IntegrationCommandService {
     this.deps.executor = executor;
   }
 
-  /** The `IntegrationDeps` the existing health registry expects. */
-  private registryDeps(): IntegrationDeps {
+  /**
+   * The `IntegrationDeps` the existing health registry expects.
+   *
+   * Phase 17 — `allowSharedMeta: false` hides the deployment's Meta
+   * credential from the registry for this caller, so what it describes and
+   * tests is exactly what it would on a deployment that has none.
+   */
+  private registryDeps(options: { allowSharedMeta?: boolean } = {}): IntegrationDeps {
     return {
       googleConnections: this.deps.googleConnections,
       readMetaCredentials: async (userId) => {
@@ -274,6 +399,44 @@ export class IntegrationCommandService {
       },
       googleOAuthMounted: this.deps.googleConfig() !== null,
       ...(this.deps.mcp ? { mcp: this.deps.mcp } : {}),
+      allowSharedMeta: options.allowSharedMeta !== false,
+    };
+  }
+
+  /**
+   * Phase 17 — this caller's standing on one integration, read now (see
+   * `Standing`). Meta is personal only with a complete set of the caller's
+   * own credentials; without one, what it would use is the deployment's.
+   */
+  private async standingFor(
+    id: IntegrationId,
+    userId: string,
+    stored: Record<string, string> | null
+  ): Promise<Standing> {
+    const connector = sharedConnectorFor(id);
+    if (!connector) return { kind: "personal" };
+    if (id === "meta" && stored?.accessToken && stored?.adAccountId) return { kind: "personal" };
+    if (!this.deps.sharedAccess) {
+      return { kind: "shared", connector, tenantId: null, grants: [], member: false, unverified: true };
+    }
+    const decision = await this.deps.sharedAccess.check(userId, connector, "status");
+    if (!decision.allowed) {
+      return {
+        kind: "shared",
+        connector,
+        tenantId: null,
+        grants: [],
+        member: decision.member,
+        unverified: decision.code === "AUTHORIZATION_UNAVAILABLE",
+      };
+    }
+    return {
+      kind: "shared",
+      connector,
+      tenantId: decision.tenantId,
+      grants: sharedConnectionGrantsFor(decision.role),
+      member: true,
+      unverified: false,
     };
   }
 
@@ -515,13 +678,29 @@ export class IntegrationCommandService {
    */
   async buildView(id: IntegrationId, userId: string): Promise<IntegrationView> {
     const descriptor = getIntegrationDescriptor(id)!;
-    const [legacy, state, stored, usage] = await Promise.all([
-      describeIntegration(userId, id, this.registryDeps()),
+    const stored =
+      descriptor.configKind === "server-managed" ? null : await this.deps.credentials.read(userId, id);
+
+    // Phase 17 (review finding L11) — what this caller may see, decided before
+    // anything is read for them. Every surface takes its view from here: the
+    // Integration Control Center, JARVIS's integration tools and capability
+    // discovery, so none of them can show more than the others.
+    const standing = await this.standingFor(id, userId, stored);
+    const outsider = standing.kind === "shared" && !standing.grants.includes("shared:status");
+    // A server-managed integration exists only as the deployment's: an
+    // outsider is shown one fixed view, whatever is configured or for whom.
+    if (outsider && descriptor.configKind === "server-managed") return unavailableView(descriptor);
+    // Meta has a side of the caller's own. An outsider sees exactly what they
+    // would on a deployment with no shared Meta connection: their own
+    // credentials, or none.
+    const allowSharedMeta = !outsider;
+    const diagnostics = standing.kind === "personal" || standing.grants.includes("shared:diagnostics");
+
+    const [legacy, state, usage] = await Promise.all([
+      describeIntegration(userId, id, this.registryDeps({ allowSharedMeta })),
       this.deps.state.get(userId, id),
-      descriptor.configKind === "server-managed"
-        ? Promise.resolve(null)
-        : this.deps.credentials.read(userId, id),
-      id === "google-maps" ? this.deps.mapsUsage() : Promise.resolve(null),
+      // The Maps quota is the operator's figure.
+      id === "google-maps" && diagnostics ? this.deps.mapsUsage() : Promise.resolve(null),
     ]);
 
     const serverPresence = this.serverManagedPresence(id);
@@ -531,8 +710,8 @@ export class IntegrationCommandService {
       .filter((f) => !config.find((c) => c.name === f.name)?.hasValue)
       .map((f) => f.name);
 
-    const connection = await this.connectionState(id, userId, stored, state.enabled);
-    const permissions = await this.permissionsFor(id, userId, stored);
+    const connection = await this.connectionState(id, userId, stored, state.enabled, allowSharedMeta);
+    const permissions = await this.permissionsFor(id, userId, stored, allowSharedMeta);
 
     // A disabled integration reports DISABLED regardless of what the health
     // engine says. The credential may be perfectly good; the user asked for it
@@ -555,7 +734,7 @@ export class IntegrationCommandService {
           ? descriptor.actions.map((a) => a.id)
           : [];
 
-    return {
+    const view: IntegrationView = {
       id,
       name: descriptor.name,
       subtitle: descriptor.subtitle,
@@ -576,13 +755,33 @@ export class IntegrationCommandService {
         available: state.enabled && connection === "CONNECTED",
       })),
       enabledServices,
-      usage: usage ?? legacy?.usage ?? null,
+      usage: diagnostics ? (usage ?? legacy?.usage ?? null) : null,
       lastTestedAt: legacy?.lastCheckedAt ?? null,
       lastSuccessfulSyncAt: state.lastSuccessfulSyncAt,
       lastError: legacy?.lastError ?? null,
       effectiveSource: legacy?.effectiveSource ?? "none",
       supportedCommands: [...descriptor.commands],
     };
+
+    // A member whose role cannot see diagnostics: whether it exists for their
+    // Organization and whether it works — none of the operator's identifiers,
+    // details, errors or quota, and no Test button for a test they cannot run.
+    if (standing.kind === "shared" && !outsider && !diagnostics) {
+      const serverManaged = descriptor.configKind === "server-managed";
+      return {
+        ...view,
+        detail: state.enabled ? statusSentence(view.health) : view.detail,
+        account: null,
+        config: serverManaged ? [] : view.config,
+        missingConfig: serverManaged ? [] : view.missingConfig,
+        usage: null,
+        lastTestedAt: null,
+        lastError: null,
+        effectiveSource: "your organization",
+        supportedCommands: view.supportedCommands.filter((c) => c !== "testConnection"),
+      };
+    }
+    return view;
   }
 
   /** Whether each server-managed field actually has a value in the environment. */
@@ -623,7 +822,9 @@ export class IntegrationCommandService {
     id: IntegrationId,
     userId: string,
     stored: Record<string, string> | null,
-    enabled: boolean
+    enabled: boolean,
+    /** Phase 17 — false: the deployment's Meta credential is not this caller's to count. */
+    allowSharedMeta = true
   ): Promise<IntegrationConnectionState> {
     if (!enabled) return "DISABLED";
 
@@ -666,7 +867,7 @@ export class IntegrationCommandService {
 
     // meta
     const hasStored = Boolean(stored?.accessToken && stored?.adAccountId);
-    const hasEnv = Boolean(process.env.META_ACCESS_TOKEN && process.env.META_AD_ACCOUNT_ID);
+    const hasEnv = allowSharedMeta && Boolean(process.env.META_ACCESS_TOKEN && process.env.META_AD_ACCOUNT_ID);
     if (hasStored || hasEnv) return "CONNECTED";
     if (stored && Object.keys(stored).length > 0) return "PARTIAL";
     return "NOT_CONNECTED";
@@ -942,6 +1143,34 @@ export class IntegrationCommandService {
     descriptor: IntegrationDescriptor,
     context: IntegrationCommandContext
   ): Promise<IntegrationCommandResult> {
+    // Phase 17 (review finding M3) — who may spend this test, decided before
+    // anything is spent: no provider request, no server start, no credential
+    // check and no quota until the caller is authorized and the budget taken.
+    const stored =
+      descriptor.configKind === "server-managed" ? null : await this.deps.credentials.read(context.userId, id);
+    const standing = await this.standingFor(id, context.userId, stored);
+    let allowSharedMeta = true;
+    if (standing.kind === "shared" && !standing.grants.includes("shared:test")) {
+      if (standing.unverified) {
+        return fail("testConnection", id, "AUTHORIZATION_UNAVAILABLE", SHARED_ACCESS_UNVERIFIED);
+      }
+      if (id === "meta" && !standing.member) {
+        // Meta without complete credentials of their own: an outsider's test is
+        // the one they would get on a deployment with no shared Meta connection
+        // — it reaches no provider, and never touches the deployment's token.
+        allowSharedMeta = false;
+      } else if (standing.member) {
+        return fail(
+          "testConnection",
+          id,
+          "PERMISSION_DENIED",
+          sharedRefusalMessage(descriptor.name, "test", { allowed: false, code: "PERMISSION_DENIED", member: true })
+        );
+      } else {
+        return fail("testConnection", id, "PERMISSION_DENIED", sharedConnectionUnavailable(descriptor.name));
+      }
+    }
+
     const state = await this.deps.state.get(context.userId, id);
     if (!state.enabled) {
       return fail(
@@ -952,9 +1181,41 @@ export class IntegrationCommandService {
       );
     }
 
+    // The budget, reserved before the provider is called: this account's
+    // window, then — for a shared connection — its Organization's window for
+    // this integration. A budget that cannot be checked refuses the test.
+    const budget = this.deps.testBudget;
+    if (!budget) {
+      return fail("testConnection", id, "RATE_LIMITED", "The connection-test budget could not be checked, so the test was not run.");
+    }
+    const mine = await budget.reserveForUser(context.userId, id);
+    if (!mine.allowed) {
+      return fail(
+        "testConnection",
+        id,
+        "RATE_LIMITED",
+        mine.reason === "UNAVAILABLE"
+          ? "The connection-test budget could not be checked, so the test was not run."
+          : `You have started ${SHARED_TEST_BUDGETS.perUser.limit} connection tests in the last ${SHARED_TEST_BUDGETS.perUser.windowMs / 60_000} minutes. Try again later.`
+      );
+    }
+    if (standing.kind === "shared" && allowSharedMeta) {
+      const ours = await budget.reserveForOrganization(standing.tenantId!, id, context.userId);
+      if (!ours.allowed) {
+        return fail(
+          "testConnection",
+          id,
+          "RATE_LIMITED",
+          ours.reason === "UNAVAILABLE"
+            ? "The connection-test budget could not be checked, so the test was not run."
+            : `Your organization has tested ${descriptor.name} ${SHARED_TEST_BUDGETS.perOrganization.limit} times in the last hour. Try again later.`
+        );
+      }
+    }
+
     let result: CheckResult | null;
     try {
-      result = await runCheck(context.userId, id, this.registryDeps());
+      result = await runCheck(context.userId, id, this.registryDeps({ allowSharedMeta }));
     } catch (error) {
       return fail("testConnection", id, "PROVIDER_ERROR", safeMessage(error, "The provider could not be reached."));
     }
@@ -997,7 +1258,20 @@ export class IntegrationCommandService {
     const stored = descriptor.configKind === "server-managed"
       ? null
       : await this.deps.credentials.read(context.userId, id);
-    const permissions = await this.permissionsFor(id, context.userId, stored);
+    // Phase 17 (L11) — what a shared connection grants is the deployment's
+    // fact, told only to its Organization: an outsider is answered as on a
+    // deployment that has none of it.
+    const standing = await this.standingFor(id, context.userId, stored);
+    const outsider = standing.kind === "shared" && !standing.grants.includes("shared:status");
+    if (outsider && descriptor.configKind === "server-managed") {
+      return ok(
+        "getPermissions",
+        id,
+        { permissions: [], grantedCount: 0, writeCount: 0 },
+        `${descriptor.name} has no active permissions — nothing is connected.`
+      );
+    }
+    const permissions = await this.permissionsFor(id, context.userId, stored, !outsider);
 
     const granted = permissions.filter((p) => p.granted);
     const writes = granted.filter((p) => p.access === "write");
@@ -1023,7 +1297,9 @@ export class IntegrationCommandService {
   private async permissionsFor(
     id: IntegrationId,
     userId: string,
-    stored: Record<string, string> | null
+    stored: Record<string, string> | null,
+    /** Phase 17 — false: the deployment's Meta credential grants this caller nothing. */
+    allowSharedMeta = true
   ): Promise<IntegrationPermission[]> {
     if (id === "google") {
       const connection = await this.deps.googleConnections?.findByUser(userId);
@@ -1068,7 +1344,7 @@ export class IntegrationCommandService {
     }
 
     if (id === "meta") {
-      const has = Boolean(stored?.accessToken) || Boolean(process.env.META_ACCESS_TOKEN);
+      const has = Boolean(stored?.accessToken) || (allowSharedMeta && Boolean(process.env.META_ACCESS_TOKEN));
       return [
         { id: "ads_read", label: "Read ad accounts, campaigns and insights", granted: has, access: "read" },
         { id: "ads_management", label: "Change campaign status and budgets (approval-gated)", granted: has, access: "write" },
@@ -1392,6 +1668,30 @@ export class IntegrationCommandService {
     }
 
     const params = input.actionParams ?? {};
+
+    // Phase 17 (H2) — a write by a tool that acts through a shared connection
+    // (`SHARED_CONNECTION_TOOLS`) is for its Organization's owners and admins.
+    // Refused before a confirmation is issued, so nobody is asked to confirm
+    // what their role could never run. Exactly the tools the executor's gate
+    // covers — this page adds no rule a sentence would not meet; the
+    // executor, the tool and the approval store still check.
+    if (action.writesExternally && action.toolId && sharedConnectionOfTool(action.toolId)?.access === "write") {
+      const stored =
+        descriptor.configKind === "server-managed" ? null : await this.deps.credentials.read(context.userId, id);
+      const standing = await this.standingFor(id, context.userId, stored);
+      if (standing.kind === "shared" && !standing.grants.includes("shared:write")) {
+        return fail(
+          "executeAction",
+          id,
+          standing.unverified ? "AUTHORIZATION_UNAVAILABLE" : "PERMISSION_DENIED",
+          standing.unverified
+            ? SHARED_ACCESS_UNVERIFIED
+            : standing.member
+              ? sharedRefusalMessage(descriptor.name, "write", { allowed: false, code: "PERMISSION_DENIED", member: true })
+              : sharedConnectionUnavailable(descriptor.name)
+        );
+      }
+    }
 
     if (action.writesExternally) {
       // A voice session cannot render a confirmation the user can read and

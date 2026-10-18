@@ -341,6 +341,13 @@ Counted per user in an audit-backed window, so limits hold across processes.
 Plain status reads are **not** limited — they cost nothing external, and
 throttling them would break the dashboard without protecting anything.
 
+**Connection-test budgets (Phase 17).** Beside the per-verb limit, a test
+takes a slot in two windows before anything is called: the caller's own — 10
+tests in 10 minutes — and, for a shared connection, its Organization's — 30
+tests of that integration an hour, counted across every account. Both are
+rows in the audit table, so they hold across processes; if they cannot be
+checked, the test is refused.
+
 ### External writes
 
 ```
@@ -380,6 +387,25 @@ is distinguishable from a click. They never carry a credential.
 one as a parameter, and no tool takes one, so a user cannot name, enumerate or
 act on anybody else's connections.
 
+### Shared connections (Phase 17)
+
+The connections configured for the whole deployment — Meta Ads, n8n, WhatsApp,
+Google Maps, MCP Servers and OmniRoute — belong to one Organization, recorded
+by the operator command (`docs/DEPLOYMENT.md`, "Organizations"). The command
+service, the Meta tools and the Meta pages read that owner and the caller's
+membership on every request; no request field, and no account-wide role,
+selects either.
+
+| Caller | Sees | May test | May change Meta Ads |
+|---|---|---|---|
+| owner or admin of the owning Organization | everything, as before | yes | yes — approved by **another** owner or admin |
+| member or viewer of it | whether it is set up and whether it works; no ids, errors, quota or Test | no | no |
+| anyone else | "Not available to your account" — the same whether it is configured or not; Meta Ads as if the deployment had none | no | no |
+
+A refused test or change reaches no provider, starts no server and spends no
+quota. A lookup that fails refuses (`AUTHORIZATION_UNAVAILABLE`, 503). The
+rules are in `AGENTS.md`, "Shared connections".
+
 ---
 
 ## Troubleshooting
@@ -397,6 +423,10 @@ act on anybody else's connections.
 | Saving blanked a secret | Should not happen — the mask sentinel prevents it | Re-enter the secret; report it |
 | 429 | Rate limit | Wait; the window is one minute |
 | 428 on an action | Confirmation required | Confirm the summary and retry with the token |
+| "X is not available to your account." | The connection is not assigned to an Organization, or you are not a member of the one it is assigned to | The operator assigns it, or adds you (`docs/DEPLOYMENT.md`, "Organizations") |
+| "Only an owner or admin of your organization can test the X connection." | Your membership role is member or viewer | Ask an owner or admin |
+| A Meta change "needs approval from another owner or admin of your organization" | Changes through the shared Meta connection are approved by someone other than the person who asked | Another owner or admin approves it on their Approvals page; then confirm it in the conversation |
+| 503 `AUTHORIZATION_UNAVAILABLE` | The Organization records could not be read | Check PostgreSQL; nothing ran |
 
 ### Disconnect vs Disable
 
@@ -424,7 +454,10 @@ forget.
   OAuth foundation, scope model and permission reporting are in place; the
   provider clients are not. Marked `implemented: false` in the catalogue.
 - **Health checks are cached in memory for 10 minutes**, per user, and lost on
-  restart. That is correct: after a restart, nothing has been verified.
+  restart. That is correct: after a restart, nothing has been verified. Since
+  Phase 17 a member of an Organization cannot test its shared connections, and
+  an owner's result is the owner's, so a member sees "Not checked" until the
+  check result is shared per Organization.
 - **Confirmations last two minutes and are single use.** They are stored in
   PostgreSQL since Phase 13, as a hash that cannot be replayed; before that they
   were in process memory and were lost on a restart. A confirmation pending

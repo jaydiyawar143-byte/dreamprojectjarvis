@@ -17,6 +17,7 @@ import type { Router } from "express";
 import { createAnalysisRouter } from "../src/routes/analysis.js";
 import type { Container } from "../src/services/container.js";
 import type { AnalysisCaller, AnalysisInput, AnalysisOutcome } from "@jarvis/tools";
+import { accessOver, memoryTenancy, organizationOwningEverything, type MemoryTenancy } from "./helpers/shared-access.js";
 
 // ---------------------------------------------------------------------------
 // Token service fake (matches the opportunities.test.ts shape)
@@ -138,6 +139,9 @@ async function call(
     };
 
     await Promise.resolve(runAt(idx));
+    // The handler runs inside the auth middleware's `next()`, whose promise
+    // the middleware does not return: wait — bounded — until it has answered.
+    for (let i = 0; i < 200 && !responded(); i++) await new Promise((r) => setImmediate(r));
     break;
   }
 
@@ -196,13 +200,22 @@ const USER = "user-alice";
 let token: string;
 let tokenSvc: FakeTokenService;
 
+/**
+ * Phase 17 — USER is a member of the Organization that owns the deployment's
+ * Meta connection unless a test says otherwise: the setting this suite was
+ * written for.
+ */
+const memberOfMetaOrg = () => organizationOwningEverything({ [USER]: "member" });
+
 function buildRouter(
-  outcomeOrService: AnalysisOutcome | null
+  outcomeOrService: AnalysisOutcome | null,
+  tenancy: MemoryTenancy = memberOfMetaOrg()
 ): { router: Router; calls: Array<{ input: AnalysisInput; caller: AnalysisCaller }> } {
   const double = outcomeOrService ? serviceReturning(outcomeOrService) : null;
   const fakeContainer = {
     tokenService: tokenSvc,
     analysisService: double ? double.service : null,
+    sharedAccess: accessOver(tenancy),
   } as unknown as Container;
   return {
     router: createAnalysisRouter(fakeContainer),
@@ -327,6 +340,7 @@ describe("Phase 11.10 — Analysis API", () => {
     const fakeContainer = {
       tokenService: tokenSvc,
       analysisService: service,
+      sharedAccess: accessOver(memberOfMetaOrg()),
     } as unknown as Container;
     const router = createAnalysisRouter(fakeContainer);
 
@@ -342,5 +356,68 @@ describe("Phase 11.10 — Analysis API", () => {
     const { router } = buildRouter(COMPLETED);
     const res = await call(router, "POST", "/", token, {});
     expect(JSON.stringify(res.body)).not.toMatch(/EAA-test-token/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 17 (review finding L11) — the deployment's Meta account is analysed
+// only for a member of the Organization that owns the connection. Anyone else
+// is answered EXACTLY as a deployment without Meta is answered — before
+// anything about this deployment's setup is said — and nothing runs.
+// ---------------------------------------------------------------------------
+
+describe("Phase 17 — analysis belongs to the Meta connection's Organization", () => {
+  beforeEach(() => {
+    tokenSvc = new FakeTokenService();
+    token = tokenSvc.issue(USER);
+    process.env.META_ACCESS_TOKEN = "EAA-test-token";
+    process.env.META_AD_ACCOUNT_ID = "act_1";
+  });
+
+  const outsider = () =>
+    memoryTenancy({
+      owners: { "meta/ads": "org-other" },
+      members: [{ userId: "someone-else", tenantId: "org-other", role: "owner" }],
+    });
+
+  it("answers an outsider as a deployment without Meta, and never runs the analysis", async () => {
+    const { router, calls } = buildRouter(COMPLETED, outsider());
+    const res = await call(router, "POST", "/", token, {});
+
+    delete process.env.META_ACCESS_TOKEN;
+    delete process.env.META_AD_ACCOUNT_ID;
+    const { router: unconfigured } = buildRouter(null);
+    const baseline = await call(unconfigured, "POST", "/", token, {});
+
+    expect(res.status).toBe(503);
+    expect(res.body.error).toEqual(baseline.body.error);
+    expect((res.body.error as Record<string, string>).code).toBe("ACCOUNT_NOT_CONFIGURED");
+    expect(calls).toEqual([]);
+  });
+
+  it("does not tell an outsider that Meta is set up and only the AI provider is missing", async () => {
+    // Meta configured, no AI: a member is told AI_PROVIDER_NOT_CONFIGURED,
+    // which would tell an outsider the Meta account exists.
+    const member = await call(buildRouter(null).router, "POST", "/", token, {});
+    expect((member.body.error as Record<string, string>).code).toBe("AI_PROVIDER_NOT_CONFIGURED");
+    const res = await call(buildRouter(null, outsider()).router, "POST", "/", token, {});
+    expect((res.body.error as Record<string, string>).code).toBe("ACCOUNT_NOT_CONFIGURED");
+  });
+
+  it("refuses everyone while nobody owns the Meta connection", async () => {
+    const { router, calls } = buildRouter(COMPLETED, memoryTenancy({}));
+    const res = await call(router, "POST", "/", token, {});
+    expect((res.body.error as Record<string, string>).code).toBe("ACCOUNT_NOT_CONFIGURED");
+    expect(calls).toEqual([]);
+  });
+
+  it("fails closed when Organization access cannot be read", async () => {
+    const tenancy = memberOfMetaOrg();
+    tenancy.setFailing(true);
+    const { router, calls } = buildRouter(COMPLETED, tenancy);
+    const res = await call(router, "POST", "/", token, {});
+    expect(res.status).toBe(503);
+    expect((res.body.error as Record<string, string>).code).toBe("AUTHORIZATION_UNAVAILABLE");
+    expect(calls).toEqual([]);
   });
 });

@@ -5,7 +5,7 @@ import type { MemoryRecallPort } from "./memory.js";
 import type { MemoryLearningControl } from "../memory-management.js";
 import type { IMemoryExtractor } from "./memory.js";
 import type { IEmbeddingProvider } from "./embedding-provider.js";
-import type { ITool } from "./tool.js";
+import type { ITool, ToolAccessGate } from "./tool.js";
 import type { IKnowledgeRetriever } from "./knowledge-retrieval.js";
 import type { IPermissionChecker } from "./common.js";
 
@@ -151,6 +151,15 @@ export interface OrchestratorConfig {
    * registered nor named here is handled exactly as before.
    */
   switchedOffTools?: Readonly<Record<string, string>>;
+  /**
+   * Phase 17 — who may use a tool at all (`ToolAccessGate`), asked before a
+   * pending action is created for it, exactly as the executor asks before an
+   * approval: a write the caller's Organization role could never allow is
+   * refused at once, instead of being shown with a Confirm button and put in
+   * front of an approver. It narrows and never widens — the executor and the
+   * tool still check. Absent: not asked.
+   */
+  accessGate?: ToolAccessGate;
 }
 
 /**

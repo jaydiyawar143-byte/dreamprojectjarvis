@@ -57,6 +57,25 @@ class FakeApprovalStore {
   }
 
   /**
+   * Phase 17 — mirrors PrismaApprovalRepository.findByIdForDecider for the
+   * ORDINARY approvals this suite holds: its requester sees it, nobody else.
+   * An Organization's approval, decided by someone else, is exercised against
+   * the real store in shared-connection-hardening-p17-pg.
+   */
+  findByIdForDecider(
+    id: string,
+    userId: string
+  ): { approval: Approval; requesterName: string; readerIs: "requester" } | null {
+    const approval = this.findByIdForUser(id, userId);
+    return approval ? { approval, requesterName: "requester", readerIs: "requester" } : null;
+  }
+
+  /** Ordinary approvals never wait for someone else's decision. */
+  listAwaitingDecision(): { items: never[]; total: number } {
+    return { items: [], total: 0 };
+  }
+
+  /**
    * Mirrors PrismaApprovalRepository.decideApproval: the conditional
    * transition happens as ONE synchronous check-and-set over the map, so
    * interleaved async handlers can never double-transition.

@@ -186,6 +186,19 @@ export interface SlotReservationPort {
     traceId?: string;
     now?: Date;
   }): Promise<{ reserved: boolean; count: number }>;
+  /**
+   * Phase 17 — one slot in a window shared by everyone whose rows carry this
+   * exact action (`PrismaAuditRepository.reserveSharedSlot`). Optional: a store
+   * without it cannot hold a shared budget, and `reserveShared` refuses.
+   */
+  reserveSharedSlot?(input: {
+    action: string;
+    userId: string;
+    limit: number;
+    windowMs: number;
+    traceId?: string;
+    now?: Date;
+  }): Promise<{ reserved: boolean; count: number }>;
 }
 
 export interface SlotDecision extends RateLimitDecision {
@@ -216,6 +229,45 @@ export class AtomicRateLimiter {
       const taken = await this.store.reserveSlot({
         userId,
         action: `${this.namespace}.${bucket}`,
+        limit,
+        windowMs,
+        ...(options.traceId ? { traceId: options.traceId } : {}),
+        ...(options.now ? { now: options.now } : {}),
+      });
+      return {
+        allowed: taken.reserved,
+        currentCount: taken.count,
+        limit,
+        windowMs,
+        ...(taken.reserved ? {} : { reason: "LIMIT" as const }),
+      };
+    } catch {
+      return { allowed: false, currentCount: limit, limit, windowMs, reason: "UNAVAILABLE" };
+    }
+  }
+
+  /**
+   * Phase 17 — take one slot in a window SHARED by everyone reserving under
+   * `namespace.key`, or be refused: a per-Organization budget, where the
+   * caller puts the Organization in `key`. Counted across accounts, in one
+   * step, in PostgreSQL. The row is written under `userId`, the account that
+   * took the slot. Fails closed, like `reserve`.
+   */
+  async reserveShared(
+    key: string,
+    userId: string,
+    limit: number,
+    windowMs: number,
+    options: { traceId?: string; now?: Date } = {}
+  ): Promise<SlotDecision> {
+    const store = this.store;
+    if (!store.reserveSharedSlot) {
+      return { allowed: false, currentCount: limit, limit, windowMs, reason: "UNAVAILABLE" };
+    }
+    try {
+      const taken = await store.reserveSharedSlot({
+        action: `${this.namespace}.${key}`,
+        userId,
         limit,
         windowMs,
         ...(options.traceId ? { traceId: options.traceId } : {}),

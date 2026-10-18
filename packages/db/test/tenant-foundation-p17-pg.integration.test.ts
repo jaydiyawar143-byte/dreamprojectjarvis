@@ -284,7 +284,7 @@ describe.skipIf(!dbUp)("Phase 17 Stage 3A — the tenant foundation on PostgreSQ
         [{ verb: "set-role", tenantId, userId: ids.bob, role: "member" }, "NOT_A_MEMBER"],
         [{ verb: "set-role", tenantId, userId: ids.alice, role: "owner" }, "NO_CHANGE"],
         [{ verb: "remove-member", tenantId, userId: ids.bob }, "NOT_A_MEMBER"],
-        [{ verb: "assign-connector", providerId: "n8n", connector: "rest", tenantId }, "UNKNOWN_CONNECTOR"],
+        [{ verb: "assign-connector", providerId: "n8n", connector: "webhook", tenantId }, "UNKNOWN_CONNECTOR"],
       ];
       for (const [command, code] of cases) {
         const result = await run(command);

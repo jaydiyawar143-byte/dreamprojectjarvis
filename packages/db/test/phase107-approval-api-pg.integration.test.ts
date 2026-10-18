@@ -9,6 +9,9 @@
 //     consumption, retroactive reject is refused (already_consumed).
 //  5. listByUser is user-scoped, paginated, and lazily reports expired rows
 //     under the "expired" filter while hiding them from "pending".
+// Phase 17: pinned with an ordinary write (no shared connection). An
+// Organization's approval is decided by someone else — see
+// shared-connection-approvals-p17-pg.
 import { config } from "dotenv";
 import { resolve } from "node:path";
 config({ path: resolve(process.cwd(), "../../.env") });
@@ -100,7 +103,7 @@ async function seedApproval(
   };
   const approval = await repo.create({
     userId,
-    toolId: "meta.campaign.create",
+    toolId: "n8n.trigger",
     action: "execute",
     params,
     paramsHash: computeParamsHash(params),
@@ -180,7 +183,7 @@ describe.skipIf(!dbUp)("PHASE 10.7 — PG approval decisions", () => {
     };
     const approval = await approvals.create({
       userId: userAId!,
-      toolId: "meta.campaign.create",
+      toolId: "n8n.trigger",
       action: "execute",
       params,
       paramsHash: computeParamsHash(params),
@@ -192,7 +195,7 @@ describe.skipIf(!dbUp)("PHASE 10.7 — PG approval decisions", () => {
 
     const exec = await executions.begin({
       userId: userAId!,
-      toolId: "meta.campaign.create",
+      toolId: "n8n.trigger",
       idempotencyKey: `pg107-consume:${Date.now()}:${Math.random()
         .toString(36)
         .slice(2)}`,
@@ -206,7 +209,7 @@ describe.skipIf(!dbUp)("PHASE 10.7 — PG approval decisions", () => {
       {
         approvalId: approval.id,
         userId: userAId!,
-        toolId: "meta.campaign.create",
+        toolId: "n8n.trigger",
         paramsHash: computeParamsHash(params),
         executionId: exec.executionId,
       },
@@ -224,7 +227,7 @@ describe.skipIf(!dbUp)("PHASE 10.7 — PG approval decisions", () => {
     // Double consumption also denied with zero side effects.
     const exec2 = await executions.begin({
       userId: userAId!,
-      toolId: "meta.campaign.create",
+      toolId: "n8n.trigger",
       idempotencyKey: `pg107-replay:${Date.now()}:${Math.random()
         .toString(36)
         .slice(2)}`,
@@ -236,7 +239,7 @@ describe.skipIf(!dbUp)("PHASE 10.7 — PG approval decisions", () => {
       {
         approvalId: approval.id,
         userId: userAId!,
-        toolId: "meta.campaign.create",
+        toolId: "n8n.trigger",
         paramsHash: computeParamsHash(params),
         executionId: exec2.executionId,
       },

@@ -396,6 +396,10 @@ export type IntegrationErrorCode =
   | "PROVIDER_ERROR"
   | "TIMEOUT"
   | "UNSUPPORTED_COMMAND"
+  // Phase 17 — who owns a shared connection, or the caller's membership in
+  // that Organization, could not be read. The request is refused, never
+  // allowed on a guess.
+  | "AUTHORIZATION_UNAVAILABLE"
   | "INTERNAL_ERROR";
 
 /**

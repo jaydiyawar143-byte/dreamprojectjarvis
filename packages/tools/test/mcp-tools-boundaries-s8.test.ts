@@ -56,8 +56,10 @@ describe("the adapter knows a port, never a provider", () => {
 
 describe("the executor and the registry are untouched", () => {
   it("pins ToolExecutor and ToolRegistry byte-for-byte", () => {
+    // Phase 17 changed the executor deliberately (the shared-connection access
+    // gate); the digest moved with packages/core/test/mcp-boundaries-s8.
     expect(sha256(read("packages/tools/src/executor.ts"))).toBe(
-      "ecc76194d55ecaed8cb434555c328afc0c7e1039a4347db0a132ebd3ad104f06"
+      "9bc4c7bff0db43a0bcd07cdfef003ff16f7c5c22126ab12dd0c133620012964d"
     );
     expect(sha256(read("packages/tools/src/registry.ts"))).toBe(
       "f62f401378deecdf774a700b88cd5a4a375b142dfbc93406065445c58b6495ac"

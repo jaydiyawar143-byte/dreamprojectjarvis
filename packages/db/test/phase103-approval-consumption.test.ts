@@ -1,6 +1,11 @@
 // PHASE 10.3 — Atomic approval consumption + one-time execution.
 // Unit tests against a faithful in-memory Prisma emulation (real-PG
 // concurrency lives in the phase103-approval-pg integration suite).
+//
+// Phase 17: the ORDINARY mechanism is pinned here with writes that use no
+// shared connection (WhatsApp, n8n). A Meta write's approval now belongs to an
+// Organization and is consumed only with its scope, after an independent
+// approver decided it — pinned in shared-connection-approvals-p17-pg.
 import { describe, it, expect } from "vitest";
 import { Prisma } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
@@ -189,7 +194,7 @@ async function approvedExecutionSetup(f: ReturnType<typeof makeFixture>, opts?: 
   const params = opts?.params ?? { accountId: "act_111111111", campaignId: "100000001" };
   const approval = await f.approvalsRepo.create({
     userId: "user-1",
-    toolId: "meta.campaign.pause",
+    toolId: "whatsapp.send",
     action: "pause campaign",
     params,
     paramsHash: opts?.legacy ? undefined : computeParamsHash(params),
@@ -198,7 +203,7 @@ async function approvedExecutionSetup(f: ReturnType<typeof makeFixture>, opts?: 
   await f.approvalsRepo.updateStatus(approval.id, "approved");
   const exec = await f.execRepo.begin({
     userId: "user-1",
-    toolId: "meta.campaign.pause",
+    toolId: "whatsapp.send",
     idempotencyKey: "meta.campaign.pause:act_111111111:100000001:PAUSED",
     provider: "meta-ads",
   });
@@ -213,7 +218,7 @@ describe("PHASE 10.3 — atomic consumption", () => {
     const res = await f.approvalsRepo.consumeForExecution({
       approvalId: approval.id,
       userId: "user-1",
-      toolId: "meta.campaign.pause",
+      toolId: "whatsapp.send",
       paramsHash: computeParamsHash({ accountId: "act_111111111", campaignId: "100000001" }),
       executionId: exec.executionId,
     });
@@ -236,7 +241,7 @@ describe("PHASE 10.3 — atomic consumption", () => {
     const input = {
       approvalId: approval.id,
       userId: "user-1",
-      toolId: "meta.campaign.pause",
+      toolId: "whatsapp.send",
       paramsHash: computeParamsHash({ accountId: "act_111111111", campaignId: "100000001" }),
       executionId: exec.executionId,
     };
@@ -255,7 +260,7 @@ describe("PHASE 10.3 — atomic consumption", () => {
     const res = await f.approvalsRepo.consumeForExecution({
       approvalId: approval.id,
       userId: "user-1",
-      toolId: "meta.campaign.pause",
+      toolId: "whatsapp.send",
       paramsHash: computeParamsHash({ accountId: "act_111111111", campaignId: "100000002" }),
       executionId: exec.executionId,
     });
@@ -273,7 +278,7 @@ describe("PHASE 10.3 — atomic consumption", () => {
     const res = await f.approvalsRepo.consumeForExecution({
       approvalId: approval.id,
       userId: "user-1",
-      toolId: "meta.campaign.pause",
+      toolId: "whatsapp.send",
       paramsHash: computeParamsHash({ accountId: "act_111111111", campaignId: "100000001" }),
       executionId: exec.executionId,
     });
@@ -284,7 +289,7 @@ describe("PHASE 10.3 — atomic consumption", () => {
 
   it.each([
     ["different user", { override: { userId: "attacker" }, reason: "different user" }],
-    ["different tool", { override: { toolId: "meta.campaign.create" }, reason: "different tool" }],
+    ["different tool", { override: { toolId: "n8n.trigger" }, reason: "different tool" }],
   ])("$label denies", async (_name, { override, reason }: { override: { userId?: string; toolId?: string }; reason: string }) => {
     const f = makeFixture();
     const { approval, exec } = await approvedExecutionSetup(f);
@@ -292,7 +297,7 @@ describe("PHASE 10.3 — atomic consumption", () => {
     const res = await f.approvalsRepo.consumeForExecution({
       approvalId: approval.id,
       userId: override.userId ?? "user-1",
-      toolId: override.toolId ?? "meta.campaign.pause",
+      toolId: override.toolId ?? "whatsapp.send",
       paramsHash: computeParamsHash({ accountId: "act_111111111", campaignId: "100000001" }),
       executionId: exec.executionId,
     });
@@ -311,7 +316,7 @@ describe("PHASE 10.3 — atomic consumption", () => {
     const res = await f.approvalsRepo.consumeForExecution({
       approvalId: approval.id,
       userId: "user-1",
-      toolId: "meta.campaign.pause",
+      toolId: "whatsapp.send",
       paramsHash: computeParamsHash({ accountId: "act_111111111", campaignId: "100000001" }),
       executionId: exec.executionId,
     });
@@ -327,7 +332,7 @@ describe("PHASE 10.3 — atomic consumption", () => {
     const res = await f.approvalsRepo.consumeForExecution({
       approvalId: approval.id,
       userId: "user-1",
-      toolId: "meta.campaign.pause",
+      toolId: "whatsapp.send",
       paramsHash: computeParamsHash({ accountId: "act_111111111", campaignId: "100000001" }),
       executionId: exec.executionId,
     });
@@ -340,7 +345,7 @@ describe("PHASE 10.3 — atomic consumption", () => {
     const params = { accountId: "act_111111111", campaignId: "100000001" };
     const approval = await f.approvalsRepo.create({
       userId: "user-1",
-      toolId: "meta.campaign.pause",
+      toolId: "whatsapp.send",
       action: "pause campaign",
       params,
       paramsHash: computeParamsHash(params),
@@ -348,14 +353,14 @@ describe("PHASE 10.3 — atomic consumption", () => {
     });
     const exec = await f.execRepo.begin({
       userId: "user-1",
-      toolId: "meta.campaign.pause",
+      toolId: "whatsapp.send",
       idempotencyKey: "k-pending",
     });
 
     const res = await f.approvalsRepo.consumeForExecution({
       approvalId: approval.id,
       userId: "user-1",
-      toolId: "meta.campaign.pause",
+      toolId: "whatsapp.send",
       paramsHash: computeParamsHash(params),
       executionId: exec.executionId,
     });
@@ -368,7 +373,7 @@ describe("PHASE 10.3 — atomic consumption", () => {
     const res = await f.approvalsRepo.consumeForExecution({
       approvalId: "does-not-exist",
       userId: "user-1",
-      toolId: "meta.campaign.pause",
+      toolId: "whatsapp.send",
       paramsHash: "deadbeef",
       executionId: "exec-x",
     });
@@ -386,7 +391,7 @@ describe("PHASE 10.3 — atomic consumption", () => {
     const res = await f.approvalsRepo.consumeForExecution({
       approvalId: approval.id,
       userId: "user-1",
-      toolId: "meta.campaign.pause",
+      toolId: "whatsapp.send",
       paramsHash: computeParamsHash({ accountId: "act_111111111", campaignId: "100000001" }),
       executionId: exec.executionId,
     });
@@ -405,7 +410,7 @@ describe("PHASE 10.3 — CONSUMED is terminal", () => {
     await f.approvalsRepo.consumeForExecution({
       approvalId: approval.id,
       userId: "user-1",
-      toolId: "meta.campaign.pause",
+      toolId: "whatsapp.send",
       paramsHash: computeParamsHash({ accountId: "act_111111111", campaignId: "100000001" }),
       executionId: exec.executionId,
     });
@@ -422,7 +427,7 @@ describe("PHASE 10.3 — CONSUMED is terminal", () => {
     const input = {
       approvalId: approval.id,
       userId: "user-1",
-      toolId: "meta.campaign.pause",
+      toolId: "whatsapp.send",
       paramsHash: computeParamsHash({ accountId: "act_111111111", campaignId: "100000001" }),
       executionId: exec.executionId,
     };

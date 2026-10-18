@@ -8,6 +8,7 @@ import type {
   AuditLogger,
   ToolResult,
   ShutdownLifecycle,
+  ToolAccessGate,
 } from "@jarvis/core";
 import {
   APPROVAL_TTL_MS,
@@ -41,6 +42,12 @@ export class ToolExecutor implements IToolExecutor {
    * them. Absent (tests/legacy callers) → no gating.
    */
   private readonly lifecycle?: ShutdownLifecycle;
+  /**
+   * Phase 17 — who may use a tool at all, asked before any approval is looked
+   * up or created (see `ToolAccessGate`). Absent: not asked, and the tool's
+   * own check, as it runs, is the only one.
+   */
+  private readonly accessGate?: ToolAccessGate;
 
   constructor(
     private registry: { get(toolId: string): ITool | undefined },
@@ -50,10 +57,12 @@ export class ToolExecutor implements IToolExecutor {
     config?: {
       defaultTimeoutMs?: number;
       lifecycle?: ShutdownLifecycle;
+      accessGate?: ToolAccessGate;
     }
   ) {
     this.defaultTimeoutMs = config?.defaultTimeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.lifecycle = config?.lifecycle;
+    this.accessGate = config?.accessGate;
   }
 
   async execute(request: ToolExecutionRequest): Promise<ToolExecutionResult> {
@@ -139,6 +148,33 @@ export class ToolExecutor implements IToolExecutor {
           toolId: request.toolId,
           status: "permission_denied",
           error: `Missing permission: ${perm}`,
+          startedAt,
+          completedAt,
+          durationMs: completedAt.getTime() - startedAt.getTime(),
+        };
+      }
+    }
+
+    // Phase 17 — may this caller use the tool at all? Asked before any
+    // approval is looked up or created, so a request that could never be
+    // allowed never reaches an approver. A gate that cannot answer refuses.
+    if (this.accessGate) {
+      let gate: { allowed: true } | { allowed: false; reason: string };
+      try {
+        // The registry's own id: a model's sanitized spelling of the name
+        // reaches the same tool, and must reach the same answer.
+        gate = await this.accessGate.check({ toolId: tool.id ?? request.toolId, userId: request.userId });
+      } catch {
+        gate = { allowed: false, reason: "Organization access could not be verified, so nothing was done." };
+      }
+      if (!gate.allowed) {
+        const completedAt = new Date();
+        await this.audit(request, executionId, "rejected", startedAt);
+        return {
+          executionId,
+          toolId: request.toolId,
+          status: "permission_denied",
+          error: gate.reason,
           startedAt,
           completedAt,
           durationMs: completedAt.getTime() - startedAt.getTime(),

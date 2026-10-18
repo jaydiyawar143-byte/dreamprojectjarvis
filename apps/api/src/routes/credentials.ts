@@ -45,6 +45,8 @@ import { createMetaGraphProvider } from "@jarvis/meta-graph";
 import { isWhatsAppConfigured } from "@jarvis/whatsapp";
 import { isN8nConfigured } from "@jarvis/n8n";
 import { describeGoogleMapsStatus, isGoogleMapsServerConfigured } from "@jarvis/config";
+import { sharedConnectorFor } from "@jarvis/core";
+import { sharedConnectionGrantsFor } from "@jarvis/security";
 import { createAuthMiddleware, type AuthenticatedRequest } from "../middleware/auth.js";
 import type { Container } from "../services/container.js";
 
@@ -172,6 +174,11 @@ export function createCredentialsRouter(
     encryption: EncryptionService;
     /** Whether the Google Ads OAuth routes are mounted in this deployment. */
     googleAdsMounted: boolean;
+    /**
+     * Phase 17 (M3) — the per-account connection-test budget, reserved before
+     * the provider is called (`SHARED_TEST_BUDGETS.perUser`). Absent: no test.
+     */
+    testBudget?: { reserveForUser(userId: string): Promise<{ allowed: boolean; reason?: "LIMIT" | "UNAVAILABLE" }> };
   }
 ): Router {
   const router = Router();
@@ -211,6 +218,23 @@ export function createCredentialsRouter(
    * The public shape of a provider: what it needs, what is set, and what state
    * it is in. Never contains a secret.
    */
+  /**
+   * Phase 17 (review finding L11) — what this caller may be told about a
+   * connection the deployment configures for everyone: everything (an owner or
+   * admin of the Organization that owns it), whether it is set up (another
+   * member), or nothing at all (everyone else — the same answer whatever is
+   * configured). Read from the database on every call; a lookup that fails
+   * tells nothing.
+   */
+  async function standingOn(userId: string, providerId: string): Promise<"full" | "status" | "none"> {
+    const connector = sharedConnectorFor(providerId);
+    if (!connector) return "full";
+    if (!container.sharedAccess) return "none";
+    const decision = await container.sharedAccess.check(userId, connector, "status");
+    if (!decision.allowed) return "none";
+    return sharedConnectionGrantsFor(decision.role).includes("shared:diagnostics") ? "full" : "status";
+  }
+
   async function describe(userId: string, spec: ProviderSpec) {
     const base = {
       id: spec.id,
@@ -243,6 +267,36 @@ export function createCredentialsRouter(
     }
 
     if (spec.kind === "server-managed") {
+      // Phase 17 — the deployment's connection is described only to its
+      // Organization: to anyone else, one fixed answer.
+      const standing = await standingOn(userId, spec.id);
+      if (standing === "none") {
+        return {
+          ...base,
+          status: "NOT_CONNECTED" as const,
+          detail: "Not available to your account.",
+          effectiveSource: "none",
+        };
+      }
+      if (standing === "status") {
+        const set =
+          spec.id === "google-maps"
+            ? describeGoogleMapsStatus().configured
+            : spec.id === "whatsapp"
+              ? isWhatsAppConfigured()
+              : isN8nConfigured();
+        return {
+          ...base,
+          // Set up is not working: whether it works is a test only an owner
+          // or admin runs.
+          status: set ? ("CONFIGURED" as const) : ("CONFIGURATION_REQUIRED" as const),
+          detail: set
+            ? "Set up for your organization. An owner or admin of your organization can see its details."
+            : "Not set up for your organization yet.",
+          effectiveSource: "your organization",
+        };
+      }
+
       // Google Maps has THREE states, not two, because its two keys do
       // different jobs and either can be present alone:
       //
@@ -311,27 +365,41 @@ export function createCredentialsRouter(
 
     const missing = spec.fields.filter((f) => f.required && !stored?.[f.name]);
 
-    const envConfigured = Boolean(process.env.META_ACCESS_TOKEN && process.env.META_AD_ACCOUNT_ID);
+    // Phase 17 (L11) — the deployment's Meta credential is mentioned only to
+    // the Organization that owns it. To anyone else this deployment has none:
+    // they see exactly what they would see on one without it.
+    const envPresent = Boolean(process.env.META_ACCESS_TOKEN && process.env.META_AD_ACCOUNT_ID);
+    const envStanding = !stored && envPresent ? await standingOn(userId, spec.id) : "none";
+    const envConfigured = envPresent && envStanding !== "none";
 
     return {
       ...base,
+      // Present is not verified: "CONFIGURED", never an assumed "CONNECTED".
       status: !stored
         ? envConfigured
-          ? ("CONNECTED" as const)
+          ? ("CONFIGURED" as const)
           : ("NOT_CONNECTED" as const)
         : missing.length > 0
           ? ("CONFIGURATION_REQUIRED" as const)
           : ("CONFIGURED" as const),
       detail: !stored
         ? envConfigured
-          ? "Running from server environment credentials. Save your own to override at the next restart."
+          ? envStanding === "full"
+            ? "Running from server environment credentials. Save your own to override at the next restart."
+            : "Uses your organization's shared Meta connection. An owner or admin of your organization can test it."
           : "No credentials stored."
         : missing.length > 0
           ? `Missing: ${missing.map((f) => f.label).join(", ")}`
           : "Stored and encrypted. Use Test Connection to verify.",
       // Honest about what the RUNNING agent is using, which is not necessarily
       // what is stored here — see the file header.
-      effectiveSource: stored ? "stored (applies at next service restart)" : envConfigured ? "server environment" : "none",
+      effectiveSource: stored
+        ? "stored (applies at next service restart)"
+        : envConfigured
+          ? envStanding === "full"
+            ? "server environment"
+            : "your organization"
+          : "none",
       values,
     };
   }
@@ -414,6 +482,23 @@ export function createCredentialsRouter(
     const stored = await readCredentials(req.auth.userId, spec.id);
     if (!stored || stored.__undecryptable || !stored.accessToken || !stored.adAccountId) {
       return fail(res, 400, "NOT_CONFIGURED", "Save credentials before testing the connection");
+    }
+
+    // Phase 17 (M3) — the caller's OWN credentials, but still a request this
+    // server makes: it takes a slot in the caller's test budget first, so the
+    // server is never an unmetered relay to the provider.
+    const slot = deps.testBudget
+      ? await deps.testBudget.reserveForUser(req.auth.userId)
+      : { allowed: false, reason: "UNAVAILABLE" as const };
+    if (!slot.allowed) {
+      return fail(
+        res,
+        429,
+        "RATE_LIMITED",
+        slot.reason === "UNAVAILABLE"
+          ? "The connection-test budget could not be checked, so the test was not run."
+          : "Too many connection tests. Try again later."
+      );
     }
 
     try {
