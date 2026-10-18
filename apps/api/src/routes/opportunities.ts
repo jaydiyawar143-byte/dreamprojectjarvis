@@ -21,6 +21,7 @@ import { Router } from "express";
 import type { Response } from "express";
 import { createAuthMiddleware, type AuthenticatedRequest } from "../middleware/auth.js";
 import type { Container } from "../services/container.js";
+import { metaAvailability } from "../services/tenancy/meta-ads-access.js";
 import {
   buildOpportunityQueue,
   buildOpportunityDetail,
@@ -57,6 +58,19 @@ export function createOpportunitiesRouter(container: Container): Router {
   const requireAuth = createAuthMiddleware(container.tokenService);
   const recommendationRepo = container.recommendationRepo;
 
+  /**
+   * Phase 17 (review finding L11) — the queue is the deployment's Meta
+   * account's, so it is shown only to a caller that account is available to.
+   * Anyone else gets exactly the answer a deployment without one gives.
+   */
+  async function metaRefusal(userId: string): Promise<{ status: number; code: string; message: string } | null> {
+    const availability = await metaAvailability(container.sharedAccess, userId);
+    if (availability === "available") return null;
+    return availability === "unverified"
+      ? { status: 503, code: "AUTHORIZATION_UNAVAILABLE", message: "Organization access could not be verified" }
+      : { status: 503, code: "ACCOUNT_NOT_CONFIGURED", message: "Ad account not configured on this server" };
+  }
+
   // -------------------------------------------------------------------------
   // GET / — ranked opportunity queue
   //
@@ -76,6 +90,11 @@ export function createOpportunitiesRouter(container: Container): Router {
   router.get("/", requireAuth, async (req: AuthenticatedRequest, res: Response) => {
     if (!req.auth) return fail(res, 401, "AUTH_REQUIRED", "Authentication required");
     const { userId } = req.auth;
+
+    // Phase 17 (L11) — only for a caller the deployment's Meta Ads is
+    // available to; anyone else is answered as on a deployment without it.
+    const refusal = await metaRefusal(userId);
+    if (refusal) return fail(res, refusal.status, refusal.code, refusal.message);
 
     // Account isolation: ALWAYS from server config, never from client.
     const accountId = process.env.META_AD_ACCOUNT_ID;
@@ -173,6 +192,10 @@ export function createOpportunitiesRouter(container: Container): Router {
     if (!isValidId(req.params.id)) {
       return fail(res, 404, "OPPORTUNITY_NOT_FOUND", "Opportunity not found");
     }
+
+    // Phase 17 (L11) — as for the queue.
+    const refusal = await metaRefusal(userId);
+    if (refusal) return fail(res, refusal.status, refusal.code, refusal.message);
 
     // Account isolation: ALWAYS from server config
     const accountId = process.env.META_AD_ACCOUNT_ID;

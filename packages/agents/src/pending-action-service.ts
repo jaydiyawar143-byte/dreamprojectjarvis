@@ -5,7 +5,14 @@ import type {
   ITool,
   ToolExecutionResult,
 } from "@jarvis/core";
-import { APPROVAL_TTL_MS, MARKETING_TOOL_IDS, MEMORY_CORRECT_TOOL_ID, computeParamsHash, isDestructiveMemoryTool } from "@jarvis/core";
+import {
+  APPROVAL_TTL_MS,
+  MARKETING_TOOL_IDS,
+  MEMORY_CORRECT_TOOL_ID,
+  computeParamsHash,
+  isDestructiveMemoryTool,
+  needsIndependentApproval,
+} from "@jarvis/core";
 import type { PendingAction, PendingActionState } from "@jarvis/core";
 
 export interface PendingActionServiceConfig {
@@ -28,6 +35,9 @@ export interface PendingActionServiceConfig {
       decision: "approve" | "reject",
       options?: { fromPendingOnly?: boolean }
     ): Promise<{ outcome: string; currentState?: string }>;
+    // Phase 17 — an Organization's write (`needsIndependentApproval`) is never
+    // approved by its requester: decideApproval answers
+    // `self_approval_forbidden` and changes nothing.
   };
   toolRegistry: {
     get(toolId: string): ITool | undefined;
@@ -58,8 +68,21 @@ export interface PendingActionResult {
  *                     resolved it first (it was confirmed, cancelled or
  *                     replaced) — this answer lost and changed nothing
  *   FAILED            the approval could not be moved
+ *   NEEDS_INDEPENDENT_APPROVAL
+ *                     Phase 17 — a write through a shared connection, which
+ *                     its requester cannot confirm: it waits for one of the
+ *                     Organization's owners or admins to approve it
  */
-export type PendingActionRefusal = "NOT_FOUND" | "MISMATCH" | "ALREADY_RESOLVED" | "FAILED";
+export type PendingActionRefusal =
+  | "NOT_FOUND"
+  | "MISMATCH"
+  | "ALREADY_RESOLVED"
+  | "FAILED"
+  | "NEEDS_INDEPENDENT_APPROVAL";
+
+/** What the requester is told while their Organization's write waits. */
+export const NEEDS_INDEPENDENT_APPROVAL_MESSAGE =
+  "This change needs approval from another owner or admin of your organization, so it was not run. It is waiting on their Approvals page; once they approve it, confirm here to run it.";
 
 export interface ConfirmResult {
   success: boolean;
@@ -96,6 +119,9 @@ type Answer = "confirm" | "cancel" | "change";
  * the action — it was confirmed, or cancelled or replaced — or it is gone.
  */
 function refusedDecision(answer: Answer, decided: { outcome: string; currentState?: string }): { reason: PendingActionRefusal; message: string } {
+  if (decided.outcome === "self_approval_forbidden") {
+    return { reason: "NEEDS_INDEPENDENT_APPROVAL", message: NEEDS_INDEPENDENT_APPROVAL_MESSAGE };
+  }
   const verb = answer === "cancel" ? "cancelled" : "changed";
   if (decided.outcome === "already_consumed" || (decided.outcome === "conflict" && decided.currentState === "APPROVED")) {
     return {
@@ -183,6 +209,9 @@ export class PendingActionService {
       approvalId: approval.id,
       expiresAt: expiresAt.toISOString(),
       createdAt: approval.createdAt,
+      // Phase 17 — the store decided this when it created the approval, from
+      // the owner record: an Organization's write waits for someone else.
+      ...(needsIndependentApproval(approval) ? { needsIndependentApproval: true } : {}),
     };
 
     const message = this.buildPendingActionMessage(pendingAction);
@@ -246,11 +275,12 @@ export class PendingActionService {
     pending: PendingAction,
     userId: string,
     decision: "approve" | "reject",
-    answer: Answer
+    answer: Answer,
+    options: { fromPendingOnly: boolean } = { fromPendingOnly: true }
   ): Promise<{ ok: true } | { ok: false; reason: PendingActionRefusal; message: string }> {
     let decided: { outcome: string; currentState?: string };
     try {
-      decided = await this.config.approvalRepo.decideApproval(pending.approvalId, userId, decision, { fromPendingOnly: true });
+      decided = await this.config.approvalRepo.decideApproval(pending.approvalId, userId, decision, options);
     } catch {
       const verb = answer === "confirm" ? "confirmed" : answer === "cancel" ? "cancelled" : "changed";
       return { ok: false, reason: "FAILED", message: `That action could not be ${verb} right now, so nothing was changed.` };
@@ -275,8 +305,21 @@ export class PendingActionService {
     }
     const { pending } = found;
 
+    // Phase 17 — an Organization's write that one of its owners or admins
+    // has already approved: confirming RUNS it. Nothing is decided here — the
+    // approval is someone else's — and the run is held to everything that
+    // must still hold, in the transaction that consumes the approval.
+    if (pending.needsIndependentApproval && pending.state === "APPROVED") {
+      return {
+        success: true,
+        pendingAction: pending,
+        message: `Approved by your organization. Running: ${pending.action}.`,
+      };
+    }
+
     // Transition to APPROVED — this action's own approval, by its id, and
-    // only if it is still waiting (see decide).
+    // only if it is still waiting (see decide). For an Organization's write
+    // the store refuses: its requester cannot approve it.
     const decided = await this.decide(pending, userId, "approve", "confirm");
     if (!decided.ok) {
       return { success: false, reason: decided.reason, message: decided.message };
@@ -308,8 +351,12 @@ export class PendingActionService {
     const { pending } = found;
 
     // Only if it is still waiting: a confirmed action cannot be cancelled
-    // after the fact (see decide).
-    const decided = await this.decide(pending, userId, "reject", "cancel");
+    // after the fact (see decide). Phase 17 — an Organization's write that was
+    // approved by someone else is still waiting for its requester to run it,
+    // so the requester may still withdraw it; if a run consumed it first, the
+    // store says so and nothing changes.
+    const approvedForMe = pending.needsIndependentApproval === true && pending.state === "APPROVED";
+    const decided = await this.decide(pending, userId, "reject", "cancel", { fromPendingOnly: !approvedForMe });
     if (!decided.ok) {
       return { success: false, reason: decided.reason, message: decided.message };
     }
@@ -463,6 +510,7 @@ export class PendingActionService {
       approvalId: approval.id,
       expiresAt: approval.expiresAt,
       createdAt: approval.createdAt,
+      ...(needsIndependentApproval(approval) ? { needsIndependentApproval: true } : {}),
     };
   }
 
@@ -474,7 +522,11 @@ export class PendingActionService {
     const toolName = tool?.name ?? pending.toolId;
 
     const lines: string[] = [];
-    lines.push(`${toolName} requires your confirmation.`);
+    lines.push(
+      pending.needsIndependentApproval
+        ? `${toolName} needs approval from another owner or admin of your organization.`
+        : `${toolName} requires your confirmation.`
+    );
     lines.push("");
 
     const p = pending.params;
@@ -515,13 +567,17 @@ export class PendingActionService {
 
     lines.push("");
     lines.push(
-      pending.toolId === MARKETING_TOOL_IDS.contentPublish
-        ? // A publish cannot be changed while it waits (see modifyPendingAction),
-          // so it is not offered.
-          typeof p.earlierAttempt === "string"
-          ? "Reply 'yes' to look for the post, or 'no' to cancel."
-          : "Reply 'yes' to publish it, or 'no' to cancel."
-        : "Reply 'yes' to confirm, 'no' to cancel, or provide updated parameters."
+      pending.needsIndependentApproval
+        ? // Phase 17 — the requester cannot confirm it; saying "reply yes"
+          // would offer an answer that can only be refused.
+          "It is waiting on their Approvals page. Once they approve it, reply 'yes' here to run it, or 'no' to withdraw it."
+        : pending.toolId === MARKETING_TOOL_IDS.contentPublish
+          ? // A publish cannot be changed while it waits (see modifyPendingAction),
+            // so it is not offered.
+            typeof p.earlierAttempt === "string"
+            ? "Reply 'yes' to look for the post, or 'no' to cancel."
+            : "Reply 'yes' to publish it, or 'no' to cancel."
+          : "Reply 'yes' to confirm, 'no' to cancel, or provide updated parameters."
     );
 
     return lines.join("\n");

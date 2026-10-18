@@ -79,7 +79,7 @@ describe("parseTenantAdminArgs", () => {
     [["list", "--tenant=t1", "--as=operator-1"], /requires --confirm-target/],
     [["list", "--tenant=t1", `--confirm-target=${TARGET}`], /requires --as/],
     [["list", "--tenant=../t1", ...COMMON], /--tenant must be an id/],
-    [["assign-connector", "--provider=n8n", "--connector=rest", "--tenant=t1", ...COMMON], /connection whose owner can be recorded/],
+    [["assign-connector", "--provider=n8n", "--connector=webhook", "--tenant=t1", ...COMMON], /connection whose owner can be recorded/],
     [["assign-connector", "--provider=zapier", "--connector=mcp", "--tenant=t1", ...COMMON], /connection whose owner can be recorded/],
     [["remove-member", "--tenant=t1", "--user=u2", ...COMMON, "--execute=yes"], /takes no value/],
     [["create-tenant", `--name=${"x".repeat(121)}`, "--owner=u1", ...COMMON], /at most 120/],

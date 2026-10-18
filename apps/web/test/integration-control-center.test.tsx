@@ -918,3 +918,49 @@ describe("granting write access", () => {
     expect(screen.queryByTestId("integration-grant-write-google")).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 17 (M3, L11) — a shared connection's controls follow the server's
+// list. A member of the Organization that owns it may see whether it works;
+// only its owners and admins test it; an outsider is offered nothing. The
+// server refuses all of it regardless — these buttons are never the boundary.
+// ---------------------------------------------------------------------------
+
+describe("Phase 17 — a shared connection offers only what the server lists", () => {
+  it("offers a member of its Organization no Test, on the card or in the drawer", async () => {
+    respond([
+      integration({
+        configKind: "server-managed",
+        effectiveSource: "your organization",
+        supportedCommands: ALL_COMMANDS.filter((c) => c !== "testConnection"),
+      }),
+    ]);
+    render(<IntegrationsPage />);
+
+    await screen.findByTestId("integration-card-meta");
+    expect(screen.queryByTestId("integration-test-meta")).toBeNull();
+    // Their own on/off switch is theirs to use.
+    expect(screen.getByTestId("integration-toggle-meta")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("integration-manage-meta"));
+    await screen.findByTestId("integration-drawer");
+    expect(screen.queryByTestId("drawer-test")).toBeNull();
+  });
+
+  it("offers an outsider neither a Test nor a switch", async () => {
+    respond([
+      integration({
+        configKind: "server-managed",
+        connection: "NOT_CONNECTED",
+        health: "NOT_CONNECTED",
+        supportedCommands: ["status", "getHealth"],
+      }),
+    ]);
+    render(<IntegrationsPage />);
+
+    await screen.findByTestId("integration-card-meta");
+    expect(screen.queryByTestId("integration-test-meta")).toBeNull();
+    expect(screen.queryByTestId("integration-toggle-meta")).toBeNull();
+    expect(mocked.testIntegration).not.toHaveBeenCalled();
+  });
+});

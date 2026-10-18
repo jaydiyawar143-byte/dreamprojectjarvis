@@ -25,6 +25,7 @@ import {
 } from "@jarvis/security";
 import {
   type PrismaClient,
+  PrismaAuditRepository,
   PrismaConfirmationRepository,
   PrismaCredentialRepository,
   PrismaGoogleConnectionRepository,
@@ -37,10 +38,17 @@ import {
   type GoogleConfig,
 } from "@jarvis/google-ads";
 import type { IToolExecutor, IntegrationUsage } from "@jarvis/core";
-import { DbBackedRateLimiter } from "../rate-limiter.js";
+import { AtomicRateLimiter, DbBackedRateLimiter, RATE_LIMIT_NAMESPACES } from "../rate-limiter.js";
+import type { SharedConnectionAccessPort } from "../tenancy/shared-connection-access.js";
 import { getMapsUsageGuard } from "../maps-usage-guard.js";
 import type { ErrorMonitor, OperationalLog } from "../observability/index.js";
-import { IntegrationCommandService, type CredentialPort, type IntegrationCommandDeps } from "./command-service.js";
+import {
+  IntegrationCommandService,
+  SHARED_TEST_BUDGETS,
+  type CredentialPort,
+  type IntegrationCommandDeps,
+  type TestBudgetPort,
+} from "./command-service.js";
 import { createConfirmationService } from "./confirmations.js";
 
 export interface BuildInput {
@@ -54,6 +62,11 @@ export interface BuildInput {
   log?: OperationalLog;
   /** Phase 13 — told when a command fails in a way nothing expected. */
   monitor?: ErrorMonitor;
+  /**
+   * Phase 17 — who may see, test or change a shared connection: the
+   * container's one `SharedConnectionAccess`. Absent: nobody may.
+   */
+  sharedAccess?: SharedConnectionAccessPort;
 }
 
 /**
@@ -152,6 +165,22 @@ export function buildIntegrationCommandService(
     }
   };
 
+  // Phase 17 (M3) — a connection test's budget, reserved before the provider
+  // is called: count and reservation in ONE step in PostgreSQL, per account
+  // and per Organization (its id is in the key, so two never share a window).
+  const slots = new AtomicRateLimiter(new PrismaAuditRepository(input.prisma), RATE_LIMIT_NAMESPACES.integration);
+  const testBudget: TestBudgetPort = {
+    reserveForUser: (userId) =>
+      slots.reserve(userId, "test_slot", SHARED_TEST_BUDGETS.perUser.limit, SHARED_TEST_BUDGETS.perUser.windowMs),
+    reserveForOrganization: (tenantId, integration, userId) =>
+      slots.reserveShared(
+        `test_budget.${tenantId}.${integration}`,
+        userId,
+        SHARED_TEST_BUDGETS.perOrganization.limit,
+        SHARED_TEST_BUDGETS.perOrganization.windowMs
+      ),
+  };
+
   return new IntegrationCommandService({
     credentials,
     state: stateRepo,
@@ -159,6 +188,8 @@ export function buildIntegrationCommandService(
     // Counted in the same audit-backed window every other limiter uses, so the
     // limit holds across processes rather than per instance.
     rateLimiter: new DbBackedRateLimiter(input.auditLogger, "integration"),
+    testBudget,
+    ...(input.sharedAccess ? { sharedAccess: input.sharedAccess } : {}),
     googleConnections: new PrismaGoogleConnectionRepository(input.prisma, encryption),
     oauthStates: new PrismaOAuthStateRepository(input.prisma),
     googleConfig,

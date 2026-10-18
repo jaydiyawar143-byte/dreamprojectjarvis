@@ -181,8 +181,13 @@ export interface MarketingServiceDeps {
    * a parameter and check for themselves that the caller may read it — the
    * same arrangement the account analysis uses. Named explicitly so that a
    * token which can see several ad accounts still reads exactly one.
+   *
+   * Phase 17 (review finding L11) — asked for THIS caller: null for anyone
+   * outside the Organization that owns the deployment's Meta Ads, so their
+   * report says Meta Ads is not set up, exactly as on a deployment without it.
+   * Throws when that cannot be checked; the ad account is then not read.
    */
-  metaAccount: () => string | null;
+  metaAccount: (userId: string) => string | null | Promise<string | null>;
   /** Whether this user's Google Ads data could be read, and if not, why. */
   googleAds: (userId: string) => Promise<{ status: ReportSourceStatus; detail: string }>;
   /** Null: reading web pages is switched off on this deployment. */
@@ -964,7 +969,16 @@ export class MarketingService implements MarketingPort {
       account: null,
     });
 
-    const account = this.deps.metaAccount();
+    let account: string | null;
+    try {
+      account = await this.deps.metaAccount(userId);
+    } catch {
+      return {
+        performance: null,
+        source: notRead("FAILED", "Access to the ad account could not be checked, so nothing from it is in this report."),
+        currency: null,
+      };
+    }
     if (!account || !this.deps.executor()) {
       return { performance: null, source: notRead("NOT_CONFIGURED", "Meta Ads is not set up on this server."), currency: null };
     }

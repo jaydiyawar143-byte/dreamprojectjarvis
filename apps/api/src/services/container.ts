@@ -181,6 +181,12 @@ import { googleAdsReportSource } from "./marketing/google-ads-source.js";
 import { MarketingPublishFlow } from "./marketing/publish-flow.js";
 import { AtomicRateLimiter, RATE_LIMIT_NAMESPACES } from "./rate-limiter.js";
 import { buildIntegrationCommandService } from "./integrations/build.js";
+import {
+  SharedConnectionAccess,
+  createSharedConnectionToolGate,
+  type SharedConnectionAccessPort,
+} from "./tenancy/shared-connection-access.js";
+import { createOrganizationMetaAuthorizer, metaAccountFor } from "./tenancy/meta-ads-access.js";
 import { errorMonitor, operationalLog } from "./observability/index.js";
 import { mcpToolUnavailable } from "./integration-registry.js";
 
@@ -318,6 +324,14 @@ export interface Container {
    * command (apps/api/scripts/tenant-admin) does.
    */
   tenantRepo: PrismaTenantRepository;
+  /**
+   * Phase 17 multi-business hardening — who may see, test or use a connection
+   * the deployment configures for everyone, read from the owner record and the
+   * caller's membership on every call. The ONE instance: the Meta tools, the
+   * executor's and the orchestrator's access gate, the Integration Control
+   * Center and the dashboard's Meta pages all ask this object.
+   */
+  sharedAccess: SharedConnectionAccessPort;
   /**
    * Phase 14 — whether a statement may replace a memory, answered by the
    * memory writer. Absent when no writer is configured (no OPENAI_API_KEY).
@@ -556,7 +570,12 @@ function createMetaToolRegistry(
   /** Core V1 — the task lifecycle. Always present; it needs only the database. */
   tasks: TaskService,
   /** Core V1 — JARVIS describing itself. */
-  selfKnowledge: SelfKnowledgePort
+  selfKnowledge: SelfKnowledgePort,
+  /**
+   * Phase 17 (H2) — who may use the deployment's Meta connection. Every Meta
+   * tool's account authorizer asks it, on every call.
+   */
+  sharedAccess: SharedConnectionAccessPort
 ): ToolRegistry {
   const registry = new ToolRegistry();
   const metaAccessToken = process.env.META_ACCESS_TOKEN;
@@ -582,27 +601,39 @@ function createMetaToolRegistry(
     // every write tool. No in-process state may gate external side effects.
     const executionJournal = new PrismaToolExecutionRepository(prisma);
 
-    // Phase 8: Read-only tools (provider doubles as its own authorizer)
-    registry.register(new MetaGetAccountsTool(realProvider, realProvider));
-    registry.register(new MetaGetCampaignsTool(realProvider, realProvider));
-    registry.register(new MetaGetAdSetsTool(realProvider, realProvider));
-    registry.register(new MetaGetAdsTool(realProvider, realProvider));
-    registry.register(new MetaGetInsightsTool(realProvider, realProvider));
+    // Phase 17 (H2) — the authorizer answers for the PERSON, not the token: a
+    // member of the Organization that owns the Meta connection, with a role
+    // that allows the read or the write, on the ONE account this deployment
+    // gives that Organization. Only then is the provider asked whether the
+    // token reaches it. The provider used to be its own authorizer, and it
+    // never looked at the user.
+    const authorizer = createOrganizationMetaAuthorizer({
+      provider: realProvider,
+      access: sharedAccess,
+      configuredAccountId: metaAccountId,
+    });
+
+    // Phase 8: Read-only tools
+    registry.register(new MetaGetAccountsTool(realProvider, authorizer));
+    registry.register(new MetaGetCampaignsTool(realProvider, authorizer));
+    registry.register(new MetaGetAdSetsTool(realProvider, authorizer));
+    registry.register(new MetaGetAdsTool(realProvider, authorizer));
+    registry.register(new MetaGetInsightsTool(realProvider, authorizer));
 
     // Phase 9.1: Write tools (pause/resume)
-    registry.register(new MetaPauseCampaignTool(realProvider, realProvider, executionJournal, approvalConsumption));
-    registry.register(new MetaResumeCampaignTool(realProvider, realProvider, executionJournal, approvalConsumption));
-    registry.register(new MetaPauseAdSetTool(realProvider, realProvider, executionJournal, approvalConsumption));
-    registry.register(new MetaResumeAdSetTool(realProvider, realProvider, executionJournal, approvalConsumption));
-    registry.register(new MetaPauseAdTool(realProvider, realProvider, executionJournal, approvalConsumption));
-    registry.register(new MetaResumeAdTool(realProvider, realProvider, executionJournal, approvalConsumption));
+    registry.register(new MetaPauseCampaignTool(realProvider, authorizer, executionJournal, approvalConsumption));
+    registry.register(new MetaResumeCampaignTool(realProvider, authorizer, executionJournal, approvalConsumption));
+    registry.register(new MetaPauseAdSetTool(realProvider, authorizer, executionJournal, approvalConsumption));
+    registry.register(new MetaResumeAdSetTool(realProvider, authorizer, executionJournal, approvalConsumption));
+    registry.register(new MetaPauseAdTool(realProvider, authorizer, executionJournal, approvalConsumption));
+    registry.register(new MetaResumeAdTool(realProvider, authorizer, executionJournal, approvalConsumption));
 
     // Phase 9.2: Budget tools
-    registry.register(new MetaUpdateCampaignBudgetTool(realProvider, realProvider, undefined, executionJournal, approvalConsumption));
-    registry.register(new MetaUpdateAdSetBudgetTool(realProvider, realProvider, undefined, executionJournal, approvalConsumption));
+    registry.register(new MetaUpdateCampaignBudgetTool(realProvider, authorizer, undefined, executionJournal, approvalConsumption));
+    registry.register(new MetaUpdateAdSetBudgetTool(realProvider, authorizer, undefined, executionJournal, approvalConsumption));
 
     // Phase 9.3: Campaign creation
-    registry.register(new MetaCreateCampaignTool(realProvider, realProvider, undefined, executionJournal, approvalConsumption));
+    registry.register(new MetaCreateCampaignTool(realProvider, authorizer, undefined, executionJournal, approvalConsumption));
   }
 
   // -------------------------------------------------------------------------
@@ -1060,6 +1091,14 @@ export function getContainer(options?: {
   const approvalRepo = new PrismaApprovalRepository(prisma);
   const approvalService = new ApprovalService(approvalRepo);
 
+  // Phase 17 — tenant READS, and the one answer to who may use a connection
+  // the deployment configures for everyone. Built first: the integration
+  // service, the Meta tools, the executor and the orchestrator all ask the
+  // SAME object, so no surface can let through what another refuses.
+  const tenantRepo = new PrismaTenantRepository(prisma);
+  const sharedAccess = new SharedConnectionAccess(tenantRepo);
+  const sharedToolGate = createSharedConnectionToolGate(sharedAccess);
+
   // Built BEFORE the tool registry, because the JARVIS integration tools are
   // registered into it and must be present when the agents' function
   // definitions are computed a few lines below. Its executor is bound after the
@@ -1072,6 +1111,7 @@ export function getContainer(options?: {
     // the process's one log and one monitor.
     log: operationalLog,
     monitor: errorMonitor,
+    sharedAccess,
   });
 
   // Capability discovery composes three things that already exist: the tool
@@ -1190,7 +1230,8 @@ export function getContainer(options?: {
     googleWorkspaceService,
     googleWriteService,
     taskService,
-    { describe: (userId) => selfKnowledgeService.describe(userId) }
+    { describe: (userId) => selfKnowledgeService.describe(userId) },
+    sharedAccess
   );
   registryRef.current = toolRegistry;
 
@@ -1370,7 +1411,11 @@ export function getContainer(options?: {
     conversations: conversationRepo,
     executor: () => executorRef.current,
     // The configured ad account, and only where its read tools registered.
-    metaAccount: () => (toolRegistry.get("meta.insights") !== undefined ? (process.env.META_AD_ACCOUNT_ID ?? null) : null),
+    // Phase 17 (L11) — and only for a member of the Organization that owns
+    // the Meta connection; for anyone else there is none. A check that cannot
+    // be made is not a "no": it throws, and the report says it could not read.
+    metaAccount: (userId) =>
+      metaAccountFor(sharedAccess, userId, toolRegistry.get("meta.insights") !== undefined ? process.env.META_AD_ACCOUNT_ID : null),
     googleAds: (userId) => googleAdsReportSource(capabilityService, userId),
     pages: pageReader,
     publishers: marketingPublishers,
@@ -1461,10 +1506,12 @@ export function getContainer(options?: {
   // required to call `get_available_capabilities`, which derives the answer
   // from the live tool registry and the user's real integration state.
   //
-  // The Meta account id is still injected, because Meta tools need it as a
-  // parameter — but it is now explicitly marked as never-to-be-displayed, and
-  // the chat route masks identifiers on the way out as a second line of
-  // defence.
+  // Phase 17 (review finding L11) — the Meta account id is NOT in this prompt.
+  // The prompt is built once and handed to every account's conversation, so
+  // an id in it was the operator's identifier in front of everyone, member or
+  // not. The model learns it from `meta.accounts`, which returns it only to a
+  // member of the Organization that owns the Meta connection — and nothing to
+  // anyone else. The chat route still masks identifiers on the way out.
   // -------------------------------------------------------------------------
   const systemPrompt = [
     "You are JARVIS, a personal AI operating system. You are a general-purpose assistant with many tools across several domains — advertising, maps and location, web browsing, automations, messaging, documents, and your own integration management.",
@@ -1501,9 +1548,10 @@ export function getContainer(options?: {
     "Never print a full account id, customer id, phone number id, token, API key or webhook secret in your reply, even when a tool result contains one.",
     "When you must refer to an account, use a masked form (for example act_2478••••••1624) or just the provider name.",
     "",
-    "=== THE META ACCOUNT ID IS GIVEN TO YOU ===",
-    `For any Meta tool call that takes an "accountId", you MUST pass exactly this value: "${process.env.META_AD_ACCOUNT_ID ?? ""}".`,
-    "This is the ONLY valid account id. Never invent one, never guess one, and never copy an example id out of a tool's parameter description — an example in documentation is not a real account and the call will be refused.",
+    "=== THE META ACCOUNT ID COMES FROM A TOOL ===",
+    "Before any Meta tool call that takes an \"accountId\", call the Meta accounts tool (registry id `meta.accounts`) and pass exactly the accountId it returns. That is the ONLY valid account id for this user.",
+    "If it returns no account, Meta Ads is not available to this user: say so plainly, and do not call another Meta tool.",
+    "Never invent one, never guess one, and never copy an example id out of a tool's parameter description — an example in documentation is not a real account and the call will be refused.",
     "Use it as a PARAMETER only — never display it, never repeat it back to the user, and never include it in prose.",
     "",
     "=== USING TOOLS FOR FACTS ===",
@@ -1713,7 +1761,10 @@ export function getContainer(options?: {
     permissionService,
     approvalService,
     auditLogger,
-    { lifecycle: options?.lifecycle }
+    // Phase 17 — a tool that acts through a shared connection is refused,
+    // before any approval exists, to anyone its Organization role does not
+    // allow. The tool itself checks again as it runs.
+    { lifecycle: options?.lifecycle, accessGate: sharedToolGate }
   );
 
   // Phase 15 — the marketing service reads the ad account through this
@@ -1961,6 +2012,9 @@ export function getContainer(options?: {
     // Phase 15: the publish tools where publishing is off, and the page reads
     // where page reads are off — each with why.
     switchedOffTools: marketingSwitchedOffTools,
+    // Phase 17: the same gate the executor asks, asked before a pending action
+    // is created — a write nobody could let this caller make is refused now.
+    accessGate: sharedToolGate,
   });
 
   const recommendationRepo = new PrismaRecommendationRepository(prisma);
@@ -2057,7 +2111,9 @@ export function getContainer(options?: {
     // Phase 14 — projects, the correction check and the retention sweep.
     projects: projectRepo,
     // Phase 17 Stage 3A — the tenant reads the n8n MCP routes authorize with.
-    tenantRepo: new PrismaTenantRepository(prisma),
+    tenantRepo,
+    // Phase 17 — the one answer to who may use a shared connection.
+    sharedAccess,
     ...(memoryWriter.current
       ? { memoryCorrections: { check: (input: Parameters<MemoryCorrectionCheckPort["check"]>[0]) => memoryWriter.current!.checkCorrection(input) } }
       : {}),

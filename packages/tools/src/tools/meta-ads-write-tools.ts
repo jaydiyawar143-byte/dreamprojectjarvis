@@ -5,6 +5,7 @@ import type {
   CampaignProposal,
   IApprovalConsumptionPort,
   MetaCampaignInput,
+  SharedConnectionScope,
   ToolContext,
   ToolResult,
 } from "@jarvis/core";
@@ -125,8 +126,20 @@ async function authorizeAndClaim(
   toolId: string,
   executionId: string,
   params: Record<string, unknown>,
-  context: ToolContext
+  context: ToolContext,
+  /**
+   * Phase 17 — for a write through the deployment's shared Meta connection,
+   * who may take part, as the authorizer resolved it for THIS execution. The
+   * approval store re-checks all of it in the transaction that consumes the
+   * approval; an Organization's approval is never consumed without it.
+   */
+  tenantScope?: SharedConnectionScope
 ): Promise<{ ok: true; claimed: true } | { ok: false; error: string }> {
+  if (!context.approvalId && tenantScope) {
+    // A write an Organization's approver must approve never runs without its
+    // approval — not through the unit-test seam below either.
+    return { ok: false, error: "Approval required: an owner or admin of the organization must approve this change" };
+  }
   if (!context.approvalId) {
     // No approval in context (unit-test seam / non-gated invocation):
     // plain single-winner claim as before.
@@ -149,6 +162,7 @@ async function authorizeAndClaim(
       toolId,
       paramsHash: computeParamsHash(params),
       executionId,
+      ...(tenantScope ? { tenantScope } : {}),
     });
   } catch {
     // Consumption infrastructure failure: fail closed — no ownership,
@@ -157,6 +171,46 @@ async function authorizeAndClaim(
   }
   if (!result.ok) return { ok: false, error: `Approval denied: ${result.reason}` };
   return { ok: true, claimed: true };
+}
+
+/** What a write tool's access check found, for the one execution it guards. */
+type WriteAccess =
+  | { error: ToolResult; tenantScope?: undefined }
+  | { error: null; tenantScope?: SharedConnectionScope };
+
+/**
+ * The account check every Meta write makes before anything else, at the
+ * moment it runs — after any approval, never only when it was proposed.
+ *
+ * Phase 17 — an authorizer for the deployment's SHARED Meta connection answers
+ * for the write itself (`authorizeWrite`): the caller's membership and role in
+ * the Organization that owns the connection, the account that Organization may
+ * use, and the scope the approval store must re-check as it consumes the
+ * approval. An authorizer without it (a user's own credential, a test double)
+ * keeps the account check it always had, and names no Organization.
+ */
+async function checkWriteAccess(
+  authorizer: MetaAccountAuthorizer,
+  userId: string,
+  accountId: string,
+  options: ProviderCallOptions | undefined,
+  failure: (message: string) => ToolResult
+): Promise<WriteAccess> {
+  const validAccount = validateAccountId(accountId);
+  if (!validAccount) return { error: failure("Invalid account ID format") };
+  if (authorizer.authorizeWrite) {
+    let decision: Awaited<ReturnType<NonNullable<MetaAccountAuthorizer["authorizeWrite"]>>>;
+    try {
+      decision = await authorizer.authorizeWrite(userId, validAccount, options);
+    } catch {
+      return { error: failure("Organization access could not be verified, so nothing was changed") };
+    }
+    if (!decision.allowed) return { error: failure(decision.reason) };
+    return decision.tenantScope ? { error: null, tenantScope: decision.tenantScope } : { error: null };
+  }
+  const authorized = await authorizer.isAuthorized(userId, validAccount, options);
+  if (!authorized) return { error: failure("Not authorized to access this Meta account") };
+  return { error: null };
 }
 
 abstract class BaseMetaAdsWriteTool extends BaseTool {
@@ -196,12 +250,8 @@ abstract class BaseMetaAdsWriteTool extends BaseTool {
     this.approvals = approvals;
   }
 
-  protected async checkAccess(userId: string, accountId: string, options?: ProviderCallOptions): Promise<ToolResult | null> {
-    const validAccount = validateAccountId(accountId);
-    if (!validAccount) return this.failure("Invalid account ID format");
-    const authorized = await this.authorizer.isAuthorized(userId, validAccount, options);
-    if (!authorized) return this.failure("Not authorized to access this Meta account");
-    return null;
+  protected async checkAccess(userId: string, accountId: string, options?: ProviderCallOptions): Promise<WriteAccess> {
+    return checkWriteAccess(this.authorizer, userId, accountId, options, (message) => this.failure(message));
   }
 
   /**
@@ -318,8 +368,8 @@ export class MetaPauseCampaignTool extends BaseMetaAdsWriteTool {
     const validCampaignId = validateEntityId(campaignId);
     if (!validCampaignId) return this.failure("Invalid campaign ID format");
 
-    const accessError = await this.checkAccess(context.userId, validAccount, this.callOpts(context));
-    if (accessError) return accessError;
+    const access = await this.checkAccess(context.userId, validAccount, this.callOpts(context));
+    if (access.error) return access.error;
 
     const idempotencyKey = buildIdempotencyKey(this.id, validAccount, validCampaignId, "PAUSED");
     const ensured = await this.ensureExecutable(idempotencyKey, params, context, BLOCKED_STATUSES);
@@ -355,7 +405,8 @@ export class MetaPauseCampaignTool extends BaseMetaAdsWriteTool {
         this.id,
         ensured.executionId,
         params,
-        context
+        context,
+        access.tenantScope
       );
       if (!claim.ok) return this.failure(claim.error);
       claimed = true;
@@ -429,8 +480,8 @@ export class MetaResumeCampaignTool extends BaseMetaAdsWriteTool {
     const validCampaignId = validateEntityId(campaignId);
     if (!validCampaignId) return this.failure("Invalid campaign ID format");
 
-    const accessError = await this.checkAccess(context.userId, validAccount, this.callOpts(context));
-    if (accessError) return accessError;
+    const access = await this.checkAccess(context.userId, validAccount, this.callOpts(context));
+    if (access.error) return access.error;
 
     const idempotencyKey = buildIdempotencyKey(this.id, validAccount, validCampaignId, "ACTIVE");
     const ensured = await this.ensureExecutable(idempotencyKey, params, context, BLOCKED_STATUSES);
@@ -466,7 +517,8 @@ export class MetaResumeCampaignTool extends BaseMetaAdsWriteTool {
         this.id,
         ensured.executionId,
         params,
-        context
+        context,
+        access.tenantScope
       );
       if (!claim.ok) return this.failure(claim.error);
       claimed = true;
@@ -540,8 +592,8 @@ export class MetaPauseAdSetTool extends BaseMetaAdsWriteTool {
     const validAdSetId = validateEntityId(adSetId);
     if (!validAdSetId) return this.failure("Invalid ad set ID format");
 
-    const accessError = await this.checkAccess(context.userId, validAccount, this.callOpts(context));
-    if (accessError) return accessError;
+    const access = await this.checkAccess(context.userId, validAccount, this.callOpts(context));
+    if (access.error) return access.error;
 
     const idempotencyKey = buildIdempotencyKey(this.id, validAccount, validAdSetId, "PAUSED");
     const ensured = await this.ensureExecutable(idempotencyKey, params, context, BLOCKED_STATUSES);
@@ -577,7 +629,8 @@ export class MetaPauseAdSetTool extends BaseMetaAdsWriteTool {
         this.id,
         ensured.executionId,
         params,
-        context
+        context,
+        access.tenantScope
       );
       if (!claim.ok) return this.failure(claim.error);
       claimed = true;
@@ -651,8 +704,8 @@ export class MetaResumeAdSetTool extends BaseMetaAdsWriteTool {
     const validAdSetId = validateEntityId(adSetId);
     if (!validAdSetId) return this.failure("Invalid ad set ID format");
 
-    const accessError = await this.checkAccess(context.userId, validAccount, this.callOpts(context));
-    if (accessError) return accessError;
+    const access = await this.checkAccess(context.userId, validAccount, this.callOpts(context));
+    if (access.error) return access.error;
 
     const idempotencyKey = buildIdempotencyKey(this.id, validAccount, validAdSetId, "ACTIVE");
     const ensured = await this.ensureExecutable(idempotencyKey, params, context, BLOCKED_STATUSES);
@@ -688,7 +741,8 @@ export class MetaResumeAdSetTool extends BaseMetaAdsWriteTool {
         this.id,
         ensured.executionId,
         params,
-        context
+        context,
+        access.tenantScope
       );
       if (!claim.ok) return this.failure(claim.error);
       claimed = true;
@@ -762,8 +816,8 @@ export class MetaPauseAdTool extends BaseMetaAdsWriteTool {
     const validAdId = validateEntityId(adId);
     if (!validAdId) return this.failure("Invalid ad ID format");
 
-    const accessError = await this.checkAccess(context.userId, validAccount, this.callOpts(context));
-    if (accessError) return accessError;
+    const access = await this.checkAccess(context.userId, validAccount, this.callOpts(context));
+    if (access.error) return access.error;
 
     const idempotencyKey = buildIdempotencyKey(this.id, validAccount, validAdId, "PAUSED");
     const ensured = await this.ensureExecutable(idempotencyKey, params, context, BLOCKED_STATUSES);
@@ -799,7 +853,8 @@ export class MetaPauseAdTool extends BaseMetaAdsWriteTool {
         this.id,
         ensured.executionId,
         params,
-        context
+        context,
+        access.tenantScope
       );
       if (!claim.ok) return this.failure(claim.error);
       claimed = true;
@@ -873,8 +928,8 @@ export class MetaResumeAdTool extends BaseMetaAdsWriteTool {
     const validAdId = validateEntityId(adId);
     if (!validAdId) return this.failure("Invalid ad ID format");
 
-    const accessError = await this.checkAccess(context.userId, validAccount, this.callOpts(context));
-    if (accessError) return accessError;
+    const access = await this.checkAccess(context.userId, validAccount, this.callOpts(context));
+    if (access.error) return access.error;
 
     const idempotencyKey = buildIdempotencyKey(this.id, validAccount, validAdId, "ACTIVE");
     const ensured = await this.ensureExecutable(idempotencyKey, params, context, BLOCKED_STATUSES);
@@ -910,7 +965,8 @@ export class MetaResumeAdTool extends BaseMetaAdsWriteTool {
         this.id,
         ensured.executionId,
         params,
-        context
+        context,
+        access.tenantScope
       );
       if (!claim.ok) return this.failure(claim.error);
       claimed = true;
@@ -1008,12 +1064,8 @@ abstract class BaseMetaAdsBudgetTool extends BaseTool {
     this.approvals = approvals;
   }
 
-  protected async checkAccess(userId: string, accountId: string, options?: ProviderCallOptions): Promise<ToolResult | null> {
-    const validAccount = validateAccountId(accountId);
-    if (!validAccount) return this.failure("Invalid account ID format");
-    const authorized = await this.authorizer.isAuthorized(userId, validAccount, options);
-    if (!authorized) return this.failure("Not authorized to access this Meta account");
-    return null;
+  protected async checkAccess(userId: string, accountId: string, options?: ProviderCallOptions): Promise<WriteAccess> {
+    return checkWriteAccess(this.authorizer, userId, accountId, options, (message) => this.failure(message));
   }
 
   protected callOpts(context: ToolContext): ProviderCallOptions {
@@ -1108,8 +1160,8 @@ export class MetaUpdateCampaignBudgetTool extends BaseMetaAdsBudgetTool {
     const validCampaignId = validateEntityId(campaignId);
     if (!validCampaignId) return this.failure("Invalid campaign ID format");
 
-    const accessError = await this.checkAccess(context.userId, validAccount, this.callOpts(context));
-    if (accessError) return accessError;
+    const access = await this.checkAccess(context.userId, validAccount, this.callOpts(context));
+    if (access.error) return access.error;
 
     // Validate requested budget format
     const budgetValidation = validateBudgetAmount(params.requestedDailyBudget);
@@ -1175,7 +1227,8 @@ export class MetaUpdateCampaignBudgetTool extends BaseMetaAdsBudgetTool {
         this.id,
         ensured.executionId,
         params,
-        context
+        context,
+        access.tenantScope
       );
       if (!claim.ok) return this.failure(claim.error);
       claimed = true;
@@ -1291,8 +1344,8 @@ export class MetaUpdateAdSetBudgetTool extends BaseMetaAdsBudgetTool {
     const validAdSetId = validateEntityId(adSetId);
     if (!validAdSetId) return this.failure("Invalid ad set ID format");
 
-    const accessError = await this.checkAccess(context.userId, validAccount, this.callOpts(context));
-    if (accessError) return accessError;
+    const access = await this.checkAccess(context.userId, validAccount, this.callOpts(context));
+    if (access.error) return access.error;
 
     // Validate requested budget format
     const budgetValidation = validateBudgetAmount(params.requestedDailyBudget);
@@ -1358,7 +1411,8 @@ export class MetaUpdateAdSetBudgetTool extends BaseMetaAdsBudgetTool {
         this.id,
         ensured.executionId,
         params,
-        context
+        context,
+        access.tenantScope
       );
       if (!claim.ok) return this.failure(claim.error);
       claimed = true;
@@ -1605,12 +1659,8 @@ abstract class BaseMetaCampaignTool extends BaseTool {
     this.approvals = approvals;
   }
 
-  protected async checkAccess(userId: string, accountId: string, options?: ProviderCallOptions): Promise<ToolResult | null> {
-    const validAccount = validateAccountId(accountId);
-    if (!validAccount) return this.failure("Invalid account ID format");
-    const authorized = await this.authorizer.isAuthorized(userId, validAccount, options);
-    if (!authorized) return this.failure("Not authorized to access this Meta account");
-    return null;
+  protected async checkAccess(userId: string, accountId: string, options?: ProviderCallOptions): Promise<WriteAccess> {
+    return checkWriteAccess(this.authorizer, userId, accountId, options, (message) => this.failure(message));
   }
 
   protected callOpts(context: ToolContext): ProviderCallOptions {
@@ -1707,8 +1757,8 @@ export class MetaCreateCampaignTool extends BaseMetaCampaignTool {
     const validAccount = validateAccountId(accountId);
     if (!validAccount) return this.failure("Invalid account ID format");
 
-    const accessError = await this.checkAccess(context.userId, validAccount, this.callOpts(context));
-    if (accessError) return accessError;
+    const access = await this.checkAccess(context.userId, validAccount, this.callOpts(context));
+    if (access.error) return access.error;
 
     if (!proposal || typeof proposal !== "object") {
       return this.failure("proposal parameter is required and must be an object");
@@ -1746,7 +1796,8 @@ export class MetaCreateCampaignTool extends BaseMetaCampaignTool {
         this.id,
         ensured.executionId,
         params,
-        context
+        context,
+        access.tenantScope
       );
       if (!claim.ok) return this.failure(claim.error);
       claimed = true;

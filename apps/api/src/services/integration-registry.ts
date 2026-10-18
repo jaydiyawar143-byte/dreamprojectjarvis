@@ -231,6 +231,14 @@ export interface IntegrationDeps {
   googleOAuthMounted: boolean;
   /** S8.5 — MCP as the container built it. Absent: reported as switched off. */
   mcp?: McpIntegrationRuntime;
+  /**
+   * Phase 17 — whether the deployment's Meta credential (META_ACCESS_TOKEN
+   * with META_AD_ACCOUNT_ID) may be described or tested for this caller. The
+   * command service passes false for anyone outside the Organization that owns
+   * it, so they are shown — and tested — exactly as on a deployment without it.
+   * Absent: true.
+   */
+  allowSharedMeta?: boolean;
 }
 
 /**
@@ -484,7 +492,8 @@ function describeN8n(userId: string): IntegrationView {
 
 async function describeMeta(userId: string, deps: IntegrationDeps): Promise<IntegrationView> {
   const stored = await deps.readMetaCredentials(userId);
-  const envConfigured = Boolean(process.env.META_ACCESS_TOKEN && process.env.META_AD_ACCOUNT_ID);
+  const envConfigured =
+    deps.allowSharedMeta !== false && Boolean(process.env.META_ACCESS_TOKEN && process.env.META_AD_ACCOUNT_ID);
   const hasCredentials = Boolean(stored?.accessToken && stored?.adAccountId) || envConfigured;
 
   const capabilities: IntegrationCapability[] = [
@@ -860,11 +869,24 @@ async function testMeta(userId: string, deps: IntegrationDeps): Promise<CheckRes
   const now = new Date().toISOString();
   const stored = await deps.readMetaCredentials(userId);
 
-  const accessToken = stored?.accessToken ?? process.env.META_ACCESS_TOKEN;
-  const adAccountId = stored?.adAccountId ?? process.env.META_AD_ACCOUNT_ID;
-  if (!accessToken || !adAccountId) {
+  // One whole set of credentials or the other — never a mix. Phase 17: taking
+  // the token and the account separately let an account that stored only an
+  // ad account id test the DEPLOYMENT's token against an account of its
+  // choosing. A user's own set is used only when it is complete; otherwise the
+  // deployment's — and that only where the caller may use it.
+  const own =
+    stored?.accessToken && stored?.adAccountId
+      ? { accessToken: stored.accessToken, adAccountId: stored.adAccountId }
+      : null;
+  const shared =
+    deps.allowSharedMeta !== false && process.env.META_ACCESS_TOKEN && process.env.META_AD_ACCOUNT_ID
+      ? { accessToken: process.env.META_ACCESS_TOKEN, adAccountId: process.env.META_AD_ACCOUNT_ID }
+      : null;
+  const credentials = own ?? shared;
+  if (!credentials) {
     return { health: "NOT_CONNECTED", detail: "Save credentials before testing the connection.", checkedAt: now };
   }
+  const { accessToken, adAccountId } = credentials;
 
   try {
     const provider = createMetaGraphProvider({

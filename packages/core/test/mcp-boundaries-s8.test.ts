@@ -102,8 +102,10 @@ describe("the tool architecture is untouched", () => {
   it("leaves ToolExecutor and ToolRegistry byte-for-byte unchanged", () => {
     // A pin, not an aspiration: S8 never edits either file. A later phase that
     // must change one updates its digest here, deliberately.
+    // Phase 17 (multi-business hardening) changed the executor once: the
+    // shared-connection access gate, asked before any approval exists.
     expect(sha256(read("packages/tools/src/executor.ts"))).toBe(
-      "ecc76194d55ecaed8cb434555c328afc0c7e1039a4347db0a132ebd3ad104f06"
+      "9bc4c7bff0db43a0bcd07cdfef003ff16f7c5c22126ab12dd0c133620012964d"
     );
     expect(sha256(read("packages/tools/src/registry.ts"))).toBe(
       "f62f401378deecdf774a700b88cd5a4a375b142dfbc93406065445c58b6495ac"

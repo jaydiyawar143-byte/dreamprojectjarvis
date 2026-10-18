@@ -31,6 +31,14 @@ const ROLE_FROM_DB: Readonly<Record<string, TenantRole>> = {
   VIEWER: "viewer",
 };
 
+/** The `TenantRole` enum value a core role is stored as. */
+export const TENANT_ROLE_TO_DB: Readonly<Record<TenantRole, "OWNER" | "ADMIN" | "MEMBER" | "VIEWER">> = {
+  owner: "OWNER",
+  admin: "ADMIN",
+  member: "MEMBER",
+  viewer: "VIEWER",
+};
+
 /** An id as this schema writes it. Anything else is not looked up at all. */
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 /** A provider or connector key, e.g. "n8n". */

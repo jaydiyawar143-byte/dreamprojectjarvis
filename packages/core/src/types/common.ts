@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { ToolPermissionSchema, type ToolPermission, type RiskLevel } from "./tool.js";
+import type { SharedConnectionScope } from "./tenant.js";
 
 export const RoleSchema = {
   OWNER: "owner",
@@ -58,9 +59,23 @@ export const ApprovalSchema = z.object({
   expiresAt: z.string().datetime(),
   resolvedAt: z.string().datetime().nullable().optional(),
   createdAt: z.string().datetime(),
+  // Phase 17 multi-business hardening. Set ONLY by the approval store, from
+  // the owner record, when the approval is for a write through a shared
+  // connection (`SHARED_CONNECTION_TOOLS`): the Organization the write acts
+  // for. Such an approval is decided by one of that Organization's owners or
+  // admins who is not the requester — never by the requester. Never read from
+  // a request.
+  tenantId: z.string().optional(),
+  /** Who decided it, when someone other than the requester did. */
+  decidedById: z.string().optional(),
 });
 
 export type Approval = z.infer<typeof ApprovalSchema>;
+
+/** True when only someone other than the requester may approve this. */
+export function needsIndependentApproval(approval: Pick<Approval, "tenantId">): boolean {
+  return typeof approval.tenantId === "string" && approval.tenantId.length > 0;
+}
 
 export interface User {
   id: string;
@@ -150,6 +165,15 @@ export interface ApprovalConsumptionInput {
   paramsHash: string;
   /** Execution journal record this consumption authorizes. */
   executionId: string;
+  /**
+   * Phase 17 — for a write through a shared connection, who may take part,
+   * resolved by the server as the write runs. When present, only an approval
+   * belonging to `tenantScope.tenantId` and decided by an independent approver
+   * can be consumed, and only while every condition of the scope still holds.
+   * When absent, an approval that belongs to an Organization can never be
+   * consumed: the store refuses rather than skip the checks.
+   */
+  tenantScope?: SharedConnectionScope;
 }
 
 export type ApprovalConsumptionResult =
@@ -327,6 +351,13 @@ export interface PendingAction {
   approvalId: string;
   expiresAt: string;
   createdAt: string;
+  /**
+   * Phase 17 — a write through a shared connection. The requester cannot
+   * confirm it: it waits (`WAITING_CONFIRMATION`) until an owner or admin of
+   * the Organization approves it, and is then `APPROVED`, which the requester
+   * confirms to run it.
+   */
+  needsIndependentApproval?: boolean;
 }
 
 export type IntentType = "CONFIRM" | "REJECT" | "MODIFY" | "NEW_ACTION" | "CLARIFY";

@@ -66,7 +66,14 @@ const STAMP = Date.now();
 const userIds: string[] = [];
 let conversations = 0;
 const FORGET = { memoryIds: ["m-1"], versions: ["2026-10-01T00:00:00.000Z"] };
-const BUDGET = { campaignId: "c-1", dailyBudget: 5000 };
+/**
+ * An ordinary external write. Phase 17: a Meta write belongs to an
+ * Organization and its requester cannot confirm it at all — its path is pinned
+ * in shared-connection-hardening-p17-pg — so the race is pinned here with a
+ * write that uses no shared connection.
+ */
+const WRITE_TOOL = "n8n.trigger";
+const WRITE = { workflowKey: "w-1", amount: 5000 };
 
 async function newUser(tag: string): Promise<string> {
   const user = await prisma!.user.create({
@@ -254,15 +261,15 @@ describe.skipIf(!SAFE_TARGET && !REQUIRED)("Atomic resolution — two API instan
   });
 
   it.each(["approve", "reject"] as const)(
-    "Confirm against Modify of a Meta write, both having read it as waiting (%s writes first): one wins; a losing Modify creates nothing, a losing Confirm approves nothing",
+    "Confirm against Modify of an external write, both having read it as waiting (%s writes first): one wins; a losing Modify creates nothing, a losing Confirm approves nothing",
     async (first) => {
       const conversationId = newConversation();
-      const action = await waiting(user, conversationId, "meta.campaign.budget.update", BUDGET);
+      const action = await waiting(user, conversationId, WRITE_TOOL, WRITE);
       const { a, b } = twoInstances({ afterRead: barrier(2), ...writesFirst(first) });
 
       const [confirm, modify] = await Promise.allSettled([
         a.confirmPendingAction(conversationId, user, action.id),
-        b.modifyPendingAction(conversationId, user, { dailyBudget: 3000 }, action.id),
+        b.modifyPendingAction(conversationId, user, { amount: 3000 }, action.id),
       ]);
 
       const rows = await prisma!.approval.findMany({ where: { userId: user, conversationId }, orderBy: { createdAt: "asc" } });
@@ -278,7 +285,7 @@ describe.skipIf(!SAFE_TARGET && !REQUIRED)("Atomic resolution — two API instan
         expect(confirm.status === "fulfilled" && confirm.value.success).toBe(false);
         expect(confirm.status === "fulfilled" && confirm.value.reason).toBe("ALREADY_RESOLVED");
         expect(rows.map((r) => r.status)).toEqual(["REJECTED", "PENDING"]);
-        expect(rows[1]!.params).toEqual({ campaignId: "c-1", dailyBudget: 3000 });
+        expect(rows[1]!.params).toEqual({ workflowKey: "w-1", amount: 3000 });
       }
     }
   );
@@ -425,11 +432,11 @@ describe.skipIf(!SAFE_TARGET && !REQUIRED)("Atomic resolution — over HTTP, thr
     expect(await audited(user, "SUCCESS")).toBe(runs);
   });
 
-  it("a Meta write resolves the same way: one winner, and the executor is called only when Confirm wins", async () => {
-    const user = await newUser("http-meta");
+  it("an external write resolves the same way: one winner, and the executor is called only when Confirm wins", async () => {
+    const user = await newUser("http-external");
     for (let trial = 0; trial < 10; trial++) {
       const conversationId = newConversation();
-      const action = await waiting(user, conversationId, "meta.campaign.pause", { campaignId: "c-1" });
+      const action = await waiting(user, conversationId, WRITE_TOOL, { workflowKey: "w-1" });
       const executed: ToolExecutionRequest[] = [];
       const recording: IToolExecutor = {
         async execute(request): Promise<ToolExecutionResult> {
@@ -446,7 +453,7 @@ describe.skipIf(!SAFE_TARGET && !REQUIRED)("Atomic resolution — over HTTP, thr
 
       expect([confirm.status, cancel.status].sort()).toEqual([200, 409]);
       expect(executed).toHaveLength(confirm.status === 200 ? 1 : 0);
-      if (confirm.status === 200) expect(executed[0]).toMatchObject({ toolId: "meta.campaign.pause", params: { campaignId: "c-1" }, approvalId: action.id });
+      if (confirm.status === 200) expect(executed[0]).toMatchObject({ toolId: WRITE_TOOL, params: { workflowKey: "w-1" }, approvalId: action.id });
     }
   });
 });

@@ -37,6 +37,7 @@ import type { Router } from "express";
 import { createOpportunitiesRouter } from "../src/routes/opportunities.js";
 import type { Container } from "../src/services/container.js";
 import type { RecommendationRecord, AuditLogger } from "@jarvis/core";
+import { accessOver, memoryTenancy, organizationOwningEverything } from "./helpers/shared-access.js";
 
 // ---------------------------------------------------------------------------
 // Helpers / Factories
@@ -269,6 +270,9 @@ async function call(
     };
 
     await Promise.resolve(runAt(idx));
+    // The handler runs inside the auth middleware's `next()`, whose promise
+    // the middleware does not return: wait — bounded — until it has answered.
+    for (let i = 0; i < 200 && !responded(); i++) await new Promise((r) => setImmediate(r));
     break;
   }
 
@@ -316,6 +320,9 @@ describe("Phase 11.9B — Opportunity Queue API", () => {
       tokenService: tokenSvc,
       auditLogger: { log: vi.fn() } as unknown as AuditLogger,
       recommendationRepo: repo,
+      // Phase 17 — both are members of the Organization that owns the
+      // deployment's Meta connection: the setting this suite was written for.
+      sharedAccess: accessOver(organizationOwningEverything({ [USER_ALICE]: "member", [USER_BOB]: "member" })),
     } as unknown as Container;
 
     router = createOpportunitiesRouter(fakeContainer);
@@ -711,5 +718,57 @@ describe("Phase 11.9B — Opportunity Queue API", () => {
     expect(res.status).toBe(200);
     expect((res.body.items as unknown[]).length).toBeLessThanOrEqual(5);
     expect(typeof res.body.totalEligible).toBe("number");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 17 (review finding L11) — the queue is the deployment's Meta
+// account's, shown only to a member of the Organization that owns the
+// connection. Anyone else is answered exactly as on a deployment without Meta.
+// ---------------------------------------------------------------------------
+
+describe("Phase 17 — the opportunity queue belongs to the Meta connection's Organization", () => {
+  function routerWith(tenancy: ReturnType<typeof memoryTenancy>) {
+    const tokenSvc = new FakeTokenService();
+    tokenAlice = tokenSvc.issue(USER_ALICE);
+    repo = new FakeRecommendationRepo();
+    repo.records.push(makeRecord({ userId: USER_ALICE, accountId: META_ACCOUNT_ID }));
+    return createOpportunitiesRouter({
+      tokenService: tokenSvc,
+      auditLogger: { log: vi.fn() } as unknown as AuditLogger,
+      recommendationRepo: repo,
+      sharedAccess: accessOver(tenancy),
+    } as unknown as Container);
+  }
+
+  beforeEach(() => {
+    process.env.META_AD_ACCOUNT_ID = META_ACCOUNT_ID;
+  });
+
+  it("answers an outsider — even about their own past records — as a deployment without Meta", async () => {
+    const outsider = routerWith(
+      memoryTenancy({ owners: { "meta/ads": "org-other" }, members: [{ userId: USER_BOB, tenantId: "org-other", role: "owner" }] })
+    );
+    const id = repo.records[0]!.recommendationId;
+    const queue = await call(outsider, "GET", "/", tokenAlice);
+    const detail = await call(outsider, "GET", `/${id}`, tokenAlice);
+
+    delete process.env.META_AD_ACCOUNT_ID;
+    const unconfigured = routerWith(organizationOwningEverything({ [USER_ALICE]: "member" }));
+    const baseline = await call(unconfigured, "GET", "/", tokenAlice);
+
+    for (const res of [queue, detail]) {
+      expect(res.status).toBe(503);
+      expect(res.body.error).toEqual(baseline.body.error);
+    }
+    expect(JSON.stringify([queue.body, detail.body])).not.toContain(META_ACCOUNT_ID);
+  });
+
+  it("fails closed when Organization access cannot be read", async () => {
+    const tenancy = organizationOwningEverything({ [USER_ALICE]: "member" });
+    tenancy.setFailing(true);
+    const res = await call(routerWith(tenancy), "GET", "/", tokenAlice);
+    expect(res.status).toBe(503);
+    expect((res.body.error as Record<string, string>).code).toBe("AUTHORIZATION_UNAVAILABLE");
   });
 });

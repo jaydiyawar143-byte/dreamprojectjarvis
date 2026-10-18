@@ -4,5 +4,9 @@
     "noEmit": true,
     "rootDir": "."
   },
-  "include": ["src/**/*.ts", "test/tenant-foundation-p17-pg.integration.test.ts"]
+  "include": [
+    "src/**/*.ts",
+    "test/tenant-foundation-p17-pg.integration.test.ts",
+    "test/shared-connection-approvals-p17-pg.integration.test.ts"
+  ]
 }

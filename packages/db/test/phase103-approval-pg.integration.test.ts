@@ -2,6 +2,8 @@
 // Proves: single-winner consumption under x2/x5/x10 races, durable terminal
 // state across restarts, UNKNOWN/FAILED never resurrecting the approval.
 // Uses a dedicated test user removed afterwards (FK cascade).
+// Phase 17: pinned with a write that uses no shared connection. A Meta write's
+// approval belongs to an Organization (shared-connection-approvals-p17-pg).
 import { config } from "dotenv";
 import { resolve } from "node:path";
 config({ path: resolve(process.cwd(), "../../.env") });
@@ -30,7 +32,7 @@ const PARAMS_HASH = computeParamsHash(PARAMS);
 async function makeApprovedApproval(repo: PrismaApprovalRepository, tag: string) {
   const approval = await repo.create({
     userId: testUserId!,
-    toolId: "meta.campaign.pause",
+    toolId: "whatsapp.send",
     action: "pause campaign",
     params: PARAMS,
     paramsHash: PARAMS_HASH,
@@ -43,7 +45,7 @@ async function makeApprovedApproval(repo: PrismaApprovalRepository, tag: string)
 async function makeExecution(repo: PrismaToolExecutionRepository, tag: string) {
   return repo.begin({
     userId: testUserId!,
-    toolId: "meta.campaign.pause",
+    toolId: "whatsapp.send",
     idempotencyKey: `pg103:${tag}:act_111111111:100000001:PAUSED`,
     provider: "meta-ads",
   });
@@ -84,7 +86,7 @@ describe.skipIf(!dbUp)("PHASE 10.3 — real PostgreSQL atomic consumption", () =
     const input = {
       approvalId: approval.id,
       userId: testUserId!,
-      toolId: "meta.campaign.pause",
+      toolId: "whatsapp.send",
       paramsHash: PARAMS_HASH,
       executionId: exec.executionId,
     };
@@ -111,7 +113,7 @@ describe.skipIf(!dbUp)("PHASE 10.3 — real PostgreSQL atomic consumption", () =
     const input = {
       approvalId: approval.id,
       userId: testUserId!,
-      toolId: "meta.campaign.pause",
+      toolId: "whatsapp.send",
       paramsHash: PARAMS_HASH,
       executionId: exec.executionId,
     };
@@ -136,7 +138,7 @@ describe.skipIf(!dbUp)("PHASE 10.3 — real PostgreSQL atomic consumption", () =
     const input = {
       approvalId: approval.id,
       userId: testUserId!,
-      toolId: "meta.campaign.pause",
+      toolId: "whatsapp.send",
       paramsHash: PARAMS_HASH,
       executionId: exec.executionId,
     };
@@ -156,7 +158,7 @@ describe.skipIf(!dbUp)("PHASE 10.3 — real PostgreSQL atomic consumption", () =
     const res = await approvalsRepo.consumeForExecution({
       approvalId: approval.id,
       userId: testUserId!,
-      toolId: "meta.campaign.pause",
+      toolId: "whatsapp.send",
       paramsHash: PARAMS_HASH,
       executionId: exec.executionId,
     });

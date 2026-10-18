@@ -114,6 +114,18 @@ const publishFlow = {
 let server: Server;
 let base: string;
 
+/**
+ * Phase 17 — who may read the deployment's Meta Ads: the members of the
+ * Organization that owns it. Here, all three accounts, unless a test says
+ * otherwise; `metaCheckFails` makes the check itself fail.
+ */
+let metaReaders: Set<string>;
+let metaCheckFails: boolean;
+const metaAvailable = async (userId: string): Promise<boolean> => {
+  if (metaCheckFails) throw new Error("tenant store down");
+  return metaReaders.has(userId);
+};
+
 interface Reply {
   status: number;
   headers: Headers;
@@ -145,7 +157,7 @@ async function call(method: string, path: string, options: { token?: string | nu
 beforeAll(() => {
   const app = express();
   app.use(express.json());
-  app.use("/marketing", createMarketingRouter({ tokenService, executor, toolRegistry, marketing, publishFlow, permissions: new PermissionService() }));
+  app.use("/marketing", createMarketingRouter({ tokenService, executor, toolRegistry, marketing, publishFlow, permissions: new PermissionService(), metaAvailable }));
   server = app.listen(0);
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/marketing`;
 });
@@ -161,6 +173,8 @@ beforeEach(() => {
   researchAvailable = true;
   flowCalls = [];
   flowResult = { status: "UNAVAILABLE", message: "unset" };
+  metaReaders = new Set(Object.values(TOKENS).map((t) => t.userId));
+  metaCheckFails = false;
 });
 
 // ---------------------------------------------------------------------------
@@ -829,6 +843,31 @@ describe("Phase 15 routes — /status reports what was registered, so the page c
 
   it("reports no ad account when the Meta reads are not registered", async () => {
     expect((await call("GET", "/status")).body.data.adAccount).toEqual({ available: false });
+  });
+
+  // Phase 17 (review finding L11) — the deployment's ad account is described
+  // only to the Organization that owns it.
+  it("reports no ad account to an account outside the Organization that owns Meta Ads", async () => {
+    registeredTools.add("meta.insights");
+    metaReaders.delete("user-member");
+
+    const outsider = (await call("GET", "/status", { token: "token-member" })).body.data;
+    const member = (await call("GET", "/status", { token: "token-owner" })).body.data;
+
+    expect(outsider.adAccount).toEqual({ available: false });
+    expect(member.adAccount).toEqual({ available: true });
+    // Everything else about the server is said to both alike.
+    for (const key of ["research", "publishing"]) expect(outsider[key], key).toEqual(member[key]);
+  });
+
+  it("reports no ad account when that cannot be checked, and still answers", async () => {
+    registeredTools.add("meta.insights");
+    metaCheckFails = true;
+
+    const reply = await call("GET", "/status");
+
+    expect(reply.status).toBe(200);
+    expect(reply.body.data.adAccount).toEqual({ available: false });
   });
 
   it("says the same about the SERVER to every role", async () => {

@@ -537,11 +537,12 @@ so PR 1 keeps the committed lockfile, and CI's `--frozen-lockfile` holds.
 `.github/workflows/ci.yml` (the header's package list and the
 `Test @jarvis/omniroute` step). Neither PR needs the other.
 
-### Blockers for any multi-tenant launch — H2, M3, L11 (not fixed here)
+### Blockers for any multi-tenant launch — H2, M3, L11 (as found; addressed in §8)
 
 These are pre-existing and outside Stage 3A, and they block running JARVIS for
 more than one business — or with open registration — wherever the shared
-integrations are configured:
+integrations are configured. They are kept here as found; §8 records the fix
+and what is still open.
 
 - **H2.** Any account can read and change the operator's Meta ad account: the
   Meta tools hold the deployment's `META_ACCESS_TOKEN`
@@ -637,7 +638,270 @@ active-tenant selection, which role decides, who owns the shared connection,
 and the membership lifecycle — with seven open questions. The user approved it
 with the answers above, and Stage 3A was built on it.
 
-## 8. Stages ahead (not started)
+## 8. Multi-business hardening — H2, M3, L11
+
+**Status: IMPLEMENTED, 2026-10-18 — uncommitted, on top of `514b42b`; not
+deployed, not verified in production.** The three findings §7 left open, fixed
+on the Stage 3A foundation — its owner rows, its membership reads and its
+operator command — not on a new model. Nothing was staged or committed, and no
+provider was called: every test runs against stand-ins.
+
+### The model: Stage 3A's, extended to every shared connection
+
+- **Ownership.** Six more connection keys can be assigned
+  (`SHARED_INTEGRATION_CONNECTORS`, `packages/core/src/types/tenant.ts`):
+  `meta/ads`, `n8n/rest`, `whatsapp/cloud-api`, `google-maps/server-key`,
+  `mcp/servers` and `omniroute/gateway`, beside Stage 3A's `n8n/mcp`. Only the
+  operator command writes them.
+- **Policy.** One table, from the membership role and nothing else
+  (`packages/security/src/shared-connection-authz.ts`):
+
+  | Membership role | `read` | `status` | `diagnostics` | `test` | `write` | `approve` |
+  |---|---|---|---|---|---|---|
+  | owner, admin | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ — never their own request |
+  | member, viewer | ✓ | ✓ | — | — | — | — |
+
+  `authorizeSharedConnection` decides identity → operation → ownership →
+  membership (the same user, in the owning tenant) → role → grant;
+  `authorizeIndependentApproval` adds that the approver is not the requester.
+  Refusal codes: `IDENTITY_REQUIRED`, `OPERATION_UNKNOWN`,
+  `RESOURCE_OWNERSHIP_MISSING`, `TENANT_MEMBERSHIP_REQUIRED`,
+  `SCOPE_TENANT_MISMATCH`, `ROLE_UNRECOGNIZED`, `PERMISSION_DENIED`,
+  `SELF_APPROVAL_FORBIDDEN`.
+- **One reader.** `SharedConnectionAccess`
+  (`apps/api/src/services/tenancy/shared-connection-access.ts`) reads the owner
+  row and the caller's membership on every call, with no cache. A read that
+  fails is `AUTHORIZATION_UNAVAILABLE`, never an allow.
+- **Trust boundaries.** Trusted: the verified access token's user id; the owner
+  rows and memberships in PostgreSQL; the policy table; `META_AD_ACCOUNT_ID`.
+  Never trusted: a tenant, organization, account or approval id — or an
+  approval's state — in a request; the account-wide role; what a screen shows
+  or hides.
+
+### H2 — the Meta Ads connection
+
+| Where | What holds now |
+|---|---|
+| Every Meta tool (`meta.accounts` … `meta.campaign.create`, `meta.analyze`) | `createOrganizationMetaAuthorizer` answers for the person: only `META_AD_ACCOUNT_ID`; a read for a member, a write for an owner or admin; the Organization asked before the token is. Anyone else: "Meta Ads is not available to your account." |
+| `ToolExecutor` and the orchestrator | A `ToolAccessGate` asks the same question before any approval or pending action exists. A gate that throws refuses |
+| Creating an approval | An approval for a Meta write takes its `tenantId` from the owner row, never from the caller; with no owner, none is created |
+| Deciding it | Its requester can never approve it — refused before its state is told. Another owner or admin of that Organization can, in a transaction that locks the row and reads their role, recording `decidedById`. Anyone else: not found |
+| Running it | The requester confirms. The write tool asks `authorizeWrite` again and passes the scope to `consumeForExecution`, which locks the approval `FOR UPDATE`, the owner row and both memberships `FOR SHARE`, and consumes only if the Organization, an independent approver, the ownership and both roles all still hold. Every conditional `UPDATE` is on plain columns |
+| The pages | Dashboard `/meta/*`, `/summary` and `/status`; analysis; the opportunity queue; marketing reports and `/marketing/status`: an outsider is answered as on a deployment without Meta; a lookup that fails is `503 AUTHORIZATION_UNAVAILABLE` (a report says it could not be checked) |
+| Integration Control Center | `executeAction` of a shared-connection write is refused before any confirmation, for the gate's reasons |
+| The screens | The Approvals page lists "Waiting for your decision" (`GET /approvals?scope=review`). A card offers Approve only where the server says `canApprove`; its requester sees who it waits for and may withdraw it. The chat card says the same, and a Confirm before the approval leaves it waiting |
+
+**Compatibility.**
+
+- Meta Ads is refused to everyone until `meta/ads` is assigned.
+- A `member` can no longer change Meta Ads; a `viewer` can read it.
+- Every change needs two people: an Organization with one owner or admin
+  cannot change Meta Ads through JARVIS.
+- Reads and writes are limited to `META_AD_ACCOUNT_ID`, whatever else the token
+  reaches.
+- The approval's 10 minutes now include the second person's decision, and
+  nothing notifies them.
+- An approval for a Meta write created before this change has no Organization
+  and is refused when it is run; the person asks again.
+- The approve route's budget guardrail now runs for the budget tools: it
+  matched neither their ids (`*.budget.update`) nor their parameter
+  (`requestedDailyBudget`), so it never ran for them.
+- The executor's byte pin (`mcp-boundaries-s8` in core and tools) was updated
+  deliberately, for the gate.
+
+### M3 — connection tests
+
+`handleTest` in the command service decides in this order, before any provider
+call, server start, credential check or quota:
+
+1. **Standing.** An owner or admin of the owning Organization — or, for Meta,
+   the caller's own complete credentials. A member or viewer: `PERMISSION_DENIED`,
+   "Only an owner or admin of your organization can test the X connection." Anyone
+   else: "X is not available to your account.", the same whether X is configured
+   or not. An outsider's Meta test runs as on a deployment without the shared
+   credential: their own credentials or nothing, never the deployment's token.
+   A lookup that fails: `503 AUTHORIZATION_UNAVAILABLE`.
+2. **Switched off** — refused.
+3. **The caller's slot** — 10 in 10 minutes (`integration.test_slot`, `reserveSlot`).
+4. **The Organization's slot** — 30 tests of that integration an hour
+   (`integration.test_budget.<tenant id>.<integration>`, `reserveSharedSlot`:
+   counted across every account under an advisory lock, in the transaction that
+   writes its row). No store, or one that cannot be reached: refused.
+5. Only then the provider.
+
+The `/integrations` reads and tests that served the registry directly when no
+encryption key is set now answer `503 NOT_CONFIGURED` and reach nothing.
+`/credentials/meta/test` — the caller's own credentials — takes the caller's
+slot first. **No migration was needed:** both budgets are rows in the audit
+table, like every other limit, and the key embeds the Organization from the
+owner row, never from the request.
+
+### L11 — what each caller is shown
+
+| Caller | Integration views | Credentials page | Meta pages |
+|---|---|---|---|
+| owner, admin of the owning Organization | everything, as before | the details (`server environment`), `CONFIGURED` — never `CONNECTED` from presence alone | the data |
+| member, viewer | whether it is set up and whether it works: no account, configuration, error, quota or last-tested time; `effectiveSource: "your organization"`; no Test | "Set up for your organization. An owner or admin of your organization can see its details." | the data (reads) |
+| anyone else | a server-managed integration: one fixed "Not available to your account" view, its permissions `[]`; Meta Ads: as with no shared credential | as on a deployment without them | as on a deployment without Meta |
+
+The web controls follow the server's `supportedCommands`: no Test or switch is
+drawn where the server would refuse it.
+
+### Tests that changed, and why
+
+No test was removed or skipped.
+
+- **Approval tests that used a Meta write as their example** now use an
+  ordinary write (`whatsapp.send`, `n8n.trigger`): a Meta write's approval
+  needs an owner row now, and those tests are about approvals in general —
+  `phase103-approval-consumption`, `phase103-approval-pg`,
+  `phase107-approval-api-pg`, `pending-action-atomic-pg`.
+- **`phase116a-bridge-pg`** runs on the H2 flow: an Organization owns Meta,
+  the harness accounts are its admins, the requester's own approval is
+  refused `self_approval_forbidden`, and another admin approves.
+- **`n8n/rest` became a valid key**, so `tenant-foundation-p17` and
+  `tenant-admin-cli-p17` use `n8n/webhook` as their unknown one.
+- **Harnesses given the new collaborators** — an Organization that owns every
+  connection, an access reader, a test budget: `integration-command-parity`,
+  `mcp-integration-s8`, `dashboard-api`, `analysis`, `analysis-parity`,
+  `opportunities`, `approvals`, `marketing-routes-p15`. Three of them
+  (`analysis`, `analysis-parity`, `opportunities`) also wait for the handler
+  behind the auth middleware, which no longer finishes in one tick.
+- **The executor's pinned digest**, in `mcp-boundaries-s8` (core) and
+  `mcp-tools-boundaries-s8` (tools).
+- **The web Approvals page** asks for two lists, so its test's stand-in tells
+  them apart.
+
+### Verification
+
+2026-10-18, Windows, Node 24, on the working tree as it stands; turbo's cache
+bypassed with `--force`. PostgreSQL runs used brand-new `pgvector/pgvector:pg16`
+containers with a random password and every migration applied — never the
+development (5432) or deployment (5433) database — with
+`JARVIS_REQUIRE_POSTGRES=1` wherever CI sets it. No provider was called.
+
+| Command | Result |
+|---|---|
+| `pnpm typecheck` / `pnpm typecheck:tests` / `pnpm lint` / `pnpm build` | 37/37 · 20/20 · 20/20 · 20/20, none cached |
+| `turbo run test --concurrency=1 --continue --force` (every workspace, no database) | **9,682 passed, 0 failed, 633 skipped** across 20 workspaces — the skips are the database-backed files. Among them `@jarvis/api` 2,633, `@jarvis/core` 2,167, `@jarvis/agents` 1,048, `@jarvis/tools` 1,005, `@jarvis/web` 810, `@jarvis/security` 188. The timing-sensitive tests of §5 passed in this run |
+| CI's database steps, replayed in order | 32 migrations applied; `@jarvis/db` **410/410** (27 files), `@jarvis/memory` 93/93 (9), `@jarvis/api` **228/228** (9), the evaluation 13/13; the skip check: 0 not run in all four reports |
+| The new CI step: `vitest run shared-connection` in `@jarvis/tools` and in `@jarvis/agents` | 11/11 · 8/8 |
+| The two security suites with no working database | skipped when none is configured; **failed** (`Failed Suites 1`, exit 1) under `JARVIS_REQUIRE_POSTGRES=1` with none, and with one configured that cannot be reached |
+| The same two and `phase116a-bridge-pg`, on another fresh container after that change | `@jarvis/db` 23/23 · `@jarvis/api` 16/16 |
+
+**The new tests.** `@jarvis/security` 56 (the policy); `@jarvis/db` 23, on
+PostgreSQL (ownership at creation, who decides, consuming on what holds now,
+two approvers at once, the per-Organization window); `@jarvis/tools` 11 (the
+executor's gate, the write tools' scope); `@jarvis/agents` 8 (the orchestrator's
+gate, the waiting pending action); `apps/api` 78 without a database —
+`shared-connection-access-p17` 33, `meta-ads-access-p17` 18,
+`shared-connection-routes-p17` 11, `marketing-meta-access-p17` 3, and Phase 17
+cases added to `dashboard-api` (5), `analysis` (4), `opportunities` (2) and
+`marketing-routes-p15` (2) — and 8 over HTTP on PostgreSQL
+(`shared-connection-hardening-p17-pg`); `apps/web` 13.
+
+**How the required properties are held.**
+
+| # | Property | Proven by |
+|---|---|---|
+| 1 | An unrelated Organization cannot read or run a Meta action | the PostgreSQL end-to-end test 1; the authorizer and gate tests; the Integration Control Center tests |
+| 2 | A member without the write grant cannot run a write | end-to-end test 1 (a viewer); the authorizer, executor-gate and orchestrator tests |
+| 3 | No self-approval; an independent approval is bound to the exact action and parameters | the PostgreSQL approval tests (requester refused, an admin included; other parameters refused); end-to-end test 2 (the Approvals page and the chat) |
+| 4 | A membership revoked after the approval is refused at execution | the PostgreSQL tests: requester demoted, approver removed, connection moved |
+| 5 | An unauthorized test calls no provider and starts no server | the M3 tests, with a `fetch` spy and an MCP spy at zero |
+| 6 | An authorized test runs within its limits; past them it is refused before the provider | the M3 budget tests; the Credentials test |
+| 7 | One Organization's budget is its own | the M3 test; the PostgreSQL window test, across accounts at once |
+| 8 | No list, detail or status names an operator identifier | the L11 view tests, the Credentials tests, the dashboard, analysis, opportunity and marketing tests |
+| 9 | Owners and admins keep their diagnostics | the L11 owner tests |
+| 10 | A lookup that fails refuses | every layer's failure test: the reader, the gate in the executor and the orchestrator, the authorizer, the views, the Credentials page, the pages, the report |
+| 11 | No surface goes around the controls | a sentence and a button get the same refusal and the same zero calls; chat (and voice, which only transcribes into it) meets the orchestrator's gate, and every tool call the executor's; the web screens draw no control the server refuses |
+
+### Mutation checks
+
+Each was applied to one file, the named tests run, and the file restored —
+checked byte for byte by SHA-256.
+
+| # | Control removed | Caught by |
+|---|---|---|
+| U1 | the caller's standing before a test | 13 of 33 access tests (every outsider, member, viewer, unowned and lookup-failure case) |
+| U2 | the Organization's test budget | 3 (the slot order, the limit for every member, one Organization's budget not another's) |
+| U3 | a member's view without diagnostics | 2 (member, viewer) |
+| U4 | an outsider's fixed view | 5 (four integrations, and no identifier in any view) |
+| U5 | Meta as on a deployment without it, for an outsider | 3 |
+| U6 | only the configured ad account | 2 |
+| U7 | the role, for a Meta write | 2 |
+| U8 | no Organization write without an approval | 1 |
+| U9 | the executor's gate | 3 |
+| U10 | the orchestrator's gate | 2 |
+| U11 | the chat card's flag | 1 |
+| U12 | Approve only where `canApprove` | 1 |
+| K1 | `/marketing/status` per caller | 2 |
+| K2 | the report's account asked as the caller | 1 |
+| K3 | an unknown answer is not "none" | 1 |
+| P1 | the requester's role, re-read as it runs | 1 (PostgreSQL) |
+| P2 | the ownership, re-read as it runs | 1 (PostgreSQL) |
+| P3 | the approver's role, re-read as it runs | 1 (PostgreSQL) |
+| P4 | the store's refusal of a self-approval | 1 (PostgreSQL) |
+| P5 | the scope check of the decider | **0 — survives**, as designed: the consuming `UPDATE` also requires a decider other than the requester |
+| P6 | P5 together with that clause of the `UPDATE` | 1 (PostgreSQL) |
+
+### Remaining risks and open decisions
+
+- **Not yet Organization-owned:** a WhatsApp send (only the account the phone
+  number is assigned to, approved by that account), an n8n trigger (only the
+  account's own registered workflows, approved by it), the read-only Maps tools
+  (any account, within the deployment's monthly ceiling) and the reviewed MCP
+  servers. Their tests and their details are Organization-checked; their use is
+  not.
+- **Page publishing** (`marketing.publish`) uses the deployment's
+  `META_ACCESS_TOKEN` and is not Organization-checked. It is off unless
+  `MARKETING_PUBLISH_ENABLED=true`; keep it off on any deployment that serves
+  more than one business until it is.
+- **What a deployment has is still visible.** The model's tool catalogue, the
+  agents list and the capability list are built per deployment, so an outsider
+  can learn that Meta, WhatsApp or n8n exist here — never their identifiers or
+  their data.
+- **A member sees "Not checked".** Check results are cached per account and a
+  member cannot test; sharing a result per Organization is a separate change.
+- **Two people for every Meta change**, within 10 minutes, with no notification
+  to the approver. Whether a one-person Organization needs another path is a
+  product decision.
+- **Everything shared is refused until assigned.** A deployment must run the
+  operator command after this release, or Meta Ads, its pages and every
+  connection test stop working for everyone.
+- **Rolling back reopens H2** (`docs/DEPLOYMENT.md`, "Rolling back"); rolling
+  forward again is safe.
+- **The Credentials page still reports a configured WhatsApp or n8n as
+  `CONNECTED` to an owner** — from presence, before any test. Pre-existing, and
+  against the "status is observed" rule; not changed here.
+- **Not exercised against the real stack** or a real provider.
+
+### How this separates from the pending pull request
+
+Everything above is uncommitted, on top of `514b42b` — the branch's one commit
+beyond `main`, which holds Stage 3A, its pre-merge fixes and the OmniRoute
+package. The hardening adds no OmniRoute code; it treats the OmniRoute
+integration already in that base as one more shared connection, as M3 and L11
+require (the review named its key and its base URL). Every hardening change is
+in the working tree and nowhere else, so it can be its own pull request on top
+of the Phase 16 + 17 one. Excluding OmniRoute from that base would mean
+dropping `omniroute/gateway` from `SHARED_INTEGRATION_CONNECTORS` and the
+OmniRoute cases of the access tests with it.
+
+### Hardening files
+
+| Part | Files |
+|---|---|
+| Contract | `packages/core/src/types/tenant.ts`, `common.ts`, `integration.ts`, `orchestrator.ts`, `tool.ts`; `packages/core/src/objective-evaluation.ts` |
+| Policy | `packages/security/src/shared-connection-authz.ts` *(new)*, `packages/security/src/index.ts`; `packages/security/test/shared-connection-authz.test.ts` *(new)*, `packages/security/tsconfig.test.json` |
+| Database | `packages/db/prisma/schema.prisma`, `packages/db/prisma/migrations/20261018120000_phase17_shared_connection_approvals/` *(new)*, `packages/db/src/repositories/approval-repository.ts`, `audit-repository.ts`, `tenant-repository.ts`, `packages/db/src/index.ts`; `packages/db/test/shared-connection-approvals-p17-pg.integration.test.ts` *(new)* and four changed tests; `packages/db/tsconfig.test.json` |
+| Tools and agents | `packages/tools/src/executor.ts`, `packages/tools/src/tools/meta-ads-provider.ts`, `meta-ads-write-tools.ts`; `packages/tools/test/shared-connection-gate-p17.test.ts` *(new)*, `mcp-tools-boundaries-s8.test.ts`; `packages/agents/src/orchestrator.ts`, `pending-action-service.ts`; `packages/agents/test/shared-connection-pending-action-p17.test.ts` *(new)*; `packages/core/test/mcp-boundaries-s8.test.ts` |
+| API | `apps/api/src/services/tenancy/` *(new: `shared-connection-access.ts`, `meta-ads-access.ts`)*; `apps/api/src/services/container.ts`, `integration-registry.ts`, `rate-limiter.ts`, `integrations/build.ts`, `integrations/command-service.ts`, `marketing/marketing-service.ts`; `apps/api/src/routes/analysis.ts`, `approvals.ts`, `credentials.ts`, `dashboard.ts`, `integrations.ts`, `marketing.ts`, `opportunities.ts`, `pending-actions.ts`; `apps/api/src/index.ts` |
+| API tests | new: `shared-connection-access-p17`, `shared-connection-routes-p17`, `meta-ads-access-p17`, `marketing-meta-access-p17`, `shared-connection-hardening-p17-pg.integration`, `helpers/shared-access.ts`, `helpers/shared-connection-lock.ts`; changed: the eleven named above |
+| Web | `apps/web/src/lib/api.ts`, `src/app/approvals/page.tsx`, `src/components/approval-card.tsx`, `inline-approval-card.tsx`, `pending-action-card.tsx`, `integrations/integration-card.tsx`, `integrations/integration-drawer.tsx`; `apps/web/test/shared-connection-approvals-p17.test.tsx` *(new)*, `approvals.test.tsx`, `integration-control-center.test.tsx` |
+| CI and docs | `.github/workflows/ci.yml` (the shared-connection step and the header); `AGENTS.md`, `docs/phases/phase-17.md`, `docs/DEPLOYMENT.md`, `docs/DEVELOPMENT.md`, `docs/INTEGRATIONS.md`, `docs/tenant-model-design.md` |
+
+## 9. Stages ahead (not started)
 
 - **Stage 3B onwards** — the Durable Execution Ledger, approval binding for writes
   (Phase 16 execution spec §4–§6), then timeouts and uncertain outcomes,

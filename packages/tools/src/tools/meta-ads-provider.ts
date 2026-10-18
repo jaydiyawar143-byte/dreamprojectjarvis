@@ -1,4 +1,5 @@
 import type {
+  SharedConnectionScope,
   MetaAdAccount,
   MetaCampaign,
   MetaAdSet,
@@ -178,4 +179,19 @@ export interface MetaAccountAuthorizer {
 
   /** Check if a user is authorized to access a specific Meta account. */
   isAuthorized(userId: string, accountId: string, options?: ProviderCallOptions): Promise<boolean>;
+
+  /**
+   * Phase 17 — whether this user may make a WRITE on this account, asked as
+   * the write runs. An authorizer for the deployment's SHARED Meta connection
+   * implements it: it answers from the caller's membership in the
+   * Organization that owns the connection, and returns the scope the approval
+   * store re-checks as it consumes the approval. `reason` is shown to the
+   * caller, so it must be a fixed sentence that names no Organization.
+   * Optional: an authorizer without it keeps `isAuthorized` for writes too.
+   */
+  authorizeWrite?(
+    userId: string,
+    accountId: string,
+    options?: ProviderCallOptions
+  ): Promise<{ allowed: true; tenantScope?: SharedConnectionScope } | { allowed: false; reason: string }>;
 }

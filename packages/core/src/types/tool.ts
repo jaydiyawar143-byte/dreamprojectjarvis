@@ -98,6 +98,26 @@ export interface ToolContext {
 }
 
 // ---------------------------------------------------------------------------
+// ToolAccessGate — Phase 17, who may use a tool at all
+// ---------------------------------------------------------------------------
+
+/**
+ * Asked about a tool BEFORE an approval is looked up or created — by the
+ * executor and by the orchestrator's pending-action path — so a request the
+ * caller could never be allowed to make is refused at once instead of being
+ * put in front of an approver. For a tool that acts through a shared
+ * connection it answers from the caller's membership in the Organization
+ * that owns the connection; for every other tool it allows.
+ *
+ * An early answer, not the enforcement: the tool checks again as it runs, and
+ * the approval store again as it consumes the approval. `reason` is shown to
+ * the caller, so it is a fixed sentence that names no Organization.
+ */
+export interface ToolAccessGate {
+  check(input: { toolId: string; userId: string }): Promise<{ allowed: true } | { allowed: false; reason: string }>;
+}
+
+// ---------------------------------------------------------------------------
 // ITool — Core tool contract
 // ---------------------------------------------------------------------------
 

@@ -14,6 +14,20 @@ export {
   type AutomationAuthzDecision,
   type AutomationAuthzDenyCode,
 } from "./automation-authz.js";
+export {
+  authorizeSharedConnection,
+  authorizeIndependentApproval,
+  sharedConnectionGrantsFor,
+  rolesHoldingSharedPermission,
+  sharedWriteScope,
+  SHARED_CONNECTION_OPERATIONS,
+  type SharedConnectionOperation,
+  type SharedConnectionPermission,
+  type SharedConnectionSubject,
+  type SharedConnectionAuthzInput,
+  type SharedConnectionAuthzDecision,
+  type SharedConnectionDenyCode,
+} from "./shared-connection-authz.js";
 export { AuditLogger, redactAuditParams } from "./audit.js";
 export { ApprovalService } from "./approval.js";
 export { ToolApprovalService } from "./tool-approval.js";

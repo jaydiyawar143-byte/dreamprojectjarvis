@@ -135,6 +135,56 @@ export class PrismaAuditRepository implements IAuditRepository {
   }
 
   /**
+   * Phase 17 — take one slot in a window SHARED by everyone whose rows carry
+   * this exact `action`, atomically: a per-Organization budget.
+   *
+   * The same step as `reserveSlot`, keyed on the action alone instead of on
+   * the user and the action: the advisory lock lets one caller at a time
+   * through on every instance, the window is counted across ALL users, and
+   * the reservation row is written — under the caller's own user id — only if
+   * there is room. The caller puts the Organization in `action`, so two
+   * Organizations never share a window, and nobody outside an Organization
+   * can take one of its slots: the caller authorizes before it reserves.
+   *
+   * Counted through the `createdAt` index and filtered on the action — the
+   * window is short, so the scan is too. Throws if the database cannot be
+   * reached; the caller refuses the work.
+   */
+  async reserveSharedSlot(input: {
+    action: string;
+    userId: string;
+    limit: number;
+    windowMs: number;
+    traceId?: string;
+    now?: Date;
+  }): Promise<{ reserved: boolean; count: number }> {
+    const now = input.now ?? new Date();
+    const since = new Date(now.getTime() - input.windowMs);
+    const lockKey = `shared:${input.action}`;
+
+    return this.prisma.$transaction(
+      async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`;
+        const count = await tx.auditLog.count({
+          where: { action: input.action, createdAt: { gte: since } },
+        });
+        if (count >= input.limit) return { reserved: false, count };
+        await tx.auditLog.create({
+          data: {
+            userId: input.userId,
+            action: input.action,
+            result: "PENDING",
+            traceId: input.traceId ?? null,
+            createdAt: now,
+          },
+        });
+        return { reserved: true, count: count + 1 };
+      },
+      { maxWait: 10_000, timeout: 10_000 }
+    );
+  }
+
+  /**
    * Task Engine V2.3 - the execution evidence for ONE `executionId`.
    *
    * `ToolExecutor` writes exactly one `tool.execute` audit row per execution,

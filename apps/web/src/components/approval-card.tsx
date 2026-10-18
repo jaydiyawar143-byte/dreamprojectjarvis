@@ -17,6 +17,13 @@
 // This is the ONLY approval control in the app. The command centre renders this
 // same component rather than a copy, which is what keeps "voice can never
 // approve" true: there is one decision path, and it is this one.
+//
+// Phase 17 — a change to an Organization's shared connection (a Meta write) is
+// approved by another owner or admin of that Organization, never by the person
+// who asked for it. The server says whether THIS reader may approve
+// (`canApprove`); where it may not, Approve is not shown and the card says who
+// it waits for. That is presentation: the approval store refuses a
+// self-approval whatever a client sends.
 // ---------------------------------------------------------------------------
 
 import { useState } from "react";
@@ -49,6 +56,9 @@ const STATE_MESSAGES: Record<string, string> = {
   APPROVAL_CONFLICT:
     "Conflict: the approval changed while you were deciding.",
   APPROVAL_EXPIRED: "This approval has expired and can no longer be used.",
+  APPROVAL_SELF_APPROVAL_FORBIDDEN:
+    "A change to your organization's connection must be approved by another owner or admin of your organization.",
+  APPROVAL_FORBIDDEN: "You may not decide this approval.",
 };
 
 export function approvalUiError(code?: string): string {
@@ -88,6 +98,12 @@ export function ApprovalCard({
   const [ui, setUi] = useState<ApprovalUiState>("idle");
   const [message, setMessage] = useState<string | null>(null);
 
+  // Phase 17 — an Organization's change, and whether this reader may approve
+  // it. A server that sends no `canApprove` predates the rule, and the card
+  // behaves as it always did.
+  const independent = approval.needsIndependentApproval === true;
+  const mayApprove = approval.canApprove !== false;
+
   const effectiveStatus: ApprovalUiState =
     ui !== "idle"
       ? ui
@@ -113,7 +129,9 @@ export function ApprovalCard({
       setUi(kind === "approve" ? "approved" : "rejected");
       setMessage(
         kind === "approve"
-          ? "Approved. JARVIS may execute this exact action once."
+          ? independent
+            ? "Approved. The person who asked for it may now run this exact action once."
+            : "Approved. JARVIS may execute this exact action once."
           : "Rejected. This proposal will not execute."
       );
       onChanged?.();
@@ -187,6 +205,12 @@ export function ApprovalCard({
       </p>
 
       <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-sys-dim">
+        {approval.requestedBy && (
+          <>
+            <dt>Requested by</dt>
+            <dd data-testid="approval-requested-by">{approval.requestedBy}</dd>
+          </>
+        )}
         {approval.accountRedacted && (
           <>
             <dt>Account</dt>
@@ -275,7 +299,33 @@ export function ApprovalCard({
         </div>
       )}
 
-      {!decided && (
+      {independent && approval.status === "approved" && approval.decidedByAnother && (
+        <p data-testid="approval-approved-by-another" className="text-xs text-sys-dim">
+          Approved by another owner or admin of your organization. It runs once,
+          from the conversation that asked for it, before it expires.
+        </p>
+      )}
+
+      {!decided && !mayApprove && (
+        // The requester of an Organization's change: it waits for someone
+        // else, and the one thing they can do here is withdraw it.
+        <div className="space-y-2 pt-1">
+          <p data-testid="approval-waiting-for-another" className="text-xs text-amber-300/90">
+            Waiting for another owner or admin of your organization to approve
+            this. You cannot approve your own change.
+          </p>
+          <button
+            data-testid="reject-button"
+            disabled={busy}
+            onClick={() => decide("reject")}
+            className="sys-focus rounded-md border border-sys-line bg-white/[0.03] px-3.5 py-1.5 font-mono text-xs uppercase tracking-hud text-sys-text/85 transition-colors enabled:hover:border-red-400/40 enabled:hover:text-red-300 disabled:opacity-45"
+          >
+            {busy && ui === "rejecting" ? "Withdrawing…" : "Withdraw"}
+          </button>
+        </div>
+      )}
+
+      {!decided && mayApprove && (
         // Reject FIRST in the DOM and on screen. Approve is the irreversible
         // one, and putting it under the reading hand's default landing spot is
         // how an accidental confirmation happens.

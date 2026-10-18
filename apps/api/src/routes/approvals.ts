@@ -31,12 +31,44 @@ import {
   APPROVAL_RATE_LIMITS,
   DbBackedRateLimiter,
 } from "../services/rate-limiter.js";
-import { computeParamsHash, type ApprovalStatus } from "@jarvis/core";
+import { computeParamsHash, needsIndependentApproval, type Approval, type ApprovalStatus } from "@jarvis/core";
+import { rolesHoldingSharedPermission } from "@jarvis/security";
 import {
   validateBudgetAmount,
   validateBudgetTransition,
   DEFAULT_BUDGET_GUARDRAILS,
 } from "@jarvis/tools";
+
+/**
+ * Phase 17 — the tenant roles that may approve an Organization's approval for
+ * someone else, from the one policy table (`shared:approve`). The approval
+ * store checks the decider's membership against these IN the transaction that
+ * writes the decision; this route never decides who is an approver itself.
+ */
+const APPROVER_ROLES = rolesHoldingSharedPermission("shared:approve");
+
+/**
+ * An approval as a client sees it. The Organization's id and the decider's
+ * account id are internal: the reader is told only whether the approval
+ * waits for someone else, and whether they may decide it.
+ */
+function publicApproval(approval: Approval, readerIs: "requester" | "approver") {
+  const { tenantId: _tenantId, decidedById: _decidedById, ...rest } = approval;
+  const independent = needsIndependentApproval(approval);
+  return {
+    ...rest,
+    needsIndependentApproval: independent,
+    // The requester of an Organization's write never approves it; an approver
+    // may decide it while it waits. The store enforces both regardless.
+    canApprove: independent ? readerIs === "approver" && approval.status === "pending" : approval.status === "pending",
+    decidedByAnother: Boolean(approval.decidedById),
+  };
+}
+
+/** Meta budget tools, by either naming the registry has used. */
+function isBudgetTool(toolId: string): boolean {
+  return toolId.endsWith("update_budget") || toolId.endsWith("budget.update");
+}
 
 function fail(
   res: Response,
@@ -130,6 +162,38 @@ export function createApprovalsRouter(container: Container): Router {
         ? (req.query.status as ApprovalStatus)
         : undefined;
 
+    // Phase 17 — `scope=review`: other members' writes waiting for THIS
+    // account's decision, in Organizations where it is an owner or admin.
+    // Never its own: those wait for someone else.
+    if (req.query.scope === "review") {
+      try {
+        const { items, total } = await container.approvalRepo.listAwaitingDecision(
+          identity.userId,
+          APPROVER_ROLES,
+          { page, limit }
+        );
+        res.status(200).json({
+          success: true,
+          data: items.map((item) => ({
+            ...publicApproval(item.approval, "approver"),
+            ...buildApprovalSummary(item.approval.toolId, item.approval.params),
+            risk: riskOf(item.approval.toolId),
+            requestedBy: item.requesterName,
+          })),
+          pagination: {
+            page,
+            limit,
+            total,
+            totalPages: Math.max(Math.ceil(total / limit), 1),
+          },
+          timestamp: new Date().toISOString(),
+        });
+      } catch {
+        fail(res, 400, "APPROVAL_INVALID_QUERY", "Invalid list query parameters");
+      }
+      return;
+    }
+
     try {
       const { items, total } = await container.approvalRepo.listByUser(
         identity.userId,
@@ -139,7 +203,7 @@ export function createApprovalsRouter(container: Container): Router {
       res.status(200).json({
         success: true,
         data: items.map((a) => ({
-          ...a,
+          ...publicApproval(a, "requester"),
           ...buildApprovalSummary(a.toolId, a.params),
           risk: riskOf(a.toolId),
         })),
@@ -166,13 +230,18 @@ export function createApprovalsRouter(container: Container): Router {
       return fail(res, 404, "APPROVAL_NOT_FOUND", "Approval not found");
     }
 
-    const approval = await container.approvalRepo.findByIdForUser(
+    // Its requester — or, for an Organization's write, one of its approvers.
+    // Anyone else: not found, exactly as for an approval that does not exist.
+    const found = await container.approvalRepo.findByIdForDecider(
       req.params.id,
-      identity.userId
+      identity.userId,
+      APPROVER_ROLES
     );
-    if (!approval) {
+    if (!found) {
       return fail(res, 404, "APPROVAL_NOT_FOUND", "Approval not found");
     }
+    const approval = found.approval;
+    const shown = publicApproval(approval, found.readerIs);
 
     // Durable execution link (if this approval already authorized a run).
     let executionId: string | undefined;
@@ -204,6 +273,10 @@ export function createApprovalsRouter(container: Container): Router {
         executionStatus,
         ...buildApprovalSummary(approval.toolId, approval.params),
         risk: riskOf(approval.toolId),
+        needsIndependentApproval: shown.needsIndependentApproval,
+        canApprove: shown.canApprove,
+        decidedByAnother: shown.decidedByAnother,
+        ...(found.readerIs === "approver" ? { requestedBy: found.requesterName } : {}),
       },
       timestamp: new Date().toISOString(),
     });
@@ -245,13 +318,30 @@ export function createApprovalsRouter(container: Container): Router {
       });
     };
 
-    const approval = await container.approvalRepo.findByIdForUser(
+    // Its requester — or, for an Organization's write, one of that
+    // Organization's approvers. Anyone else: not found.
+    const found = await container.approvalRepo.findByIdForDecider(
       approvalId,
-      identity.userId
+      identity.userId,
+      APPROVER_ROLES
     );
-    if (!approval) {
+    if (!found) {
       await auditAttempt("rejected", { reason: "APPROVAL_NOT_FOUND" });
       return fail(res, 404, "APPROVAL_NOT_FOUND", "Approval not found");
+    }
+    const approval = found.approval;
+
+    // Phase 17 (H2) — an Organization's write is never approved by the
+    // person who asked for it. Refused before anything else is looked at; the
+    // store refuses it again if anything ever got this far.
+    if (needsIndependentApproval(approval) && found.readerIs === "requester") {
+      await auditAttempt("rejected", {
+        toolId: approval.toolId,
+        paramsHash: approval.paramsHash,
+        reason: "APPROVAL_SELF_APPROVAL_FORBIDDEN",
+      });
+      return fail(res, 403, "APPROVAL_SELF_APPROVAL_FORBIDDEN",
+        "A change to your organization's connection must be approved by another owner or admin of your organization.");
     }
 
     // Integrity: stored hash must match a recomputation over durable params.
@@ -297,9 +387,13 @@ export function createApprovalsRouter(container: Container): Router {
     }
 
     // Budget guardrails re-checked at decision time (server-side authority;
-    // the AI cannot bypass them through approval).
-    if (approval.toolId.endsWith("update_budget")) {
+    // the AI cannot bypass them through approval). Phase 17 — matched by both
+    // namings, and read from `requestedDailyBudget`, which is what the budget
+    // tools take: the check used to match neither the tools' ids
+    // (`*.budget.update`) nor their parameter, so it never ran for them.
+    if (isBudgetTool(approval.toolId)) {
       const raw =
+        approval.params.requestedDailyBudget ??
         approval.params.dailyBudget ??
         approval.params.budget ??
         approval.params.amount;
@@ -359,7 +453,8 @@ export function createApprovalsRouter(container: Container): Router {
     const decision = await container.approvalRepo.decideApproval(
       approvalId,
       identity.userId,
-      "approve"
+      "approve",
+      { approverRoles: APPROVER_ROLES }
     );
 
     switch (decision.outcome) {
@@ -367,6 +462,8 @@ export function createApprovalsRouter(container: Container): Router {
         await auditAttempt("success", {
           toolId: approval.toolId,
           paramsHash: approval.paramsHash,
+          // Phase 17 — approved for someone else: the requester runs it next.
+          ...(found.readerIs === "approver" ? { forAnother: true } : {}),
         });
         return res.status(200).json({
           success: true,
@@ -376,10 +473,14 @@ export function createApprovalsRouter(container: Container): Router {
       case "not_found":
         await auditAttempt("rejected", { reason: "APPROVAL_NOT_FOUND" });
         return fail(res, 404, "APPROVAL_NOT_FOUND", "Approval not found");
+      case "self_approval_forbidden":
+        await auditAttempt("rejected", { reason: "APPROVAL_SELF_APPROVAL_FORBIDDEN" });
+        return fail(res, 403, "APPROVAL_SELF_APPROVAL_FORBIDDEN",
+          "A change to your organization's connection must be approved by another owner or admin of your organization.");
       case "forbidden":
         await auditAttempt("rejected", { reason: "APPROVAL_FORBIDDEN" });
         return fail(res, 403, "APPROVAL_FORBIDDEN",
-          "Approval belongs to another user");
+          "You may not decide this approval");
       case "already_consumed":
         await auditAttempt("rejected", { reason: "APPROVAL_ALREADY_CONSUMED" });
         return fail(res, 409, "APPROVAL_ALREADY_CONSUMED",
@@ -431,9 +532,12 @@ export function createApprovalsRouter(container: Container): Router {
       });
     };
 
-    const exists = await container.approvalRepo.findByIdForUser(
+    // Its requester (who may withdraw it) or, for an Organization's write, one
+    // of that Organization's approvers. Anyone else: not found.
+    const exists = await container.approvalRepo.findByIdForDecider(
       approvalId,
-      identity.userId
+      identity.userId,
+      APPROVER_ROLES
     );
     if (!exists) {
       await auditAttempt("rejected", { reason: "APPROVAL_NOT_FOUND" });
@@ -443,7 +547,8 @@ export function createApprovalsRouter(container: Container): Router {
     const decision = await container.approvalRepo.decideApproval(
       approvalId,
       identity.userId,
-      "reject"
+      "reject",
+      { approverRoles: APPROVER_ROLES }
     );
 
     switch (decision.outcome) {
@@ -475,7 +580,7 @@ export function createApprovalsRouter(container: Container): Router {
       case "forbidden":
         await auditAttempt("rejected", { reason: "APPROVAL_FORBIDDEN" });
         return fail(res, 403, "APPROVAL_FORBIDDEN",
-          "Approval belongs to another user");
+          "You may not decide this approval");
       case "conflict":
       default:
         await auditAttempt("rejected", { reason: "APPROVAL_CONFLICT" });

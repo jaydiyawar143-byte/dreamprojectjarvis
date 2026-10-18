@@ -35,6 +35,7 @@ import {
 import { createIntegrationTools, type IntegrationCommandPort } from "@jarvis/tools";
 import { __resetIntegrationChecks } from "../src/services/integration-registry.js";
 import { MASK } from "../src/services/integrations/config-validation.js";
+import { accessOver, organizationOwningEverything, unlimitedTestBudget } from "./helpers/shared-access.js";
 
 // ---------------------------------------------------------------------------
 // Doubles
@@ -85,6 +86,17 @@ const allowAll: RateLimitPort = {
   },
 };
 
+/**
+ * Phase 17 — the setting this suite was written for: one Organization owns
+ * every shared connection, and the test accounts are its owners, so what is
+ * pinned here (parity, secrets, confirmations, audit) is unchanged. Who may see
+ * and test a shared connection is pinned in shared-connection-access-p17.
+ */
+const PHASE17_OWNER = {
+  sharedAccess: accessOver(organizationOwningEverything({ "user-1": "owner", u: "owner" })),
+  testBudget: unlimitedTestBudget,
+};
+
 interface AuditRow {
   userId: string;
   action: string;
@@ -131,6 +143,7 @@ function harness(seed: Record<string, Record<string, string>> = {}): Harness {
     oauthStates: null,
     googleConfig: () => null,
     mapsUsage: async () => null,
+    ...PHASE17_OWNER,
   });
 
   const original = service.execute.bind(service);
@@ -295,6 +308,7 @@ describe("one service, two callers", () => {
       oauthStates: null,
       googleConfig: () => null,
       mapsUsage: async () => null,
+      ...PHASE17_OWNER,
     });
 
     const result = await toolNamed(service, "integration.test").execute(
@@ -643,6 +657,7 @@ describe("rate limits apply to both paths equally", () => {
       oauthStates: null,
       googleConfig: () => null,
       mapsUsage: async () => null,
+      ...PHASE17_OWNER,
     });
 
     const button = await service.execute(
@@ -674,6 +689,7 @@ describe("rate limits apply to both paths equally", () => {
       oauthStates: null,
       googleConfig: () => null,
       mapsUsage: async () => null,
+      ...PHASE17_OWNER,
     });
 
     // Reading status costs nothing external; throttling it would break the
@@ -709,6 +725,7 @@ describe("tenant isolation", () => {
       oauthStates: null,
       googleConfig: () => null,
       mapsUsage: async () => null,
+      ...PHASE17_OWNER,
     });
 
     await service.execute({ command: "status", integration: "meta" }, { userId: "user-A", source: "frontend" });

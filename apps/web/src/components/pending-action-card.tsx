@@ -25,6 +25,12 @@ export interface PendingActionData {
   approvalId: string;
   expiresAt: string;
   summary?: string;
+  /**
+   * Phase 17 — a change to an Organization's shared connection: approved by
+   * another owner or admin of that Organization, then confirmed here by the
+   * person who asked. The server enforces it; this only says so.
+   */
+  needsIndependentApproval?: boolean;
   executionResult?: {
     status: string;
     data?: Record<string, unknown>;
@@ -153,6 +159,11 @@ export function PendingActionCard({
       if (code === "PENDING_ACTION_NOT_FOUND") {
         setUi("failed");
         setMessage("This action has expired or was already processed.");
+      } else if (code === "PENDING_ACTION_NEEDS_INDEPENDENT_APPROVAL") {
+        // Nothing failed and nothing ran: it still waits for an approver, and
+        // Confirm runs it once they have approved.
+        setUi("idle");
+        setMessage(res.error?.message || "This change needs approval from another owner or admin of your organization.");
       } else {
         setUi("failed");
         setMessage(res.error?.message || "Failed to confirm.");
@@ -281,6 +292,13 @@ export function PendingActionCard({
           </div>
         )}
       </div>
+
+      {pendingAction.needsIndependentApproval && ui === "idle" && !expired && !message && (
+        <p data-testid="pending-action-needs-approver" className="text-xs text-amber-300/90">
+          Needs approval from another owner or admin of your organization. Once
+          they approve it on their Approvals page, confirm here to run it.
+        </p>
+      )}
 
       {/* Status message */}
       {message && (

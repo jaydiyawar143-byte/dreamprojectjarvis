@@ -130,22 +130,33 @@ describe("ApprovalCard states (31–35)", () => {
   });
 });
 
+const EMPTY_PAGE = {
+  success: true,
+  data: [],
+  pagination: { page: 1, limit: 20, total: 0, totalPages: 1 },
+  timestamp: new Date().toISOString(),
+};
+
 describe("ApprovalsPage list behaviour", () => {
   it("renders loading, then cards from listApprovals", async () => {
     mockedApi.listApprovals.mockImplementation(
-      () =>
-        new Promise((resolve) =>
-          setTimeout(
-            () =>
-              resolve({
-                success: true,
-                data: [makeApproval()],
-                pagination: { page: 1, limit: 20, total: 1, totalPages: 1 },
-                timestamp: new Date().toISOString(),
-              }),
-            10
-          )
-        )
+      (_status, _page, _limit, scope) =>
+        // Phase 17 — the page also asks for the approvals waiting for this
+        // reader's decision; here there are none.
+        scope === "review"
+          ? Promise.resolve(EMPTY_PAGE)
+          : new Promise((resolve) =>
+              setTimeout(
+                () =>
+                  resolve({
+                    success: true,
+                    data: [makeApproval()],
+                    pagination: { page: 1, limit: 20, total: 1, totalPages: 1 },
+                    timestamp: new Date().toISOString(),
+                  }),
+                10
+              )
+            )
     );
     render(<ApprovalsPage />);
     expect(screen.getByTestId("approvals-loading")).toBeInTheDocument();

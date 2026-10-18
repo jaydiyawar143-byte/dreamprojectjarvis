@@ -4,10 +4,43 @@ import type {
   IApprovalRepository,
   ApprovalConsumptionInput,
   ApprovalConsumptionResult,
+  TenantRole,
 } from "@jarvis/core";
-import { DEFAULT_LEASE_MS } from "@jarvis/core";
+import { DEFAULT_LEASE_MS, sharedConnectionOfTool } from "@jarvis/core";
 import { Prisma } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
+import { PrismaTenantRepository, TENANT_ROLE_TO_DB } from "./tenant-repository.js";
+
+type DbTenantRole = (typeof TENANT_ROLE_TO_DB)[TenantRole];
+
+/** Core roles as stored. An unknown value maps to nothing, so it matches no row. */
+function dbRoles(roles: readonly TenantRole[] | undefined): DbTenantRole[] {
+  return (roles ?? []).flatMap((role) =>
+    Object.prototype.hasOwnProperty.call(TENANT_ROLE_TO_DB, role) ? [TENANT_ROLE_TO_DB[role]] : []
+  );
+}
+
+/**
+ * Phase 17 — an approval for a write through a shared connection could not be
+ * given its owning Organization: nobody owns the connection, the owner record
+ * is invalid, or it could not be read. Nothing is created. A request nobody
+ * could ever be allowed to approve is not put in front of anybody.
+ */
+export class SharedConnectionOwnerUnavailableError extends Error {
+  constructor() {
+    super("This connection has no owning organization, so no approval can be created for it.");
+    this.name = "SharedConnectionOwnerUnavailableError";
+  }
+}
+
+/** One approval as an Organization's approver sees it. */
+export interface ApprovalForDecision {
+  approval: Approval;
+  /** The requester's display name — a colleague in the same Organization. */
+  requesterName: string;
+  /** Whether the reader asked for it, or may decide it for someone else. */
+  readerIs: "requester" | "approver";
+}
 
 const STATUS_MAP: Record<
   ApprovalStatus,
@@ -45,6 +78,8 @@ function toApproval(row: {
   expiresAt: Date;
   resolvedAt: Date | null;
   createdAt: Date;
+  tenantId?: string | null;
+  decidedById?: string | null;
 }): Approval {
   return {
     id: row.id,
@@ -60,6 +95,8 @@ function toApproval(row: {
     expiresAt: row.expiresAt.toISOString(),
     resolvedAt: row.resolvedAt?.toISOString() ?? null,
     createdAt: row.createdAt.toISOString(),
+    ...(row.tenantId ? { tenantId: row.tenantId } : {}),
+    ...(row.decidedById ? { decidedById: row.decidedById } : {}),
   };
 }
 
@@ -71,11 +108,33 @@ class ConsumptionDenied extends Error {
 }
 
 export class PrismaApprovalRepository implements IApprovalRepository {
-  constructor(private prisma: PrismaClient) {}
+  private readonly tenants: PrismaTenantRepository;
 
+  constructor(private prisma: PrismaClient) {
+    this.tenants = new PrismaTenantRepository(prisma);
+  }
+
+  /**
+   * Phase 17 — an approval for a WRITE through a shared connection
+   * (`SHARED_CONNECTION_TOOLS`) belongs, from the moment it exists, to the
+   * Organization that owns the connection: read here, from the owner record —
+   * never from the caller, whatever `data` carries. Every creation path (the
+   * executor's, a chat's pending action, a correction) arrives here, so none
+   * can create one that skips it. With no owner on record nothing is created.
+   */
   async create(
     data: Omit<Approval, "id" | "status" | "createdAt">
   ): Promise<Approval> {
+    let tenantId: string | null = null;
+    const shared = sharedConnectionOfTool(data.toolId);
+    if (shared?.access === "write") {
+      const owner = await this.tenants
+        .findConnectorOwner(shared.connector.providerId, shared.connector.connector)
+        .catch(() => null);
+      if (!owner || owner.status !== "assigned") throw new SharedConnectionOwnerUnavailableError();
+      tenantId = owner.tenantId;
+    }
+
     const row = await this.prisma.approval.create({
       data: {
         userId: data.userId,
@@ -88,6 +147,7 @@ export class PrismaApprovalRepository implements IApprovalRepository {
         riskLevel: data.riskLevel ?? null,
         status: "PENDING",
         expiresAt: new Date(data.expiresAt),
+        tenantId,
       },
     });
 
@@ -224,13 +284,24 @@ export class PrismaApprovalRepository implements IApprovalRepository {
    */
   async decideApproval(
     id: string,
-    userId: string,
+    deciderId: string,
     decision: "approve" | "reject",
-    options?: { now?: Date; fromPendingOnly?: boolean }
+    options?: {
+      now?: Date;
+      fromPendingOnly?: boolean;
+      /**
+       * Phase 17 — the tenant roles that may approve an Organization's
+       * approval for someone else (`rolesHoldingSharedPermission("shared:approve")`
+       * in `@jarvis/security`). Absent or empty: nobody but the requester may
+       * decide, and the requester may only withdraw.
+       */
+      approverRoles?: readonly TenantRole[];
+    }
   ): Promise<
     | { outcome: "approved" | "rejected" }
     | { outcome: "not_found" }
     | { outcome: "forbidden" }
+    | { outcome: "self_approval_forbidden" }
     | { outcome: "already_consumed" }
     | { outcome: "already_rejected"; idempotent: boolean }
     | { outcome: "expired" }
@@ -240,7 +311,28 @@ export class PrismaApprovalRepository implements IApprovalRepository {
 
     const row = await this.prisma.approval.findUnique({ where: { id } });
     if (!row) return { outcome: "not_found" };
-    if (row.userId !== userId) return { outcome: "forbidden" };
+
+    // Phase 17 — who may decide. An ordinary approval: its requester, as
+    // before. One that belongs to an Organization (`tenantId`): its requester
+    // may only WITHDRAW it; approving it — or rejecting it for someone else —
+    // is for one of that Organization's owners or admins who is not the
+    // requester. That authority is checked here before anything about the
+    // approval's state is told, and again, under a lock, in the transaction
+    // that writes the decision.
+    const shared = row.tenantId !== null;
+    const byRequester = row.userId === deciderId;
+    if (!byRequester && !shared) return { outcome: "forbidden" };
+    if (shared && byRequester && decision === "approve") return { outcome: "self_approval_forbidden" };
+    const asApprover = shared && !byRequester;
+    const approverRoles: string[] = dbRoles(options?.approverRoles);
+    if (asApprover) {
+      if (approverRoles.length === 0) return { outcome: "forbidden" };
+      const membership = await this.prisma.tenantMembership.findUnique({
+        where: { tenantId_userId: { tenantId: row.tenantId!, userId: deciderId } },
+        select: { role: true },
+      });
+      if (!membership || !approverRoles.includes(membership.role)) return { outcome: "forbidden" };
+    }
 
     if (row.status === "CONSUMED") return { outcome: "already_consumed" };
     if (row.status === "REJECTED") {
@@ -277,17 +369,39 @@ export class PrismaApprovalRepository implements IApprovalRepository {
         ? ["PENDING"]
         : ["PENDING", "APPROVED"]; // reject may still veto a not-yet-consumed approval
 
-    const result = await this.prisma.approval.updateMany({
-      where: {
-        id,
-        userId,
-        status: { in: guardStates },
-        ...(decision === "approve" ? { expiresAt: { gt: now } } : {}),
-      },
-      data: { status: target, resolvedAt: now },
-    });
+    // Plain columns only: the whole condition is one UPDATE, so of two
+    // decisions arriving together exactly one changes the row.
+    const where: Prisma.ApprovalWhereInput = {
+      id,
+      userId: row.userId,
+      tenantId: row.tenantId,
+      status: { in: guardStates },
+      ...(decision === "approve" ? { expiresAt: { gt: now } } : {}),
+    };
+    const data: Prisma.ApprovalUpdateManyMutationInput = {
+      status: target,
+      resolvedAt: now,
+      ...(asApprover ? { decidedById: deciderId } : {}),
+    };
 
-    if (result.count === 1) {
+    let changed: number | "forbidden";
+    if (asApprover) {
+      // The approver's authority must still hold AS the decision is written:
+      // the approval row is locked, the membership row read under a share
+      // lock (an operator removing it waits for this to finish, or has
+      // finished first and the row is gone), and only then is the row updated.
+      changed = await this.prisma.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT "id" FROM "Approval" WHERE "id" = ${id} FOR UPDATE`;
+        const role = await this.roleIn(tx, row.tenantId!, deciderId);
+        if (role === null || !approverRoles.includes(role)) return "forbidden" as const;
+        return (await tx.approval.updateMany({ where, data })).count;
+      });
+    } else {
+      changed = (await this.prisma.approval.updateMany({ where, data })).count;
+    }
+
+    if (changed === "forbidden") return { outcome: "forbidden" };
+    if (changed === 1) {
       return { outcome: decision === "approve" ? "approved" : "rejected" };
     }
 
@@ -317,14 +431,28 @@ export class PrismaApprovalRepository implements IApprovalRepository {
    * commits; every loser rolls back with zero side effects. A crash before
    * commit leaves the approval APPROVED (retry safe); a crash after commit
    * leaves it CONSUMED forever (never resurrected).
+   *
+   * Phase 17 — a write through a shared connection (`input.tenantScope`).
+   * Before step 1, in the same transaction, the approval row is locked and
+   * every condition of the scope is read under a share lock: the approval
+   * belongs to that Organization, someone other than the requester decided
+   * it, the Organization still owns the connection, the requester still holds
+   * a role that may make the change and the approver one that may approve it.
+   * An operator removing a membership or moving the connection waits for this
+   * transaction, or finished first and the check fails: the write runs on the
+   * state that holds as it is authorized, never on a remembered one. Without a
+   * scope, an approval that belongs to an Organization is never consumed.
    */
   async consumeForExecution(
     input: ApprovalConsumptionInput,
     options?: { ownerId?: string; leaseMs?: number }
   ): Promise<ApprovalConsumptionResult> {
     const now = new Date();
+    const scope = input.tenantScope;
     try {
       await this.prisma.$transaction(async (tx) => {
+        if (scope) await this.assertSharedScope(tx, input, scope);
+
         const consumed = await tx.approval.updateMany({
           where: {
             id: input.approvalId,
@@ -333,6 +461,10 @@ export class PrismaApprovalRepository implements IApprovalRepository {
             paramsHash: input.paramsHash, // NULL (legacy) never matches: fail closed
             status: "APPROVED",
             expiresAt: { gt: now },
+            // An Organization's approval only WITH its scope, decided by
+            // someone else; an ordinary one only without.
+            tenantId: scope ? scope.tenantId : null,
+            ...(scope ? { decidedById: { not: null }, NOT: [{ decidedById: input.userId }] } : {}),
           },
           data: { status: "CONSUMED", resolvedAt: now },
         });
@@ -378,6 +510,14 @@ export class PrismaApprovalRepository implements IApprovalRepository {
     if (!row) return "approval not found";
     if (row.userId !== input.userId) return "approval belongs to a different user";
     if (row.toolId !== input.toolId) return "approval was issued for a different tool";
+    if ((row.tenantId ?? null) !== (input.tenantScope?.tenantId ?? null)) {
+      return row.tenantId
+        ? "approval belongs to an organization and cannot be used without its checks"
+        : "approval does not belong to this organization";
+    }
+    if (row.tenantId && (!row.decidedById || row.decidedById === input.userId)) {
+      return "approval was not given by an independent approver";
+    }
     if (!row.paramsHash || row.paramsHash !== input.paramsHash) {
       return "params hash mismatch (or legacy approval without hash)";
     }
@@ -387,10 +527,69 @@ export class PrismaApprovalRepository implements IApprovalRepository {
     return `approval is ${row.status.toLowerCase()}`;
   }
 
+  /**
+   * Phase 17 — every condition of a shared-connection write's scope, read
+   * inside the consuming transaction: the approval row under FOR UPDATE, the
+   * owner record and both memberships under FOR SHARE. Throws the reason —
+   * secret-free, and about the requester's own approval — on the first one
+   * that does not hold; the transaction then rolls back with nothing consumed.
+   */
+  private async assertSharedScope(
+    tx: Prisma.TransactionClient,
+    input: ApprovalConsumptionInput,
+    scope: NonNullable<ApprovalConsumptionInput["tenantScope"]>
+  ): Promise<void> {
+    const requesterRoles: string[] = dbRoles(scope.requesterRoles);
+    const approverRoles: string[] = dbRoles(scope.approverRoles);
+
+    const rows = await tx.$queryRaw<Array<{ tenantId: string | null; decidedById: string | null }>>`
+      SELECT "tenantId", "decidedById" FROM "Approval" WHERE "id" = ${input.approvalId} FOR UPDATE`;
+    const row = rows[0];
+    if (!row) throw new ConsumptionDenied("approval not found");
+    if (row.tenantId !== scope.tenantId) {
+      throw new ConsumptionDenied("approval does not belong to this organization");
+    }
+    if (!row.decidedById || row.decidedById === input.userId) {
+      throw new ConsumptionDenied("approval was not given by an independent approver");
+    }
+
+    const owner = await tx.$queryRaw<Array<{ one: number }>>`
+      SELECT 1 AS "one" FROM "AutomationConnectorOwner"
+      WHERE "provider_id" = ${scope.providerId} AND "connector" = ${scope.connector} AND "tenant_id" = ${scope.tenantId}
+      FOR SHARE`;
+    if (owner.length === 0) {
+      throw new ConsumptionDenied("the organization no longer owns this connection");
+    }
+
+    const requester = await this.roleIn(tx, scope.tenantId, input.userId);
+    if (requester === null || !requesterRoles.includes(requester)) {
+      throw new ConsumptionDenied("the requester's organization role no longer allows this change");
+    }
+    const approver = await this.roleIn(tx, scope.tenantId, row.decidedById);
+    if (approver === null || !approverRoles.includes(approver)) {
+      throw new ConsumptionDenied("the approver's organization role no longer allows approving this change");
+    }
+  }
+
+  /** One membership's stored role, read under a share lock. Null: not a member. */
+  private async roleIn(tx: Prisma.TransactionClient, tenantId: string, userId: string): Promise<string | null> {
+    const rows = await tx.$queryRaw<Array<{ role: string }>>`
+      SELECT "role"::text AS "role" FROM "TenantMembership"
+      WHERE "tenant_id" = ${tenantId} AND "user_id" = ${userId}
+      FOR SHARE`;
+    return rows[0]?.role ?? null;
+  }
+
   // -------------------------------------------------------------------------
   // PHASE 11.9 — Conversation-scoped pending action lookups
   // -------------------------------------------------------------------------
 
+  /**
+   * The action waiting in a conversation: still PENDING — or, Phase 17, an
+   * Organization's write that another owner or admin has APPROVED and that is
+   * now waiting for its requester to run it. An ordinary approved approval is
+   * never waiting: the requester's own confirm runs it at once.
+   */
   async findPendingByConversationId(
     conversationId: string,
     userId: string
@@ -400,12 +599,95 @@ export class PrismaApprovalRepository implements IApprovalRepository {
       where: {
         conversationId,
         userId,
-        status: "PENDING",
         expiresAt: { gt: now },
+        OR: [
+          { status: "PENDING" },
+          {
+            status: "APPROVED",
+            tenantId: { not: null },
+            decidedById: { not: null },
+            NOT: [{ decidedById: userId }],
+          },
+        ],
       },
       orderBy: { createdAt: "desc" },
     });
     return row ? toApproval(row) : null;
+  }
+
+  // -------------------------------------------------------------------------
+  // Phase 17 — what an Organization's approvers may see and decide
+  // -------------------------------------------------------------------------
+
+  /**
+   * Approvals waiting for THIS account's decision: other members' writes,
+   * pending and unexpired, in Organizations where this account holds one of
+   * `approverRoles`. Never its own — those wait for someone else.
+   */
+  async listAwaitingDecision(
+    userId: string,
+    approverRoles: readonly TenantRole[],
+    options?: { page?: number; limit?: number }
+  ): Promise<{ items: ApprovalForDecision[]; total: number }> {
+    const roles = dbRoles(approverRoles);
+    if (roles.length === 0) return { items: [], total: 0 };
+    const limit = Math.min(Math.max(options?.limit ?? 20, 1), 100);
+    const page = Math.max(options?.page ?? 1, 1);
+    const now = new Date();
+
+    const where: Prisma.ApprovalWhereInput = {
+      tenantId: { not: null },
+      userId: { not: userId },
+      status: "PENDING",
+      expiresAt: { gt: now },
+      tenant: { memberships: { some: { userId, role: { in: roles } } } },
+    };
+    const [rows, total] = await Promise.all([
+      this.prisma.approval.findMany({
+        where,
+        include: { user: { select: { name: true } } },
+        orderBy: { createdAt: "desc" },
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+      this.prisma.approval.count({ where }),
+    ]);
+    return {
+      items: rows.map((row) => ({
+        approval: this.withEffectiveStatus(toApproval(row), now),
+        requesterName: row.user.name,
+        readerIs: "approver" as const,
+      })),
+      total,
+    };
+  }
+
+  /**
+   * One approval, for an account that may see it: its requester, or — for an
+   * Organization's approval — one of that Organization's approvers. Anyone
+   * else gets null, exactly as for an approval that does not exist.
+   */
+  async findByIdForDecider(
+    id: string,
+    userId: string,
+    approverRoles: readonly TenantRole[]
+  ): Promise<ApprovalForDecision | null> {
+    const row = await this.prisma.approval.findUnique({
+      where: { id },
+      include: { user: { select: { name: true } } },
+    });
+    if (!row) return null;
+    const approval = this.withEffectiveStatus(toApproval(row), new Date());
+    if (row.userId === userId) return { approval, requesterName: row.user.name, readerIs: "requester" };
+    if (!row.tenantId) return null;
+    const roles: string[] = dbRoles(approverRoles);
+    if (roles.length === 0) return null;
+    const membership = await this.prisma.tenantMembership.findUnique({
+      where: { tenantId_userId: { tenantId: row.tenantId, userId } },
+      select: { role: true },
+    });
+    if (!membership || !roles.includes(membership.role)) return null;
+    return { approval, requesterName: row.user.name, readerIs: "approver" };
   }
 
   async updateParams(

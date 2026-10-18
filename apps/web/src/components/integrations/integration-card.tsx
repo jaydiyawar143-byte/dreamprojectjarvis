@@ -292,7 +292,10 @@ export function IntegrationCard({
                   Connect
                 </Button>
               )}
-              {!disabled && (
+              {/* Phase 17 — from the server's list: a member of the
+                  Organization that owns a shared connection may see whether it
+                  works, and only its owners and admins may test it. */}
+              {!disabled && can("testConnection") && (
                 <Button
                   data-testid={`integration-test-${integration.id}`}
                   variant="secondary"
@@ -323,14 +326,16 @@ export function IntegrationCard({
           {/* Disable, not disconnect. Switching off keeps the credential, so
               turning it back on needs no second consent round trip — which is
               what most people actually mean by "turn it off". */}
-          <Button
-            data-testid={`integration-toggle-${integration.id}`}
-            variant="secondary"
-            onClick={() => onToggleEnabled(disabled)}
-            disabled={busy}
-          >
-            {disabled ? "Enable" : "Disable"}
-          </Button>
+          {can(disabled ? "enable" : "disable") && (
+            <Button
+              data-testid={`integration-toggle-${integration.id}`}
+              variant="secondary"
+              onClick={() => onToggleEnabled(disabled)}
+              disabled={busy}
+            >
+              {disabled ? "Enable" : "Disable"}
+            </Button>
+          )}
         </div>
       </div>
     </Panel>

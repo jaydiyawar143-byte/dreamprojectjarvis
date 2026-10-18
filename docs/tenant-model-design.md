@@ -33,6 +33,15 @@ Settled by the pre-merge security review (2026-10-17; `docs/phases/phase-17.md`
 - **§11's exposure is a blocker for any multi-tenant launch**, with its own
   proposed stage.
 
+Extended by the Phase 17 multi-business hardening (2026-10-18;
+`docs/phases/phase-17.md` §8), with no new model: the same owner rows and
+operator command now cover every shared connection; one grant table for them
+(`packages/security/src/shared-connection-authz.ts`) gives owners and admins
+everything and members and viewers read and status; a Meta change is approved
+by another owner or admin of the Organization; and connection tests have a
+per-Organization budget beside the per-account one — the one place §10's "the
+limiter stays per account" no longer holds.
+
 This answers the six decisions that stopped Stage 3A at its preflight
 (`docs/phases/phase-17.md` §7): the confirmed policy — *each business is a
 separate ownership and data boundary; owner, admin and member may read MCP
@@ -474,6 +483,10 @@ credentials, any account can also read and — approving its own request —
 change the operator's Meta ad account. Findings H2, M3 and L11 are recorded in
 `docs/phases/phase-17.md` §7 as **blockers for any multi-tenant launch**, with
 the proposed stage that removes them.
+
+**Addressed 2026-10-18** (`docs/phases/phase-17.md` §8), using the
+connector-owner model above. What is still decided per account, and the
+decisions left open, are listed there.
 
 ---
 

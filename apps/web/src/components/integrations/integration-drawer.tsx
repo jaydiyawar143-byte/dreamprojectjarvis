@@ -327,16 +327,20 @@ export function IntegrationDrawer({
           <section className="space-y-2" data-testid="drawer-actions">
             <h3 className="font-mono text-xs uppercase tracking-hud text-sys-dim">Actions</h3>
             <div className="flex flex-wrap gap-2">
-              <Button data-testid="drawer-test" variant="secondary" onClick={onTest} disabled={busy}>
-                {busy ? (
-                  <>
-                    <Loader2 size={11} className="animate-spin" aria-hidden />
-                    Testing…
-                  </>
-                ) : (
-                  "Test connection"
-                )}
-              </Button>
+              {/* Phase 17 — only where the server offers it: a shared
+                  connection is tested by its Organization's owners and admins. */}
+              {can("testConnection") && (
+                <Button data-testid="drawer-test" variant="secondary" onClick={onTest} disabled={busy}>
+                  {busy ? (
+                    <>
+                      <Loader2 size={11} className="animate-spin" aria-hidden />
+                      Testing…
+                    </>
+                  ) : (
+                    "Test connection"
+                  )}
+                </Button>
+              )}
               {can("reconnect") && (
                 <Button
                   data-testid="drawer-reconnect"

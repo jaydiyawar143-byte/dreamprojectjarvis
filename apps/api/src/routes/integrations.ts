@@ -35,13 +35,7 @@ import {
 } from "@jarvis/core";
 import { createAuthMiddleware, type AuthenticatedRequest } from "../middleware/auth.js";
 import type { Container } from "../services/container.js";
-import {
-  getIntegration,
-  invalidateChecks,
-  listIntegrations,
-  runCheck,
-  type IntegrationDeps,
-} from "../services/integration-registry.js";
+import { invalidateChecks, type IntegrationDeps } from "../services/integration-registry.js";
 
 /** Maps a command failure onto the HTTP status that means the same thing. */
 const STATUS_FOR: Record<IntegrationErrorCode, number> = {
@@ -59,12 +53,20 @@ const STATUS_FOR: Record<IntegrationErrorCode, number> = {
   PROVIDER_ERROR: 502,
   TIMEOUT: 504,
   UNSUPPORTED_COMMAND: 405,
+  // Phase 17 — who owns a shared connection, or the caller's membership,
+  // could not be read: refused, and said so.
+  AUTHORIZATION_UNAVAILABLE: 503,
   INTERNAL_ERROR: 500,
 };
 
 export function createIntegrationsRouter(
   container: Container,
-  deps: IntegrationDeps
+  /**
+   * Phase 17 — no longer read here. The registry is reached only through the
+   * command service, which authorizes first; the parameter stays so callers
+   * need not change.
+   */
+  _deps: IntegrationDeps
 ): Router {
   const router = Router();
   const requireAuth = createAuthMiddleware(container.tokenService);
@@ -124,20 +126,23 @@ export function createIntegrationsRouter(
    * because "this endpoint does not exist" is not something a UI can act on and
    * "set JARVIS_ENCRYPTION_KEY" is.
    */
+  /** The command service is absent: a deployment without an encryption key. */
+  function unavailable(res: Response): void {
+    fail(
+      res,
+      503,
+      "NOT_CONFIGURED",
+      "Integration management is unavailable because JARVIS_ENCRYPTION_KEY is not set on this server, so third-party credentials cannot be stored safely."
+    );
+  }
+
   async function run(
     req: AuthenticatedRequest,
     res: Response,
     input: IntegrationCommandInput
   ): Promise<void> {
     if (!req.auth) return fail(res, 401, "AUTHENTICATION_REQUIRED", "Authentication required");
-    if (!commands) {
-      return fail(
-        res,
-        503,
-        "NOT_CONFIGURED",
-        "Integration management is unavailable because JARVIS_ENCRYPTION_KEY is not set on this server, so third-party credentials cannot be stored safely."
-      );
-    }
+    if (!commands) return unavailable(res);
     send(res, await commands.execute(input, contextOf(req)));
   }
 
@@ -174,16 +179,12 @@ export function createIntegrationsRouter(
   router.get("/", requireAuth, async (req: AuthenticatedRequest, res: Response) => {
     if (!req.auth) return fail(res, 401, "AUTHENTICATION_REQUIRED", "Authentication required");
 
-    // Legacy shape when the command service is unavailable: the read-only
-    // registry still works without an encryption key, and a status page that
-    // renders is more useful than a 503.
-    if (!commands) {
-      try {
-        return ok(res, { integrations: await listIntegrations(req.auth.userId, deps) });
-      } catch {
-        return fail(res, 500, "INTERNAL_ERROR", "Could not read integration status");
-      }
-    }
+    // Phase 17 (review findings M3, L11) — without the command service there
+    // is nothing here that knows who may see or test a shared connection, so
+    // these read paths answer as the management verbs do: unavailable. They
+    // used to serve the registry directly — every operator identifier to every
+    // account, and connection tests no check stood in front of.
+    if (!commands) return unavailable(res);
 
     const result = await commands.execute({ command: "list", integration: null }, contextOf(req));
     if (!result.ok) return fail(res, STATUS_FOR[result.code] ?? 500, result.code, result.message);
@@ -199,11 +200,7 @@ export function createIntegrationsRouter(
     const id = integrationParam(req);
     if (!id) return fail(res, 404, "NOT_FOUND", "Unknown integration");
 
-    if (!commands) {
-      const found = await getIntegration(req.auth.userId, id, deps);
-      if (!found) return fail(res, 404, "NOT_FOUND", "Unknown integration");
-      return ok(res, found);
-    }
+    if (!commands) return unavailable(res);
 
     const result = await commands.execute({ command: "status", integration: id }, contextOf(req));
     if (!result.ok) return fail(res, STATUS_FOR[result.code] ?? 500, result.code, result.message);
@@ -223,21 +220,9 @@ export function createIntegrationsRouter(
     const id = integrationParam(req);
     if (!id) return fail(res, 404, "NOT_FOUND", "Unknown integration");
 
-    if (!commands) {
-      try {
-        const result = await runCheck(req.auth.userId, id, deps);
-        if (!result) return fail(res, 404, "NOT_FOUND", "Unknown integration");
-        await container.auditLogger?.log({
-          userId: req.auth.userId,
-          action: "integration.test",
-          result: result.health === "CONNECTED" ? "success" : "failure",
-          metadata: { integration: id, health: result.health },
-        });
-        return ok(res, result);
-      } catch {
-        return fail(res, 500, "INTERNAL_ERROR", "The connection test could not be completed");
-      }
-    }
+    // A connection test reaches a provider: it runs only through the command
+    // service, which authorizes the caller and takes the budget first.
+    if (!commands) return unavailable(res);
 
     // The legacy response body was the CheckResult itself, so it is returned
     // flat here rather than nested — an existing client must keep working.
@@ -260,7 +245,7 @@ export function createIntegrationsRouter(
 
     invalidateChecks(req.auth.userId, id);
 
-    if (!commands) return ok(res, await getIntegration(req.auth.userId, id, deps));
+    if (!commands) return unavailable(res);
 
     const result = await commands.execute({ command: "status", integration: id }, contextOf(req));
     if (!result.ok) return fail(res, STATUS_FOR[result.code] ?? 500, result.code, result.message);

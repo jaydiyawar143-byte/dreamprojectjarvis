@@ -29,6 +29,9 @@
 #   Permission and Risk Engine), and the TEST-FILE typecheck widened: the
 #   Phase 17 test files of @jarvis/db and @jarvis/security, and the API's
 #   operator scripts (`apps/api/scripts`, which the API's lint now covers too).
+#   Phase 17 multi-business hardening — the shared-connection contracts of
+#   @jarvis/tools and @jarvis/agents, by file name; their PostgreSQL-backed
+#   tests in @jarvis/db and @jarvis/api run in the database steps.
 #
 # Deliberately not gated yet (docs/DEVELOPMENT.md, "Continuous integration"):
 #   - Most test files OUTSIDE @jarvis/api. `typecheck:tests` runs in
@@ -191,6 +194,17 @@ jobs:
       - name: Test @jarvis/security
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: pnpm --filter @jarvis/security test
+
+      # Phase 17 (multi-business hardening) — the shared-connection contracts
+      # that live outside the gated workspaces: the executor's access gate and
+      # the Meta write tools' Organization scope in tools; the orchestrator's
+      # gate and the pending actions that wait for an independent approver in
+      # agents. Selected by file name, as the memory and marketing contracts are.
+      - name: Test shared-connection contracts (@jarvis/tools, @jarvis/agents)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          pnpm --filter @jarvis/tools exec vitest run shared-connection
+          pnpm --filter @jarvis/agents exec vitest run shared-connection
 
       # From here on, the PostgreSQL-backed tests. DATABASE_URL is set on these
       # steps only, so nothing above ever sees a database. Applying every

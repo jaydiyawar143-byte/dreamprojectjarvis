@@ -117,6 +117,16 @@ Plan → Explain → Confirm → Execute → Audit → Verify → Report
   gets `409 PENDING_ACTION_ALREADY_RESOLVED` and changes nothing. A cancelled
   action can never be approved, so it never runs. Never resolve an approval
   with a read followed by an unconditional write.
+- **A change through a shared connection is approved by someone else.** An
+  approval for a write through the deployment's Meta Ads connection belongs to
+  the Organization that owns the connection from the moment it is created —
+  `tenantId` comes from the owner record, never from a request. Only another
+  owner or admin of that Organization may approve it (`decidedById`); its
+  requester then runs it. It is consumed only in the transaction that re-checks,
+  under locks, that the Organization still owns the connection and that both
+  people still hold their roles (`consumeForExecution` with `tenantScope`).
+  Never let a requester approve their own Organization write, and never
+  consume such an approval without its scope.
 
 ### Google scopes
 
@@ -127,6 +137,41 @@ explicit user decision. Never request every Google scope at initial login.
 
 Authorization decisions read **granted** scopes, never requested ones: Google
 may grant fewer than were asked for.
+
+### Shared connections
+
+The deployment-wide connections — Meta Ads, n8n (REST and MCP), WhatsApp,
+Google Maps, the MCP servers and OmniRoute — each belong to one Organization.
+The record of which (`AutomationConnectorOwner`) is set only by the operator
+command (`docs/DEPLOYMENT.md`, "Organizations").
+
+- **Unassigned means nobody.** Until a connection has an owner, every account
+  is refused its test and its details — and, for Meta Ads, every read and
+  write — platform owners and admins included.
+- **Not yet Organization-owned:** sending a WhatsApp message and triggering an
+  n8n workflow — still decided per account (the account the phone number is
+  assigned to; the account's own registered workflows) and approved by that
+  account — and the read-only Maps tools and reviewed MCP servers, which any
+  account may use (Maps within the deployment's monthly ceiling). Moving them
+  under their Organization is open work (`docs/phases/phase-17.md`, §8).
+- **Only the membership role counts**, from the one table in
+  `packages/security/src/shared-connection-authz.ts`: owners and admins may
+  read, see diagnostics, test, change and approve; members and viewers may read
+  and see status. `auth.role` never decides anything about a shared connection.
+- **Refused before anything is spent.** A connection test is authorized first,
+  then takes the caller's slot and the Organization's slot, and only then
+  reaches the provider or starts a server. A lookup that fails refuses
+  (`AUTHORIZATION_UNAVAILABLE`).
+- **Outsiders get one answer.** Anyone outside the owning Organization sees a
+  server-managed integration as one fixed "not available" view, and Meta Ads
+  as on a deployment without the shared credential — whatever is configured.
+  An operator identifier (an ad-account id, a phone-number id, a base URL, an
+  MCP server id) reaches the owning Organization's owners and admins only.
+- **One check for every surface.** The tool gate (`ToolAccessGate`) runs in
+  `ToolExecutor` and in the orchestrator before a pending action exists; the
+  integration command service, the Meta pages and the marketing service ask
+  `SharedConnectionAccess` the same question. A new surface that reaches a
+  shared connection asks it too — hiding a control is never the check.
 
 ### Memory
 
@@ -324,6 +369,12 @@ database; every CI step passed, the marketing contracts at 565; and of the
 workspace's suite was started at once — the performance budget again, and a
 web test that waits one second for a page (`auth-session`, "/approvals loads
 its data…"). Both pass alone and in CI's own steps; see §16.
+After the Phase 17 multi-business hardening (2026-10-18, on Windows from the
+working tree, turbo's cache bypassed): `@jarvis/db` 410 passed / 0 failed (27
+files) on a fresh database;
+CI's database steps all passed, 0 skipped; and every workspace's suite without
+a database gave 9,682 passed, 0 failed (20 workspaces)
+(`docs/phases/phase-17.md`, §8).
 
 The two memory end-to-end tests (`sprint-1.1d-memory-e2e`, and
 `phase14-memory-e2e-pg.integration`, which has no in-memory fallback at all)
@@ -337,10 +388,11 @@ database-backed test in `apps/api` or `packages/memory` must be named
 `*-pg.integration.test.ts`, or CI never gives it a database.
 
 CI does not run the tests of `@jarvis/core`, `tools`, `agents`, `browser` or
-`meta-graph` as workspaces. Two slices of them are gated by **file name**: the
-memory contracts and the marketing contracts. A new contract test for either
-must match the names that step selects (`.github/workflows/ci.yml`), or CI
-never runs it.
+`meta-graph` as workspaces. Three slices of them are gated by **file name**:
+the memory contracts, the marketing contracts and the shared-connection
+contracts (`shared-connection*` in `tools` and `agents`). A new contract test
+for any of them must match the names its step selects
+(`.github/workflows/ci.yml`), or CI never runs it.
 
 ---
 

@@ -33,6 +33,8 @@
 // role could run, so the page can decline to draw a control that could not do
 // anything. It decides nothing: a control it lets the page draw still goes
 // through the executor, which asks the same question of the same table.
+// (Phase 17: whether there is an ad account is said per caller — only the
+// Organization that owns the deployment's Meta Ads is told it exists.)
 // ---------------------------------------------------------------------------
 
 import { randomUUID } from "node:crypto";
@@ -66,6 +68,13 @@ export interface MarketingRouterDeps {
   publishFlow: MarketingPublishFlow;
   /** The same role table the executor checks against. Read here, never decided here. */
   permissions: { checkToolPermissions(role: Role, required: ToolPermission[]): boolean };
+  /**
+   * Phase 17 (review finding L11) — whether the deployment's Meta Ads is this
+   * caller's to read: they are a member of the Organization that owns it.
+   * Anyone else is told there is no ad account, exactly as on a deployment
+   * without one. Absent, or unable to answer: there is none, for anyone.
+   */
+  metaAvailable?: (userId: string) => Promise<boolean>;
 }
 
 const T = MARKETING_TOOL_IDS;
@@ -182,8 +191,19 @@ export function createMarketingRouter(deps: MarketingRouterDeps): Router {
   router.get(
     "/status",
     requireAuth,
-    handle((req, res) => {
+    handle(async (req, res) => {
       const registered = (id: string) => deps.toolRegistry.get(id) !== undefined;
+      // Phase 17 — the deployment's ad account is described only to the
+      // Organization that owns it. A display flag: the reads themselves are
+      // refused by the executor's gate for everyone else.
+      let adAccount = false;
+      if (registered("meta.insights") && deps.metaAvailable) {
+        try {
+          adAccount = await deps.metaAvailable(req.auth!.userId);
+        } catch {
+          adAccount = false;
+        }
+      }
       // Registered here AND within the caller's role — the executor's own
       // two conditions, in the executor's own terms.
       const may = (id: string): boolean => {
@@ -203,7 +223,7 @@ export function createMarketingRouter(deps: MarketingRouterDeps): Router {
           channels: registered(T.contentPublish) ? deps.marketing.publishableChannels() : [],
           reason: registered(T.contentPublish) ? null : (deps.publishingUnavailableReason ?? "No publishing connection is configured on this server."),
         },
-        adAccount: { available: registered("meta.insights") },
+        adAccount: { available: adAccount },
         // What THIS caller's role could run. A hint for the screen, not a grant.
         caller: {
           canEdit: may(T.contentUpdate),

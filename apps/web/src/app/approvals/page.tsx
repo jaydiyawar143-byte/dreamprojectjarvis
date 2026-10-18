@@ -4,6 +4,11 @@
 // PHASE 10.7 — Approvals page: pending list, status filters, pagination.
 // Data comes exclusively from the authenticated approval API; no secrets are
 // ever present in these payloads or stored client-side.
+//
+// Phase 17 — "Waiting for your decision": other members' changes to an
+// Organization's shared connection, for an owner or admin of that
+// Organization to approve. The server decides who sees them (`scope=review`);
+// an account that is nobody's approver gets an empty list and sees no section.
 // ---------------------------------------------------------------------------
 
 import { useCallback, useEffect, useState } from "react";
@@ -54,6 +59,26 @@ export default function ApprovalsPage() {
     void load(filter, page);
   }, [filter, page, load]);
 
+  const [review, setReview] = useState<ApprovalRecord[]>([]);
+  const [reviewError, setReviewError] = useState<string | null>(null);
+
+  const loadReview = useCallback(async () => {
+    const res = await listApprovals(undefined, 1, 20, "review");
+    if (res.success && res.data) {
+      setReview(res.data);
+      setReviewError(null);
+    } else {
+      // Said, not hidden: an approver who is not told the list failed would
+      // read it as nothing waiting for them.
+      setReview([]);
+      setReviewError(res.error?.message ?? "Failed to load the approvals waiting for you");
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadReview();
+  }, [loadReview]);
+
   return (
     <main className="mx-auto max-w-3xl space-y-4 p-6">
       <h1 className="text-xl font-semibold">Approvals</h1>
@@ -62,6 +87,32 @@ export default function ApprovalsPage() {
         exact parameters shown — exactly once. To change anything, reject and
         start a new proposal.
       </p>
+
+      {(review.length > 0 || reviewError) && (
+        <section data-testid="approvals-review" className="space-y-3">
+          <h2 className="text-sm font-semibold">Waiting for your decision</h2>
+          <p className="text-xs text-gray-400">
+            Changes other members of your organization asked for. Once you
+            approve one, the person who asked can run it once.
+          </p>
+          {reviewError && (
+            <p data-testid="approvals-review-error" role="alert" className="text-sm text-red-400">
+              {reviewError}
+            </p>
+          )}
+          {review.map((a) => (
+            <ApprovalCard
+              key={a.approvalId}
+              approval={a}
+              onChanged={() => void loadReview()}
+            />
+          ))}
+        </section>
+      )}
+
+      {(review.length > 0 || reviewError) && (
+        <h2 className="text-sm font-semibold">Your requests</h2>
+      )}
 
       <div className="flex flex-wrap gap-2">
         {FILTERS.map((f) => (
