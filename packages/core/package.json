@@ -25,6 +25,10 @@
     "./marketing": {
       "types": "./dist/marketing.d.ts",
       "import": "./dist/marketing.js"
+    },
+    "./automation-planning": {
+      "types": "./dist/automation-planning-view.d.ts",
+      "import": "./dist/automation-planning-view.js"
     }
   },
   "scripts": {

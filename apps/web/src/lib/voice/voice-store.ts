@@ -564,6 +564,8 @@ export const useVoiceStore = create<VoiceStoreState>((set, get) => {
         result = await useChatStore.getState().sendMessage(text, {
           requestId: turn.requestId,
           signal: turn.abort.signal,
+          // Phase 18.2 — the server refuses what speech may not start.
+          inputMode: "voice",
         });
       } catch {
         endChat({ ok: false });

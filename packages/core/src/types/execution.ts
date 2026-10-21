@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { Role } from "./common.js";
 import type { ToolResult } from "./tool.js";
+import type { InputMode } from "./voice.js";
 
 export const ToolInvocationSchema = z.object({
   toolId: z.string(),
@@ -82,6 +83,12 @@ export interface ToolExecutionRequest {
    */
   signal?: AbortSignal;
   approvalId?: string;
+  /**
+   * Phase 18.2 — "voice" when the turn that asked for this was spoken. The
+   * executor refuses a tool speech may not start (`voiceToolRefusal`) before
+   * the tool runs, and passes the mode on in the tool's context.
+   */
+  inputMode?: InputMode;
 }
 
 export interface ToolExecutionResult {

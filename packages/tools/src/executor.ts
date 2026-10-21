@@ -13,7 +13,10 @@ import type {
 import {
   APPROVAL_TTL_MS,
   SERVICE_SHUTTING_DOWN_ERROR,
+  VOICE_TOOL_REFUSED_CODE,
   computeParamsHash,
+  voiceConfirmationRefusal,
+  voiceToolRefusal,
 } from "@jarvis/core";
 
 /**
@@ -153,6 +156,26 @@ export class ToolExecutor implements IToolExecutor {
           durationMs: completedAt.getTime() - startedAt.getTime(),
         };
       }
+    }
+
+    // Phase 18.2 — what speech may not start. A turn the session marked as
+    // spoken is refused a tool on the voice list here, before any gate,
+    // approval or tool — whatever the caller's role, and whether or not the
+    // tool would have refused too.
+    const spoken = voiceToolRefusal(tool.id ?? request.toolId, request.inputMode);
+    if (spoken) {
+      const completedAt = new Date();
+      await this.audit(request, executionId, "rejected", startedAt);
+      return {
+        executionId,
+        toolId: request.toolId,
+        status: "permission_denied",
+        result: { success: false, error: spoken, metadata: { toolId: tool.id ?? request.toolId, code: VOICE_TOOL_REFUSED_CODE, status: 403 } },
+        error: spoken,
+        startedAt,
+        completedAt,
+        durationMs: completedAt.getTime() - startedAt.getTime(),
+      };
     }
 
     // Phase 17 — may this caller use the tool at all? Asked before any
@@ -303,6 +326,33 @@ export class ToolExecutor implements IToolExecutor {
       }
 
       if (approvedBound) {
+        // Phase 18.3A — a spoken turn never spends an approval, however the
+        // approval id got here: a spoken "yes", a cached approval for the
+        // same parameters, an id carried over from another turn. It is
+        // refused before the approval is consumed and before the tool runs;
+        // the approval stays as it was, to be carried out on screen. Asking
+        // by voice is unaffected — with no approved approval a spoken turn
+        // still gets a pending one below.
+        const spokenConfirmation = voiceConfirmationRefusal(request.inputMode);
+        if (spokenConfirmation) {
+          const completedAt = new Date();
+          await this.audit(request, executionId, "rejected", startedAt);
+          return {
+            executionId,
+            toolId: request.toolId,
+            status: "permission_denied",
+            approvalId: approvedBound.id,
+            result: {
+              success: false,
+              error: spokenConfirmation,
+              metadata: { toolId: tool.id ?? request.toolId, code: VOICE_TOOL_REFUSED_CODE, status: 403 },
+            },
+            error: spokenConfirmation,
+            startedAt,
+            completedAt,
+            durationMs: completedAt.getTime() - startedAt.getTime(),
+          };
+        }
         approvalIdForExecution = approvedBound.id;
       } else if (rejectedLatest) {
         const completedAt = new Date();
@@ -420,6 +470,7 @@ export class ToolExecutor implements IToolExecutor {
             traceId: request.traceId,
             approvalId: approvalIdForExecution,
             signal: contextSignal,
+            ...(request.inputMode ? { inputMode: request.inputMode } : {}),
           })
           .then(
             (value) => {

@@ -83,6 +83,20 @@ const ALL_REGISTERED_TOOLS = [
   "google.insights",
   "whatsapp.send",
   "n8n.trigger",
+  // Phase 18.2 — the n8n workflow library, registered on every deployment
+  // (its service answers "n8n is not configured" where it is not).
+  "automation.library.search",
+  "automation.library.status",
+  "automation.library.sync",
+  // Phase 18.3B — inspection and proposals (the change itself is page-only).
+  "automation.library.inspect",
+  "automation.library.allowlist.propose",
+  // Phase 18.4 — planning: match the library, and drafts kept in JARVIS.
+  "automation.workflow.match",
+  "automation.draft.create",
+  "automation.draft.revise",
+  "automation.draft.get",
+  "automation.draft.list",
   // Integration management — registered by the container whenever
   // JARVIS_ENCRYPTION_KEY is set, i.e. whenever a credential can be stored at
   // all. These are the JARVIS arm of the two-path integration contract.
@@ -285,7 +299,26 @@ describe("Sprint 6 — per-agent tool definition filtering", () => {
 
     // One tool that can do something, plus the read-only integration lookups
     // that let it answer "is n8n still connected?" without guessing.
-    expect(actingOnly(defs)).toEqual(["n8n-trigger"]);
+    // Phase 18.2 — and the workflow library: two reads and a sync that only
+    // refreshes JARVIS's own catalog. None of them acts on a workflow.
+    const library = defs.filter((n) => n.startsWith("automation-library-"));
+    expect(library).toEqual([
+      "automation-library-search",
+      "automation-library-status",
+      "automation-library-sync",
+      "automation-library-inspect",
+      "automation-library-allowlist-propose",
+    ]);
+    // Phase 18.4 — planning: a read and drafts that write only JARVIS's own store.
+    const planning = defs.filter((n) => n.startsWith("automation-workflow-") || n.startsWith("automation-draft-"));
+    expect(planning).toEqual([
+      "automation-workflow-match",
+      "automation-draft-create",
+      "automation-draft-revise",
+      "automation-draft-get",
+      "automation-draft-list",
+    ]);
+    expect(actingOnly(defs).filter((n) => !library.includes(n) && !planning.includes(n))).toEqual(["n8n-trigger"]);
     expect(defs).not.toContain("whatsapp-send");
     expect(defs).not.toContain("meta-insights");
     // It can READ integration state; it cannot change anyone's connection.

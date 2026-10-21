@@ -16,6 +16,7 @@
 
 import type { AgentPolicy, ITool, ToolRegistry } from "@jarvis/core";
 import {
+  VOICE_REFUSED_TOOLS,
   BROWSER_READ_TOOL_IDS,
   BROWSER_ACTION_TOOL_IDS,
   MARKETING_PUBLISH_TOOL_IDS,
@@ -478,7 +479,30 @@ const ANALYTICS_POLICY = policy({
 const AUTOMATION_POLICY = policy({
   agentId: AGENT_IDS.automation,
   domain: "automation",
-  allowedTools: ["n8n.trigger", ...INTEGRATION_READ_TOOLS, ...CAPABILITY_TOOLS, ...SELF_TOOLS],
+  allowedTools: [
+    "n8n.trigger",
+    // Phase 18.2 — the workflow library, through the one AutomationLibraryService.
+    // Observations only: none of them activates, edits or runs a workflow.
+    "automation.library.search",
+    "automation.library.status",
+    "automation.library.sync",
+    // Phase 18.3B — inspect one entry (read-only) and propose it for the
+    // trigger allow-list (an approval; nothing changes). The change itself,
+    // automation.library.allowlist.add, is on no agent's allowlist.
+    "automation.library.inspect",
+    "automation.library.allowlist.propose",
+    // Phase 18.4 — planning: match a request against the library (read-only)
+    // and keep drafts in JARVIS (its own store). None reaches n8n, none needs
+    // an approval, and nothing deploys, activates or runs a draft.
+    "automation.workflow.match",
+    "automation.draft.create",
+    "automation.draft.revise",
+    "automation.draft.get",
+    "automation.draft.list",
+    ...INTEGRATION_READ_TOOLS,
+    ...CAPABILITY_TOOLS,
+    ...SELF_TOOLS,
+  ],
   requiredPermissions: ["read", "write"],
   writesRequireApproval: true,
   clientSelectable: true,
@@ -603,13 +627,20 @@ export const AGENT_POLICIES: Readonly<Record<string, AgentPolicy>> = Object.free
  * may call, except the MCP group. An MCP tool is granted for a conversation
  * with the general assistant, with a person present; S8 v1 keeps it out of
  * unattended, scheduled work.
+ *
+ * Phase 18.3A — and except the tools speech may not start
+ * (`VOICE_REFUSED_TOOLS`). A task can be scheduled by a spoken turn and run
+ * later, when that turn — and its input mode — is gone; such a tool must not
+ * be reachable through a path that cannot carry the mode with it. They stay
+ * reachable from their own surfaces, where the mode is present.
  */
 export function schedulableToolIds(): ReadonlySet<string> {
   const mcp = new Set(MCP_READ_TOOLS);
+  const spokenNever = new Set(Object.keys(VOICE_REFUSED_TOOLS));
   return new Set(
     Object.values(AGENT_POLICIES)
       .flatMap((policy) => [...policy.allowedTools])
-      .filter((id) => !mcp.has(id))
+      .filter((id) => !mcp.has(id) && !spokenNever.has(id))
   );
 }
 

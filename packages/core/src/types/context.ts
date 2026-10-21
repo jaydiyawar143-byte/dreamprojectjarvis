@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { RoleZodSchema } from "./common.js";
+import { InputModeSchema } from "./voice.js";
 
 export const AuthContextSchema = z.object({
   userId: z.string(),
@@ -34,6 +35,12 @@ export const SessionContextSchema = z.object({
    * personal conversation, in which no project memory is used or learned.
    */
   projectId: z.string().optional(),
+  /**
+   * Phase 18.2 — "voice" when this turn was spoken. Set by the chat route
+   * only; carried to the tool execution request so the execution layer can
+   * refuse what speech may not start. Absent: typed.
+   */
+  inputMode: InputModeSchema.optional(),
 });
 
 export type SessionContext = z.infer<typeof SessionContextSchema>;

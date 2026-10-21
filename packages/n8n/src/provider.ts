@@ -1,3 +1,4 @@
+import type { N8nWorkflowTriggerTarget } from "./trigger-target.js";
 import type { N8nTriggerResult } from "@jarvis/core";
 import {
   createN8nHttpClient,
@@ -72,6 +73,8 @@ export interface N8nApiProvider {
   listExecutions(params?: N8nListExecutionsParams): Promise<N8nApiResult<N8nExecutionPage>>;
   /** Reads one execution's status by its n8n id. */
   getExecution(id: string): Promise<N8nApiResult<N8nRemoteExecution>>;
+  /** Stage 18.3B — one workflow's webhook trigger target, validated, and nothing else. */
+  getWorkflowTriggerTarget(id: string): Promise<N8nApiResult<N8nWorkflowTriggerTarget>>;
 }
 
 export interface N8nCloudProviderConfig {
@@ -127,6 +130,10 @@ export class N8nCloudProvider implements N8nProvider, N8nApiProvider {
 
   getExecution(id: string): Promise<N8nApiResult<N8nRemoteExecution>> {
     return this.api.getExecution(id);
+  }
+
+  getWorkflowTriggerTarget(id: string): Promise<N8nApiResult<N8nWorkflowTriggerTarget>> {
+    return this.api.getWorkflowTriggerTarget(id);
   }
 
   async triggerWorkflow(

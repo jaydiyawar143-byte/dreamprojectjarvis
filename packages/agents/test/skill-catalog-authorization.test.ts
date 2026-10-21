@@ -52,6 +52,11 @@ const IMPLEMENTATION_SOURCE: string = [
   // Phase 15 — the marketing tool ids are declared once, in the core contract
   // (MARKETING_TOOL_IDS); marketing-tools.ts builds from it.
   new URL("../../core/src/types/marketing.ts", import.meta.url),
+  // Phase 18.2 — the workflow library tool ids are declared once, in the core
+  // contract (AUTOMATION_LIBRARY_TOOL_IDS); automation-library-tools.ts builds from it.
+  new URL("../../core/src/automation-library.ts", import.meta.url),
+  // Phase 18.4 — the planning tool ids, likewise (AUTOMATION_PLANNING_TOOL_IDS).
+  new URL("../../core/src/automation-planning.ts", import.meta.url),
 ]
   .map((u) => readFileSync(u, "utf8"))
   .join(" ");

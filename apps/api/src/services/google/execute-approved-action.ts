@@ -52,15 +52,22 @@ export interface ExecuteApprovedGoogleWriteInput {
   userId: string;
   conversationId?: string;
   traceId?: string;
+  /**
+   * Phase 18.3A — whether the turn that is confirming was spoken. REQUIRED, so
+   * every caller states it: the chat route from the turn's server-established
+   * input mode, the confirmation endpoint from what the confirmation says.
+   * Until 18.3A this helper passed `false` for every caller, so a spoken "yes"
+   * in chat reached the Google write service as not-voice.
+   */
+  voice: boolean;
 }
 
 /**
  * Execute an approved Google write and report it as a tool execution.
  *
- * `voice: false` is passed explicitly. The service refuses a voice context
- * outright, and stating it here keeps that visible at the call site rather than
- * relying on a default — a spoken "yes" must never be able to spend an
- * approval, and this is one of the places that could otherwise let it.
+ * The caller's `voice` is passed through unchanged. The service refuses a voice
+ * context outright — a spoken "yes" must never be able to spend an approval —
+ * before the approval is read, consumed or the provider is called.
  */
 export async function executeApprovedGoogleWrite(
   writes: GoogleWriteService | null,
@@ -100,7 +107,7 @@ export async function executeApprovedGoogleWrite(
     userId: input.userId,
     source: "jarvis",
     ...(input.traceId ? { traceId: input.traceId } : {}),
-    voice: false,
+    voice: input.voice,
   });
 
   if (!result.success) {

@@ -31,7 +31,7 @@
 // reach — no more. The extra allowlist check below narrows that further.
 // ---------------------------------------------------------------------------
 
-import type { Role, ToolExecutionResult } from "@jarvis/core";
+import type { InputMode, Role, ToolExecutionResult } from "@jarvis/core";
 import type { IToolExecutor } from "@jarvis/core";
 import type { TaskRecord } from "@jarvis/db";
 import type { TaskService } from "./task-service.js";
@@ -53,6 +53,8 @@ export interface TaskExecutionRequest {
   agentId?: string;
   conversationId?: string;
   ipAddress?: string;
+  /** Phase 18.3A — the asking turn's input mode; absent for the REST endpoint and the scheduler. */
+  inputMode?: InputMode;
 }
 
 /** Why a task could not be executed, before the executor was ever reached. */
@@ -192,6 +194,7 @@ export class TaskExecutionService {
       ...(request.agentId ? { agentId: request.agentId } : {}),
       ...(request.conversationId ? { conversationId: request.conversationId } : {}),
       ...(request.ipAddress ? { ipAddress: request.ipAddress } : {}),
+      ...(request.inputMode ? { inputMode: request.inputMode } : {}),
     });
 
     // 6. Settle. A run that did not produce a successful result is a failure,

@@ -225,10 +225,16 @@ export const SKILL_CATALOG: readonly SkillDefinition[] = [
     id: "productivity",
     title: "Tasks and productivity",
     summary: "Keep track of what you have to do and let your automations run.",
-    prefixes: ["tasks.", "n8n."],
+    // Phase 18.2 — `automation.library.` is the n8n workflow library: what the
+    // organization's n8n instance holds, observed, never run from here.
+    // Phase 18.4 — `automation.workflow.` matches a request against that
+    // library; `automation.draft.` keeps workflow drafts in JARVIS.
+    prefixes: ["tasks.", "n8n.", "automation.library.", "automation.workflow.", "automation.draft."],
     phrases: [
       { requires: "tasks.list", text: "go over your task list" },
       { requires: "n8n.trigger", text: "kick off one of your n8n workflows" },
+      { requires: "automation.library.search", text: "look through the workflows on your n8n instance" },
+      { requires: "automation.workflow.match", text: "find a workflow you already have for a new automation, or draft one" },
     ],
   },
   {

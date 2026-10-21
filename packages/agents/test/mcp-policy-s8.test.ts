@@ -9,7 +9,7 @@
 // in apps/api/test/mcp-wiring-s8.test.ts.)
 import { readFileSync } from "node:fs";
 import { describe, it, expect } from "vitest";
-import { MCP_MANIFEST, mcpReadToolIds } from "@jarvis/core";
+import { MCP_MANIFEST, VOICE_REFUSED_TOOLS, mcpReadToolIds } from "@jarvis/core";
 import { AGENT_IDS, AGENT_POLICIES, MCP_READ_TOOLS, isToolAllowed, schedulableToolIds } from "../src/agent-policy.js";
 
 const SOURCE = readFileSync(new URL("../src/agent-policy.ts", import.meta.url), "utf8");
@@ -66,7 +66,9 @@ describe("the MCP grant", () => {
       "google-ads-agent": 40,
       "knowledge-agent": 5,
       "analytics-agent": 22,
-      "automation-agent": 13,
+      // Phase 18.2 — plus the three workflow library tools; 18.3B inspect and propose;
+      // 18.4 match and the four draft tools.
+      "automation-agent": 23,
       "communication-agent": 13,
       "browser-agent": 15,
       "location-agent": 20,
@@ -76,11 +78,18 @@ describe("the MCP grant", () => {
 });
 
 describe("scheduled work", () => {
-  it("may reach everything any agent may call — except the MCP group", () => {
+  it("may reach everything any agent may call — except the MCP group and what speech may not start", () => {
+    // Phase 18.3A — a task can outlive the spoken turn that scheduled it, so
+    // the tools on the voice list are not task tools (see schedulableToolIds).
+    const spokenNever = Object.keys(VOICE_REFUSED_TOOLS);
     const union = Object.values(AGENT_POLICIES).flatMap((policy) => [...policy.allowedTools]);
-    const expected = new Set(union.filter((id) => !(MCP_READ_TOOLS as readonly string[]).includes(id)));
+    const expected = new Set(
+      union.filter((id) => !(MCP_READ_TOOLS as readonly string[]).includes(id) && !spokenNever.includes(id))
+    );
     const schedulable = schedulableToolIds();
     expect([...schedulable].sort()).toEqual([...expected].sort());
     for (const id of MCP_READ_TOOLS) expect(schedulable.has(id), id).toBe(false);
+    expect(spokenNever).toEqual(["automation.library.sync"]);
+    for (const id of spokenNever) expect(schedulable.has(id), id).toBe(false);
   });
 });

@@ -64,7 +64,11 @@ const ACTION_VERBS =
   // Each is an order when it opens a clause, and none is a "think about it"
   // verb. "post" is deliberately NOT here: "Post-campaign analysis shows…"
   // opens with it and instructs nothing — the word for that order is publish.
-  "save|schedule|reschedule|move|mark";
+  "save|schedule|reschedule|move|mark|" +
+  // Phase 18.2 — the workflow library's imperative. "Sync the n8n library"
+  // and "refresh the workflow catalog" are orders; without these words they
+  // were read as statements and the sync was refused as not requested.
+  "sync|synchronize|synchronise|resync|refresh";
 
 /**
  * Information-request framings that must beat a coincidental instruction:

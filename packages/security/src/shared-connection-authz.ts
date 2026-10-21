@@ -59,6 +59,8 @@ import { TENANT_ROLES } from "@jarvis/core";
  *   status       see that it exists for your Organization and whether it works
  *   diagnostics  see the operator's identifiers, details, errors and usage
  *   test         run its connection test, which spends the shared credential
+ *   sync         start a catalog synchronization through it (Phase 18), which
+ *                reads the provider page after page on the shared credential
  */
 export const SHARED_CONNECTION_OPERATIONS = [
   "read",
@@ -67,6 +69,7 @@ export const SHARED_CONNECTION_OPERATIONS = [
   "status",
   "diagnostics",
   "test",
+  "sync",
 ] as const;
 
 export type SharedConnectionOperation = (typeof SHARED_CONNECTION_OPERATIONS)[number];
@@ -87,6 +90,8 @@ const OPERATION_SET: ReadonlySet<string> = new Set<string>(SHARED_CONNECTION_OPE
 //   • approve               — owner and admin only, and never one's own write.
 //   • diagnostics, test     — owner and admin only: identifiers and the
 //                             credential's quota are the operator side.
+//   • sync                  — owner and admin only, for the reason `test` is:
+//                             a sync spends the credential's quota (Phase 18).
 // ---------------------------------------------------------------------------
 
 const EVERY_PERMISSION: readonly SharedConnectionPermission[] = SHARED_CONNECTION_OPERATIONS.map(

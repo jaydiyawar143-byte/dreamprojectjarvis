@@ -56,6 +56,11 @@ export interface IntegrationCommandPort {
       source: "jarvis";
       traceId?: string;
       role?: "owner" | "admin" | "member" | "viewer";
+      /**
+       * Phase 18.3A — true when the turn that asked was spoken (the executor's
+       * `inputMode`). The service refuses an external write for it.
+       */
+      voice?: boolean;
     }
   ): Promise<IntegrationCommandResult>;
 }
@@ -124,6 +129,9 @@ abstract class IntegrationTool extends BaseTool {
       userId: context.userId,
       source: "jarvis",
       ...(context.traceId ? { traceId: context.traceId } : {}),
+      // Phase 18.3A — the turn's server-established mode, as the service's
+      // own voice flag: it refuses an external write for a spoken turn.
+      ...(context.inputMode === "voice" ? { voice: true } : {}),
     });
 
     if (!result.ok) {
@@ -300,6 +308,7 @@ export class TestIntegrationConnectionTool extends IntegrationTool {
         userId: context.userId,
         source: "jarvis",
         ...(context.traceId ? { traceId: context.traceId } : {}),
+        ...(context.inputMode === "voice" ? { voice: true } : {}),
       }
     );
 

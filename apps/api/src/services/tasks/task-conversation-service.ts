@@ -27,7 +27,7 @@
 // through to the existing path.
 // ---------------------------------------------------------------------------
 
-import { JARVIS_TASK_CREATOR, type Role } from "@jarvis/core";
+import { JARVIS_TASK_CREATOR, type InputMode, type Role } from "@jarvis/core";
 import type { TaskService } from "./task-service.js";
 import type { TaskPlannerService } from "./task-planner-service.js";
 import type { TaskExecutionService } from "./task-execution-service.js";
@@ -48,6 +48,14 @@ export interface WorkTurnInput {
   traceId?: string;
   conversationId?: string;
   ipAddress?: string;
+  /**
+   * Phase 18.3A — the turn's server-established input mode, carried to the
+   * executor for work that runs now: a spoken request never spends an
+   * approval or starts what speech may not. (Tools speech may not start are
+   * not task tools at all, so a scheduled run — which outlives the turn —
+   * cannot reach them either.)
+   */
+  inputMode?: InputMode;
 }
 
 export interface WorkTurnResult {
@@ -191,6 +199,7 @@ export class TaskConversationService {
       ...(input.traceId ? { traceId: input.traceId } : {}),
       ...(input.conversationId ? { conversationId: input.conversationId } : {}),
       ...(input.ipAddress ? { ipAddress: input.ipAddress } : {}),
+      ...(input.inputMode ? { inputMode: input.inputMode } : {}),
     });
 
     if (!outcome.ok) {

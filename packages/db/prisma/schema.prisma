@@ -80,6 +80,13 @@ model User {
   approvals     Approval[] @relation("ApprovalRequester")
   // Phase 17 — approvals this account decided for someone else.
   decidedApprovals Approval[] @relation("ApprovalDecider")
+  // Phase 18 — library synchronizations this account asked for.
+  automationLibraryRuns AutomationLibrarySyncRun[] @relation("AutomationLibrarySyncRequester")
+  // Phase 18.2 — continue-until-complete chains this account started.
+  automationLibraryChains AutomationLibrarySyncChain[] @relation("AutomationLibraryChainRequester")
+  // Phase 18.4 — workflow drafts and draft versions this account wrote.
+  automationDrafts        AutomationDraft[]        @relation("AutomationDraftAuthor")
+  automationDraftVersions AutomationDraftVersion[] @relation("AutomationDraftVersionAuthor")
   auditLogs     AuditLog[]
   settings      UserSetting[]
   refreshTokens RefreshToken[]
@@ -432,12 +439,18 @@ model N8nWorkflow {
   isActive    Boolean  @default(true) @map("is_active")
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
+  /// Phase 18.3B — the Automation Library entry this row was added from
+  /// ("<instance key>:<n8n id>"), when it was; null for any other row.
+  libraryEntryRef  String? @map("library_entry_ref")
+  /// The n8n versionId the approved proposal was bound to.
+  libraryVersionId String? @map("library_version_id")
 
   user       User            @relation(fields: [userId], references: [id], onDelete: Cascade)
   executions N8nExecution[]
 
   @@unique([userId, webhookPath])
   @@index([userId])
+  @@index([userId, libraryEntryRef])
   @@map("N8nWorkflow")
 }
 
@@ -1204,6 +1217,11 @@ model Tenant {
   memberships     TenantMembership[]
   connectorOwners AutomationConnectorOwner[]
   approvals       Approval[]
+  // Phase 18 — the Automation Library: this Organization's catalogs.
+  libraryEntries  AutomationLibraryEntry[]
+  librarySyncs    AutomationLibrarySync[]
+  // Phase 18.4 — workflow drafts: plans in JARVIS, never sent to n8n.
+  automationDrafts AutomationDraft[]
 
   @@map("Tenant")
 }
@@ -1246,4 +1264,251 @@ model AutomationConnectorOwner {
   @@unique([providerId, connector])
   @@index([tenantId])
   @@map("AutomationConnectorOwner")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 18, Stage 18.1 — the Automation Library: a durable catalog of the
+// workflows an n8n instance holds, read from its Public REST API.
+//
+// NOT THE TRIGGER ALLOW-LIST. `N8nWorkflow` above records which workflows an
+// ACCOUNT may trigger (by webhook path) — an outbound security boundary. A
+// library entry records that a workflow was SEEN in the instance. The two are
+// different facts and stay in different tables: a catalog entry never makes a
+// workflow triggerable.
+//
+// SCOPE. A catalog belongs to the Organization that owns the n8n REST
+// connection (`AutomationConnectorOwner`, n8n/rest), for ONE instance:
+// `instance_key` is a hash of the configured base URL, never the URL. Every
+// read and write names all three, so one Organization never sees another's
+// workflows, and pointing the server at another instance starts another
+// catalog.
+//
+// WHAT IS STORED. Listing metadata only — id, name, active state, n8n's own
+// timestamps and version id, tag names, node TYPES and count — never a node's
+// parameters, a credential, settings, static or pinned data. No secret and no
+// provider error text is stored anywhere here.
+//
+// LIFECYCLE (docs/phases/phase-18.md). A SCAN walks the provider's cursor chain
+// from its first page to its last; it may take several bounded RUNS, each
+// resuming from the checkpoint the last one saved. A page and the checkpoint
+// past it are stored in ONE transaction, fenced by the run's lease. Only a scan
+// whose chain ran out is complete; only then are unseen entries reconciled, and
+// an entry is marked removed — never deleted — after two consecutive complete
+// scans without it.
+//
+// Additive: three new tables and one enum; no existing column changes.
+// ---------------------------------------------------------------------------
+
+enum AutomationLibraryRunStatus {
+  RUNNING
+  PARTIAL
+  COMPLETE
+  FAILED
+}
+
+model AutomationLibraryEntry {
+  id               String    @id @default(cuid())
+  tenantId         String    @map("tenant_id")
+  providerId       String    @map("provider_id")
+  instanceKey      String    @map("instance_key")
+  /// The provider's own workflow id — the stable handle.
+  externalId       String    @map("external_id")
+  name             String
+  /// Lower-cased name, tags and node types, for search.
+  searchText       String    @map("search_text")
+  active           Boolean
+  remoteCreatedAt  DateTime? @map("remote_created_at")
+  remoteUpdatedAt  DateTime? @map("remote_updated_at")
+  versionId        String?   @map("version_id")
+  /// Tag names; null when the listing did not say.
+  tags             Json?
+  /// Node types; null when the listing carried no nodes.
+  nodeTypes        Json?     @map("node_types")
+  nodeCount        Int?      @map("node_count")
+  /// SHA-256 of the stored listing metadata.
+  fingerprint      String
+  /// The surface that observed it.
+  source           String    @default("rest")
+  firstSeenAt      DateTime  @map("first_seen_at")
+  lastSeenAt       DateTime  @map("last_seen_at")
+  lastSeenScanId   String    @map("last_seen_scan_id")
+  /// When the fingerprint last changed (first seen, or a changed listing).
+  contentChangedAt DateTime  @map("content_changed_at")
+  /// Consecutive complete scans this entry was missing from; 0 once seen again.
+  missedScans      Int       @default(0) @map("missed_scans")
+  missingSince     DateTime? @map("missing_since")
+  /// Set after consecutive complete scans without it. The row is never deleted.
+  removedAt        DateTime? @map("removed_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, providerId, instanceKey, externalId])
+  @@index([tenantId, providerId, instanceKey, name])
+  @@index([tenantId, providerId, instanceKey, lastSeenScanId])
+  @@map("AutomationLibraryEntry")
+}
+
+// One per catalog: the open scan's checkpoint, the last complete scan, and the
+// lease that keeps two runs off the same catalog.
+model AutomationLibrarySync {
+  id                  String    @id @default(cuid())
+  tenantId            String    @map("tenant_id")
+  providerId          String    @map("provider_id")
+  instanceKey         String    @map("instance_key")
+  /// The open scan; null when none is open (the next run starts one).
+  scanId              String?   @map("scan_id")
+  /// The provider's cursor for the scan's next page — the resume point. Never returned to a client.
+  scanCursor          String?   @map("scan_cursor")
+  scanPageSize        Int?      @map("scan_page_size")
+  scanPages           Int       @default(0) @map("scan_pages")
+  scanRecords         Int       @default(0) @map("scan_records")
+  /// SHA-256 of every cursor requested in the open scan, for cycle detection.
+  scanCursorTrail     String[]  @default([]) @map("scan_cursor_trail")
+  scanStartedAt       DateTime? @map("scan_started_at")
+  lastCompleteScanId  String?   @map("last_complete_scan_id")
+  lastCompleteAt      DateTime? @map("last_complete_at")
+  lastCompleteRecords Int?      @map("last_complete_records")
+  /// The run that holds the lease, and until when.
+  leaseOwner          String?   @map("lease_owner")
+  leaseExpiresAt      DateTime? @map("lease_expires_at")
+  /// Phase 18.2 — the continue-until-complete chain that holds the catalog, if any.
+  activeChainId       String?   @map("active_chain_id")
+  /// The holding chain's last sign of life (refreshed between runs and when a run releases the lease).
+  chainHeartbeatAt    DateTime? @map("chain_heartbeat_at")
+  createdAt           DateTime  @default(now()) @map("created_at")
+  updatedAt           DateTime  @updatedAt @map("updated_at")
+
+  tenant Tenant                       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  runs   AutomationLibrarySyncRun[]
+  chains AutomationLibrarySyncChain[]
+
+  @@unique([tenantId, providerId, instanceKey])
+  @@map("AutomationLibrarySync")
+}
+
+enum AutomationLibraryChainStatus {
+  RUNNING
+  COMPLETE
+  STOPPED
+  INTERRUPTED
+}
+
+/// Phase 18.2 — one continue-until-complete request: bounded runs of one scan,
+/// chained until the scan completes or a limit or a refusal stops them. Counts,
+/// limits and stable codes only.
+model AutomationLibrarySyncChain {
+  id              String                       @id
+  syncId          String                       @map("sync_id")
+  requestedById   String?                      @map("requested_by_id")
+  /// The client's key for one click; a retry with it returns this chain.
+  idempotencyKey  String?                      @map("idempotency_key")
+  status          AutomationLibraryChainStatus
+  stopCode        String?                      @map("stop_code")
+  failureCode     String?                      @map("failure_code")
+  runsStarted     Int                          @default(0) @map("runs_started")
+  pagesFetched    Int                          @default(0) @map("pages_fetched")
+  recordsObserved Int                          @default(0) @map("records_observed")
+  maxRuns         Int                          @map("max_runs")
+  maxPages        Int                          @map("max_pages")
+  deadlineAt      DateTime                     @map("deadline_at")
+  startedAt       DateTime                     @map("started_at")
+  heartbeatAt     DateTime                     @map("heartbeat_at")
+  finishedAt      DateTime?                    @map("finished_at")
+
+  sync        AutomationLibrarySync      @relation(fields: [syncId], references: [id], onDelete: Cascade)
+  requestedBy User?                      @relation("AutomationLibraryChainRequester", fields: [requestedById], references: [id], onDelete: SetNull)
+  chainRuns   AutomationLibrarySyncRun[]
+
+  @@unique([syncId, requestedById, idempotencyKey])
+  @@index([syncId, startedAt])
+  @@map("AutomationLibrarySyncChain")
+}
+
+// One bounded run of a scan. Failure is a stable code; its sentence is fixed
+// in @jarvis/core — no provider text is stored.
+model AutomationLibrarySyncRun {
+  id               String                     @id
+  syncId           String                     @map("sync_id")
+  scanId           String                     @map("scan_id")
+  requestedById    String?                    @map("requested_by_id")
+  status           AutomationLibraryRunStatus
+  /// Continued an open scan rather than starting one.
+  resumed          Boolean                    @default(false)
+  pagesFetched     Int                        @default(0) @map("pages_fetched")
+  recordsObserved  Int                        @default(0) @map("records_observed")
+  recordsCreated   Int                        @default(0) @map("records_created")
+  recordsUpdated   Int                        @default(0) @map("records_updated")
+  recordsUnchanged Int                        @default(0) @map("records_unchanged")
+  recordsRejected  Int                        @default(0) @map("records_rejected")
+  markedMissing    Int                        @default(0) @map("marked_missing")
+  markedRemoved    Int                        @default(0) @map("marked_removed")
+  failureCode      String?                    @map("failure_code")
+  startedAt        DateTime                   @map("started_at")
+  heartbeatAt      DateTime                   @map("heartbeat_at")
+  finishedAt       DateTime?                  @map("finished_at")
+  /// Phase 18.2 — the chain this run belongs to; null for a single run.
+  chainId          String?                    @map("chain_id")
+
+  sync        AutomationLibrarySync       @relation(fields: [syncId], references: [id], onDelete: Cascade)
+  requestedBy User?                       @relation("AutomationLibrarySyncRequester", fields: [requestedById], references: [id], onDelete: SetNull)
+  chain       AutomationLibrarySyncChain? @relation(fields: [chainId], references: [id], onDelete: SetNull)
+
+  @@index([syncId, startedAt])
+  @@index([chainId])
+  @@map("AutomationLibrarySyncRun")
+}
+
+/// Phase 18.4 — a workflow draft: a plan held in JARVIS, never sent to n8n.
+/// It belongs to the Organization that owns the n8n connection, for one
+/// instance, like the library catalog it is drafted against.
+model AutomationDraft {
+  id              String   @id @default(cuid())
+  tenantId        String   @map("tenant_id")
+  providerId      String   @map("provider_id")
+  instanceKey     String   @map("instance_key")
+  /// "new" or "customization".
+  kind            String
+  title           String
+  /// A customization's source catalog entry and the version it was drafted from.
+  sourceEntryId   String?  @map("source_entry_id")
+  sourceVersionId String?  @map("source_version_id")
+  /// The newest version. A revision is stored only while this is still the version it was based on.
+  latestVersion   Int      @default(1) @map("latest_version")
+  /// SHA-256 of the author and the first version's content: the same request twice is one draft.
+  createKey       String   @map("create_key")
+  createdById     String?  @map("created_by_id")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  tenant    Tenant                   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  createdBy User?                    @relation("AutomationDraftAuthor", fields: [createdById], references: [id], onDelete: SetNull)
+  versions  AutomationDraftVersion[]
+
+  @@unique([tenantId, providerId, instanceKey, createKey])
+  @@index([tenantId, providerId, instanceKey, updatedAt])
+  @@map("AutomationDraft")
+}
+
+/// One version of a draft. Immutable: PostgreSQL refuses an UPDATE of any of
+/// its columns (only an author's deletion may clear created_by_id).
+model AutomationDraftVersion {
+  id          String   @id @default(cuid())
+  draftId     String   @map("draft_id")
+  version     Int
+  /// The draft's structure and plain answers — no n8n parameter, credential, expression or URL.
+  content     Json
+  /// SHA-256 of the canonical content.
+  contentHash String   @map("content_hash")
+  /// The status when it was saved.
+  status      String
+  createdById String?  @map("created_by_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  draft     AutomationDraft @relation(fields: [draftId], references: [id], onDelete: Cascade)
+  createdBy User?           @relation("AutomationDraftVersionAuthor", fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@unique([draftId, version])
+  @@map("AutomationDraftVersion")
 }

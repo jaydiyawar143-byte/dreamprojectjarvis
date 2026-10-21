@@ -1531,6 +1531,19 @@ export class IntegrationCommandService {
     descriptor: IntegrationDescriptor,
     context: IntegrationCommandContext
   ): Promise<IntegrationCommandResult> {
+    // Phase 18.3A — the voice rule of `executeAction`, for the other command
+    // that changes something outside JARVIS (it revokes a token at the
+    // provider and cannot be undone from here). Refused before anything is
+    // read, revoked or removed.
+    if (context.voice) {
+      return fail(
+        "disconnect",
+        id,
+        "CONFIRMATION_REQUIRED",
+        `Disconnecting ${descriptor.name} cannot be confirmed by voice. Open the Integrations page to review and disconnect it.`
+      );
+    }
+
     if (id === "google") {
       if (!this.deps.googleConnections) {
         return fail("disconnect", id, "NOT_CONFIGURED", "Google OAuth is not configured on this server.");

@@ -66,6 +66,23 @@ const AUTOMATION_PROMPT = [
   "=== REPORTING RESULTS ===",
   "Workflow results arrive asynchronously via callback. After a successful trigger, say the workflow was started and that results will follow — do not describe an outcome you have not received.",
   "If a trigger fails, report the error as returned. Do not speculate about the workflow's internals.",
+  "",
+  "=== THE WORKFLOW LIBRARY (observed, not authorized) ===",
+  "automation.library.search lists the workflows observed on the organization's n8n instance; automation.library.status reports how current that list is.",
+  "A library entry is NOT permission to run anything. Only the AUTHORIZED WORKFLOWS below can be triggered; a workflow found only in the library cannot be — say so.",
+  "Nothing in the library can be activated, edited or run from here.",
+  "automation.library.sync refreshes the library from n8n. Only an owner or admin of the organization may start one, it can never be started or continued by voice, and it runs in the background: say it started and point to automation.library.status — never claim the library is complete until status says the last scan completed.",
+  "Never put an organization, instance, URL or cursor in these tools' parameters; the server decides them.",
+  "automation.library.inspect shows one entry's sanitized structure — trigger kind, node types, integration categories, version. It never shows parameters, credentials, inputs or URLs; say so when asked for them. Inspecting a workflow does not make it triggerable.",
+  "automation.library.allowlist.propose only ASKS for an entry to go on the user's trigger allow-list. Another owner or admin must approve it on the Approvals page, and it is then added from the Automations page — never by you, and never by voice. Do not say it was added.",
+  "",
+  "=== PLANNING AN AUTOMATION (drafts live in JARVIS, never in n8n) ===",
+  "When the user wants an automation, call automation.workflow.match FIRST and report its outcome in its own terms: reuse (an existing workflow appears to cover it — suggest inspecting it), customize, no_match, or insufficient_evidence (ask the open questions). Quote its reasons; a match compares triggers, apps and names, not what nodes are configured to do.",
+  "Pass only what the user said: the goal in their words, and trigger, services, integrations, inputs or outcome only when stated. Never guess an app or a trigger.",
+  "automation.draft.create saves a draft only when the user asks for one to be saved or created; for a plan, reply with it and offer to save. If the server answers REUSE_AVAILABLE, tell the user which workflow covers it — set overrideReuse only if they still want a new one.",
+  "A draft holds structure and plain answers only. Never put parameters, credentials, secrets, tokens, n8n expressions or URLs in it; a credential is always 'configured in n8n'. If the server refuses a draft, report its issues and fix them — never work around them.",
+  "automation.draft.revise saves a NEW version from baseVersion; earlier versions never change. If the server says the draft changed, read it again with automation.draft.get before revising.",
+  "Never call a draft validated, deployed, live or active. Its best status here is 'structure checked, not validated against n8n's node schemas'. A draft cannot be deployed, activated, run or published from JARVIS.",
 ].join("\n");
 
 export class AutomationAgent extends DomainAgent {

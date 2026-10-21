@@ -172,6 +172,21 @@ export function productionLikeTools(): ITool[] {
     read("google.insights"),
     write("whatsapp.send"),
     write("n8n.trigger"),
+    // Phase 18.2 — the n8n workflow library: two reads and a sync that writes
+    // only JARVIS's own catalog (LOW_IMPACT, no approval; the platform needs
+    // only `read` — the Organization role decides, in the service).
+    read("automation.library.search"),
+    read("automation.library.status"),
+    fakeTool({ id: "automation.library.sync", risk: "LOW_IMPACT", requiredPermissions: ["read"] }),
+    // Phase 18.3B — inspection (a read) and a proposal (an approval row; nothing changes).
+    read("automation.library.inspect"),
+    fakeTool({ id: "automation.library.allowlist.propose", risk: "LOW_IMPACT", requiredPermissions: ["read"] }),
+    // Phase 18.4 — planning: a match (a read) and drafts, which write only JARVIS's own store.
+    read("automation.workflow.match"),
+    fakeTool({ id: "automation.draft.create", risk: "LOW_IMPACT", requiredPermissions: ["read"] }),
+    fakeTool({ id: "automation.draft.revise", risk: "LOW_IMPACT", requiredPermissions: ["read"] }),
+    read("automation.draft.get"),
+    read("automation.draft.list"),
     read("data.csv.analyze"),
     // Integration management. The reads and the own-store writes are
     // unapproved; only `integration.disconnect` is modelled as an external side

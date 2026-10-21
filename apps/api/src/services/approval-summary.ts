@@ -158,6 +158,19 @@ export function buildApprovalSummary(
         ],
       };
     }
+    // Phase 18.3B — a proposal from the n8n workflow library. Its parameters
+    // are two ids; the approver is told what the change is and is not.
+    case "automation.library.allowlist.add": {
+      const entry = typeof params.entryId === "string" ? params.entryId : "the workflow";
+      return {
+        actionSummary: `Add n8n workflow ${entry} to the requester's trigger allow-list, at the version shown. Nothing in n8n changes and nothing runs; each trigger still needs its own approval.`,
+        targetResource: entry,
+        detailLines: [
+          { label: "Workflow", value: entry },
+          { label: "Version", value: typeof params.versionId === "string" ? params.versionId : "unknown" },
+        ],
+      };
+    }
     default:
       break;
   }

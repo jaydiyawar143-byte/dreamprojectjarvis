@@ -144,6 +144,7 @@ The rest of the marketing tests need no database: `pnpm --filter @jarvis/api exe
 | Memory contracts (Phase 14) | `vitest run memory learning` in `@jarvis/core`, `vitest run memory-tools` in `@jarvis/tools`, `vitest run memory` in `@jarvis/agents` — by file name; those workspaces' other tests are still not gated |
 | Marketing contracts (Phase 15) | `vitest run marketing seo-audit` in `@jarvis/core`, `vitest run marketing-tools` in `@jarvis/tools`, `vitest run marketing-agent` in `@jarvis/agents`, `vitest run page-fetcher` in `@jarvis/browser`, `vitest run page-publisher` in `@jarvis/meta-graph` — by file name, for the same reason as the memory contracts |
 | Shared-connection contracts (Phase 17 hardening) | `vitest run shared-connection` in `@jarvis/tools` and in `@jarvis/agents` — by file name, for the same reason |
+| Automation Library contracts (Phase 18) | `vitest run automation-library` in `@jarvis/core`, `@jarvis/tools` and `@jarvis/agents` (the last two since Stage 18.2) — by file name, for the same reason |
 | Migrations | `pnpm --filter @jarvis/db exec prisma migrate deploy`, against the CI database |
 | PostgreSQL tests | `vitest run` for all of `@jarvis/db`; `vitest run pg.integration` for `@jarvis/memory`; `vitest run pg.integration sprint-1.1d-memory-e2e` for `@jarvis/api` |
 | Memory quality evaluation (Phase 14) | `vitest run memory-quality-eval-p14-pg` in `@jarvis/memory`, against the CI database — its own gate, with the report in the log and a JSON report for the skip check |
@@ -169,6 +170,81 @@ Phase 17 (2026-10-17) added one migration and two database test files — `packa
 
 The Phase 17 multi-business hardening (2026-10-18) added one migration and two database test files — `packages/db/test/shared-connection-approvals-p17-pg.integration.test.ts` and `apps/api/test/shared-connection-hardening-p17-pg.integration.test.ts` — both picked up by the names above, the first also type-checked by `typecheck:tests`; and **one new step**, the shared-connection contracts in the table. It adds gates and changes no existing one. The two database suites never skip quietly: with a database configured that cannot be reached, or with none under `JARVIS_REQUIRE_POSTGRES=1`, they fail. Both — and `phase116a-bridge-pg` — need the deployment-wide `meta/ads` owner row to themselves, and vitest runs files in parallel, so they take a PostgreSQL advisory lock for it first (`apps/api/test/helpers/shared-connection-lock.ts`, `holdSharedConnection`). The same local replay, on a brand-new `pgvector/pgvector:pg16` container with every migration applied from scratch, gave 32 migrations applied; `@jarvis/db` 410/410 (27 files), `@jarvis/memory` 93/93 (9 files), `@jarvis/api` 228/228 (9 files), the evaluation 13/13; the skip check reported 0 not run in all four reports; the new step 11 + 8. Every workspace's tests without a database: 9,682 passed, 0 failed, 633 skipped. Those are local counts, taken on Windows with Node 24 on 2026-10-18; the changed workflow has not run on GitHub yet.
 
+Phase 18, Stage 18.1 (2026-10-19) added one migration and two database test files — `packages/db/test/automation-library-p18-pg.integration.test.ts` (also type-checked by `typecheck:tests`) and `apps/api/test/automation-library-p18-pg.integration.test.ts` — both picked up by the names above, and **one new step**, the Automation Library contracts in the table. It adds gates and changes no existing one. Both database suites fail rather than skip when a configured database cannot be reached or `JARVIS_REQUIRE_POSTGRES=1` is set without one, and neither reaches n8n: the workflow list is a fake. The same local replay, on a brand-new `pgvector/pgvector:pg16` container with every migration applied from scratch, gave 33 migrations applied; `@jarvis/db` 417/417 (28 files), `@jarvis/memory` 93/93 (9 files), `@jarvis/api` 235/235 (10 files), the evaluation 13/13; the skip check reported 0 not run in all four reports; the new step 14/14. Those are local counts, taken on Windows with Node 24 on 2026-10-19; the changed workflow has not run on GitHub yet.
+
+Phase 18, Stage 18.2 (2026-10-20) added:
+- one migration;
+- two database test files, picked up by the names above:
+  - `packages/db/test/automation-library-chain-p18-pg.integration.test.ts`
+    (added to `typecheck:tests`);
+  - `apps/api/test/automation-library-continuation-p18-pg.integration.test.ts`;
+- `@jarvis/tools` and `@jarvis/agents` in the Automation Library step, by file
+  name (`automation-library`).
+
+It changes no existing gate. The same local replay, on a brand-new container,
+gave:
+
+| Step | Result |
+|---|---|
+| Migrations | 34 applied |
+| `@jarvis/db` | 422/422 (29 files) |
+| `@jarvis/memory` | 93/93 (9 files) |
+| `@jarvis/api` | 239/239 (11 files) |
+| The evaluation | 13/13 |
+| The skip check | 0 not run in all four reports |
+| The Automation Library step | core 24/24, tools 8/8, agents 7/7 |
+
+Local counts again; the workflow has not run on GitHub yet.
+
+Phase 18, Stage 18.3B (2026-10-21) added:
+- one migration;
+- one database test file, `packages/db/test/automation-library-allowlist-p18-pg.integration.test.ts`
+  (added to `typecheck:tests`). It assigns `n8n/rest` and refuses to run on
+  a database where that connection is already assigned;
+- contract tests picked up by the existing steps and names: core
+  `automation-library-inspection-p18`, tools
+  `automation-library-allowlist-p18`, n8n `trigger-target-p18`, and api
+  and web tests in their workspaces.
+
+It changes no gate. The same local replay, on a brand-new container, gave:
+
+| Step | Result |
+|---|---|
+| Migrations | 35 applied |
+| `@jarvis/db` | 428/428 (30 files) |
+| `@jarvis/memory` | 93/93 (9 files) |
+| `@jarvis/api` | 239/239 (11 files) |
+| The evaluation | 13/13 |
+| The skip check | 0 not run in all four reports |
+| The Automation Library step | core 32/32, tools 20/20, agents 7/7 |
+
+Local counts; the workflow has not run on GitHub yet.
+
+Phase 18, Stage 18.4 (2026-10-21) added:
+- one migration, with a trigger that refuses an `UPDATE` of a stored draft
+  version;
+- one database test file, `packages/db/test/automation-draft-p18-pg.integration.test.ts`
+  (added to `typecheck:tests`);
+- contract tests picked up by the existing names: core
+  `automation-library-planning-p18` and `automation-library-drafts-p18`,
+  tools `automation-library-planning-p18`, agents
+  `automation-library-planning-p18`, and api and web tests in their
+  workspaces.
+
+It changes no gate. The same local replay, on a brand-new container, gave:
+
+| Step | Result |
+|---|---|
+| Migrations | 36 applied |
+| `@jarvis/db` | 434/434 (31 files) |
+| `@jarvis/memory` | 93/93 (9 files) |
+| `@jarvis/api` | 239/239 (11 files) |
+| The evaluation | 13/13 |
+| The skip check | 0 not run in all four reports |
+| The Automation Library step | core 65/65, tools 26/26, agents 11/11 |
+
+Local counts; the workflow has not run on GitHub yet.
+
 **Protected `main`.** The active GitHub ruleset "Protect main" applies to `main`, the default branch. As the GitHub API reports its rules on 2026-10-17:
 
 - The status check "Lint, typecheck, build and tests" — the job in `ci.yml` — is required, **non-strict**: the branch need not be up to date with `main`, so the merge result of a stale branch is not re-tested.
@@ -180,7 +256,7 @@ From 2026-10-05 this paragraph said a pull request was required, with "Require a
 **Not covered yet:**
 
 - **Most test files outside `apps/api`.** `typecheck:tests` runs in `apps/api` and, for their Phase 17 test files only, in `@jarvis/db` and `@jarvis/security`; other packages' test files are not type-checked. Left out by name until they are fixed or retired: the older test files of `@jarvis/db` (13 errors in seven Phase 10–11 files) and `@jarvis/security` (2 errors in two files), and `apps/api/scripts/phase116b` (23 errors in four files, which no longer match the code they call). (Ledger R-18, the API's own 60 errors, is closed: they were fixed in `1c1c1bd` and CI gates the script.)
-- **The other workspaces' tests** — `@jarvis/agents`, `tools`, `core`, `config` and the provider packages. Run them locally with `pnpm test`. Three slices of them are gated by file name: the memory contracts (Phase 14), the marketing contracts (Phase 15) and the shared-connection contracts (Phase 17). Everything else in those workspaces — including the pinned agent-policy and skill censuses that Phase 15 updated, and the executor's byte pin in `mcp-boundaries-s8` — still runs only locally.
+- **The other workspaces' tests** — `@jarvis/agents`, `tools`, `core`, `config` and the provider packages. Run them locally with `pnpm test`. Four slices of them are gated by file name: the memory contracts (Phase 14), the marketing contracts (Phase 15), the shared-connection contracts (Phase 17) and the Automation Library's contracts (Phase 18 — in `core`, `tools` and `agents`). Everything else in those workspaces — including the pinned agent-policy and skill censuses that Phase 15 updated, and the executor's byte pin in `mcp-boundaries-s8` — still runs only locally.
 - **Secret scanning and dependency audits** — audit finding SEC-7.
 
 **Status, 2026-10-05:** the workflow runs on GitHub on every push to `main` and on pull requests, since its first run on 2026-09-14 (`df1d099`). Run 37306626267, for `68628c0`, passed every step.

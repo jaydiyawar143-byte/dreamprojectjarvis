@@ -39,6 +39,8 @@ interface SendOptions {
   /** Supplied by the caller so its own logs and this turn share an id. */
   requestId?: string;
   signal?: AbortSignal;
+  /** Phase 18.2 — set by the voice pipeline: this turn was spoken. */
+  inputMode?: "voice";
 }
 
 interface ChatState {
@@ -157,7 +159,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // update one instead of opening a duplicate.
     // Phase 14 — a project is named only when this message STARTS a conversation.
     const project = activeConversationId ? null : get().newConversationProjectId;
-    const res = project
+    // A spoken turn says so; a typed one is sent exactly as before.
+    const res = options.inputMode
+      ? await sendChatMessage(
+          content,
+          project ? undefined : (activeConversationId ?? undefined),
+          undefined,
+          useSurfaceStore.getState().activeContextKeys(),
+          options.signal,
+          project ?? undefined,
+          options.inputMode
+        )
+      : project
       ? await sendChatMessage(content, undefined, undefined, useSurfaceStore.getState().activeContextKeys(), options.signal, project)
       : await sendChatMessage(
           content,

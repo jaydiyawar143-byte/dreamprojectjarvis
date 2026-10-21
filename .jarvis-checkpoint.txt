@@ -1,0 +1,14 @@
+JARVIS CHECKPOINT
+Date: 2026-10-21
+Branch: feat/automation-engine-phase-18
+
+Completed: Phase 18.1 - Persistent Automation Library
+Completed: Phase 18.2 - Agent and UI Integration
+Completed: Phase 18.3A - Server-Side Voice Confirmation Security
+Completed: Phase 18.3B - Workflow Inspection and Approval-Gated Allow-List Proposals
+Completed: Phase 18.4 - Intelligent Workflow Matching and Drafts
+
+Next: Stage 18.5 - Discover and validate a trusted n8n node-schema source.
+
+Git status: Phase 18 changes are not yet committed.
+Safety: Do not reset, discard, or overwrite changes. Do not deploy or execute live n8n workflows without explicit approval.

@@ -237,6 +237,98 @@ Document the names; never the values.
 | `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_VERIFY_TOKEN`, `WHATSAPP_APP_SECRET` | WhatsApp Cloud API |
 | `N8N_BASE_URL`, `N8N_API_KEY`, `N8N_CALLBACK_SECRET`, `N8N_TIMEOUT_MS` | n8n REST — list workflows, read executions, trigger |
 
+**The workflow library (Phase 18, Stage 18.1)** uses the same variables. It
+keeps a catalog of the instance's workflows in PostgreSQL, built by bounded,
+resumable runs of n8n's cursor listing (at most 20 pages per run; each run
+continues from the stored checkpoint). It is the owning Organization's: its
+owners and admins start a run (`POST /api/v1/n8n/library/sync`), and every
+member reads the catalog and its status (`GET /api/v1/n8n/library/workflows`,
+`/status`). Only listing metadata is stored — name, active state, n8n's
+timestamps and version id, tag names, node types — never a node's parameters
+or credentials. A catalog entry is not a permission to trigger anything. The
+data model, lifecycle and recovery rules are in `docs/phases/phase-18.md`.
+
+**Since Stage 18.2 the library has both arms of the integration rule.** The
+Automations page and the JARVIS tools reach the one `AutomationLibraryService`
+instance:
+- `automation.library.search` and `automation.library.status`, both
+  `READ_ONLY`;
+- `automation.library.sync`, `LOW_IMPACT`, on the automation agent only.
+
+Both arms use core's request rules, so a sentence and a button get the same
+answer and the same refusal.
+
+**Continue until complete.** An owner or admin may ask for it
+(`POST /sync { continueUntilComplete: true, idempotencyKey? }`). It chains
+bounded runs of one scan until the scan completes:
+- the requester's role and the connection's owner are re-checked before
+  every run;
+- the Organization's budget is reserved for every run;
+- it is capped at 25 runs, 500 pages and 30 minutes;
+- one chain runs per catalog — a repeated request gets the running chain and
+  spends nothing.
+
+**Voice.** A spoken chat turn cannot start or continue a sync: the executor
+refuses it (`VOICE_NOT_ALLOWED`) before the tool runs.
+
+**Inspection and allow-list proposals (Stage 18.3B).** Both arms again reach
+the one service:
+
+| Surface | Page | JARVIS |
+|---|---|---|
+| Inspect one entry: trigger kind, node types, integration categories, version, staleness | `GET /workflows/:entryId/inspection` | `automation.library.inspect`, `READ_ONLY` |
+| Propose it for the requester's trigger allow-list | `POST /workflows/:entryId/allowlist-proposals` | `automation.library.allowlist.propose`, `LOW_IMPACT` |
+| Add an approved proposal | `POST /workflows/:entryId/allowlist-proposals/:approvalId/apply` | none: page only, never by voice |
+
+- **What is shown.** The inspection is built from the stored catalog row, and
+  n8n is not contacted. Input names are never available.
+- **Who may propose.** Owners and admins of the Organization that owns
+  `n8n/rest`.
+- **Who approves.** Another owner or admin approves the proposal on the
+  Approvals page. The requester then adds it, which consumes the approval
+  with the Organization's scope.
+- **The one read of n8n.** Adding is the only step that reads n8n:
+  `GET /api/v1/workflows/{id}`. The n8n client reduces the response to the
+  version and the enabled webhook node's validated path, method and auth
+  mode before anything else sees it. Nothing of it is returned, logged or
+  audited. The path is stored in the per-account allow-list (`N8nWorkflow`),
+  where `n8n.trigger` reads it.
+- **What adding does not do.** It activates, edits, runs and publishes
+  nothing. Each trigger still needs its own approval.
+
+The fields, checks and audit events are in `docs/phases/phase-18.md`,
+Stage 18.3B.
+
+**Workflow matching and drafts (Stage 18.4).** Again both arms reach one
+service:
+
+| Surface | Page (`/api/v1/n8n/planning`) | JARVIS |
+|---|---|---|
+| Compare a request with the library: reuse, customize, no match, or not enough to judge — with each candidate's reasons and gaps | `POST /match` | `automation.workflow.match`, `READ_ONLY` |
+| Save a draft — a new workflow, or a customization bound to a library entry and its version | `POST /drafts` | `automation.draft.create`, `LOW_IMPACT` |
+| Save a new version of a draft | `POST /drafts/:id/versions` | `automation.draft.revise`, `LOW_IMPACT` |
+| Read drafts and their versions | `GET /drafts`, `GET /drafts/:id` | `automation.draft.get`, `.list`, `READ_ONLY` |
+
+- **Matching.** It reads the stored catalog only. It cannot see how a
+  workflow's nodes are configured, so a match is a lead to inspect.
+- **Who.** Members match and read; owners and admins draft.
+- **What a draft is.** A plan kept in JARVIS: never sent to n8n, never an
+  approval, never on the trigger allow-list.
+- **What it holds.** Nodes from a reviewed list of n8n base-package types,
+  their connections, and settings written as questions. Credentials and URLs
+  are left to configure in n8n.
+- **What it never holds.** n8n parameters, credentials, expressions, URLs or
+  secrets.
+- **How far it is checked.** JARVIS has no n8n node schemas, so a draft's
+  configuration is not validated, and the page says so. Its best status is
+  "structure checked".
+- **Versions.** Immutable: a change is a new version.
+- **What it never does.** Nothing here deploys, activates, runs or publishes
+  a workflow.
+
+The matching criteria, draft representation, checks and limits are in
+`docs/phases/phase-18.md`, Stage 18.4.
+
 ### n8n MCP (optional — the second n8n surface)
 
 | Variable | Purpose |
@@ -371,6 +463,19 @@ Plan → Explain → Confirm → Execute → Audit → Verify → Report
   Nothing is confirmed from process memory instead.
 - **A voice session cannot confirm a write at all.** No token is even issued —
   speech is a fine way to ask for a write and not a fine way to authorize one.
+  Since Phase 18.3A this is enforced by the server.
+  - **The mark.** The chat route marks a spoken turn (`inputMode`) from the
+    client's word or from the server's own recent transcript.
+  - **Integration tools** pass it to this service as `voice`. A spoken
+    `disconnect` is now refused here too, before anything is revoked or
+    removed, alongside `executeAction`.
+  - **Further refusals.** The chat route refuses a spoken "yes", the
+    confirmation endpoint refuses a confirmation that says it was spoken, and
+    `ToolExecutor` never spends an approval for a spoken turn.
+  - **Google writes.** `executeApprovedGoogleWrite` hands the Google write
+    service the caller's real `voice`; until 18.3A it always said `false`.
+
+  See `docs/phases/phase-18.md`, Stage 18.3A.
 - Execution then goes through `ToolExecutor`: permission check, approval gate,
   execution journal, audit. The command service *gates*; it never executes.
 

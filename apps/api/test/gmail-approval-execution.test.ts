@@ -35,7 +35,8 @@ const APPROVAL = "ap-1";
 const USER = "user-1";
 
 function input(over: Record<string, unknown> = {}) {
-  return { approvalId: APPROVAL, action: "gmail.createDraft", userId: USER, ...over } as never;
+  // Phase 18.3A — `voice` is required: every caller states it.
+  return { approvalId: APPROVAL, action: "gmail.createDraft", userId: USER, voice: false, ...over } as never;
 }
 
 /** A GoogleWriteService double. Only `execute` is reachable from this path. */
@@ -146,14 +147,18 @@ describe("the approval boundary is not weakened by this path", () => {
     expect(res.error).toMatch(/Approve it/i);
   });
 
-  it("declares voice: false explicitly, so a spoken yes can never spend an approval", async () => {
+  it("forwards the caller's voice unchanged, so a spoken yes reaches the service as voice and is refused there", async () => {
+    // Phase 18.3A — until then this helper declared voice: false for EVERY
+    // caller, the chat route's spoken "yes" included. Now each caller states
+    // it: the on-screen Confirm false, the chat route the turn's own mode.
     const svc = writes({});
     await executeApprovedGoogleWrite(svc, input());
+    await executeApprovedGoogleWrite(svc, input({ voice: true }));
 
     // No cast: the mock now declares its real signature, so this is a
     // WriteContext and `ctx.voice` is checked against the actual field.
-    const ctx = svc.execute.mock.calls[0]![1];
-    expect(ctx.voice).toBe(false);
+    expect(svc.execute.mock.calls[0]![1].voice).toBe(false);
+    expect(svc.execute.mock.calls[1]![1].voice).toBe(true);
   });
 
   it("performs no gate of its own — one execute call, no pre-checks", async () => {

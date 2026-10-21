@@ -14,6 +14,8 @@ import type {
   PublishPreparation,
   PublishResolution,
 } from "@jarvis/core/marketing";
+// Phase 18.4 — workflow planning's shapes, from its browser-safe entry point.
+import type { DraftIssue, DraftListPage, DraftView, PlanningMatchView } from "@jarvis/core/automation-planning";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001/api/v1";
 
@@ -21,6 +23,8 @@ export interface ApiError {
   code: string;
   message: string;
   details?: Record<string, unknown>;
+  /** Phase 18.4 — why a draft was refused: one entry per problem, with where it is. */
+  issues?: DraftIssue[];
 }
 
 export interface ApiResponse<T = unknown> {
@@ -321,7 +325,13 @@ export async function sendChatMessage(
    * only when it creates the conversation, and only after checking it is one
    * of this user's own; a conversation's project never changes afterwards.
    */
-  projectId?: string
+  projectId?: string,
+  /**
+   * Phase 18.2 — "voice" for a spoken turn. It only narrows what the server
+   * will run (speech cannot start a workflow library sync); the server also
+   * recognises its own recent transcripts, so leaving it out widens nothing.
+   */
+  inputMode?: "voice"
 ): Promise<
   ApiResponse<{
     message: string;
@@ -348,6 +358,7 @@ export async function sendChatMessage(
       ...(activeSurfaceKeys && activeSurfaceKeys.length > 0
         ? { metadata: { activeSurfaceKeys } }
         : {}),
+      ...(inputMode ? { inputMode } : {}),
     }),
   });
 }
@@ -1450,6 +1461,250 @@ export async function listN8nExecutions(
   limit = 50
 ): Promise<ApiResponse<{ executions: N8nExecution[]; count: number }>> {
   return request(`/n8n/executions?limit=${encodeURIComponent(String(limit))}`);
+}
+
+// ---------------------------------------------------------------------------
+// Phase 18.2 — the n8n workflow library (`/api/v1/n8n/library`).
+//
+// These mirror the views in `@jarvis/core` (automation-library.ts), which the
+// web app may not import from the root. Nothing here names an Organization,
+// an instance or a cursor: the server takes all of them from the session, and
+// refuses a request that tries (REQUEST_SCOPE_REFUSED).
+// ---------------------------------------------------------------------------
+
+export type LibraryState = "never_synced" | "running" | "partial" | "complete" | "failed";
+export type LibraryRunStatus = "RUNNING" | "PARTIAL" | "COMPLETE" | "FAILED";
+export type LibraryChainStatus = "RUNNING" | "COMPLETE" | "STOPPED" | "INTERRUPTED";
+export type LibraryPresenceFilter = "current" | "present" | "missing" | "removed" | "all";
+
+export interface LibraryWorkflow {
+  externalId: string;
+  name: string;
+  active: boolean;
+  remoteCreatedAt: string | null;
+  remoteUpdatedAt: string | null;
+  versionId: string | null;
+  tags: string[] | null;
+  nodeTypes: string[] | null;
+  nodeCount: number | null;
+  presence: "present" | "missing" | "removed";
+  firstSeenAt: string;
+  lastSeenAt: string;
+  missingSince: string | null;
+  removedAt: string | null;
+}
+
+export interface LibraryWorkflowPage {
+  items: LibraryWorkflow[];
+  page: number;
+  limit: number;
+  total: number;
+  totalPages: number;
+}
+
+export interface LibraryRun {
+  runId: string;
+  status: LibraryRunStatus;
+  resumed: boolean;
+  pagesFetched: number;
+  recordsObserved: number;
+  created: number;
+  updated: number;
+  unchanged: number;
+  rejected: number;
+  markedMissing: number;
+  markedRemoved: number;
+  failure: { code: string; message: string } | null;
+  startedAt: string;
+  finishedAt: string | null;
+}
+
+export interface LibraryContinuation {
+  chainId: string;
+  status: LibraryChainStatus;
+  stop: { code: string; message: string } | null;
+  runFailure: { code: string; message: string } | null;
+  runs: number;
+  pages: number;
+  recordsObserved: number;
+  limits: { maxRuns: number; maxPages: number; deadlineAt: string };
+  startedAt: string;
+  finishedAt: string | null;
+}
+
+export interface LibraryStatus {
+  configured: boolean;
+  state: LibraryState;
+  /** The server's answer to "may I start a sync?" for this reader, now. */
+  canSync: boolean;
+  catalog: { present: number; missing: number; removed: number };
+  currentScan: { pagesFetched: number; recordsObserved: number; startedAt: string } | null;
+  lastCompleteScan: { completedAt: string; records: number } | null;
+  runs: LibraryRun[];
+  continuation: LibraryContinuation | null;
+}
+
+export type LibrarySyncStarted =
+  | { mode: "run"; runId: string; resumed: boolean; state: "running" }
+  | { mode: "continue"; chainId: string; existing: boolean; state: "running" | LibraryChainStatus };
+
+export interface LibraryWorkflowQuery {
+  page?: number;
+  limit?: number;
+  search?: string;
+  active?: boolean;
+  presence?: LibraryPresenceFilter;
+}
+
+export async function getWorkflowLibraryStatus(signal?: AbortSignal): Promise<ApiResponse<LibraryStatus>> {
+  return request("/n8n/library/status", signal ? { signal } : {});
+}
+
+export async function listWorkflowLibrary(
+  query: LibraryWorkflowQuery = {},
+  signal?: AbortSignal
+): Promise<ApiResponse<LibraryWorkflowPage>> {
+  const params = new URLSearchParams();
+  if (query.page !== undefined) params.set("page", String(query.page));
+  if (query.limit !== undefined) params.set("limit", String(query.limit));
+  if (query.search && query.search.trim().length > 0) params.set("search", query.search.trim());
+  if (query.active !== undefined) params.set("active", String(query.active));
+  if (query.presence) params.set("presence", query.presence);
+  const qs = params.toString();
+  return request(`/n8n/library/workflows${qs ? `?${qs}` : ""}`, signal ? { signal } : {});
+}
+
+// Phase 18.3B — one entry's sanitized structure, and trigger allow-list
+// proposals. Mirrors `LibraryInspectionView` & co. in `@jarvis/core`
+// (automation-inspection.ts). Nothing here carries a parameter, a credential,
+// an input name or a URL: the server never sends one.
+
+export type LibraryTriggerKind =
+  | "webhook" | "schedule" | "manual" | "form" | "chat" | "sub_workflow" | "error_handler" | "email" | "n8n_event" | "app_event";
+
+export interface LibraryInspection {
+  entryId: string;
+  name: string;
+  active: boolean;
+  presence: "present" | "missing" | "removed";
+  versionId: string | null;
+  observedAt: string;
+  trigger: { status: "derived" | "none_found" | "unavailable"; kinds: Array<{ kind: LibraryTriggerKind; nodeType: string }> };
+  nodeTypes: { status: "available" | "partial" | "unavailable"; items: string[]; count: number | null };
+  integrations: { status: "derived" | "unavailable"; categories: Array<{ category: string; nodeTypes: string[] }>; unrecognized: string[] };
+  inputs: { available: false; reason: string };
+  stale: { stale: boolean; reason: string | null };
+  limitations: string[];
+  inspectedAt: string;
+  source: "catalog";
+  allowlist: { status: "not_on_allowlist" | "on_allowlist" | "on_allowlist_other_version"; registeredVersionId: string | null };
+  proposal: {
+    status: "none" | "awaiting_approval" | "approved" | "rejected" | "expired" | "used";
+    approvalId: string | null;
+    versionId: string | null;
+  } | null;
+  canPropose: boolean;
+  proposeBlockedReason: string | null;
+}
+
+export interface LibraryAllowlistProposal {
+  approvalId: string;
+  existing: boolean;
+  status: "awaiting_approval" | "approved";
+  entryId: string;
+  versionId: string;
+  expiresAt: string;
+}
+
+export interface LibraryAllowlistApplied {
+  entryId: string;
+  versionId: string;
+  outcome: "created" | "unchanged" | "updated";
+}
+
+export async function getWorkflowInspection(entryId: string): Promise<ApiResponse<LibraryInspection>> {
+  return request(`/n8n/library/workflows/${encodeURIComponent(entryId)}/inspection`);
+}
+
+/** Asks for the entry to go on YOUR trigger allow-list. Another owner or admin approves; nothing changes yet. */
+export async function proposeWorkflowForAllowlist(entryId: string): Promise<ApiResponse<LibraryAllowlistProposal>> {
+  return request(`/n8n/library/workflows/${encodeURIComponent(entryId)}/allowlist-proposals`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+/** Adds it, once another owner or admin approved the proposal. An on-screen action only. */
+export async function applyWorkflowAllowlistProposal(
+  entryId: string,
+  approvalId: string
+): Promise<ApiResponse<LibraryAllowlistApplied>> {
+  return request(
+    `/n8n/library/workflows/${encodeURIComponent(entryId)}/allowlist-proposals/${encodeURIComponent(approvalId)}/apply`,
+    { method: "POST", body: JSON.stringify({}) }
+  );
+}
+
+// Phase 18.4 — workflow planning (`/api/v1/n8n/planning`). Drafts live in
+// JARVIS; none of these reaches n8n, and there is no call that deploys,
+// activates, runs or publishes a workflow.
+
+export interface PlanningRequestBody {
+  goal: string;
+  trigger?: string;
+  services?: string[];
+  integrations?: string[];
+  inputs?: string[];
+  outcome?: string;
+}
+
+export async function matchWorkflows(body: PlanningRequestBody): Promise<ApiResponse<PlanningMatchView>> {
+  return request("/n8n/planning/match", { method: "POST", body: JSON.stringify(body) });
+}
+
+export async function listWorkflowDrafts(page = 1): Promise<ApiResponse<DraftListPage>> {
+  return request(`/n8n/planning/drafts?page=${page}&limit=20`);
+}
+
+export async function createWorkflowDraft(
+  body: PlanningRequestBody & { kind: "new" | "customization"; sourceEntryId?: string; overrideReuse?: boolean }
+): Promise<ApiResponse<{ draft: DraftView; existing: boolean }>> {
+  return request("/n8n/planning/drafts", { method: "POST", body: JSON.stringify(body) });
+}
+
+export async function getWorkflowDraft(draftId: string, version?: number): Promise<ApiResponse<DraftView>> {
+  return request(`/n8n/planning/drafts/${encodeURIComponent(draftId)}${version ? `?version=${version}` : ""}`);
+}
+
+/** A new version, from the version shown. Earlier versions never change. */
+export async function reviseWorkflowDraft(
+  draftId: string,
+  baseVersion: number,
+  answers: Record<string, string>
+): Promise<ApiResponse<{ draft: DraftView; unchanged: boolean }>> {
+  return request(`/n8n/planning/drafts/${encodeURIComponent(draftId)}/versions`, {
+    method: "POST",
+    body: JSON.stringify({ baseVersion, answers }),
+  });
+}
+
+/**
+ * Starts a sync. `idempotencyKey` names ONE click: a retry of the same click
+ * returns the same chain, and a new click gets a new key.
+ */
+export async function startWorkflowLibrarySync(options: {
+  continueUntilComplete?: boolean;
+  restart?: boolean;
+  idempotencyKey?: string;
+}): Promise<ApiResponse<LibrarySyncStarted>> {
+  return request("/n8n/library/sync", {
+    method: "POST",
+    body: JSON.stringify({
+      ...(options.continueUntilComplete ? { continueUntilComplete: true } : {}),
+      ...(options.restart ? { restart: true } : {}),
+      ...(options.idempotencyKey ? { idempotencyKey: options.idempotencyKey } : {}),
+    }),
+  });
 }
 
 /**

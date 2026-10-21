@@ -83,6 +83,13 @@ export * from "./integration-catalog.js";
 // reach through a connector (n8n REST and n8n MCP today), with deduplication
 // and operation-based routing. Pure: connectors collect, this decides.
 export * from "./automation-registry.js";
+// Phase 18, Stage 18.1 — the persistent Automation Library's rules and ports.
+export * from "./automation-library.js";
+export * from "./automation-inspection.js";
+export * from "./automation-vocabulary.js";
+export * from "./automation-planning.js";
+export * from "./automation-draft.js";
+export * from "./voice-tool-policy.js";
 // Phase 17 Stage 3A — tenants (Organizations): roles, the membership context
 // and the two read ports. Contract only; the reads live in @jarvis/db.
 export * from "./types/tenant.js";

@@ -28,6 +28,7 @@ import type {
   ToolAccessGate,
 } from "@jarvis/core";
 import { JarvisError, decideSurface, classifyToolFailures, toClientErrorDetails, rankMemories, scoreMemoryRelevance, MEMORY_SIMILARITY_FLOOR } from "@jarvis/core";
+import { VOICE_TOOL_REFUSED_CODE, voiceToolRefusal } from "@jarvis/core";
 import type { SurfaceDecision } from "@jarvis/core";
 import type { AgentPolicy, AgentResolution, ISkillContextProvider } from "@jarvis/core";
 import { renderSkillContext } from "@jarvis/core";
@@ -1203,6 +1204,43 @@ export class Orchestrator implements IOrchestrator {
       }
 
       // ---------------------------------------------------------------------
+      // Phase 18.2 — what speech may not start.
+      //
+      // A spoken turn (the chat route marks it) asking for a tool on the voice
+      // list is answered here, before any gate, pending action or execution:
+      // the model is given the fixed sentence and tells the user to use the
+      // on-screen control. The executor refuses the same tool for the same
+      // turn again, so this is an early answer, not the only check.
+      // ---------------------------------------------------------------------
+      const spoken = voiceToolRefusal(tool?.id ?? action.toolId, context.inputMode);
+      if (spoken) {
+        results.push({
+          executionId,
+          toolId: action.toolId,
+          toolCallId: action.toolCallId,
+          status: "permission_denied",
+          result: { success: false, error: spoken, metadata: { toolId: action.toolId, code: VOICE_TOOL_REFUSED_CODE, status: 403 } },
+          error: spoken,
+          startedAt: stepStartedAt,
+          completedAt: new Date(),
+          durationMs: Date.now() - stepStartedAt.getTime(),
+        });
+
+        await this.auditLogger.log({
+          userId: context.auth.userId,
+          agentId: policy?.agentId ?? context.agentId,
+          toolId: action.toolId,
+          action: "agent.tool_voice_refused",
+          result: "rejected",
+          traceId: context.traceId,
+          ipAddress: context.ipAddress,
+          metadata: { inputMode: "voice", domain: policy?.domain, executionId, stepIndex: i },
+        });
+
+        continue;
+      }
+
+      // ---------------------------------------------------------------------
       // Write-intent gate — BUG-INTENT-001 / BUG-SAFETY-001.
       //
       // Between the model deciding a tool and the pending-action branch. A
@@ -1468,6 +1506,7 @@ export class Orchestrator implements IOrchestrator {
         ipAddress: context.ipAddress,
         executionId,
         stepIndex: i,
+        ...(context.inputMode ? { inputMode: context.inputMode } : {}),
       };
 
       if (this.toolApprovalService && this.toolRegistry) {

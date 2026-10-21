@@ -285,6 +285,85 @@ Once assigned, the Organization's membership role decides — never the account-
 
 **Connection tests are budgeted.** Each account may start 10 connection tests in 10 minutes, and each Organization 30 per integration per hour. Both are slots in the audit table, taken before the provider is called (`integration.test_slot`, `integration.test_budget.<tenant id>.<integration>`); while PostgreSQL cannot be reached, tests are refused. A test of the caller's **own** Meta credentials (Credentials page) takes their slot too.
 
+#### The n8n workflow library (Phase 18, Stage 18.1)
+
+Since Phase 18 the server can keep a catalog of the n8n instance's workflows. After a deploy, check that the migration arrived — `20261019120000_phase18_automation_library` adds one enum and three tables (`AutomationLibraryEntry`, `AutomationLibrarySync`, `AutomationLibrarySyncRun`). It alters no existing table and writes no row:
+
+```bash
+docker compose exec postgres psql -U jarvis -d jarvis -c '\dt "AutomationLibrary"*'
+```
+
+Nothing synchronizes by itself. An owner or admin of the Organization that owns the n8n REST connection (`n8n/rest`, assigned above) starts one bounded run with `POST /api/v1/n8n/library/sync`; each run reads at most 20 pages of 250 workflows and stops, and the next request continues where it stopped. Progress, the last complete scan and each run's outcome are on `GET /api/v1/n8n/library/status`; members and viewers can read both, and nobody outside the Organization can see or start anything. Look for `automation_library_run_started` and `automation_library_run_finished` in the API log (with a failure code, never n8n's words). Runs need `N8N_BASE_URL` and `N8N_API_KEY` — the same variables the rest of the n8n integration uses; no new variable was added. A library never deletes anything: a workflow deleted in n8n is marked removed after two complete scans without it.
+
+**Stage 18.2** adds the migration `20261019180000_phase18_library_continuation`:
+
+- one enum and one table (`AutomationLibrarySyncChain`);
+- two nullable columns on `AutomationLibrarySync` (`active_chain_id`, `chain_heartbeat_at`) and one on `AutomationLibrarySyncRun` (`chain_id`).
+
+It alters no existing column and writes no row. The same `\dt` check above now lists four tables.
+
+The Automations page gains a library section; its Sync and **Continue until complete** buttons appear only for the owning Organization's owners and admins.
+
+**Continue until complete** chains bounded runs of one scan until it completes:
+
+- It stops at 25 runs, 500 pages or 30 minutes, keeping the scan's place.
+- It takes the Organization's 60-per-hour budget for every run.
+- It re-checks the requester's role before every run.
+
+Follow it on `GET /status` (`continuation`) and in the API log: `automation_library_chain_started` and `automation_library_chain_finished`, the latter with a stop code. Audit rows are `automation_library.sync_chain`.
+
+**After a restart or a redeploy:**
+
+- **A chain stops.** A graceful stop records it as `STOPPED` with code `SHUTDOWN`. A crash shows it as `INTERRUPTED` once its lease and heartbeat are stale (about 3 minutes).
+- **Nothing resumes it.** An owner or admin presses Continue again, and the scan goes on from its last stored page.
+
+JARVIS reaches the library through `automation.library.search`, `.status` and `.sync`. A spoken chat turn cannot start or continue a sync — the server refuses it.
+
+**Stage 18.3B** adds the migration `20261021120000_phase18_library_allowlist_link`. It adds two nullable columns to `N8nWorkflow` (`library_entry_ref`, `library_version_id`) and one index. It writes no row, and existing allow-list rows keep null. Check it arrived:
+
+```bash
+docker compose exec postgres psql -U jarvis -d jarvis -c '\d "N8nWorkflow"'
+```
+
+The Automations page gains an **Inspect** button on each library row. It shows the workflow's sanitized structure from the stored catalog, and n8n is not contacted.
+
+Owners and admins may **propose** a workflow for their own trigger allow-list. **Another** owner or admin approves it on the Approvals page. The requester then adds it, from the page only, never by voice.
+
+Adding is the only step that reads n8n: one `GET /api/v1/workflows/{id}`, kept to the webhook's path, method and auth mode. It changes nothing in n8n and runs nothing. Each trigger still needs its own approval.
+
+What to look for:
+
+- **Log:** `automation_library_allowlist_applied`.
+- **Audit rows:** `automation_library.inspect`, `.allowlist_propose` and `.allowlist_apply`.
+
+An Organization with a single owner and no admin cannot approve its own proposals, by design.
+
+**Stage 18.4** adds the migration `20261021180000_phase18_automation_drafts`:
+
+- two tables, `AutomationDraft` and `AutomationDraftVersion`;
+- their indexes and foreign keys;
+- one trigger, `automation_draft_version_immutability`, which refuses any `UPDATE` of a stored draft version.
+
+It alters no existing table and writes no row. Check that it arrived:
+
+```bash
+docker compose exec postgres psql -U jarvis -d jarvis -c '\dt "AutomationDraft"*'
+docker compose exec postgres psql -U jarvis -d jarvis -c "SELECT tgname FROM pg_trigger WHERE tgname = 'automation_draft_version_immutability'"
+```
+
+The Automations page gains a **Plan an automation** section, and JARVIS gains `automation.workflow.match` and `automation.draft.*`:
+
+- **Matching** compares a request with the stored library.
+- **Drafts** are plans saved in JARVIS: owners and admins create and revise them; members read them.
+- **Nothing in n8n is read, changed, activated or run.** The draft tables are the only new state.
+
+What to look for:
+
+- **Log:** `automation_draft_created` and `automation_draft_revised`.
+- **Audit rows:** `automation_planning.match`, `.draft_create`, `.draft_revise` (and `.draft_read` for refused reads).
+
+No new environment variable was added.
+
 **Still decided per account, not by Organization:** sending a WhatsApp message (only the account the phone number is assigned to), triggering an n8n workflow (only the account's own registered workflows), the read-only Maps tools (any account, within `GOOGLE_MAPS_MONTHLY_LIMIT`) and the reviewed MCP servers. Publishing to a Facebook Page is off unless `MARKETING_PUBLISH_ENABLED=true`, and is not Organization-checked: leave it off on a deployment that serves more than one business.
 
 ## 8. After the deployment
@@ -358,7 +437,40 @@ The Phase 15 migration is additive in the same way. `20261012120000_phase15_mark
 
 The Phase 17 migration is additive in the same way. `20261017120000_phase17_tenant_foundation` adds three tables and an enum and alters none; a release from before it never reads or writes them, so they stay in place across a rollback and are used again when the newer release returns. (Rolling back also takes away the Organization check on n8n MCP discovery: a release from before Phase 17 Stage 3A has its own rules for those routes. The routes have not been part of a deployed release yet.) It was applied on a fresh database after every earlier migration (2026-10-17, `31 migrations found`, all applied); it has not been run against the real stack.
 
-The Phase 17 hardening's migration is additive too. `20261018120000_phase17_shared_connection_approvals` adds two nullable columns to `Approval`, an index and two foreign keys; a release from before it never reads them, so they stay across a rollback. **Rolling back reopens finding H2**: the older release has no Organization check on Meta Ads, so any account can again read and change the deployment's ad account, and an approval waiting for another owner or admin can be approved by the person who asked for it. Coming forward again is safe: an approval approved by its own requester while the older release ran carries no independent approver, and the newer release refuses to run it. It was applied on a fresh database after every earlier migration (2026-10-18, `32 migrations found`, all applied); it has not been run against the real stack.
+The Phase 17 hardening's migration is additive too. `20261018120000_phase17_shared_connection_approvals` adds two nullable columns to `Approval`, an index and two foreign keys; a release from before it never reads them, so they stay across a rollback. **Rolling back reopens finding H2**: the older release has no Organization check on Meta Ads, so any account can again read and change the deployment's ad account, and an approval waiting for another owner or admin can be approved by the person who asked for it. Coming forward again is safe: an approval approved by its own requester while the older release ran carries no independent approver, and the newer release refuses to run it.
+
+The Phase 18 migration is additive as well. `20261019120000_phase18_automation_library` adds three tables and an enum and alters none; a release from before it never reads them. Rolling back leaves the catalog in place and unreachable, and it is used again when the newer release returns. A run that was in progress when the API stopped is closed as interrupted by the next run, and its scan resumes from the last stored page. It was applied on a fresh database after every earlier migration (2026-10-18, `32 migrations found`, all applied); it has not been run against the real stack.
+
+The Stage 18.2 migration is additive too. `20261019180000_phase18_library_continuation` adds a table, an enum and three nullable columns, and changes no existing column. A release from before it never reads them, so they stay across a rollback.
+
+Rolling back to Stage 18.1 brings back the 18.1 behaviour:
+
+- **No Continue button, and no library tools for JARVIS.** The last chain's row stays, unreachable.
+- **The older release ignores the chain columns.** If a chain was running when the rollback happened, it leaves at most its last run's lease, which expires within 3 minutes like any interrupted run's.
+
+When the newer release returns, a chain still marked `RUNNING` is shown and closed as interrupted.
+
+It was applied on a fresh database after every earlier migration (2026-10-20, `34 migrations found`, all applied); it has not been run against the real stack.
+
+The Stage 18.3B migration is additive too. `20261021120000_phase18_library_allowlist_link` adds two nullable columns and an index to `N8nWorkflow`, and changes no existing column. Rolling back to 18.3A:
+
+- **The older release ignores the columns.** A workflow added from the library stays on its owner's allow-list, an ordinary row that `n8n.trigger` reads as before.
+- **No Inspect, propose or add.** The page loses the controls; JARVIS loses the tools.
+- **Proposals are left behind.** One still waiting names a tool the older release does not have, so it can never run there. It expires within 10 minutes.
+
+When the newer release returns, the columns are read again.
+
+It was applied on a fresh database after every earlier migration (2026-10-21, `35 migrations found`, all applied); it has not been run against the real stack.
+
+The Stage 18.4 migration is additive too. `20261021180000_phase18_automation_drafts` adds two tables, a function and a trigger on its own new table, and changes nothing that exists. Rolling back to 18.3B:
+
+- **The older release never reads the tables.** Drafts stay in place, unreachable.
+- **No planning section, no planning tools.** The page and JARVIS lose them; nothing else changes.
+- **Nothing to settle.** Drafts are plans and were never in n8n, so no workflow or allow-list row depends on them.
+
+When the newer release returns, the drafts are there again, each at the version it was left at.
+
+It was applied on a fresh database after every earlier migration (2026-10-21, `36 migrations found`, all applied); it has not been run against the real stack.
 
 A migration that **failed part-way** is different. Prisma records it as failed and will refuse to apply anything after it until it is resolved, and how to resolve it depends on what the migration had already done. Roll the application back so the service is up, then stop and work out the state of the database before touching it.
 

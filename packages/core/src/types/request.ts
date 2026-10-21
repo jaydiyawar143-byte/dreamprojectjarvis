@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { ConversationMessageSchema } from "./conversation.js";
+import { InputModeSchema } from "./voice.js";
 
 export const JarvisRequestSchema = z.object({
   message: z.string().min(1, "Message cannot be empty"),
@@ -16,6 +17,13 @@ export const JarvisRequestSchema = z.object({
   stream: z.boolean().default(false),
   /** Set by the chat route when intent detection identifies this as a confirmation/reject/modify. */
   intent: z.enum(["CONFIRM", "REJECT", "MODIFY", "NEW_ACTION", "CLARIFY"]).optional(),
+  /**
+   * Phase 18.2 — the client's word that this turn was spoken. It can only
+   * narrow what runs: "voice" refuses what speech may not start, and "text"
+   * (or nothing) is never taken as proof the turn was typed — the server also
+   * recognises its own recent transcripts.
+   */
+  inputMode: InputModeSchema.optional(),
 });
 
 export type JarvisRequest = z.infer<typeof JarvisRequestSchema>;
