@@ -37,6 +37,12 @@ export {
 } from "./client.js";
 
 export {
+  extractWorkflowTriggerTarget,
+  WEBHOOK_NODE_TYPE,
+  type N8nWorkflowTriggerTarget,
+} from "./trigger-target.js";
+
+export {
   createN8nApiClient,
   N8N_MAX_PAGE_SIZE,
   N8N_MAX_LIST_PAGES,
@@ -92,6 +98,9 @@ export {
   type N8nMcpTool,
   type N8nMcpTransport,
 } from "./mcp-connector.js";
+
+// Phase 18, Stage 18.1 — one page of the workflow list, for the Automation Library.
+export { createN8nLibraryPageSource, createN8nLibraryTriggerTargetSource } from "./library-source.js";
 
 export {
   buildAutomationCatalog,

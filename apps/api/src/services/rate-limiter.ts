@@ -56,6 +56,10 @@ export const RATE_LIMIT_NAMESPACES = {
   // discovery cannot spend the budget that a chat turn or a workflow read
   // needs, and this ceiling can be tuned without touching them.
   n8n_mcp: "n8n_mcp",
+  // Phase 18, Stage 18.1 — Automation Library synchronizations. Each run reads
+  // n8n page after page on the shared credential, so starting one takes a slot
+  // here — per account and per Organization's catalog — before n8n is called.
+  automation_library: "automation_library",
 } as const;
 
 export type RateLimitNamespace =

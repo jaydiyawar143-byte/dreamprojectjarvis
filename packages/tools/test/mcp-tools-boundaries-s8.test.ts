@@ -58,8 +58,11 @@ describe("the executor and the registry are untouched", () => {
   it("pins ToolExecutor and ToolRegistry byte-for-byte", () => {
     // Phase 17 changed the executor deliberately (the shared-connection access
     // gate); the digest moved with packages/core/test/mcp-boundaries-s8.
+    // Phase 18.2 changed it once more: a spoken turn is refused a tool on the
+    // voice list, and the turn's input mode reaches the tool's context.
+    // Phase 18.3A: a spoken turn never spends an approval.
     expect(sha256(read("packages/tools/src/executor.ts"))).toBe(
-      "9bc4c7bff0db43a0bcd07cdfef003ff16f7c5c22126ab12dd0c133620012964d"
+      "4fd510b9779cc70d49e7a4d9116d44ca97d22dbccd09419674933de6171deb37"
     );
     expect(sha256(read("packages/tools/src/registry.ts"))).toBe(
       "f62f401378deecdf774a700b88cd5a4a375b142dfbc93406065445c58b6495ac"

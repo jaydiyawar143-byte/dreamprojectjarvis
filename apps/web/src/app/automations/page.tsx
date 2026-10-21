@@ -12,6 +12,15 @@
 //
 // When n8n is not configured the entire router is unmounted and every call
 // 404s. That is "not deployed", not an error, and is rendered as such.
+//
+// Phase 18.2 — below them, the workflow LIBRARY: every workflow observed on
+// the organization's n8n instance, with its synchronization. Its only controls
+// start a sync (for an owner or admin) — none activates, edits or runs a
+// workflow.
+//
+// Phase 18.4 — and PLANNING: a request compared with that library, and drafts
+// saved in JARVIS. A draft is not in n8n; nothing here deploys, activates or
+// runs one.
 // ---------------------------------------------------------------------------
 
 import {
@@ -25,6 +34,8 @@ import { PageContainer, PageHeader, PanelGrid } from "@/components/dashboard/pag
 import { Panel, StatPanel } from "@/components/dashboard/panel";
 import { EmptyState, ErrorState, LoadingState } from "@/components/dashboard/states";
 import { Badge, DataTable, StatusDot, type Tone } from "@/components/ui/primitives";
+import { WorkflowLibrarySection } from "@/components/automations/workflow-library";
+import { WorkflowPlannerSection } from "@/components/automations/workflow-planner";
 
 function statusTone(status: string): Tone {
   const normalized = status.toUpperCase();
@@ -166,6 +177,14 @@ export default function AutomationsPage() {
           </Panel>
         </>
       )}
+
+      {/* Phase 18.2 — the workflow library has its own router and its own
+          states (not configured, not available to this account), so it is
+          shown whatever the trigger allow-list above could load. */}
+      <WorkflowLibrarySection />
+      {/* Phase 18.4 — plan an automation: reuse first, then drafts kept in
+          JARVIS. Nothing in it deploys, activates or runs a workflow. */}
+      <WorkflowPlannerSection />
     </PageContainer>
   );
 }

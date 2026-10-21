@@ -428,3 +428,20 @@ export interface IVoiceProvider {
 
   isAvailable(): Promise<boolean>;
 }
+
+// ---------------------------------------------------------------------------
+// Phase 18.2 — how a turn was given
+// ---------------------------------------------------------------------------
+
+/**
+ * How a chat turn reached the server: typed, or spoken and transcribed.
+ *
+ * The voice client declares "voice"; the chat route also marks a turn as voice
+ * when its text is a transcript the server itself produced moments ago for the
+ * same account. It is carried — server-side only, after that — on the session,
+ * the tool execution request and the tool context, so the execution layer can
+ * refuse what speech may not start (`voiceToolRefusal`). A turn that declares
+ * nothing is "text": the marker narrows what runs and never widens it.
+ */
+export const InputModeSchema = z.enum(["text", "voice"]);
+export type InputMode = z.infer<typeof InputModeSchema>;

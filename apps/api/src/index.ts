@@ -37,6 +37,8 @@ import { checkGoogleHealth } from "./services/health/google-health-check.js";
 import { createWhatsAppRouter } from "./routes/whatsapp.js";
 import { createN8nRouter } from "./routes/n8n.js";
 import { createN8nMcpRouter } from "./routes/n8n-mcp.js";
+import { createAutomationLibraryRouter } from "./routes/automation-library.js";
+import { createAutomationPlanningRouter } from "./routes/automation-planning.js";
 import { createVoiceRouter } from "./routes/voice.js";
 import {
   SOCKET_CONNECT_TIMEOUT_MS,
@@ -315,6 +317,20 @@ app.use("/api/v1/capabilities", createCapabilitiesRouter(container));
 // have built. It reads and nothing else — no invocation, no write.
 // ---------------------------------------------------------------------------
 app.use("/api/v1/n8n/mcp", createN8nMcpRouter(container));
+
+// ---------------------------------------------------------------------------
+// Phase 18, Stage 18.1 — the Automation Library: the persistent catalog of the
+// n8n instance's workflows, its synchronization and its status.
+//
+// Mounted unconditionally, like the route above, so it can answer for itself:
+// whether n8n is configured is said — after the caller is authorized — as
+// N8N_NOT_CONFIGURED, never as a 404. It reads n8n and stores what it read; it
+// activates, edits and runs nothing.
+// ---------------------------------------------------------------------------
+app.use("/api/v1/n8n/library", createAutomationLibraryRouter(container));
+// Phase 18.4 — workflow planning: matching and drafts. Drafts live in JARVIS;
+// nothing here reaches n8n, and no endpoint deploys, activates or runs one.
+app.use("/api/v1/n8n/planning", createAutomationPlanningRouter(container));
 
 // ---------------------------------------------------------------------------
 // Phase 12 — real read-only Gmail, Drive and Calendar.

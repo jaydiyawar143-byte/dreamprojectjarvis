@@ -59,6 +59,9 @@ describe("the grant table", () => {
       "shared:status",
       "shared:diagnostics",
       "shared:test",
+      // Phase 18, Stage 18.1 — starting a catalog sync spends the credential's
+      // quota, so it is the operator side, like `test`.
+      "shared:sync",
     ]);
     expect(sharedConnectionGrantsFor("admin")).toEqual(sharedConnectionGrantsFor("owner"));
     expect(sharedConnectionGrantsFor("member")).toEqual(["shared:read", "shared:status"]);

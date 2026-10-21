@@ -292,6 +292,16 @@ describe("Sprint 8 — voice client", () => {
       );
     });
 
+    it("marks the turn as spoken, so the server refuses what speech may not start (Phase 18.2)", async () => {
+      await useVoiceStore.getState().startListening();
+      await useVoiceStore.getState().stopListening();
+
+      expect(mockSendMessage).toHaveBeenCalledWith(
+        "show me campaign performance",
+        expect.objectContaining({ inputMode: "voice" })
+      );
+    });
+
     it("speaks the reply and returns to idle", async () => {
       await useVoiceStore.getState().startListening();
       await useVoiceStore.getState().stopListening();

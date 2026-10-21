@@ -7,6 +7,10 @@
   "include": [
     "src/**/*.ts",
     "test/tenant-foundation-p17-pg.integration.test.ts",
-    "test/shared-connection-approvals-p17-pg.integration.test.ts"
+    "test/shared-connection-approvals-p17-pg.integration.test.ts",
+    "test/automation-library-p18-pg.integration.test.ts",
+    "test/automation-library-chain-p18-pg.integration.test.ts",
+    "test/automation-library-allowlist-p18-pg.integration.test.ts",
+    "test/automation-draft-p18-pg.integration.test.ts"
   ]
 }

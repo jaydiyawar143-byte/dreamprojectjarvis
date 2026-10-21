@@ -90,6 +90,8 @@ import {
   type N8nMcpConnector,
   hashPayload,
   buildIdempotencyKey,
+  createN8nLibraryPageSource,
+  createN8nLibraryTriggerTargetSource,
 } from "@jarvis/n8n";
 import {
   PermissionService,
@@ -123,12 +125,18 @@ import {
   PrismaProjectRepository,
   PrismaMarketingRepository,
   PrismaTenantRepository,
+  PrismaAutomationLibraryRepository,
+  PrismaAutomationDraftRepository,
 } from "@jarvis/db";
 import { MemoryExtractionService, KnowledgeRetrievalService, MemoryManagementService, MemoryRetentionSweep } from "@jarvis/memory";
 import { createMemoryToolPort } from "./memory-tool-port.js";
 import type { MemoryCorrectionCheckPort } from "../routes/memory-commands.js";
 import { IntegrationCommandService } from "./integrations/command-service.js";
 import { createIntegrationTools, type IntegrationCommandPort } from "@jarvis/tools";
+import { createAutomationLibraryAllowlistTool, createAutomationLibraryTools, createAutomationPlanningTools } from "@jarvis/tools";
+import { AutomationPlanningService } from "./automation-library/planning-service.js";
+import { LibraryAllowlistFlow } from "./automation-library/allowlist-flow.js";
+import { RecentTranscripts } from "./recent-transcripts.js";
 import {
   createCapabilityTools,
   createMemoryCorrectionTool,
@@ -189,6 +197,8 @@ import {
 import { createOrganizationMetaAuthorizer, metaAccountFor } from "./tenancy/meta-ads-access.js";
 import { errorMonitor, operationalLog } from "./observability/index.js";
 import { mcpToolUnavailable } from "./integration-registry.js";
+import { libraryInstanceKey, type LibraryPageSource, type LibraryTriggerTargetSource } from "@jarvis/core";
+import { AutomationLibraryService, LIBRARY_SYNC_BUDGETS } from "./automation-library/library-service.js";
 
 export interface Container {
   tokenService: TokenService;
@@ -417,6 +427,32 @@ export interface Container {
    * use. It grants nothing: the executor still asks for itself.
    */
   permissions: PermissionService;
+  /**
+   * Phase 18, Stage 18.1 — the Automation Library: the persistent catalog of
+   * the n8n instance's workflows, its synchronization and its status. The one
+   * implementation; the library router only translates HTTP into its calls.
+   */
+  automationLibrary: AutomationLibraryService;
+  /**
+   * Phase 18.2 — what the server transcribed a moment ago, per account (hashes
+   * only). The voice router remembers; the chat route marks a turn whose text
+   * it recognises as spoken, so the execution layer refuses what speech may
+   * not start even when a client leaves its own flag out.
+   */
+  recentTranscripts: RecentTranscripts;
+  /**
+   * Phase 18.3B — adds an approved library workflow to the trigger allow-list,
+   * from the Automations page: names the approval and runs the page-only tool
+   * through ToolExecutor. It approves and adds nothing itself.
+   */
+  automationLibraryAllowlist: LibraryAllowlistFlow;
+  /**
+   * Phase 18.4 — workflow planning: the library matched against a request,
+   * and drafts held in JARVIS (never sent to n8n). The one implementation; the
+   * planning router and the `automation.workflow.match` / `automation.draft.*`
+   * tools are both given it.
+   */
+  automationPlanning: AutomationPlanningService;
 }
 
 /**
@@ -1442,6 +1478,82 @@ export function getContainer(options?: {
     // allowlist, so no model is offered it.
     for (const tool of createMarketingDecisionTools(marketingPort)) toolRegistry.register(tool);
   }
+
+  // ---------------------------------------------------------------------------
+  // Phase 18, Stage 18.1 — the Automation Library.
+  //
+  // A persistent catalog of the n8n instance's workflows, synchronized in
+  // bounded, resumable runs. Built on every deployment so its routes can say
+  // what is missing; it reads n8n only when n8n is configured, through the same
+  // read-only listing the rest of the server uses. The catalog belongs to the
+  // Organization that owns the n8n REST connection, and the instance is named by
+  // a hash of its base URL — the URL itself is never stored. A run's start takes
+  // a slot per account and per catalog before n8n is called, and a stopping
+  // server ends a run at its next page boundary with its place saved.
+  //
+  // Stage 18.2 — built here, before the registry is read for the agents'
+  // definitions, because the JARVIS tools `automation.library.*` hold this
+  // one instance as their port: the routes and the tools share it, so a
+  // sentence and a button meet the same authorization, budgets and refusals.
+  // The sync tool is refused for a spoken turn by the executor itself.
+  // ---------------------------------------------------------------------------
+  let librarySource: { pages: LibraryPageSource; instanceKey: string } | null = null;
+  // Stage 18.3B — the one live read an approved allow-list change makes.
+  let libraryTriggerTargets: LibraryTriggerTargetSource | null = null;
+  if (isN8nConfigured()) {
+    try {
+      const n8nConfig = createN8nConfig();
+      const instanceKey = libraryInstanceKey(n8nConfig.baseUrl);
+      if (instanceKey) {
+        const n8nApi = createN8nProvider({ config: n8nConfig });
+        librarySource = { pages: createN8nLibraryPageSource(n8nApi), instanceKey };
+        libraryTriggerTargets = createN8nLibraryTriggerTargetSource(n8nApi);
+      }
+    } catch {
+      operationalLog.child("automation-library").warn("automation_library_source_unavailable", { reason: "n8n configuration is invalid" });
+    }
+  }
+  const librarySlots = new AtomicRateLimiter(auditRepo, RATE_LIMIT_NAMESPACES.automation_library);
+  const libraryStore = new PrismaAutomationLibraryRepository(prisma);
+  const automationLibrary = new AutomationLibraryService({
+    store: libraryStore,
+    access: sharedAccess,
+    source: librarySource,
+    budget: {
+      reserveForUser: (userId) =>
+        librarySlots.reserve(userId, "sync_slot", LIBRARY_SYNC_BUDGETS.perUser.limit, LIBRARY_SYNC_BUDGETS.perUser.windowMs),
+      reserveForOrganization: (scope, userId) =>
+        librarySlots.reserveShared(
+          `sync_budget.${scope.tenantId}.${scope.instanceKey}`,
+          userId,
+          LIBRARY_SYNC_BUDGETS.perOrganization.limit,
+          LIBRARY_SYNC_BUDGETS.perOrganization.windowMs
+        ),
+    },
+    audit: auditLogger,
+    shouldStop: () => options?.lifecycle?.isShuttingDown() ?? false,
+    log: operationalLog.child("automation-library"),
+    // Stage 18.3B — a proposal is an approval row in the one approval store
+    // (which binds it to the Organization that owns n8n); the allow-list is
+    // the existing per-account `N8nWorkflow` table.
+    approvals: approvalRepo,
+    allowlist: new PrismaN8nRepository(prisma),
+    triggerTargets: libraryTriggerTargets,
+  });
+  for (const tool of createAutomationLibraryTools(automationLibrary)) toolRegistry.register(tool);
+  // The page-only change: registered so the executor can run it, granted to no
+  // agent. It consumes its approval in the journal's durable step.
+  toolRegistry.register(createAutomationLibraryAllowlistTool(automationLibrary, executionJournal, approvalRepo));
+  // Stage 18.4 — planning: the library's own authorization and store, and the
+  // drafts table. Nothing in it holds an n8n client.
+  const automationPlanning = new AutomationPlanningService({
+    catalog: automationLibrary,
+    entries: libraryStore,
+    drafts: new PrismaAutomationDraftRepository(prisma),
+    audit: auditLogger,
+    log: operationalLog.child("automation-planning"),
+  });
+  for (const tool of createAutomationPlanningTools(automationPlanning)) toolRegistry.register(tool);
   const marketingPublishingUnavailableReason =
     marketingPublishers.length > 0
       ? null
@@ -2081,6 +2193,7 @@ export function getContainer(options?: {
   // on the same condition; this is the service it has been waiting for.
   analysisRef.current = analysisService;
 
+
   _container = {
     tokenService,
     authService,
@@ -2132,6 +2245,14 @@ export function getContainer(options?: {
     marketingPublishFlow,
     marketingPublishingUnavailableReason,
     permissions: permissionService,
+    // Phase 18, Stage 18.1 — the persistent n8n workflow catalog.
+    automationLibrary,
+    // Phase 18.2 — the voice marker's server-side half.
+    recentTranscripts: new RecentTranscripts(),
+    // Phase 18.3B — the Automations page's apply, through the executor.
+    automationLibraryAllowlist: new LibraryAllowlistFlow({ executor: toolExecutor, approvals: approvalRepo, audit: auditLogger }),
+    // Phase 18.4 — workflow planning and drafts.
+    automationPlanning,
   };
 
   return _container;

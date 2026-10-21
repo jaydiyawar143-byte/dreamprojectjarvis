@@ -1,3 +1,4 @@
+import { extractWorkflowTriggerTarget, type N8nWorkflowTriggerTarget } from "./trigger-target.js";
 import type { N8nConfig } from "./config.js";
 import {
   classifyN8nError,
@@ -53,6 +54,17 @@ export interface N8nRemoteWorkflow {
   active: boolean;
   createdAt: string | null;
   updatedAt: string | null;
+  // Phase 18, Stage 18.1 — catalog metadata, each present ONLY when the listing
+  // carried it (absent means unknown, never "none"). Read from the workflow's
+  // own `versionId`, its tags' names and its nodes' TYPES — never a node's
+  // parameters or credentials, the workflow's settings, static data or pinned
+  // data, any of which can hold a secret.
+  /** n8n's own version id, changed on every save. */
+  versionId?: string;
+  tags?: string[];
+  /** The node types the workflow uses, e.g. `n8n-nodes-base.slack`. */
+  nodeTypes?: string[];
+  nodeCount?: number;
 }
 
 export interface N8nWorkflowPage {
@@ -108,6 +120,12 @@ export interface N8nApiClient {
   listExecutions(params?: N8nListExecutionsParams): Promise<N8nApiResult<N8nExecutionPage>>;
   /** Reads one execution's status by its n8n id. */
   getExecution(id: string): Promise<N8nApiResult<N8nRemoteExecution>>;
+  /**
+   * Stage 18.3B — one workflow's webhook trigger target: its versionId and,
+   * per enabled webhook node, the path, method and authentication mode. The
+   * rest of the definition n8n returns never leaves this call.
+   */
+  getWorkflowTriggerTarget(id: string): Promise<N8nApiResult<N8nWorkflowTriggerTarget>>;
   /**
    * The cheapest authenticated read: one workflow. Success proves the base URL
    * resolves AND the key is accepted; nothing is written.
@@ -207,6 +225,38 @@ async function getJson(
   }
 }
 
+/** Bounds on the catalog metadata kept per workflow. */
+const MAX_TAGS_PER_WORKFLOW = 50;
+const MAX_NODE_TYPES_PER_WORKFLOW = 200;
+
+/** Tag names, when the listing carried a tag list (objects with `name`, or strings). */
+function tagNames(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const names: string[] = [];
+  for (const tag of value) {
+    const name = typeof tag === "string" ? tag : tag && typeof tag === "object" ? (tag as Record<string, unknown>).name : null;
+    if (typeof name === "string" && name.trim().length > 0) names.push(name.trim());
+    if (names.length >= MAX_TAGS_PER_WORKFLOW) break;
+  }
+  return names;
+}
+
+/**
+ * The node TYPES and the node count, when the listing carried nodes. A node's
+ * `type` is all that is read — its parameters and credentials are not touched.
+ */
+function nodeSummary(value: unknown): { nodeTypes: string[]; nodeCount: number } | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const types = new Set<string>();
+  for (const node of value) {
+    if (!node || typeof node !== "object") continue;
+    const type = (node as Record<string, unknown>).type;
+    if (typeof type === "string" && type.length > 0 && type.length <= 150) types.add(type);
+    if (types.size >= MAX_NODE_TYPES_PER_WORKFLOW) break;
+  }
+  return { nodeTypes: [...types].sort(), nodeCount: value.length };
+}
+
 function normalizeWorkflows(body: unknown): N8nWorkflowPage | null {
   if (!body || typeof body !== "object" || Array.isArray(body)) return null;
   const raw = body as Record<string, unknown>;
@@ -220,12 +270,19 @@ function normalizeWorkflows(body: unknown): N8nWorkflowPage | null {
     // A row with no id cannot be addressed, so it is dropped rather than
     // surfaced as an unusable entry.
     if (!id) continue;
+    const versionId = nonEmptyString(row.versionId);
+    const tags = tagNames(row.tags);
+    const nodes = nodeSummary(row.nodes);
     workflows.push({
       id,
       name: typeof row.name === "string" ? row.name : "",
       active: row.active === true,
       createdAt: nonEmptyString(row.createdAt),
       updatedAt: nonEmptyString(row.updatedAt),
+      // Phase 18 — only what the listing actually carried.
+      ...(versionId ? { versionId } : {}),
+      ...(tags ? { tags } : {}),
+      ...(nodes ? nodes : {}),
     });
   }
   return { workflows, nextCursor: nonEmptyString(raw.nextCursor) };
@@ -355,6 +412,16 @@ export function createN8nApiClient(config: N8nConfig): N8nApiClient {
         return Promise.resolve({ ok: false as const, error: invalidRequestError("Invalid execution id") });
       }
       return read("executions", {}, normalizeExecutionRow, safeId);
+    },
+
+    getWorkflowTriggerTarget(id) {
+      const safeId = typeof id === "string" ? id.trim() : "";
+      // The catalog's own id charset; no slash, scheme or dot-dot survives it.
+      if (!/^[A-Za-z0-9._:-]{1,128}$/.test(safeId) || safeId.includes("..")) {
+        return Promise.resolve({ ok: false as const, error: invalidRequestError("Invalid workflow id") });
+      }
+      // The extractor is the boundary: only the trigger target is returned.
+      return read("workflows", {}, extractWorkflowTriggerTarget, safeId);
     },
 
     checkConnection() {

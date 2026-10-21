@@ -25,6 +25,7 @@ import { Router } from "express";
 import type { Response } from "express";
 import { randomUUID } from "crypto";
 import { PendingActionConflictError, type PendingActionRefusal } from "@jarvis/agents";
+import { VOICE_TOOL_REFUSED_CODE, voiceConfirmationRefusal } from "@jarvis/core";
 import { createAuthMiddleware, type AuthenticatedRequest } from "../middleware/auth.js";
 import type { Container } from "../services/container.js";
 import {
@@ -147,6 +148,42 @@ export function createPendingActionsRouter(container: Container): Router {
         return;
       }
 
+      // Phase 18.3A — this endpoint is the on-screen Confirm, the one way a
+      // request made by voice is committed. A confirmation that says it was
+      // spoken is refused here, before the pending action or its approval
+      // moves; one that says nothing is a click. (A spoken "yes" in chat is
+      // refused by the chat route, and ToolExecutor never spends an approval
+      // for a spoken turn.)
+      const declared = req.body?.inputMode;
+      if (declared !== undefined && declared !== "text" && declared !== "voice") {
+        res.status(400).json({
+          success: false,
+          error: { code: "INVALID_REQUEST", message: "inputMode must be text or voice" },
+          traceId,
+          timestamp: new Date().toISOString(),
+        });
+        return;
+      }
+      const spoken = voiceConfirmationRefusal(declared);
+      if (spoken) {
+        await container.auditLogger
+          ?.log({
+            userId: req.auth.userId,
+            action: "pending_action.voice_confirmation_refused",
+            result: "rejected",
+            traceId,
+            metadata: { pendingActionId: String(req.params.id), inputMode: "voice" },
+          })
+          .catch(() => undefined);
+        res.status(403).json({
+          success: false,
+          error: { code: VOICE_TOOL_REFUSED_CODE, message: spoken },
+          traceId,
+          timestamp: new Date().toISOString(),
+        });
+        return;
+      }
+
       const result = await container.pendingActionService.confirmPendingAction(
         conversationId,
         req.auth.userId,
@@ -183,6 +220,8 @@ export function createPendingActionsRouter(container: Container): Router {
                 userId: req.auth.userId,
                 conversationId,
                 traceId,
+                // The on-screen Confirm: a spoken one was refused above.
+                voice: false,
               })
             : await container.executor.execute({
                 toolId: result.pendingAction.toolId,

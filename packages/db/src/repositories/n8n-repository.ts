@@ -1,6 +1,7 @@
 import type { PrismaClient } from "@prisma/client";
 import type {
   IN8nRepository,
+  LibraryAllowlistRegistry,
   N8nWorkflowRecord,
   N8nExecutionRecord,
   N8nExecutionStatus,
@@ -78,8 +79,70 @@ function toExecution(row: {
   };
 }
 
-export class PrismaN8nRepository implements IN8nRepository {
+export class PrismaN8nRepository implements IN8nRepository, LibraryAllowlistRegistry {
   constructor(private prisma: PrismaClient) {}
+
+  // -------------------------------------------------------------------------
+  // Phase 18.3B — the trigger allow-list's one writer: a workflow added from
+  // the Automation Library by an approved proposal. Idempotent. In ONE
+  // transaction: the row this entry already has (same path: nothing to do;
+  // another path, the workflow's webhook moved: the row follows it, unless
+  // that path is another row's), or else a new row — and a path another row
+  // already holds is never taken from it. Two registrations arriving
+  // together meet the (user, path) unique key; the loser reads the winner.
+  // -------------------------------------------------------------------------
+
+  async registerLibraryWorkflow(input: {
+    userId: string;
+    name: string;
+    webhookPath: string;
+    entryRef: string;
+    versionId: string;
+  }): Promise<{ outcome: "created" | "unchanged" | "updated" | "conflict" }> {
+    const { userId, name, webhookPath, entryRef, versionId } = input;
+    const attempt = () =>
+      this.prisma.$transaction(async (tx) => {
+        const byRef = await tx.n8nWorkflow.findFirst({ where: { userId, libraryEntryRef: entryRef }, orderBy: { createdAt: "asc" } });
+        if (byRef) {
+          if (byRef.webhookPath === webhookPath) {
+            if (byRef.libraryVersionId === versionId && byRef.isActive) return { outcome: "unchanged" as const };
+            await tx.n8nWorkflow.update({ where: { id: byRef.id }, data: { name, libraryVersionId: versionId, isActive: true } });
+            return { outcome: "updated" as const };
+          }
+          const holder = await tx.n8nWorkflow.findUnique({ where: { userId_webhookPath: { userId, webhookPath } } });
+          if (holder) return { outcome: "conflict" as const };
+          await tx.n8nWorkflow.update({ where: { id: byRef.id }, data: { name, webhookPath, libraryVersionId: versionId, isActive: true } });
+          return { outcome: "updated" as const };
+        }
+        const holder = await tx.n8nWorkflow.findUnique({ where: { userId_webhookPath: { userId, webhookPath } } });
+        if (holder) return { outcome: holder.libraryEntryRef === entryRef ? ("unchanged" as const) : ("conflict" as const) };
+        await tx.n8nWorkflow.create({
+          data: { userId, name, webhookPath, isActive: true, libraryEntryRef: entryRef, libraryVersionId: versionId },
+        });
+        return { outcome: "created" as const };
+      });
+    try {
+      return await attempt();
+    } catch (err) {
+      if ((err as { code?: string }).code !== UNIQUE_CONSTRAINT) throw err;
+      // Another registration took the path first: read what it left.
+      return attempt();
+    }
+  }
+
+  async findLibraryRegistrations(
+    userId: string,
+    entryRefs: string[]
+  ): Promise<Array<{ entryRef: string; versionId: string | null }>> {
+    if (entryRefs.length === 0) return [];
+    const rows = await this.prisma.n8nWorkflow.findMany({
+      where: { userId, isActive: true, libraryEntryRef: { in: entryRefs } },
+      select: { libraryEntryRef: true, libraryVersionId: true },
+    });
+    return rows
+      .filter((row): row is { libraryEntryRef: string; libraryVersionId: string | null } => row.libraryEntryRef !== null)
+      .map((row) => ({ entryRef: row.libraryEntryRef, versionId: row.libraryVersionId }));
+  }
 
   async findWorkflowForUser(
     userId: string,

@@ -114,6 +114,10 @@ export {
 // operator-driven only (apps/api/scripts/tenant-admin): nothing in the
 // runtime creates or changes a tenant, a membership or a connector owner.
 export { PrismaTenantRepository } from "./repositories/tenant-repository.js";
+// Phase 18, Stage 18.1 — the Automation Library: catalog entries, the scan
+// checkpoint and its lease, and the run history.
+export { PrismaAutomationLibraryRepository } from "./repositories/automation-library-repository.js";
+export { PrismaAutomationDraftRepository } from "./repositories/automation-draft-repository.js";
 export {
   runTenantAdminCommand,
   validateTenantAdminCommand,

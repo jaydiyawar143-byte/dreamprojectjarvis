@@ -1,13 +1,15 @@
 import { Router } from "express";
 import type { Response } from "express";
 import { randomUUID } from "crypto";
-import { JarvisRequestSchema, JarvisError } from "@jarvis/core";
+import { JarvisRequestSchema, JarvisError, voiceConfirmationRefusal } from "@jarvis/core";
 import { maskIdentifiersInText } from "@jarvis/core";
 import type { SessionContext, AuthContext } from "@jarvis/core";
 import { createAuthMiddleware, type AuthenticatedRequest } from "../middleware/auth.js";
 import { detectIntent, detectMemoryCommand, detectWorkRequest, PendingActionConflictError, type PendingActionService } from "@jarvis/agents";
 import type {
+  AuditLogger,
   ConversationStorePort,
+  InputMode,
   IOrchestrator,
   ITokenService,
   IToolExecutor,
@@ -80,6 +82,8 @@ export interface TaskConversationPort {
     traceId?: string;
     conversationId?: string;
     ipAddress?: string;
+    /** Phase 18.3A — the turn's server-established input mode. */
+    inputMode?: InputMode;
   }): Promise<{
     message: string;
     taskId: string;
@@ -125,6 +129,17 @@ export interface ChatRouterDeps {
    * wrong" only ever offers to forget, as before.
    */
   memoryCorrections?: MemoryCorrectionCheckPort;
+  /**
+   * Phase 18.2 — the server's memory of its own recent transcripts. A turn
+   * whose text it recognises is marked spoken. Absent: only the client's
+   * `inputMode` marks one.
+   */
+  recentTranscripts?: { recognises(userId: string, text: string): boolean };
+  /**
+   * Phase 18.3A — where a refused spoken confirmation is recorded. Absent: it
+   * is refused all the same, unrecorded.
+   */
+  auditLogger?: AuditLogger;
 }
 
 export function createChatRouter(container: ChatRouterDeps): Router {
@@ -177,6 +192,18 @@ export function createChatRouter(container: ChatRouterDeps): Router {
         traceId,
         ipAddress: req.ip,
       };
+
+      // Phase 18.2 — a spoken turn. The client's word, or the server's own
+      // memory of transcribing this text for this account a moment ago:
+      // either marks it, and the mark only narrows what may run (the
+      // executor refuses what speech may not start). Set here, by the
+      // server, and carried on the session from now on.
+      if (
+        jarvisRequest.inputMode === "voice" ||
+        container.recentTranscripts?.recognises(authContext.userId, jarvisRequest.message) === true
+      ) {
+        sessionContext.inputMode = "voice";
+      }
 
       let conversationId = jarvisRequest.conversationId;
 
@@ -313,6 +340,41 @@ export function createChatRouter(container: ChatRouterDeps): Router {
         intent = guarded.intent;
       }
 
+      // -----------------------------------------------------------------------
+      // Phase 18.3A — A SPOKEN TURN NEVER CONFIRMS (VOICE_APPROVAL_POLICY).
+      //
+      // The turn's mode was set above by the server — the client's word, or
+      // the server's own memory of transcribing this text — and a spoken
+      // "yes", "haan" or "go ahead" is answered here: the pending action is
+      // not confirmed, its approval does not move, and nothing is executed or
+      // sent. It keeps waiting for the on-screen Confirm. Rejecting and
+      // changing stay open to voice: neither runs anything.
+      // -----------------------------------------------------------------------
+      if (intent.type === "CONFIRM" && pendingAction) {
+        const spoken = voiceConfirmationRefusal(sessionContext.inputMode);
+        if (spoken) {
+          await saveUserMessage();
+          await container.auditLogger
+            ?.log({
+              userId: authContext.userId,
+              action: "chat.voice_confirmation_refused",
+              result: "rejected",
+              traceId,
+              ...(req.ip ? { ipAddress: req.ip } : {}),
+              metadata: { pendingActionId: pendingAction.id, toolId: pendingAction.toolId, inputMode: "voice" },
+            })
+            .catch(() => undefined);
+          await container.conversationRepo.addMessage({ conversationId, role: "assistant", content: spoken, metadata: { traceId, pendingActionId: pendingAction.id } });
+          res.status(200).json({
+            success: true,
+            data: { message: spoken, conversationId, metadata: { traceId, pendingActionId: pendingAction.id, confirmation: "refused_voice" } },
+            traceId,
+            timestamp: new Date().toISOString(),
+          });
+          return;
+        }
+      }
+
       // Handle CONFIRM intent
       if (intent.type === "CONFIRM" && pendingAction && container.pendingActionService) {
         await saveUserMessage();
@@ -343,6 +405,9 @@ export function createChatRouter(container: ChatRouterDeps): Router {
                 userId: authContext.userId,
                 conversationId,
                 traceId,
+                // A spoken turn never gets here (refused above); stated
+                // anyway, so the service's own refusal holds if it ever did.
+                voice: sessionContext.inputMode === "voice",
               })
             : // The executor resolves sanitized names internally.
               await container.executor.execute({
@@ -354,6 +419,7 @@ export function createChatRouter(container: ChatRouterDeps): Router {
                 traceId,
                 ipAddress: req.ip,
                 approvalId: pendingAction.approvalId,
+                ...(sessionContext.inputMode ? { inputMode: sessionContext.inputMode } : {}),
               });
 
             let assistantMessage: string;
@@ -610,6 +676,9 @@ export function createChatRouter(container: ChatRouterDeps): Router {
           traceId,
           conversationId,
           ...(req.ip ? { ipAddress: req.ip } : {}),
+          // Phase 18.3A — the work runs under the turn's mode too: a spoken
+          // request never spends an approval or starts what speech may not.
+          ...(sessionContext.inputMode ? { inputMode: sessionContext.inputMode } : {}),
         });
 
         if (result) {

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { InputMode } from "./voice.js";
 
 // ---------------------------------------------------------------------------
 // Risk Level
@@ -95,6 +96,12 @@ export interface ToolContext {
    * classify the outcome into the journal (FAILED vs UNKNOWN).
    */
   signal?: AbortSignal;
+  /**
+   * Phase 18.2 — "voice" when the turn that asked for this was spoken. Set by
+   * the executor from the request; a tool speech may not start refuses on it
+   * too, behind the executor's own refusal.
+   */
+  inputMode?: InputMode;
 }
 
 // ---------------------------------------------------------------------------

@@ -137,6 +137,30 @@ export {
 } from "./tools/n8n-tools.js";
 export { MockN8nProvider, mockKeyDeriver, type MockN8nProviderConfig } from "./tools/n8n-mock.js";
 
+// Phase 18.2 — the n8n workflow library: search, status, sync (through the one service)
+export {
+  SearchAutomationLibraryTool,
+  AutomationLibraryStatusTool,
+  SyncAutomationLibraryTool,
+  AUTOMATION_LIBRARY_TOOLS,
+  createAutomationLibraryTools,
+  createAutomationLibraryAllowlistTool,
+  InspectAutomationLibraryTool,
+  ProposeAllowlistTool,
+  AllowlistAddTool,
+} from "./tools/automation-library-tools.js";
+
+// Phase 18.4 — workflow planning: match the library, and drafts (in JARVIS only)
+export {
+  MatchWorkflowTool,
+  CreateDraftTool,
+  ReviseDraftTool,
+  GetDraftTool,
+  ListDraftsTool,
+  AUTOMATION_PLANNING_TOOLS,
+  createAutomationPlanningTools,
+} from "./tools/automation-planning-tools.js";
+
 // Sprint 7.3 — controlled browser automation (reads open, actions approval-gated)
 export {
   BrowserNavigateTool,

@@ -145,6 +145,10 @@ export const SHARED_CONNECTION_TOOLS: Readonly<
   "meta.campaign.budget.update": { integration: "meta", access: "write" },
   "meta.adset.budget.update": { integration: "meta", access: "write" },
   "meta.campaign.create": { integration: "meta", access: "write" },
+  // Phase 18.3B — putting a library workflow on a trigger allow-list makes it
+  // triggerable through the deployment's n8n connection: an Organization's
+  // write, approved by another of its owners or admins.
+  "automation.library.allowlist.add": { integration: "n8n", access: "write" },
 };
 
 /** What a tool does with its shared connection, or null when it uses none. */

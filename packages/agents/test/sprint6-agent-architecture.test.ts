@@ -178,6 +178,19 @@ describe("Sprint 6.1 — agent architecture", () => {
       const automation = AGENT_POLICIES[AGENT_IDS.automation]!;
       expect(automation.allowedTools).toEqual([
         "n8n.trigger",
+        // Phase 18.2 — the workflow library (observations; nothing runs a workflow).
+        "automation.library.search",
+        "automation.library.status",
+        "automation.library.sync",
+        // Phase 18.3B — inspect one entry; propose it (an approval). Never the change itself.
+        "automation.library.inspect",
+        "automation.library.allowlist.propose",
+        // Phase 18.4 — planning: match (a read) and drafts kept in JARVIS. None reaches n8n.
+        "automation.workflow.match",
+        "automation.draft.create",
+        "automation.draft.revise",
+        "automation.draft.get",
+        "automation.draft.list",
         ...INTEGRATION_READ_TOOLS,
         ...CAPABILITY_TOOLS,
         ...SELF_TOOLS,

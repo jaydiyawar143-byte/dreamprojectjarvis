@@ -103,7 +103,22 @@ Plan → Explain → Confirm → Execute → Audit → Verify → Report
 - If the confirmation store is missing or cannot be reached, the write is
   refused. There is no in-memory fallback, and none may be added.
 - **A voice session cannot confirm a write at all.** Speech is a fine way to ask
-  for one and not a fine way to authorize one.
+  for one and not a fine way to authorize one. Enforced by the server since
+  Phase 18.3A, from the turn's server-established `inputMode` — the client's
+  flag, or the server's own recent transcript, never "text" alone. Each of
+  these refuses:
+  - **the chat route**, a spoken CONFIRM, before the pending action or its
+    approval moves;
+  - **`POST /pending-actions/:id/confirm`**, a confirmation that says it was
+    spoken;
+  - **`ToolExecutor`**, spending an approved approval for a spoken turn,
+    however the id got there;
+  - **the integration and Google write services**, through their `voice` flag,
+    which the tools and `executeApprovedGoogleWrite` now pass on.
+
+  Voice may still propose, cancel and change. Never add a confirmation path
+  that does not carry the turn's mode to the executor (`voiceConfirmationRefusal`,
+  `docs/phases/phase-18.md`, Stage 18.3A).
 - **A pending action is answered by its id.** `POST /api/v1/pending-actions/:id/confirm`,
   `/reject` and `/modify` act only when `:id` is the action waiting in that
   conversation. Any other id — replaced, used, expired, unknown — gets `409
@@ -172,6 +187,125 @@ command (`docs/DEPLOYMENT.md`, "Organizations").
   integration command service, the Meta pages and the marketing service ask
   `SharedConnectionAccess` the same question. A new surface that reaches a
   shared connection asks it too — hiding a control is never the check.
+
+### Automation Library
+
+The record is `docs/phases/phase-18.md` (Stages 18.1 and 18.2); these are the
+parts a change must not break.
+
+- **An observation, not a permission.** A library entry records that a
+  workflow was seen in the n8n instance. It never makes one triggerable: that
+  stays the per-account `N8nWorkflow` allow-list and the approval-gated
+  `n8n.trigger`. Never merge the two tables, and never add a path that
+  activates, edits or runs a workflow from the library.
+- **Bounded runs, never a bigger bound.** A run reads at most
+  `LIBRARY_MAX_PAGES_PER_RUN` pages; a larger catalog takes more runs of the
+  same scan. A page and the checkpoint past it are stored in ONE transaction
+  that first renews the run's lease — a checkpoint never points past an
+  unstored page.
+- **Partial is never complete.** A scan is complete only when n8n's cursor
+  chain ran out with every page stored. A repeated cursor fails the scan.
+- **Absence needs two complete scans.** Only the last page of a complete scan
+  reconciles; an entry missing from two consecutive complete scans is marked
+  removed, and no entry is ever deleted. n8n's workflow cursor carries an
+  offset, so one scan can skip a workflow that still exists.
+- **One run per catalog**, by a lease taken in ONE conditional `UPDATE`. Never
+  check it in memory and then write.
+- **The catalog is the owning Organization's**, per instance (a hash of the
+  base URL — the URL is not stored). Reads and syncs ask
+  `SharedConnectionAccess`; starting a sync is `shared:sync` (owner, admin).
+- **Nothing secret, nothing n8n said.** Only listing metadata is kept — never
+  node parameters, credentials, settings, static or pinned data. Failures are
+  stable codes with fixed sentences; a cursor, the instance, a credential or
+  n8n's words never reach a response, a log or an audit row.
+- **One port, every surface (Stage 18.2).** The router and the
+  `automation.library.*` tools are handed the one `AutomationLibraryService`
+  instance (`AutomationLibraryPort`). The request rules are in core
+  (`validateLibraryEntryQuery`, `validateLibrarySyncOptions`,
+  `namesLibraryServerScope`), so both arms refuse alike. Never validate in
+  only one of them.
+- **The Organization role decides, never `auth.role`.** The library tools need
+  only the platform's `read`; `shared:read` and `shared:sync` are asked in
+  the service.
+- **Speech never starts or continues a sync.** A spoken turn is marked by the
+  chat route — the client's `inputMode: "voice"`, or the server's own recent
+  transcript (`RecentTranscripts`). The mark travels on the session, the
+  execution request and the tool context. `ToolExecutor` refuses every tool
+  in `VOICE_REFUSED_TOOLS` before the tool runs, and the orchestrator and the
+  tool refuse too. The mark only narrows: never let `"text"` unmark a
+  recognised transcript. Tools on that list are not task tools
+  (`schedulableToolIds`), because a scheduled run outlives the turn's mode.
+- **A chain is bounded runs, held by ONE conditional `UPDATE`.**
+  Continue-until-complete holds the catalog through `activeChainId`, taken
+  only while no run holds the lease and no live chain holds the catalog. A
+  run's start checks the chain in the same statement that takes the lease.
+  Before every run the chain re-reads the requester's authorization and the
+  scope, and reserves the Organization's budget. It stops at its hard limits
+  and is `COMPLETE` only when the store completed the scan. A repeated
+  request, or an idempotency key, returns the existing chain and spends
+  nothing. Never resume a chain automatically.
+- **An inspection is the catalog row, sanitized (Stage 18.3B).**
+  `inspectLibraryEntry` in core is the one place an entry becomes a view, and
+  it is an explicit allowlist of fields. Trigger kinds and integration
+  categories come only from its curated tables. Links are removed from names,
+  and stored node types are re-validated. Input names are always "not
+  available". It never reads n8n. Never add a field, never fill a gap with a
+  guess or a source read, and never return node parameters, credentials,
+  URLs, settings, static or pinned data, or a workflow object.
+- **Inspecting or proposing never grants anything.** A proposal is an
+  approval for the page-only `automation.library.allowlist.add`, bound to
+  exactly `{entryId, versionId}`. It is an n8n write in
+  `SHARED_CONNECTION_TOOLS`, so the Organization comes from the owner record
+  and only *another* owner or admin approves it (Phase 17). Adding it to the
+  allow-list still triggers nothing: `n8n.trigger` keeps its own approval.
+  The add tool stays on NO agent's allowlist.
+- **Apply re-checks, then reads n8n once, then spends.** Re-check: authorization,
+  not stale, the catalog version. Then one read of the workflow, reduced
+  *inside the n8n client* (`extractWorkflowTriggerTarget`) to the version
+  and each enabled webhook node's path (`validateWebhookPath`), method and
+  auth mode. Then the version must match, with exactly one usable webhook.
+  Only then `consume` with the Organization's scope, then
+  `registerLibraryWorkflow`. A refusal before the consume leaves the approval
+  unspent. The reduced target is never returned, logged or audited; its path
+  is stored only in `N8nWorkflow`. Never widen that read, and never move
+  the consume ahead of a check.
+- **Speech never applies one.** The apply flow, `ToolExecutor` and the tool
+  each refuse a spoken turn (18.3A). Voice may propose.
+- **Matching reads the catalog, never n8n (Stage 18.4).**
+  `rankLibraryCandidates` in core judges each entry on its 18.3B inspection,
+  and the planning service retrieves through the library store's own
+  listing. Explanations are fixed sentences over the criteria. They quote
+  only the requester's words, and never a tag or a link. Shared words count
+  only if they are purpose words, never a trigger's or an app's name. Never
+  recommend a stale entry, or one whose node types are unknown. Never claim
+  what a node is configured to do.
+- **A draft is a plan in JARVIS, not a workflow.** `AutomationPlanningService`
+  is the one implementation; the planning router and the
+  `automation.workflow.match` / `automation.draft.*` tools are both handed
+  it. It holds no n8n client.
+  - Never add a path that sends a draft to n8n, deploys, activates, runs or
+    publishes one, or turns one into an approval or an allow-list row.
+  - A new draft is refused while the library covers the request
+    (`REUSE_AVAILABLE`), unless `overrideReuse` is set.
+- **No n8n parameter without its schema.** JARVIS has no n8n node schemas, so
+  a draft holds structure, nodes from `DRAFT_NODE_CATALOG`, and settings
+  written as questions. Credentials and URLs are references to configure in
+  n8n, never values.
+  - The `configuration_schema` check stays **not run** until a reviewed
+    schema source exists.
+  - Never add a node type, a parameter or a credential field to a draft
+    without one.
+  - Never report a draft `validated` while any check did not run.
+  - Secrets, expressions and links are refused, never stored redacted.
+- **Draft versions are immutable.** A revision names its `baseVersion` and is
+  stored only while that is the latest: ONE conditional `UPDATE`, then the
+  insert. PostgreSQL refuses an `UPDATE` of a stored version. A stale
+  customization cannot be revised. Never add an update of a version.
+- **The Organization role decides drafts too.** Matching and reading need
+  `shared:read`; creating and revising need `shared:write`
+  (`resolveCatalog`). Drafts are scoped by Organization, provider and
+  instance. Audit rows hold ids, hashes and statuses — never the goal, an
+  answer or a label.
 
 ### Memory
 
@@ -374,7 +508,28 @@ working tree, turbo's cache bypassed): `@jarvis/db` 410 passed / 0 failed (27
 files) on a fresh database;
 CI's database steps all passed, 0 skipped; and every workspace's suite without
 a database gave 9,682 passed, 0 failed (20 workspaces)
-(`docs/phases/phase-17.md`, §8).
+(`docs/phases/phase-17.md`, §8). After Phase 18, Stage 18.1 (2026-10-19, same
+method): `@jarvis/db` 417 passed / 0 failed (28 files) on a fresh database;
+CI's database steps all passed, 0 skipped; every workspace's suite without a
+database gave 9,744 passed and 4 failed — the timing-sensitive tests named in
+`docs/phases/phase-15.md` §15 (`evidence-builder` and three MCP timeout
+tests), each passing when run alone (`docs/phases/phase-18.md`).
+After Phase 18, Stage 18.2 (2026-10-20, same method): `@jarvis/db` 422 passed /
+0 failed (29 files) on a fresh database; CI's database steps all passed, 0
+skipped; every workspace's suite without a database gave 9,840 passed and 3
+failed — the three MCP timeout tests, which that day failed alone and on an
+untouched checkout of `1fd1bb0` alike (`docs/phases/phase-18.md`, Stage 18.2).
+After Stage 18.3A (same day, same method): CI's database steps all passed
+(`@jarvis/db` 422/422, 0 skipped). The full suite gave 9,868 passed and 4
+failed: the same three MCP tests, plus the `evidence-builder` millisecond flake.
+After Stage 18.3B (2026-10-21, same method): CI's database steps all passed
+(`@jarvis/db` 428/428, 30 files, 0 skipped). The full suite gave 9,932 passed
+and 4 failed — the same four timing-sensitive tests, each of which passed
+when run alone that day.
+After Stage 18.4 (2026-10-21, same method): CI's database steps all passed
+(`@jarvis/db` 434/434, 31 files, 36 migrations, 0 skipped). The full suite
+gave 10,009 passed and 3 failed: the three MCP timeout tests, which failed
+alone that day too, as on the untouched `1fd1bb0` (Stage 18.2).
 
 The two memory end-to-end tests (`sprint-1.1d-memory-e2e`, and
 `phase14-memory-e2e-pg.integration`, which has no in-memory fallback at all)
@@ -388,11 +543,12 @@ database-backed test in `apps/api` or `packages/memory` must be named
 `*-pg.integration.test.ts`, or CI never gives it a database.
 
 CI does not run the tests of `@jarvis/core`, `tools`, `agents`, `browser` or
-`meta-graph` as workspaces. Three slices of them are gated by **file name**:
-the memory contracts, the marketing contracts and the shared-connection
-contracts (`shared-connection*` in `tools` and `agents`). A new contract test
-for any of them must match the names its step selects
-(`.github/workflows/ci.yml`), or CI never runs it.
+`meta-graph` as workspaces. Four slices of them are gated by **file name**:
+the memory contracts, the marketing contracts, the shared-connection
+contracts (`shared-connection*` in `tools` and `agents`) and the Automation
+Library's rules (`automation-library*` in `core`, `tools` and `agents`). A new contract test for any
+of them must match the names its step selects (`.github/workflows/ci.yml`), or
+CI never runs it.
 
 ---
 

@@ -220,6 +220,10 @@ export function createVoiceRouter(container: Container, deps: VoiceRouterDeps): 
         },
       });
 
+      // Phase 18.2 — so the chat turn this text becomes is known to be
+      // spoken, whatever the client says. A hash, never the text.
+      container.recentTranscripts?.remember(userId, result.text);
+
       // An empty transcript is a successful request whose answer is "nothing
       // was said" — silence, a mis-tap, a cough. The client shows "I didn't
       // catch that" rather than an error state.

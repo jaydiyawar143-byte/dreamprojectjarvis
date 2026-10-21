@@ -32,6 +32,22 @@
 #   Phase 17 multi-business hardening — the shared-connection contracts of
 #   @jarvis/tools and @jarvis/agents, by file name; their PostgreSQL-backed
 #   tests in @jarvis/db and @jarvis/api run in the database steps.
+#   Phase 18, Stage 18.1 — the Automation Library's rules in @jarvis/core, by
+#   file name; its PostgreSQL suites in @jarvis/db and @jarvis/api run in the
+#   database steps.
+#   Phase 18, Stage 18.2 — the same slice widened to @jarvis/tools and
+#   @jarvis/agents (the executor and the orchestrator refusing a spoken
+#   library sync), by file name; the tools,
+#   the continue-until-complete chains and the voice marker run in
+#   "Test @jarvis/api", their PostgreSQL suites in the database steps.
+#   Phase 18, Stage 18.3B — the inspection and proposal contracts join the
+#   same slice (core, tools); the service, flow and routes run in
+#   "Test @jarvis/api", the reduced n8n read in "Test @jarvis/n8n", and the
+#   allow-list's PostgreSQL suite in the database steps.
+#   Phase 18, Stage 18.4 — workflow matching and drafts: their contracts in
+#   the same slice (core, tools, agents), the service and routes in
+#   "Test @jarvis/api", the page in "Test @jarvis/web", and the draft store's
+#   PostgreSQL suite (immutability trigger included) in the database steps.
 #
 # Deliberately not gated yet (docs/DEVELOPMENT.md, "Continuous integration"):
 #   - Most test files OUTSIDE @jarvis/api. `typecheck:tests` runs in
@@ -205,6 +221,25 @@ jobs:
         run: |
           pnpm --filter @jarvis/tools exec vitest run shared-connection
           pnpm --filter @jarvis/agents exec vitest run shared-connection
+
+      # Phase 18, Stage 18.1 — the Automation Library's pure rules in core:
+      # normalization and fingerprints, cursor and instance hashing, failure
+      # naming, state. Stage 18.2 adds the shared request rules, the chain
+      # contract and the voice policy (core), the tools and the executor's refusal
+      # of a spoken sync (tools), and the orchestrator's (agents). Stage 18.3B adds
+      # the sanitized inspection and the proposal contract (core) and the
+      # approval-gated allow-list tool (tools). Stage 18.4 adds matching and the
+      # draft model (core), the planning tools (tools) and the automation agent's
+      # grant and gate (agents). Selected by file name, as the other core
+      # contracts are. The library's engine, service, routes, tools and chains
+      # run in "Test @jarvis/api", the n8n read that 18.3B reduces in "Test
+      # @jarvis/n8n", and its PostgreSQL suites in the database steps below.
+      - name: Test automation library contracts (@jarvis/core, @jarvis/tools, @jarvis/agents)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          pnpm --filter @jarvis/core exec vitest run automation-library
+          pnpm --filter @jarvis/tools exec vitest run automation-library
+          pnpm --filter @jarvis/agents exec vitest run automation-library
 
       # From here on, the PostgreSQL-backed tests. DATABASE_URL is set on these
       # steps only, so nothing above ever sees a database. Applying every
