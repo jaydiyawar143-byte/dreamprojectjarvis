@@ -89,6 +89,9 @@ export * from "./automation-inspection.js";
 export * from "./automation-vocabulary.js";
 export * from "./automation-planning.js";
 export * from "./automation-draft.js";
+// Phase 18, Stage 18.5 — the trusted n8n node-schema snapshot: its rules, and
+// what a draft's settings may say about it.
+export * from "./automation-node-schema.js";
 export * from "./voice-tool-policy.js";
 // Phase 17 Stage 3A — tenants (Organizations): roles, the membership context
 // and the two read ports. Contract only; the reads live in @jarvis/db.

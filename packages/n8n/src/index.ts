@@ -67,6 +67,11 @@ export {
   type N8nErrorCode,
 } from "./error-handler.js";
 
+// Phase 18, Stage 18.5 — the pinned, reduced copy of n8n's own parameter
+// schemas. Plain data, generated once from a verified upstream package; the
+// rules that read it are core's (`loadNodeSchemaRegistry`).
+export { N8N_NODE_SCHEMA_SNAPSHOT } from "./node-schema.js";
+
 export {
   N8nCloudProvider,
   createN8nProvider,

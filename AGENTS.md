@@ -287,14 +287,16 @@ parts a change must not break.
     publishes one, or turns one into an approval or an allow-list row.
   - A new draft is refused while the library covers the request
     (`REUSE_AVAILABLE`), unless `overrideReuse` is set.
-- **No n8n parameter without its schema.** JARVIS has no n8n node schemas, so
-  a draft holds structure, nodes from `DRAFT_NODE_CATALOG`, and settings
-  written as questions. Credentials and URLs are references to configure in
-  n8n, never values.
-  - The `configuration_schema` check stays **not run** until a reviewed
-    schema source exists.
+- **No n8n parameter without its schema.** JARVIS carries a pinned, reviewed,
+  trusted copy of n8n node parameter schemas (Phase 18, Stage 18.5) for every
+  node type in `DRAFT_NODE_CATALOG`. A draft holds structure, nodes from
+  `DRAFT_NODE_CATALOG`, and settings written as questions. Credentials and
+  URLs are references to configure in n8n, never values.
+  - The `configuration_schema` check runs when the server holds the
+    verified snapshot; a check that could not run completely is `not_run`
+    (never `passed`).
   - Never add a node type, a parameter or a credential field to a draft
-    without one.
+    without it being covered by the pinned schemas or explicitly reviewed.
   - Never report a draft `validated` while any check did not run.
   - Secrets, expressions and links are refused, never stored redacted.
 - **Draft versions are immutable.** A revision names its `baseVersion` and is
@@ -530,6 +532,15 @@ After Stage 18.4 (2026-10-21, same method): CI's database steps all passed
 (`@jarvis/db` 434/434, 31 files, 36 migrations, 0 skipped). The full suite
 gave 10,009 passed and 3 failed: the three MCP timeout tests, which failed
 alone that day too, as on the untouched `1fd1bb0` (Stage 18.2).
+After Stage 18.5 (2026-10-22, on Windows from the working tree, same method):
+`pnpm typecheck` 37/37, `pnpm lint` 20/20, `pnpm build` 20/20. The full suite
+across 20 workspaces gave 10,077 passed, 4 failed and 668 skipped — the skips
+are the database-backed suites (`@jarvis/db` 346, `@jarvis/api` 226,
+`@jarvis/memory` 96), since no test database was pointed at (this stage adds no
+migration and no repository). The 4 failures are the same timing-sensitive
+ones named in §15: the three MCP timeout tests, each failing alone on this
+machine too, and the `auth-session` web test ("/approvals loads its data…"),
+which passes alone. CI's database steps were not run in that pass.
 
 The two memory end-to-end tests (`sprint-1.1d-memory-e2e`, and
 `phase14-memory-e2e-pg.integration`, which has no in-memory fallback at all)

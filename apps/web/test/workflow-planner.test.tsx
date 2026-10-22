@@ -287,7 +287,7 @@ describe("the draft panel", () => {
     render(<WorkflowDraftPanel draftId="draft-00000001" onClose={vi.fn()} />);
     const panel = await screen.findByTestId("workflow-draft");
     expect(panel.textContent).toContain("Draft — not in n8n");
-    expect(panel.textContent).toContain("Structure checked — not validated against n8n's node schemas");
+    expect(panel.textContent).toContain("Checked — some checks could not run");
     expect(screen.queryByText("Validated")).toBeNull();
     expect(screen.getByTestId("draft-version").textContent).toBe("Version 2 of 2 · ab12cd34ef56");
     expect(screen.getByTestId("draft-checks").textContent).toContain("Not run");

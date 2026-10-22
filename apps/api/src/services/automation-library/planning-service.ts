@@ -39,6 +39,7 @@ import {
   buildDraftContent,
   draftContentHash,
   draftDiff,
+  draftSchemaHints,
   draftTitle,
   evaluateDraft,
   inspectLibraryEntry,
@@ -63,6 +64,7 @@ import {
   type DraftView,
   type LibraryEntryRecord,
   type LibraryScope,
+  type NodeSchemaRegistry,
   type PlanningMatch,
   type PlanningMatchView,
   type PlanningResult,
@@ -85,6 +87,12 @@ export interface AutomationPlanningServiceDeps {
   drafts: AutomationDraftStore | undefined;
   audit: LibraryAuditPort;
   log?: LibraryLog;
+  /**
+   * The trusted n8n node schemas (Stage 18.5). Absent or null: a draft's
+   * settings are not checked against n8n, and the check says so. One instance
+   * is shared by this service, so the router and the tools are answered alike.
+   */
+  nodeSchema?: NodeSchemaRegistry | null;
 }
 
 type Caller = "api" | "jarvis";
@@ -248,7 +256,7 @@ export class AutomationPlanningService implements AutomationPlanningPort {
 
     const built = buildDraftContent({ kind, title: draftTitle(request, parsed.value.title), request, source, graph });
     if (!built.ok) return this.rejected(userId, "draft_create", invalid(built.issues), { issues: built.issues.map((i) => i.code) });
-    const evaluation = evaluateDraft(built.content, { ...(kind === "customization" ? { source: liveSource } : {}), scopeVerified: true });
+    const evaluation = evaluateDraft(built.content, { ...(kind === "customization" ? { source: liveSource } : {}), scopeVerified: true }, this.deps.nodeSchema ?? null);
     if (evaluation.status === "invalid" || evaluation.status === "stale") {
       return this.rejected(userId, "draft_create", refuse(422, "DRAFT_INVALID", evaluation.checks.find((c) => c.status === "failed")!.message));
     }
@@ -349,7 +357,7 @@ export class AutomationPlanningService implements AutomationPlanningPort {
       next = answered.content;
     }
 
-    const evaluation = evaluateDraft(next, { ...(next.kind === "customization" ? { source: liveSource } : {}), scopeVerified: true });
+    const evaluation = evaluateDraft(next, { ...(next.kind === "customization" ? { source: liveSource } : {}), scopeVerified: true }, this.deps.nodeSchema ?? null);
     if (evaluation.status === "stale") {
       return this.rejected(
         userId,
@@ -474,9 +482,10 @@ export class AutomationPlanningService implements AutomationPlanningPort {
                 : "none",
       };
     }
-    const evaluation = evaluateDraft(content, { ...(content.kind === "customization" ? { source: live } : {}), scopeVerified: true });
+    const evaluation = evaluateDraft(content, { ...(content.kind === "customization" ? { source: live } : {}), scopeVerified: true }, this.deps.nodeSchema ?? null);
     const history = await store.listVersions(scope, draft.draftId);
     const isLatest = record.version === draft.latestVersion;
+    const hints = draftSchemaHints(content, this.deps.nodeSchema ?? null);
     return {
       draftId: draft.draftId,
       kind: draft.kind,
@@ -489,6 +498,7 @@ export class AutomationPlanningService implements AutomationPlanningPort {
       diff: draftDiff(content),
       checks: evaluation.checks,
       requirements: evaluation.requirements,
+      ...(hints.length > 0 ? { schema: hints } : {}),
       source: sourceView,
       history: history.map((h) => ({ version: h.version, contentHash: h.contentHash, status: h.status, createdAt: h.createdAt })),
       canRevise: isLatest && evaluation.status !== "stale" && evaluation.status !== "invalid" && (await this.mayDraft(userId)),

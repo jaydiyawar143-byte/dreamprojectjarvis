@@ -230,10 +230,13 @@ jobs:
       # the sanitized inspection and the proposal contract (core) and the
       # approval-gated allow-list tool (tools). Stage 18.4 adds matching and the
       # draft model (core), the planning tools (tools) and the automation agent's
-      # grant and gate (agents). Selected by file name, as the other core
-      # contracts are. The library's engine, service, routes, tools and chains
-      # run in "Test @jarvis/api", the n8n read that 18.3B reduces in "Test
-      # @jarvis/n8n", and its PostgreSQL suites in the database steps below.
+      # grant and gate (agents). Stage 18.5 adds the trusted node-schema rules
+      # (core), the tools' bounded summary (tools) and the agent's honesty about
+      # what a validated draft means (agents). Selected by file name, as the
+      # other core contracts are. The library's engine, service, routes, tools
+      # and chains run in "Test @jarvis/api", the n8n read that 18.3B reduces in
+      # "Test @jarvis/n8n" — as does the committed node-schema snapshot — and its
+      # PostgreSQL suites in the database steps below.
       - name: Test automation library contracts (@jarvis/core, @jarvis/tools, @jarvis/agents)
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: |

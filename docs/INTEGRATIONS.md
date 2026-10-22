@@ -317,11 +317,15 @@ service:
 - **What it holds.** Nodes from a reviewed list of n8n base-package types,
   their connections, and settings written as questions. Credentials and URLs
   are left to configure in n8n.
-- **What it never holds.** n8n parameters, credentials, expressions, URLs or
-  secrets.
-- **How far it is checked.** JARVIS has no n8n node schemas, so a draft's
-  configuration is not validated, and the page says so. Its best status is
-  "structure checked".
+- **What it never holds.** n8n's parameter values as structured data,
+  credentials, expressions, URLs or secrets.
+- **How far it is checked.** JARVIS carries a pinned, reviewed copy of n8n's
+  own node parameter schemas for every node type a draft may hold
+  (`packages/n8n/src/node-schema.ts`). A setting that names a parameter is
+  checked against it — its shape, its allowed values, its bounds — and a
+  check that could not run completely is said, never passed. The page shows
+  the result, and a draft is "validated" only when every check ran and
+  passed.
 - **Versions.** Immutable: a change is a new version.
 - **What it never does.** Nothing here deploys, activates, runs or publishes
   a workflow.

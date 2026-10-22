@@ -10,20 +10,23 @@
 // Credentials are references ("a Slack account, configured in n8n"); a value
 // for one is refused, never stored.
 //
-// WHY SO LITTLE. JARVIS has no copy of n8n's node parameter schemas: the
-// repository carries none, and the n8n instance was never asked for them
-// (Stage 18.4 contacts no n8n). A parameter written without its schema would
-// be invented. So the node vocabulary is the short list below — documented
+// WHY SO LITTLE. Stage 18.4 had no copy of n8n's node parameter schemas: the
+// repository carried none, and the n8n instance was never asked for them
+// (Stage 18.4 contacts no n8n). Stage 18.5 added one — a pinned, reviewed,
+// offline copy for exactly the types below — so a setting may now name a real
+// parameter and be checked against it. The node vocabulary is still the short
+// list below — documented
 // n8n base-package nodes that the Stage 18.3B tables already name, with the
 // fixed number of inputs and outputs their descriptions declare — and a node
 // whose ports depend on its configuration (Switch, Merge, error outputs, AI
 // sub-nodes) or whose content is a program (Code) is not in it.
 //
 // NEVER "VALIDATED" BY OMISSION. Every check reports passed, failed, pending
-// (input needed) or not_run, with its reason. `configuration_schema` is not
-// run while no schema exists, and a customization's `source_graph` is not run
-// because the catalog holds no connections — so a draft here is at best
-// "unverified": its structure checked, its configuration not.
+// (input needed) or not_run, with its reason. `configuration_schema` runs
+// against the trusted n8n schemas when the server holds them and is not_run
+// when it does not, and a customization's `source_graph` is not run because
+// the catalog holds no connections — so a draft is at best "unverified" until
+// every check has run and passed.
 //
 // IMMUTABLE VERSIONS. A draft is a series of versions. A version, once
 // stored, never changes (the store has no update, and PostgreSQL refuses one);
@@ -47,6 +50,12 @@ import {
 import { sanitizeUntrustedText } from "./evidence-builder.js";
 import { canonicalizeForHash } from "./utils/params-hash.js";
 import { containsSecret } from "./utils/redact-secrets.js";
+import {
+  NODE_SCHEMA_MESSAGES,
+  checkDraftConfiguration,
+  type DraftSchemaHint,
+  type NodeSchemaRegistry,
+} from "./automation-node-schema.js";
 
 // ---------------------------------------------------------------------------
 // The node vocabulary.
@@ -674,8 +683,7 @@ export interface DraftRequirement {
 }
 
 export const DRAFT_CHECK_MESSAGES = {
-  configurationSchema:
-    "Not run: n8n's parameter schemas for these node types are not available to JARVIS, so the settings could not be checked against them.",
+  configurationSchema: NODE_SCHEMA_MESSAGES.unavailable,
   sourceGraph:
     "Not run: the catalog holds the source workflow's node types, not its connections or parameters, so the effect on its existing paths cannot be checked.",
 } as const;
@@ -723,8 +731,20 @@ export interface DraftLiveFacts {
   scopeVerified?: boolean;
 }
 
-/** Every check, its result, and the status they add up to. A check that did not run is said, never passed. */
-export function evaluateDraft(content: DraftContent, live: DraftLiveFacts = {}): { status: DraftStatus; checks: DraftCheck[]; requirements: DraftRequirement[] } {
+/**
+ * Every check, its result, and the status they add up to. A check that did not
+ * run is said, never passed.
+ *
+ * `schema` is the trusted n8n node-schema snapshot, when the server has one.
+ * Without it the configuration check does not run at all; with it, the
+ * settings that name a parameter are checked against n8n's own schemas
+ * (Stage 18.5).
+ */
+export function evaluateDraft(
+  content: DraftContent,
+  live: DraftLiveFacts = {},
+  schema?: NodeSchemaRegistry | null
+): { status: DraftStatus; checks: DraftCheck[]; requirements: DraftRequirement[] } {
   const checks: DraftCheck[] = [];
   const add = (id: DraftCheckId, status: DraftCheck["status"], message: string) => checks.push({ id, status, message });
 
@@ -773,7 +793,11 @@ export function evaluateDraft(content: DraftContent, live: DraftLiveFacts = {}):
   const open = requirements.filter((r) => r.state === "needs_input");
   add("requirements", open.length ? "pending" : "passed", open.length ? `${open.length} item${open.length === 1 ? "" : "s"} still need${open.length === 1 ? "s" : ""} an answer.` : "Every question and setting has an answer.");
 
-  add("configuration_schema", "not_run", DRAFT_CHECK_MESSAGES.configurationSchema);
+  // The configuration check (Stage 18.5). It runs only when the server holds
+  // the trusted n8n node schemas; a setting that names a parameter is checked
+  // against it, and a check that could not run completely is said, never passed.
+  const configuration = checkDraftConfiguration(content, schema ?? null);
+  add("configuration_schema", configuration.status, configuration.message);
 
   if (content.kind === "customization") {
     add("source_graph", "not_run", DRAFT_CHECK_MESSAGES.sourceGraph);
@@ -1023,6 +1047,11 @@ export interface DraftView {
   diff: DraftDiff;
   checks: DraftCheck[];
   requirements: DraftRequirement[];
+  /**
+   * What JARVIS knows about each node's parameters, so a setting can name one.
+   * Bounded, and never the whole schema (Stage 18.5).
+   */
+  schema?: DraftSchemaHint[];
   source: {
     entryId: string;
     versionId: string;

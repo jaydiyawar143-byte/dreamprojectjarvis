@@ -92,6 +92,7 @@ import {
   buildIdempotencyKey,
   createN8nLibraryPageSource,
   createN8nLibraryTriggerTargetSource,
+  N8N_NODE_SCHEMA_SNAPSHOT,
 } from "@jarvis/n8n";
 import {
   PermissionService,
@@ -171,6 +172,9 @@ import {
 } from "@jarvis/core";
 // S8.4 — MCP: the reviewed manifest, the runtime and the tool adapter.
 import { MARKETING_PUBLISH_TOOL_IDS, MARKETING_RESEARCH_TOOL_IDS, MCP_MANIFEST, MEMORY_PURGE_TOOL_ID, validateMcpManifest, type McpManifest } from "@jarvis/core";
+// Phase 18, Stage 18.5 — the trusted n8n node schemas: one verified snapshot,
+// read once at start-up, shared by every surface that checks a draft.
+import { loadNodeSchemaRegistry, type NodeSchemaRegistry } from "@jarvis/core";
 import { randomUUID } from "node:crypto";
 import { McpConnection, isMcpEnabled, HttpMcpConnection } from "@jarvis/mcp";
 import { createMcpTools } from "@jarvis/tools";
@@ -1546,12 +1550,24 @@ export function getContainer(options?: {
   toolRegistry.register(createAutomationLibraryAllowlistTool(automationLibrary, executionJournal, approvalRepo));
   // Stage 18.4 — planning: the library's own authorization and store, and the
   // drafts table. Nothing in it holds an n8n client.
+  // Stage 18.5 — the trusted n8n node schemas. The snapshot is verified once,
+  // here: a file that does not match its own hash is refused whole, and then
+  // no draft is checked against it. One instance, so the page's router and the
+  // JARVIS tools are answered alike.
+  const nodeSchemaLoad = loadNodeSchemaRegistry(N8N_NODE_SCHEMA_SNAPSHOT);
+  const nodeSchema: NodeSchemaRegistry | null = nodeSchemaLoad.ok ? nodeSchemaLoad.registry : null;
+  if (nodeSchema === null) {
+    operationalLog.child("automation-planning").warn("automation_node_schema_untrusted", {
+      reason: nodeSchemaLoad.ok ? "the snapshot was refused" : nodeSchemaLoad.reason,
+    });
+  }
   const automationPlanning = new AutomationPlanningService({
     catalog: automationLibrary,
     entries: libraryStore,
     drafts: new PrismaAutomationDraftRepository(prisma),
     audit: auditLogger,
     log: operationalLog.child("automation-planning"),
+    nodeSchema,
   });
   for (const tool of createAutomationPlanningTools(automationPlanning)) toolRegistry.register(tool);
   const marketingPublishingUnavailableReason =
