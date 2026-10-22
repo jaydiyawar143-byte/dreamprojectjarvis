@@ -1269,7 +1269,7 @@ Stages 18.1–18.3B.
 | Looked for | Found | Used |
 |---|---|---|
 | A workflow builder, draft model, validator or node-schema registry | None in the code. Phase 16 (`docs/phases/phase-16.md`) is a plan only. Its §6 boundaries (structured operations, pure diff and validation in core, write-once revisions, no writes through MCP) are followed here | its boundaries |
-| n8n node schemas | None. No n8n package or node description is in the repository, and the instance was not asked (no live n8n contact in this stage). Phase 16's live check saw the n8n MCP server's 58 tool *names* only; JARVIS has no path to invoke them | the blocker below |
+| n8n node schemas | None. No n8n package or node description is in the repository, and the instance was not asked (no live n8n contact in this stage). Phase 16's live check saw the n8n MCP server's 58 tool *names* only; JARVIS has no path to invoke them | the blocker below (resolved by Stage 18.5, below) |
 | Catalog search | `AutomationLibraryStore.listEntries` (name, tag and node-type search) | candidate retrieval, unchanged |
 | Entry facts | `inspectLibraryEntry` (18.3B) | every candidate is judged on its sanitized inspection |
 | Node vocabulary | the 18.3B tables (`TRIGGER_BY_TYPE`, `CATEGORY_BY_NAME`) | the services a request can name, and the draft node catalog's types |
@@ -1292,6 +1292,14 @@ as a *setting*: a question with a plain answer, a credential reference, or a
 value left for n8n. The configuration check reports **not run**, with that
 reason, and a draft is never reported validated. This is the safe substitute
 the brief asks for, and the documented blocker on anything more.
+
+> **Stage 18.5 resolved this**, and this section is kept as the Stage 18.4
+> record. A pinned, reviewed, offline copy of the node parameter schemas is now
+> in the repository, so a setting that names a parameter is checked against it
+> (`configuration_schema` passes, fails or stays not run with a reason). See
+> "Stage 18.5" below. Everything else here still holds: a draft carries no n8n
+> parameter *value* structure, credentials stay references, and nothing is sent
+> to n8n.
 
 ### Matching
 
@@ -1450,7 +1458,7 @@ stored row is never taken on trust:
 | `safety` | no secret, n8n expression or link stored anywhere in the draft |
 | `credentials` | references only; a value is refused |
 | `requirements` | pending while a question, a value setting or a structural need is open |
-| `configuration_schema` | **not run**: no schema |
+| `configuration_schema` | **not run** in this stage: no schema (Stage 18.5 changed this — see below) |
 | `source_graph` | customization: **not run** — the source's connections are unknown |
 | `source_version` | customization: the source is still at the bound version |
 | `scope` | read inside the caller's Organization and instance |
@@ -1458,7 +1466,10 @@ stored row is never taken on trust:
 The statuses add up to `invalid`, `stale`, `needs_input`, `unverified` or
 `validated`. `validated` needs every check passed, so in this stage the best
 status is `unverified`, shown as "Structure checked — not validated against
-n8n's node schemas".
+n8n's node schemas". (Stage 18.5 made `configuration_schema` a real check, so
+a draft whose settings are valid can now reach `validated` where every other
+check passes; the page shows "Checked — some checks could not run" while one
+does not.)
 
 An invalid proposal is refused (`422 DRAFT_INVALID` or `SECRET_REFUSED`) with
 every issue and where it is. It is never stored.
@@ -1619,7 +1630,9 @@ All three were caught on the re-run.
 
 - **Configuration is not validated, and cannot be here.** JARVIS has no n8n
   node schemas. A draft carries no parameters, its configuration check never
-  runs, and no draft can reach `validated` in this stage.
+  runs, and no draft can reach `validated` in this stage. *(Stage 18.5 added
+  the schemas and made this a real check; the rest of this limitation — a
+  draft holds questions, not parameter structures — stands.)*
 - **A small node vocabulary.** It has 28 types, chosen because their ports
   are fixed. These are refused, and their steps go into notes "to plan in
   n8n":
@@ -1652,16 +1665,269 @@ All three were caught on the re-run.
   a workflow…" is answered rather than saved; the user says "create" or
   "save".
 
-### Next: Stage 18.5 (proposed, not started)
+## Stage 18.5 — trusted n8n node-schema validation
 
-**A reviewed source of node schemas** for the draft catalog's types:
-- a pinned, reviewed snapshot of their n8n node descriptions in the
-  repository, or a reviewed read-only n8n MCP tool added to `MCP_MANIFEST`;
-- so that settings can become validated parameters, and
-  `configuration_schema` can run.
+### What it adds
 
-Then, possibly, **compiling a validated draft into an n8n workflow
-definition for a person to review and import**: still no deployment.
+One thing: a **pinned, reviewed, offline copy of n8n's own node parameter
+schemas** for the 28 types a draft may hold, and a real `configuration_schema`
+check against it.
 
-Creating, activating or running a workflow in n8n stays out of scope until it
-has its own approval-gated design (Phase 16 §5, §6.8). Stage 18.4 stops here.
+- `packages/n8n/src/node-schema.ts` — the snapshot, as plain JSON TypeScript.
+  Committed data, not a dependency: no n8n package is installed, nothing is
+  fetched, and the schema for a node is the same bytes on every run.
+- `packages/core/src/automation-node-schema.ts` — the pure rules: verify the
+  snapshot, load it whole or not at all, check a draft's settings against it,
+  and produce the bounded summary a view may show.
+- `apps/api/src/services/automation-library/planning-service.ts` — the one
+  planning service holds the verified registry and passes it to every
+  `evaluateDraft` call and to `draftSchemaHints`, so the page's router and the
+  JARVIS tools are answered by the same rules.
+- `apps/api/src/services/container.ts` — verifies the snapshot once, at start
+  up; a snapshot that does not match its own hash is refused whole, logged as
+  `automation_node_schema_untrusted`, and then no draft is checked against one.
+
+**Nothing is sent, fetched or compiled.** No n8n credentials, no n8n call, no
+new route, no new tool, no approval, no workflow definition, no deployment.
+
+### Licensing, checked first
+
+The gate came before any download, extraction or commit, and it is recorded
+here because it constrains distribution, not behaviour:
+
+| Question | Answer |
+|---|---|
+| Package | `n8n-nodes-base@2.15.1` (the `latest` tag on npm on 2026-10-21) |
+| License | `SEE LICENSE IN LICENSE.md` → Sustainable Use License v1.0 |
+| Use in this repository | Permitted: SUL allows use, copy and modification for internal business purposes |
+| Conditions | keep the notices, keep the license text with the copy, mark the copy as modified — all three are in the repository |
+| Distribution | **The SUL does not permit commercial redistribution of the copy.** The snapshot must not be shipped as part of a commercially distributed product or republished on its own without a separate decision (see "Known limitations") |
+
+`packages/n8n/src/node-schema-NOTICE.md` says what the data is, which version
+it came from, that it is a *reduced and modified* copy, and under what license.
+`packages/n8n/src/node-schema-LICENSE.md` holds the license text.
+
+### The pinned source, and how it is verified
+
+```
+package     n8n-nodes-base
+version     2.15.1
+tarball     https://registry.npmjs.org/n8n-nodes-base/-/n8n-nodes-base-2.15.1.tgz
+sha256      43e200c1cbe1c4a9f967efa079facb00cc3cbe51ede23c9a3cfc66c9a4051406
+sha512      E4/vb8sBb4tzZSFoBAP2EigAHSc3uEn52RdfyTu1C7xPBNLYDfw5y5OxvMmHBQ8of9YQwcK9AQsoEsggyu7ztQ==
+provenance  https://registry.npmjs.org/-/npm/v1/attestations/n8n-nodes-base@2.15.1
+```
+
+The generator (`packages/n8n/scripts/generate-node-schema-snapshot.mjs`) is a
+developer tool, never run by the application. It refuses to start unless:
+
+- the artifact's SHA-256 **and** SHA-512 match the manifest
+  (`node-schema-source.json`), which also pins the npm attestation URL;
+- the license in the artifact is the one reviewed;
+- every helper module it loads in its sandbox is a pinned version of the
+  packages `n8n-nodes-base` itself declares;
+
+and it never executes anything from the network: the tarball, the extraction
+and the loading are offline and local.
+
+### What the snapshot holds — the reduction
+
+For each of the 28 catalog types, the **default version's** description only:
+
+| Kept | Why |
+|---|---|
+| `type`, `label`, `versions`, `defaultVersion` | which node, which version, what it is |
+| per parameter: `name`, `type`, `required`, `conditional` (it has `displayOptions`), `displayName` (≤ 120 chars, plain text) | enough to check a value, not enough to leak a definition |
+| `options` | only for `options`, `multiOptions`, `resource`, `operation`, and only when every option value is a primitive |
+| `min`, `max` | only for `number` |
+
+Dropped deliberately:
+
+- `default` — a default is n8n's opinion, not a contract, and it would make a
+  setting "valid" silently;
+- `notice` parameters — n8n's own explanatory HTML, not a configurable
+  parameter;
+- `displayOptions`, `typeOptions`, `routing`, credential definitions, node
+  settings, code, and everything else;
+- every version but the default: a draft whose node is not the default is
+  **not covered**, and says so.
+
+A node whose description has no `properties` array at all is recorded as
+**unsupported**; an empty array (No Op) is a real node with zero parameters.
+The snapshot has 28 types, 1,012 parameter declarations, 0 unsupported, and is
+222,452 bytes. Its content hash is
+`df1477b744e148ae1bec30775206647028f269b35e6b0b67a268d8d8751aa8ef`, computed
+as SHA-256 over `n8n-node-schema:v1:` + the canonical JSON of `{nodes,
+unsupported}`.
+
+### The rules
+
+**Loading is all or nothing.** `loadNodeSchemaRegistry` recomputes the hash
+from the parsed content, checks the shape and the bounds it will later rely on,
+merges repeated declarations, and deep-freezes the result. A snapshot it cannot
+verify is refused with a fixed reason — never partially loaded, never repaired.
+
+**n8n declares one name many times.** 1,045 declarations carry 478 distinct
+names; 207 names repeat, often under different conditions. A merged parameter
+takes the union, in the direction that refuses most and claims least:
+
+| Field | Merged as |
+|---|---|
+| `type` | the common type, else `"mixed"` |
+| `required` | some declaration requires it |
+| `requiredAlways` | every declaration requires it |
+| `conditional` | some declaration is conditional |
+| `options` | the union — absent if any declaration has no list |
+| `min`/`max` | the loosest |
+
+A `"mixed"` type makes **no claim**: no type check and no option check. A check
+is only made where the declarations agree.
+
+**A value is checked when the declarations agree.** `validateParameterValue`
+refuses, in order: an n8n expression (`{{ }}`), a value for a credential
+parameter, anything shaped like a secret, then a non-number for `number`, a
+non-boolean for `boolean`, a value outside `options` when the list is known,
+and a number outside `min`/`max`. A type it cannot check (`collection`,
+`fixedCollection`, `resourceLocator`, a resource with a dynamic list…) makes no
+claim — **never a pass**.
+
+**Status is the weakest link, not the strongest.**
+
+```
+failed      a setting's value is invalid                       (VALUE_INVALID)
+not_run     the node type is not in the snapshot               (not covered)
+not_run     a setting names no parameter                       (a question)
+not_run     a claim has no answer yet                          (a setting is null)
+not_run     nothing could be checked
+not_run     a parameter n8n always requires is not said
+passed      every claim was checked and held
+```
+
+`failed` wins over every `not_run`; any `not_run` wins over `passed`. The check
+therefore reports `passed`, `failed` or `not_run` — never "pending" (the
+draft's own `requirements` check owns "needs an answer").
+
+**What a setting is, and is not.** A setting of kind `credential` or
+`in_n8n` is not a parameter claim, and neither are the internal keys
+`credential` and `which_node`. A `value` setting whose key names a parameter —
+snake_case first, then case-insensitively — is a claim. One that names none is a
+question, and is reported as *unchecked*, never as an error. Two parameters that
+differ only by case make the key ambiguous, and ambiguous is unchecked.
+
+**The node type must be covered.** A node type the snapshot does not describe
+is `not_run` with "not covered" — the draft is still storable, but it is not
+validated. A non-default version of a covered type is the same.
+
+### What reaches a client — the bounded summary
+
+`DraftView.schema` carries one hint per live node: the node key, its type, its
+label, the version described, the parameter count, and **at most 24** parameter
+names with their type, whether n8n requires them, and **at most 8** option
+values (each ≤ 40 chars). Never the whole schema, never a bound, never a
+`default`, never a `displayName` beyond what is in the label, and never an
+option list of any length.
+
+That is the same summary for the page and for the model, because both read the
+one `DraftView` the one service produced. The tools' one-line answer adds
+nothing: when a check did not run, it repeats the server's own reason.
+
+### Files
+
+```
+packages/n8n/src/node-schema.ts                      the snapshot (generated)
+packages/n8n/src/node-schema-NOTICE.md               attribution, modification
+packages/n8n/src/node-schema-LICENSE.md              the SUL text
+packages/n8n/scripts/node-schema-source.json         the pinned manifest
+packages/n8n/scripts/generate-node-schema-snapshot.mjs   the developer generator
+packages/core/src/automation-node-schema.ts          the rules
+packages/core/src/automation-draft.ts                calls the check, adds the hints
+packages/core/src/automation-planning-view.ts        the hint types
+apps/api/src/services/automation-library/planning-service.ts   the seam
+apps/api/src/services/container.ts                   one verified registry
+packages/tools/src/tools/automation-planning-tools.ts  the honest status line
+packages/agents/src/agents/automation-agent.ts       the prompt
+apps/web/src/components/automations/workflow-draft.tsx  the status label
+```
+
+### Tests
+
+Named `automation-library*`, which is the slice CI runs for `core`, `tools`
+and `agents`, and inside the full workspace runs for `n8n` and `apps/api`:
+
+| File | What it pins |
+|---|---|
+| `packages/core/test/automation-library-node-schema-p18.test.ts` (36) | a corrupted snapshot is refused whole; a tampered byte changes the hash; an unsupported shape is refused; expressions, secrets and credentials are refused wherever they come from; required, type, option and bound checks; `"mixed"` makes no claim; every `not_run` reason; status precedence; the bounded summary; the draft's evaluation never says `validated` while a check did not run |
+| `packages/n8n/test/node-schema-snapshot-p18.test.ts` (14) | the committed snapshot loads; one changed byte is refused; it covers exactly `DRAFT_NODE_CATALOG`; it matches the manifest's package, version and artifact hashes; the notice and the license are present; it holds no credential, no link, no expression, no `default`, and only plain data |
+| `packages/tools/test/automation-library-node-schema-p18.test.ts` (6) | the tools carry the server's bounded summary unchanged and no schema dump; the line repeats the server's reason; no source file here imports the schema rules or the snapshot |
+| `packages/agents/test/automation-library-node-schema-p18.test.ts` (4) | the prompt may call a draft validated only when every check ran and passed; it never claims JARVIS lacks the schemas; it tells the model to prefer the server's parameter names |
+| `apps/api/test/automation-library-node-schema-p18.test.ts` (9) | the check runs and passes; an invalid value is a `422 DRAFT_INVALID` and nothing is stored; a bound is enforced; an unknown setting is `not_run`; no snapshot is `not_run` with its reason; the view's summary is bounded; the route and the tool agree; the container builds the registry once |
+
+Existing tests updated because their claim became false: the tools'
+`statusLine` test, the web's status label test, and the words in `AGENTS.md`,
+`docs/INTEGRATIONS.md` and the agent prompt.
+
+### Verification
+
+- `packages/core` — `automation-library-node-schema` 36/36.
+- `packages/n8n` — `node-schema-snapshot` 14/14.
+- `packages/tools` — `automation-library` 32/32 (4 files).
+- `packages/agents` — `automation-library` 15/15 (3 files).
+- `apps/api` — `automation-library` 143 passed / 11 skipped (the two
+  PostgreSQL-backed files, which need a database), 8 files passed.
+- The snapshot regenerated twice from the same artifact, byte-identical, same
+  content hash (222,452 bytes, 28 types, 1,012 declarations, 0 unsupported).
+- Every gate at the end of the stage, on Windows from the working tree
+  (2026-10-22):
+  - `pnpm typecheck` — 37/37.
+  - `pnpm lint` — 20/20.
+  - `pnpm build` — 20/20.
+  - `pnpm test` (`turbo run test --continue`) — 20 workspaces: **10,077
+    passed, 4 failed, 668 skipped**. The skips are the database-backed suites
+    (`@jarvis/db` 346, `@jarvis/api` 226, `@jarvis/memory` 96), which need
+    PostgreSQL.
+  - The 4 failures are the known timing-sensitive ones from
+    `docs/phases/phase-15.md` §15, none of them in code this stage touched: the
+    three MCP timeout tests (`@jarvis/mcp` `verify-s8`, `@jarvis/api`
+    `mcp-integration-s8`, `@jarvis/api` `mcp-pilot-failures-s8` — each fails
+    alone on this machine too, as AGENTS.md records on the untouched
+    `1fd1bb0`), and `@jarvis/web` `auth-session` ("/approvals loads its data
+    with the restored session"), which passes alone in 433 ms.
+  - The database-backed suites were not run in this pass: no test database was
+    pointed at. They are unchanged by this stage (no migration, no repository),
+    and CI runs them against its own throwaway pgvector service.
+
+### Known limitations
+
+- **The copy may not be redistributed commercially.** The SUL permits internal
+  use and modification; it does not permit commercial redistribution. A
+  deployment that ships JARVIS to third parties for a fee needs a separate
+  decision on this file (replace it with a licensed copy, or drop the
+  snapshot and let the check stay `not_run`). Nothing at runtime depends on
+  that decision: without the snapshot, the check says so.
+- **Only the default version of each type.** A node pinned to another version
+  is "not covered" and unchecked.
+- **Only 28 types.** The catalog is unchanged, and so is its vocabulary: no
+  community nodes, no Switch/Merge/Code/AI nodes.
+- **Conditional parameters make no required claim.** `requiredAlways` only
+  fires when every declaration requires the parameter, so the "always required"
+  rule is narrow: of the 28 types, only `formTrigger.formTitle` and
+  `httpRequest.url` are unconditionally required. Most requirements are
+  conditional and stay questions.
+- **A setting whose key is not a parameter name is unchecked, not wrong.** The
+  server does not guess a mapping between a free-text key and a parameter.
+- **Dynamic option lists are unknown offline.** A `resourceLocator` or a list
+  the instance fills at runtime (a Slack channel, a Sheet id) has no offline
+  membership test; the check makes no claim about its value.
+- **A `"mixed"` type makes no claim.** Where n8n declares one name with
+  different types, the value is not type-checked.
+- **No schema-derived requirements.** The check answers "is this value valid
+  for the parameter it names?" and does not add parameters to a draft. Turning
+  a required parameter into a question is future work.
+
+### Next: compiling a draft for a person to import
+
+A validated draft could one day be **turned into an n8n workflow definition
+for a person to review and import** — still with no deployment, activation or
+run, and only behind its own reviewed design. Creating, activating or running a
+workflow in n8n stays out of scope until then (Phase 16 §5, §6.8). Stage 18.5
+stops here.

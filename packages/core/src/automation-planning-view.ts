@@ -27,3 +27,13 @@ export type {
   DraftView,
   PlanningMatchView,
 } from "./automation-draft.js";
+export type {
+  DraftSchemaHint,
+  NodeParameterDeclaration,
+  NodeParameterSchema,
+  NodeSchemaRegistry,
+  NodeSchemaSnapshot,
+  NodeSchemaSource,
+  NodeTypeDeclaration,
+  NodeTypeSchema,
+} from "./automation-node-schema.js";

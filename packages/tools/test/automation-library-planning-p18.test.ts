@@ -37,6 +37,7 @@ function fakePort() {
     version: { number: 2 },
     latestVersion: 2,
     requirements: [],
+    checks: [{ id: "configuration_schema", status: "not_run", message: "Not run: no trusted n8n node schema is available to JARVIS, so the settings could not be checked against one." }],
   };
   return {
     match: vi.fn(async () => ({
@@ -117,7 +118,7 @@ describe("the planning tools", () => {
     const [, , revise] = createAutomationPlanningTools(fakePort());
     const result = await revise!.execute({ draftId: DRAFT_ID, baseVersion: 1, answers: { "question.x": "y" } }, ctx);
     expect(result.metadata?.message).toBe(
-      "Saved version 2 of \"Leads\". Earlier versions are unchanged. Its structure is checked; its settings are not validated against n8n's node schemas, which JARVIS does not have."
+      "Saved version 2 of \"Leads\". Earlier versions are unchanged. Not run: no trusted n8n node schema is available to JARVIS, so the settings could not be checked against one."
     );
   });
 

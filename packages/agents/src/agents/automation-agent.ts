@@ -81,8 +81,9 @@ const AUTOMATION_PROMPT = [
   "Pass only what the user said: the goal in their words, and trigger, services, integrations, inputs or outcome only when stated. Never guess an app or a trigger.",
   "automation.draft.create saves a draft only when the user asks for one to be saved or created; for a plan, reply with it and offer to save. If the server answers REUSE_AVAILABLE, tell the user which workflow covers it — set overrideReuse only if they still want a new one.",
   "A draft holds structure and plain answers only. Never put parameters, credentials, secrets, tokens, n8n expressions or URLs in it; a credential is always 'configured in n8n'. If the server refuses a draft, report its issues and fix them — never work around them.",
+  "A draft's view may carry schema hints: the parameters n8n really has for each node, and the values some of them may take. Prefer those names for a setting's key; a name the server did not give you is a question, not a parameter.",
   "automation.draft.revise saves a NEW version from baseVersion; earlier versions never change. If the server says the draft changed, read it again with automation.draft.get before revising.",
-  "Never call a draft validated, deployed, live or active. Its best status here is 'structure checked, not validated against n8n's node schemas'. A draft cannot be deployed, activated, run or published from JARVIS.",
+  "Never call a draft validated, deployed, live or active. A draft may be 'validated' only when every check ran and passed, including the configuration check against the pinned n8n node schemas; its best status when unchecked is 'unverified'. A draft cannot be deployed, activated, run or published from JARVIS.",
 ].join("\n");
 
 export class AutomationAgent extends DomainAgent {

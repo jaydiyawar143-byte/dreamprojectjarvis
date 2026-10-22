@@ -263,6 +263,69 @@ From 2026-10-05 this paragraph said a pull request was required, with "Require a
 
 **Historical, 2026-09-14 — before its first GitHub run:** its `run` steps were replayed locally, in order, in a clean checkout with LF line endings, no `.env`, no Turborepo cache, Node 24.16.0 and pnpm 9.0.0 — on Windows, not Ubuntu. Every step passed: lint 18/18, typecheck 33/33, build 18/18, `@jarvis/api` 1,159 passed and 8 skipped, `@jarvis/memory` 453/453, `@jarvis/n8n` 65/65, `@jarvis/web` 552/552. The three `uses:` actions — checkout, pnpm setup and Node setup — have not been exercised.
 
+## Regenerating the n8n node-schema snapshot
+
+`packages/n8n/src/node-schema.ts` is committed data — a reduced copy of the node
+parameter schemas of `n8n-nodes-base`, for the types in `DRAFT_NODE_CATALOG`
+(Phase 18, Stage 18.5). The application never fetches it and never runs the
+generator; this is a developer step, done deliberately, reviewed like code.
+
+It is a **modified copy under the Sustainable Use License v1.0**. Keep
+`packages/n8n/src/node-schema-NOTICE.md` and
+`packages/n8n/src/node-schema-LICENSE.md` beside it, and see
+`docs/phases/phase-18.md`, Stage 18.5, before shipping the repository or the
+snapshot commercially.
+
+1. Put the pinned tarball somewhere local. The manifest
+   (`packages/n8n/scripts/node-schema-source.json`) names its URL and both
+   hashes; download exactly that version.
+
+   ```powershell
+   # Windows PowerShell; use curl -fLO / wget elsewhere.
+   $dir = "$env:TEMP\n8n-schema"; New-Item -ItemType Directory -Force $dir | Out-Null
+   Invoke-WebRequest "https://registry.npmjs.org/n8n-nodes-base/-/n8n-nodes-base-2.15.1.tgz" -OutFile "$dir\n8n-nodes-base-2.15.1.tgz"
+   Get-FileHash "$dir\n8n-nodes-base-2.15.1.tgz" -Algorithm SHA256   # must equal the manifest's sha256
+   ```
+
+2. Prepare a runner folder holding the pinned helper packages the loader may
+   execute — the versions `n8n-nodes-base` itself declares:
+   `n8n-workflow@2.15.0`, `lodash`, `change-case`, `moment-timezone`, `moment`
+   (`npm install --prefix "$dir\runner" --no-save <those>`).
+
+3. Run the generator. It verifies the artifact's hashes before it reads it,
+   extracts it to a temporary directory, loads only the node descriptions,
+   reduces them by an explicit allowlist, and writes the snapshot, the notice
+   and the license:
+
+   ```powershell
+   node packages/n8n/scripts/generate-node-schema-snapshot.mjs `
+     --tarball "$env:TEMP\n8n-schema\n8n-nodes-base-2.15.1.tgz" `
+     --runner  "$env:TEMP\n8n-schema\runner"
+   ```
+
+   It refuses — and writes nothing — on a hash mismatch, an unexpected
+   license, an unpinned helper, or a node whose description it cannot read
+   safely.
+
+4. Review the diff. A regeneration should change the data and nothing else.
+   The snapshot's own content hash changes with it; commit both together.
+
+5. Test it before anything else:
+
+   ```bash
+   pnpm --filter @jarvis/n8n test
+   pnpm --filter @jarvis/core exec vitest run automation-library-node-schema
+   pnpm --filter @jarvis/tools exec vitest run automation-library
+   pnpm --filter @jarvis/agents exec vitest run automation-library
+   pnpm --filter @jarvis/api exec vitest run automation-library
+   ```
+
+**Never** add `n8n-nodes-base` to a `package.json` or `pnpm-lock.yaml`, fetch a
+schema at runtime, or read node schemas from a live n8n instance. To move to a
+new upstream version, update the manifest first (version, URL, sha256, sha512,
+provenance URL) and record the change in `docs/phases/phase-18.md`; the review
+of the reduced vocabulary is the point of the exercise, not a formality.
+
 ## Driving the real app
 
 The committed driver starts the stack, signs in as a real user and drives the UI in Chrome.

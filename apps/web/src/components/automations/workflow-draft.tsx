@@ -10,8 +10,8 @@
 //
 // WHAT IS SHOWN IS WHAT THE SERVER SAID. Its status, its checks (passed,
 // failed, pending, or not run — and why), what still needs an answer, and the
-// version's number and content hash. The best status a draft reaches today is
-// "structure checked — not validated": the panel never words it as more.
+// version's number and content hash. A draft is "validated" only when every
+// check ran and passed; the panel never words it as more.
 //
 // A REVISION IS A NEW VERSION. Answers are saved from the version shown, as a
 // new version; earlier versions stay as they were and can be opened.
@@ -30,7 +30,7 @@ const UNAUTHORIZED = new Set(["NOT_AVAILABLE", "PERMISSION_DENIED"]);
 
 export const DRAFT_STATUS_LABEL: Record<DraftStatus, { label: string; tone: Tone }> = {
   needs_input: { label: "Needs your input", tone: "warn" },
-  unverified: { label: "Structure checked — not validated against n8n's node schemas", tone: "info" },
+  unverified: { label: "Checked — some checks could not run", tone: "info" },
   validated: { label: "Validated", tone: "ok" },
   stale: { label: "Stale — its source workflow changed", tone: "danger" },
   invalid: { label: "Invalid", tone: "danger" },

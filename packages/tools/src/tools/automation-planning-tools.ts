@@ -71,14 +71,23 @@ const REQUEST_PARAMS: NonNullable<ConstructorParameters<typeof BaseTool>[4]> = [
   { name: "outcome", type: "string", description: "What should have happened when it finishes, if the user said.", required: false },
 ];
 
-const statusLine = (draft: DraftView) =>
-  draft.status === "needs_input"
-    ? `${draft.requirements.filter((r) => r.state === "needs_input").length} item(s) still need an answer.`
-    : draft.status === "unverified"
-      ? "Its structure is checked; its settings are not validated against n8n's node schemas, which JARVIS does not have."
-      : draft.status === "stale"
-        ? "Its source workflow has changed since; start a new draft from the current version."
-        : `Status: ${draft.status}.`;
+/**
+ * What the draft is, in one line.
+ *
+ * An "unverified" draft is one whose checks did not all run — the server says
+ * which, and that reason is what the line says. The tools never claim more
+ * than the server's own checks do.
+ */
+const statusLine = (draft: DraftView) => {
+  if (draft.status === "needs_input") return `${draft.requirements.filter((r) => r.state === "needs_input").length} item(s) still need an answer.`;
+  if (draft.status === "stale") return "Its source workflow has changed since; start a new draft from the current version.";
+  if (draft.status === "unverified") {
+    const configuration = draft.checks?.find((check) => check.id === "configuration_schema");
+    if (configuration && configuration.status !== "passed") return configuration.message;
+    return "Its structure is checked; some of its checks could not run.";
+  }
+  return `Status: ${draft.status}.`;
+};
 
 export class MatchWorkflowTool extends PlanningTool {
   constructor(port: AutomationPlanningPort) {
