@@ -12,8 +12,8 @@ import type {
 import {
   BLOCKED_STATUSES,
   CREATE_BLOCKED_STATUSES,
-  DEFAULT_LEASE_MS,
   computeParamsHash,
+  voiceConfirmationRefusal,
   type ExecutionJournalPort,
   type ExecutionJournalStatus,
 } from "@jarvis/core";
@@ -21,6 +21,7 @@ import type { MetaAdsProvider, MetaAccountAuthorizer, MetaAdsWriteProvider, Meta
 import { validateAccountId, validateEntityId, parseBudgetValue } from "./meta-ads-validators.js";
 import { validateBudgetAmount, validateBudgetTransition, buildBudgetChangeSummary, verifyBudgetResult, DEFAULT_BUDGET_GUARDRAILS } from "./meta-ads-budget-guardrails.js";
 import { MemoryExecutionJournal, classifyWriteOutcome, withSafeTerminalTransitions } from "../execution-journal.js";
+import { verifyExecutionGrant } from "../execution-grant.js";
 import type { ProviderCallOptions } from "./meta-ads-provider.js";
 
 // ---------------------------------------------------------------------------
@@ -114,15 +115,48 @@ export function buildIdempotencyKey(
 type WriteProvider = MetaAdsProvider & MetaAdsWriteProvider;
 
 // ---------------------------------------------------------------------------
+// Phase 19.1 — a Meta write runs only behind the executor.
+//
+// `execute` is a public method and a ToolContext is a plain object, so an
+// `approvalId` in the context says only that the caller CLAIMS an approval.
+// Every write therefore asks first for the executor's grant for this exact
+// call (execution-grant.ts) — before the account check, the journal, any Meta
+// read or the approval — and refuses without it. A direct call, a copied or
+// forged context, other parameters, a spent grant and a spoken turn all stop
+// here with nothing spent.
+// ---------------------------------------------------------------------------
+
+/** The one answer to a Meta write that did not come through the executor. */
+const META_WRITE_NOT_AUTHORIZED =
+  "Meta Ads changes run only after an approval is checked, so nothing was changed.";
+
+/** The refusal for this call, or null when the executor authorized it. */
+function executorGrantRefusal(
+  toolId: string,
+  params: Record<string, unknown>,
+  context: ToolContext
+): string | null {
+  const verdict = verifyExecutionGrant(toolId, params, context);
+  if (verdict.ok) return null;
+  // A spoken turn may ask for a Meta change; it never spends the approval.
+  return verdict.refusal === "spoken"
+    ? (voiceConfirmationRefusal("voice") ?? META_WRITE_NOT_AUTHORIZED)
+    : META_WRITE_NOT_AUTHORIZED;
+}
+
+// ---------------------------------------------------------------------------
 // authorizeAndClaim — one-time approval consumption fused with the execution
-// claim (Phase 10.3). When an approvalId is present it MUST be atomically
-// consumed (verifying user, tool, paramsHash, APPROVED state, expiry) in the
-// same durable step that claims the execution record. Denial => no claim,
-// no external side effect. Fail-closed when a port is missing.
+// claim (Phase 10.3). The approval MUST be atomically consumed (verifying
+// user, tool, paramsHash, APPROVED state, expiry) in the same durable step
+// that claims the execution record. Denial => no claim, no external side
+// effect. Fail-closed when a port is missing.
+//
+// Phase 19.1 — and fail-closed when the approval is missing: there is no
+// unapproved claim, whoever owns the connection. The claim is only ever the
+// approval store's.
 // ---------------------------------------------------------------------------
 async function authorizeAndClaim(
   approvals: IApprovalConsumptionPort | undefined,
-  journal: ExecutionJournalPort,
   toolId: string,
   executionId: string,
   params: Record<string, unknown>,
@@ -135,19 +169,13 @@ async function authorizeAndClaim(
    */
   tenantScope?: SharedConnectionScope
 ): Promise<{ ok: true; claimed: true } | { ok: false; error: string }> {
-  if (!context.approvalId && tenantScope) {
-    // A write an Organization's approver must approve never runs without its
-    // approval — not through the unit-test seam below either.
-    return { ok: false, error: "Approval required: an owner or admin of the organization must approve this change" };
-  }
   if (!context.approvalId) {
-    // No approval in context (unit-test seam / non-gated invocation):
-    // plain single-winner claim as before.
-    const claimed = await journal.claimForExecution(executionId, {
-      ownerId: crypto.randomUUID(),
-      leaseMs: DEFAULT_LEASE_MS,
-    });
-    return claimed ? { ok: true, claimed: true } : { ok: false, error: "Execution already executing" };
+    return {
+      ok: false,
+      error: tenantScope
+        ? "Approval required: an owner or admin of the organization must approve this change"
+        : "Approval required: this change was not approved, so nothing was changed",
+    };
   }
   if (!approvals) {
     // An approval id was supplied but no consumption port is wired:
@@ -327,14 +355,6 @@ abstract class BaseMetaAdsWriteTool extends BaseTool {
     }
     return { ok: true, executionId: record.executionId };
   }
-
-  protected async claimExecution(executionId: string): Promise<boolean> {
-    // Durable single-winner claim with lease ownership.
-    return (await this.journal.claimForExecution(executionId, {
-      ownerId: crypto.randomUUID(),
-      leaseMs: DEFAULT_LEASE_MS,
-    })) !== null;
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -360,6 +380,11 @@ export class MetaPauseCampaignTool extends BaseMetaAdsWriteTool {
   }
 
   async execute(params: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
+    // Phase 19.1 — first, before any access check, journal row, Meta read or
+    // approval: did the executor authorize THIS call?
+    const refused = executorGrantRefusal(this.id, params, context);
+    if (refused) return this.failure(refused);
+
     const accountId = params.accountId as string;
     const campaignId = params.campaignId as string;
 
@@ -401,7 +426,6 @@ export class MetaPauseCampaignTool extends BaseMetaAdsWriteTool {
       const previousState = campaign.status;
       const claim = await authorizeAndClaim(
         this.approvals,
-        this.journal,
         this.id,
         ensured.executionId,
         params,
@@ -472,6 +496,11 @@ export class MetaResumeCampaignTool extends BaseMetaAdsWriteTool {
   }
 
   async execute(params: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
+    // Phase 19.1 — first, before any access check, journal row, Meta read or
+    // approval: did the executor authorize THIS call?
+    const refused = executorGrantRefusal(this.id, params, context);
+    if (refused) return this.failure(refused);
+
     const accountId = params.accountId as string;
     const campaignId = params.campaignId as string;
 
@@ -513,7 +542,6 @@ export class MetaResumeCampaignTool extends BaseMetaAdsWriteTool {
       const previousState = campaign.status;
       const claim = await authorizeAndClaim(
         this.approvals,
-        this.journal,
         this.id,
         ensured.executionId,
         params,
@@ -584,6 +612,11 @@ export class MetaPauseAdSetTool extends BaseMetaAdsWriteTool {
   }
 
   async execute(params: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
+    // Phase 19.1 — first, before any access check, journal row, Meta read or
+    // approval: did the executor authorize THIS call?
+    const refused = executorGrantRefusal(this.id, params, context);
+    if (refused) return this.failure(refused);
+
     const accountId = params.accountId as string;
     const adSetId = params.adSetId as string;
 
@@ -625,7 +658,6 @@ export class MetaPauseAdSetTool extends BaseMetaAdsWriteTool {
       const previousState = adSet.status;
       const claim = await authorizeAndClaim(
         this.approvals,
-        this.journal,
         this.id,
         ensured.executionId,
         params,
@@ -696,6 +728,11 @@ export class MetaResumeAdSetTool extends BaseMetaAdsWriteTool {
   }
 
   async execute(params: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
+    // Phase 19.1 — first, before any access check, journal row, Meta read or
+    // approval: did the executor authorize THIS call?
+    const refused = executorGrantRefusal(this.id, params, context);
+    if (refused) return this.failure(refused);
+
     const accountId = params.accountId as string;
     const adSetId = params.adSetId as string;
 
@@ -737,7 +774,6 @@ export class MetaResumeAdSetTool extends BaseMetaAdsWriteTool {
       const previousState = adSet.status;
       const claim = await authorizeAndClaim(
         this.approvals,
-        this.journal,
         this.id,
         ensured.executionId,
         params,
@@ -808,6 +844,11 @@ export class MetaPauseAdTool extends BaseMetaAdsWriteTool {
   }
 
   async execute(params: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
+    // Phase 19.1 — first, before any access check, journal row, Meta read or
+    // approval: did the executor authorize THIS call?
+    const refused = executorGrantRefusal(this.id, params, context);
+    if (refused) return this.failure(refused);
+
     const accountId = params.accountId as string;
     const adId = params.adId as string;
 
@@ -849,7 +890,6 @@ export class MetaPauseAdTool extends BaseMetaAdsWriteTool {
       const previousState = ad.status;
       const claim = await authorizeAndClaim(
         this.approvals,
-        this.journal,
         this.id,
         ensured.executionId,
         params,
@@ -920,6 +960,11 @@ export class MetaResumeAdTool extends BaseMetaAdsWriteTool {
   }
 
   async execute(params: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
+    // Phase 19.1 — first, before any access check, journal row, Meta read or
+    // approval: did the executor authorize THIS call?
+    const refused = executorGrantRefusal(this.id, params, context);
+    if (refused) return this.failure(refused);
+
     const accountId = params.accountId as string;
     const adId = params.adId as string;
 
@@ -961,7 +1006,6 @@ export class MetaResumeAdTool extends BaseMetaAdsWriteTool {
       const previousState = ad.status;
       const claim = await authorizeAndClaim(
         this.approvals,
-        this.journal,
         this.id,
         ensured.executionId,
         params,
@@ -1111,14 +1155,6 @@ abstract class BaseMetaAdsBudgetTool extends BaseTool {
     }
     return { ok: true, executionId: record.executionId };
   }
-
-  protected async claimExecution(executionId: string): Promise<boolean> {
-    // Durable single-winner claim with lease ownership.
-    return (await this.journal.claimForExecution(executionId, {
-      ownerId: crypto.randomUUID(),
-      leaseMs: DEFAULT_LEASE_MS,
-    })) !== null;
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1152,6 +1188,11 @@ export class MetaUpdateCampaignBudgetTool extends BaseMetaAdsBudgetTool {
   }
 
   async execute(params: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
+    // Phase 19.1 — first, before any access check, journal row, Meta read or
+    // approval: did the executor authorize THIS call?
+    const refused = executorGrantRefusal(this.id, params, context);
+    if (refused) return this.failure(refused);
+
     const accountId = params.accountId as string;
     const campaignId = params.campaignId as string;
 
@@ -1223,7 +1264,6 @@ export class MetaUpdateCampaignBudgetTool extends BaseMetaAdsBudgetTool {
       // Execute write
       const claim = await authorizeAndClaim(
         this.approvals,
-        this.journal,
         this.id,
         ensured.executionId,
         params,
@@ -1336,6 +1376,11 @@ export class MetaUpdateAdSetBudgetTool extends BaseMetaAdsBudgetTool {
   }
 
   async execute(params: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
+    // Phase 19.1 — first, before any access check, journal row, Meta read or
+    // approval: did the executor authorize THIS call?
+    const refused = executorGrantRefusal(this.id, params, context);
+    if (refused) return this.failure(refused);
+
     const accountId = params.accountId as string;
     const adSetId = params.adSetId as string;
 
@@ -1407,7 +1452,6 @@ export class MetaUpdateAdSetBudgetTool extends BaseMetaAdsBudgetTool {
       // Execute write
       const claim = await authorizeAndClaim(
         this.approvals,
-        this.journal,
         this.id,
         ensured.executionId,
         params,
@@ -1707,14 +1751,6 @@ abstract class BaseMetaCampaignTool extends BaseTool {
     }
     return { ok: true, executionId: record.executionId };
   }
-
-  protected async claimExecution(executionId: string): Promise<boolean> {
-    // Durable single-winner claim with lease ownership.
-    return (await this.journal.claimForExecution(executionId, {
-      ownerId: crypto.randomUUID(),
-      leaseMs: DEFAULT_LEASE_MS,
-    })) !== null;
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1751,6 +1787,11 @@ export class MetaCreateCampaignTool extends BaseMetaCampaignTool {
   }
 
   async execute(params: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
+    // Phase 19.1 — first, before any access check, journal row, Meta read or
+    // approval: did the executor authorize THIS call?
+    const refused = executorGrantRefusal(this.id, params, context);
+    if (refused) return this.failure(refused);
+
     const accountId = params.accountId as string;
     const proposal = params.proposal as CampaignProposal | undefined;
 
@@ -1792,7 +1833,6 @@ export class MetaCreateCampaignTool extends BaseMetaCampaignTool {
     try {
       const claim = await authorizeAndClaim(
         this.approvals,
-        this.journal,
         this.id,
         ensured.executionId,
         params,

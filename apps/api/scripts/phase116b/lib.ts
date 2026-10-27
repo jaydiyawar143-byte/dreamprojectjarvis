@@ -11,6 +11,11 @@
 //
 // SECRETS: this module never prints tokens/keys; the accounting log stores
 // method + path only (never query params or headers).
+//
+// PHASE 19.1 - NO LONGER A PRODUCTION MIRROR FOR WRITES. The stack below has
+// no shared-connection gate and no Organization Meta authorizer, and these
+// scripts approve their own requests; production refuses all three. Their
+// Meta Ads write stages therefore refuse to run: see refuseSensitiveWrites().
 // ---------------------------------------------------------------------------
 
 import { config } from "dotenv";
@@ -74,6 +79,31 @@ import type { ExternalEntityState, Role } from "@jarvis/core";
 export const ACCOUNT_ID = process.env.META_AD_ACCOUNT_ID ?? "";
 export const API_VERSION = process.env.META_GRAPH_API_VERSION ?? "";
 export const SMOKE_EMAIL = "phase116b-smoke@jarvis-test.local";
+
+/**
+ * Phase 19.1 - why the write stages of these scripts refuse to run.
+ *
+ * A Meta Ads write now runs only with the executor's grant for that exact
+ * call, and the executor issues one only after it has asked the
+ * shared-connection gate. Since Phase 17 the approval for a Meta write also
+ * belongs to the Organization that owns the connection, and must be
+ * approved by another of its owners or admins. These scripts wire no gate
+ * and no Organization authorizer, and approve their own requests, so every
+ * write they attempted would be refused along the way. They refuse up
+ * front instead, before touching the database or Meta. The grant is not
+ * relaxed for them.
+ */
+export const SENSITIVE_WRITES_REFUSED =
+  "Meta Ads writes are not run by the Phase 11.6B scripts any more. A write needs the " +
+  "executor's shared-connection gate, the Organization Meta authorizer and an approval " +
+  "from another owner or admin of the Organization (Phase 17, Phase 19.1), and this " +
+  "stack has none of them. Propose the change in JARVIS and approve it on the " +
+  "Approvals page instead. Nothing was read or written.";
+
+export function refuseSensitiveWrites(script: string): never {
+  console.error(`REFUSING TO RUN ${script}: ${SENSITIVE_WRITES_REFUSED}`);
+  process.exit(65);
+}
 
 export interface HttpTally {
   get: number;

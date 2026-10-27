@@ -21,6 +21,7 @@ import {
   executeApprovedGoogleWrite,
   isGoogleWriteApprovalAction,
 } from "../services/google/execute-approved-action.js";
+import { clientMessageMetadata, clientPendingActionRecord } from "../services/client-views.js";
 import {
   guardMemoryConfirmation,
   handleMemoryCommand,
@@ -524,22 +525,27 @@ export function createChatRouter(container: ChatRouterDeps): Router {
         }
 
         const assistantMessage = modifyResult.message;
+        // Phase 19.1 (C1) — the changed action as a client may see it: its
+        // ids, state and expiry, and the value-free preview, never its raw
+        // parameters. The pending-action row keeps those for execution.
+        const modified = modifyResult.pendingAction;
+        const modifiedView = clientPendingActionRecord({
+          id: modified.id,
+          toolId: modified.toolId,
+          action: modified.action,
+          params: modified.params,
+          riskLevel: modified.riskLevel,
+          state: modified.state,
+          approvalId: modified.approvalId,
+          expiresAt: modified.expiresAt,
+        })!;
         await container.conversationRepo.addMessage({
           conversationId,
           role: "assistant",
           content: assistantMessage,
           metadata: {
             traceId,
-            pendingAction: {
-              id: modifyResult.pendingAction.id,
-              toolId: modifyResult.pendingAction.toolId,
-              action: modifyResult.pendingAction.action,
-              params: modifyResult.pendingAction.params,
-              riskLevel: modifyResult.pendingAction.riskLevel,
-              state: modifyResult.pendingAction.state,
-              approvalId: modifyResult.pendingAction.approvalId,
-              expiresAt: modifyResult.pendingAction.expiresAt,
-            },
+            pendingAction: modifiedView,
           },
         });
 
@@ -548,17 +554,7 @@ export function createChatRouter(container: ChatRouterDeps): Router {
           data: {
             message: assistantMessage,
             conversationId,
-            pendingAction: {
-              id: modifyResult.pendingAction.id,
-              toolId: modifyResult.pendingAction.toolId,
-              action: modifyResult.pendingAction.action,
-              params: modifyResult.pendingAction.params,
-              riskLevel: modifyResult.pendingAction.riskLevel,
-              state: modifyResult.pendingAction.state,
-              approvalId: modifyResult.pendingAction.approvalId,
-              expiresAt: modifyResult.pendingAction.expiresAt,
-              summary: modifyResult.message,
-            },
+            pendingAction: { ...modifiedView, summary: modifyResult.message },
           },
           traceId,
           timestamp: new Date().toISOString(),
@@ -722,10 +718,18 @@ export function createChatRouter(container: ChatRouterDeps): Router {
       );
 
       // Check if the response contains a pending action (from orchestrator)
+      //
+      // Phase 19.1 (C1, the chat path) — the orchestrator's copy carries the
+      // action's raw parameters, which for a browser action are the typed
+      // text and submitted values. It is display-only (a confirmation runs the
+      // pending-action row), so it is projected HERE, before it is stored in
+      // the message or sent: the stored `model` metadata and the response then
+      // hold the same value-free preview the pending-action routes return.
       let pendingActionData: Record<string, unknown> | undefined;
-      if (response.success && response.data?.metadata) {
+      if (response.data?.metadata) {
+        response.data.metadata = clientMessageMetadata(response.data.metadata);
         const meta = response.data.metadata as Record<string, unknown>;
-        if (meta.pendingAction) {
+        if (response.success && meta.pendingAction) {
           pendingActionData = meta.pendingAction as Record<string, unknown>;
         }
       }

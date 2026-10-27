@@ -6,6 +6,7 @@ import {
   clearExecutionStore,
 } from "../src/tools/meta-ads-write-tools.js";
 import { MemoryExecutionJournal } from "../src/execution-journal.js";
+import { ApprovedWrites } from "./helpers/approved-write.js";
 import type {
   ExecutionJournalPort,
   ToolExecutionRecord,
@@ -52,14 +53,17 @@ beforeEach(() => {
 describe("Phase 10.1 — tools use the execution journal", () => {
   it("records PENDING -> EXECUTING -> SUCCEEDED with externalResourceId on campaign create", async () => {
     const journal = new MemoryExecutionJournal();
+    // Phase 19.1 — approved runs with the executor's grant; the store claims this journal's rows.
+    const approved = new ApprovedWrites(journal);
     const tool = new MetaCreateCampaignTool(
       createMockMetaProvider() as CampaignProvider,
       createAuthorizer(),
       undefined,
-      journal
+      journal,
+      approved.approvals
     );
     const params = { accountId: "act_111111111", proposal: validProposal() };
-    const result = await tool.execute(params, ctx("user-1"));
+    const result = await approved.run(tool, params, ctx("user-1"));
     expect(result.success).toBe(true);
 
     const key = buildIdempotencyKey(
@@ -81,14 +85,17 @@ describe("Phase 10.1 — tools use the execution journal", () => {
 
   it("persists paramsHash and provider on journal records", async () => {
     const journal = new MemoryExecutionJournal();
+    // Phase 19.1 — approved runs with the executor's grant; the store claims this journal's rows.
+    const approved = new ApprovedWrites(journal);
     const tool = new MetaCreateCampaignTool(
       createMockMetaProvider() as CampaignProvider,
       createAuthorizer(),
       undefined,
-      journal
+      journal,
+      approved.approvals
     );
     const params = { accountId: "act_111111111", proposal: validProposal() };
-    await tool.execute(params, ctx());
+    await approved.run(tool, params, ctx());
 
     const key = buildIdempotencyKey(
       "meta.campaign.create",
@@ -107,6 +114,8 @@ describe("Phase 10.1 — tools use the execution journal", () => {
 
   it("propagates traceId from the tool context into the journal", async () => {
     const journal = new MemoryExecutionJournal();
+    // Phase 19.1 — approved runs with the executor's grant; the store claims this journal's rows.
+    const approved = new ApprovedWrites(journal);
     const beginInputs: BeginExecutionInput[] = [];
     const spy = {
       begin: async (input: BeginExecutionInput) => {
@@ -124,9 +133,10 @@ describe("Phase 10.1 — tools use the execution journal", () => {
     const tool = new MetaPauseCampaignTool(
       createMockMetaProvider() as WriteProvider,
       createAuthorizer(),
-      spy as ExecutionJournalPort
+      spy as ExecutionJournalPort,
+      approved.approvals
     );
-    await tool.execute(
+    await approved.run(tool, 
       { accountId: "act_111111111", campaignId: "100000001" },
       ctx("user-1", "trace-abc-123")
     );
@@ -136,6 +146,8 @@ describe("Phase 10.1 — tools use the execution journal", () => {
 
   it("marks UNKNOWN when a timeout fires after transmission and never auto-retries", async () => {
     const journal = new MemoryExecutionJournal();
+    // Phase 19.1 — approved runs with the executor's grant; the store claims this journal's rows.
+    const approved = new ApprovedWrites(journal);
     const provider = createMockMetaProvider() as CampaignProvider & WriteProvider;
     const createSpy = vi
       .fn()
@@ -146,11 +158,12 @@ describe("Phase 10.1 — tools use the execution journal", () => {
       provider,
       createAuthorizer(),
       undefined,
-      journal
+      journal,
+      approved.approvals
     );
     const params = { accountId: "act_111111111", proposal: validProposal() };
 
-    const first = await tool.execute(params, ctx("user-1"));
+    const first = await approved.run(tool, params, ctx("user-1"));
     expect(first.success).toBe(false);
 
     const key = buildIdempotencyKey(
@@ -167,7 +180,7 @@ describe("Phase 10.1 — tools use the execution journal", () => {
     expect(rec.status).toBe("UNKNOWN");
 
     // Retry attempt MUST be blocked without touching the provider again.
-    const second = await tool.execute(params, ctx("user-1"));
+    const second = await approved.run(tool, params, ctx("user-1"));
     expect(second.success).toBe(false);
     expect(second.error).toContain("unknown");
     expect(createSpy).toHaveBeenCalledTimes(1);
@@ -175,6 +188,8 @@ describe("Phase 10.1 — tools use the execution journal", () => {
 
   it("marks FAILED for definitive provider rejections and allows retry afterwards", async () => {
     const journal = new MemoryExecutionJournal();
+    // Phase 19.1 — approved runs with the executor's grant; the store claims this journal's rows.
+    const approved = new ApprovedWrites(journal);
     const provider = createMockMetaProvider();
     let calls = 0;
     const original = provider.createCampaign.bind(provider);
@@ -190,11 +205,12 @@ describe("Phase 10.1 — tools use the execution journal", () => {
       provider as CampaignProvider,
       createAuthorizer(),
       undefined,
-      journal
+      journal,
+      approved.approvals
     );
     const params = { accountId: "act_111111111", proposal: validProposal() };
 
-    const first = await tool.execute(params, ctx("user-1"));
+    const first = await approved.run(tool, params, ctx("user-1"));
     expect(first.success).toBe(false);
 
     const key = buildIdempotencyKey(
@@ -211,21 +227,25 @@ describe("Phase 10.1 — tools use the execution journal", () => {
     // Definitive failure — retry is allowed.
     (provider as CampaignProvider).createCampaign =
       original as typeof provider.createCampaign;
-    const second = await new MetaCreateCampaignTool(
+    const second = await approved.run(new MetaCreateCampaignTool(
       provider as CampaignProvider,
       createAuthorizer(),
       undefined,
-      journal
-    ).execute(params, ctx("user-1"));
+      journal,
+      approved.approvals
+    ), params, ctx("user-1"));
     expect(second.success).toBe(true);
   });
 
   it("second concurrent claim loser is told the execution is already running", async () => {
     const journal = new MemoryExecutionJournal();
+    // Phase 19.1 — approved runs with the executor's grant; the store claims this journal's rows.
+    const approved = new ApprovedWrites(journal);
     const tool = new MetaPauseCampaignTool(
       createMockMetaProvider() as WriteProvider,
       createAuthorizer(),
-      journal
+      journal,
+      approved.approvals
     );
     const params = { accountId: "act_111111111", campaignId: "100000001" };
 
@@ -244,7 +264,7 @@ describe("Phase 10.1 — tools use the execution journal", () => {
     });
     await journal.claimForExecution(other.executionId);
 
-    const result = await tool.execute(params, ctx("user-1"));
+    const result = await approved.run(tool, params, ctx("user-1"));
     expect(result.success).toBe(false);
     expect(result.error).toContain("executing");
   });

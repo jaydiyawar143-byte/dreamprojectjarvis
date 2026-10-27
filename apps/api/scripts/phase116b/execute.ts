@@ -22,6 +22,7 @@ import {
   ACCOUNT_ID,
   buildStack,
   ensureSmokeUser,
+  refuseSensitiveWrites,
   loadState,
   saveState,
   tally,
@@ -30,6 +31,9 @@ import {
 const HUMAN_FLAG = "--i-explicitly-human-approve";
 
 async function main(): Promise<void> {
+  // Phase 19.1 - this stage makes a Meta Ads write; see refuseSensitiveWrites().
+  refuseSensitiveWrites("execute.ts");
+
   if (!process.argv.includes(HUMAN_FLAG)) {
     console.error("REFUSING TO RUN: explicit human approval flag missing.");
     console.error(`Usage: tsx scripts/phase116b/execute.ts ${HUMAN_FLAG}`);

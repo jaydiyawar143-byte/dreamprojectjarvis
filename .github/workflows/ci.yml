@@ -48,6 +48,17 @@
 #   the same slice (core, tools, agents), the service and routes in
 #   "Test @jarvis/api", the page in "Test @jarvis/web", and the draft store's
 #   PostgreSQL suite (immutability trigger included) in the database steps.
+#   Phase 19, Stage 19.1 — the Computer & Browser Control contracts of
+#   @jarvis/core and the executor's refusal of a spoken sensitive action in
+#   @jarvis/tools, by file name. The supporting authorization policy is in
+#   @jarvis/security, which is gated as a whole, and the API's approval summary
+#   is in "Test @jarvis/api". Nothing in this slice starts a browser or a
+#   desktop agent. Its write-boundary hardening adds two slices of
+#   @jarvis/tools (and core), by file name: the Meta Ads write contracts (the
+#   nine writes run only with the executor's grant; `meta-ads` and the
+#   journal, timeout and concurrency suites of the same tools), and the
+#   byte-for-byte pins of the executor and the registry, which until then ran
+#   only locally. No step reaches Meta: the provider is the in-memory mock.
 #
 # Deliberately not gated yet (docs/DEVELOPMENT.md, "Continuous integration"):
 #   - Most test files OUTSIDE @jarvis/api. `typecheck:tests` runs in
@@ -243,6 +254,43 @@ jobs:
           pnpm --filter @jarvis/core exec vitest run automation-library
           pnpm --filter @jarvis/tools exec vitest run automation-library
           pnpm --filter @jarvis/agents exec vitest run automation-library
+
+      # Phase 19, Stage 19.1 — the Computer & Browser Control contracts:
+      # closed action sets and bounds, the shared-connection mapping, the
+      # value-free approval summary/binding, and the executor's refusal of a
+      # sensitive spoken action before it runs. Selected by file name, as the
+      # other core/tools contracts are. @jarvis/security (the reused policy) is
+      # gated as a whole above and @jarvis/api (the approval summary) below.
+      # `sprint7-browser-tools` holds the browser tools' 19.1 behaviour — atomic
+      # single-use consumption with the Organization's scope, and the strict
+      # request contract — so it is selected here too.
+      - name: Test computer-control contracts (@jarvis/core, @jarvis/tools)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          pnpm --filter @jarvis/core exec vitest run computer-control
+          pnpm --filter @jarvis/tools exec vitest run computer-control sprint7-browser-tools
+
+      # Phase 19, Stage 19.1 — the Meta Ads write boundary: all nine writes run
+      # only with the executor's grant for that exact call, consume their
+      # approval once with the Organization's scope, and leave the journal in
+      # the right state. `meta-ads` selects the write-boundary suite and the
+      # Meta tool suites; the other three exercise the same writes' journal,
+      # timeout and concurrency behaviour. Selected by file name.
+      - name: Test Meta Ads write contracts (@jarvis/tools)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: pnpm --filter @jarvis/tools exec vitest run meta-ads write-tools-timeout-classification phase102-concurrency-tools execution-journal
+
+      # Phase 19, Stage 19.1 — the byte-for-byte pins of the tool-execution
+      # boundary: the executor and the registry (`mcp-boundaries-s8` in core,
+      # `mcp-tools-boundaries-s8` in tools). The grant module's own pin and who
+      # may issue or verify a grant are in `computer-control-write-boundary`,
+      # selected above. A change to any of these files fails here until its
+      # digest is updated deliberately.
+      - name: Test tool-execution boundary pins (@jarvis/core, @jarvis/tools)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          pnpm --filter @jarvis/core exec vitest run mcp-boundaries-s8
+          pnpm --filter @jarvis/tools exec vitest run mcp-tools-boundaries-s8
 
       # From here on, the PostgreSQL-backed tests. DATABASE_URL is set on these
       # steps only, so nothing above ever sees a database. Applying every

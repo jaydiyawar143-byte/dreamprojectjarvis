@@ -11,6 +11,27 @@ import type {
   ToolExecutionAudit,
 } from "@jarvis/core";
 import { APPROVAL_TTL_MS, computeParamsHash } from "@jarvis/core";
+import { redactAuditParams } from "./audit.js";
+
+/**
+ * Phase 19.1 — what this service may write into an audit row.
+ *
+ * It writes straight to the audit repository, not through `AuditLogger`, so it
+ * applies the SAME projection the logger does: a browser or desktop action's
+ * typed text and submitted values never reach the row, and any other tool's
+ * parameters get the generic key/shape redaction. Metadata (an error's code
+ * and message) gets the generic pass too.
+ */
+function auditColumns(
+  toolId: string | undefined,
+  args: Record<string, unknown> | undefined,
+  metadata: Record<string, unknown>
+): { parameters?: Record<string, unknown>; metadata: Record<string, unknown> } {
+  return {
+    ...(args ? { parameters: redactAuditParams(args, toolId) } : {}),
+    metadata: redactAuditParams(metadata),
+  };
+}
 
 export interface ToolApprovalConfig {
   approvalTtlMs?: number;
@@ -176,18 +197,17 @@ export class ToolApprovalService {
       agentId: audit.executionId,
       toolId: audit.tool,
       action: audit.action,
-      parameters: audit.arguments,
       result: audit.status === "success" ? "success"
         : audit.status === "denied" || audit.status === "approval_rejected" ? "rejected"
         : audit.status === "approval_pending" ? "pending"
         : "failure",
       traceId: audit.traceId,
-      metadata: {
+      ...auditColumns(audit.tool, audit.arguments, {
         stepIndex: audit.stepIndex,
         durationMs: audit.durationMs,
         approvalId: audit.approvalId,
         error: audit.error,
-      },
+      }),
     });
   }
 
@@ -266,18 +286,17 @@ export class ToolApprovalService {
       agentId: audit.executionId,
       toolId: audit.tool,
       action: audit.action ?? "",
-      parameters: audit.arguments,
       result: audit.status === "success" ? "success"
         : audit.status === "denied" || audit.status === "approval_rejected" ? "rejected"
         : audit.status === "approval_pending" ? "pending"
         : "failure",
       traceId: audit.traceId ?? "",
-      metadata: {
+      ...auditColumns(audit.tool, audit.arguments, {
         stepIndex: audit.stepIndex,
         durationMs: audit.durationMs,
         approvalId: audit.approvalId,
         error: audit.error,
-      },
+      }),
     });
   }
 }

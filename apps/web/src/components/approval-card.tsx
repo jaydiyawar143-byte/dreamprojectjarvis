@@ -232,30 +232,18 @@ export function ApprovalCard({
       {/*
         Google write approvals get a rendered PLAN rather than a JSON dump.
         Nobody can responsibly approve sending an email by reading a blob, and
-        an approval nobody reads is a rubber stamp. The raw parameters stay
-        available below it for anyone who wants them.
+        an approval nobody reads is a rubber stamp. Phase 19.1: the plan is the
+        only client-visible projection; the raw approval parameters stay
+        server-side and are never sent to this page.
       */}
-      {isGoogleWriteApproval(approval.toolId) && (
+      {isGoogleWriteApproval(approval.toolId) && approval.plan && (
         <div className="rounded border border-sys-line/70 bg-black/20 p-2">
           <GoogleWritePlanDetail
-            plan={approval.params as WritePlanView}
+            plan={approval.plan as WritePlanView}
             toolId={approval.toolId}
           />
         </div>
       )}
-
-      {/* Display-only parameters: editing is forbidden by design. */}
-      <details className="text-xs">
-        <summary className="cursor-pointer text-sys-dim">
-          Parameters ({Object.keys(approval.params).length})
-        </summary>
-        <pre
-          data-testid="approval-params"
-          className="mt-1 overflow-x-auto rounded bg-black/50 p-2 text-sys-text/80"
-        >
-          {JSON.stringify(approval.params, null, 2)}
-        </pre>
-      </details>
 
       {message && (
         <p

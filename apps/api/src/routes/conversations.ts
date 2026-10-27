@@ -3,6 +3,7 @@ import type { Response } from "express";
 import { createAuthMiddleware, type AuthenticatedRequest } from "../middleware/auth.js";
 import { asyncHandler } from "../middleware/error-handler.js";
 import type { Container } from "../services/container.js";
+import { clientMessageMetadata } from "../services/client-views.js";
 
 // ---------------------------------------------------------------------------
 // Sprint 9.2 — both handlers are wrapped in `asyncHandler`.
@@ -67,7 +68,12 @@ export function createConversationsRouter(container: Container): Router {
         return;
       }
 
-      const messages = await container.conversationRepo.getMessages(conversation.id);
+      // Phase 19.1 (C1) — a stored message's pending action is projected on
+      // the way out, so a row written before the chat route projected it (or
+      // by any other path) never returns raw action parameters.
+      const messages = (await container.conversationRepo.getMessages(conversation.id)).map((message) =>
+        message.metadata === undefined ? message : { ...message, metadata: clientMessageMetadata(message.metadata) }
+      );
       res.status(200).json({
         success: true,
         data: { ...conversation, messages },

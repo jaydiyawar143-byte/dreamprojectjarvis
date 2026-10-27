@@ -14,6 +14,7 @@
 // ---------------------------------------------------------------------------
 
 import { AUTOMATION_LIBRARY_TOOL_IDS } from "./automation-library.js";
+import { COMPUTER_CONTROL_VOICE_REFUSED_TOOLS } from "./computer-control.js";
 import { VOICE_APPROVAL_POLICY, type InputMode } from "./types/voice.js";
 
 /** The refusal code every surface reports for a tool speech may not start. */
@@ -23,6 +24,10 @@ export const VOICE_TOOL_REFUSED_CODE = "VOICE_NOT_ALLOWED";
 export const VOICE_REFUSED_TOOLS: Readonly<Record<string, string>> = Object.freeze({
   [AUTOMATION_LIBRARY_TOOL_IDS.sync]:
     "A workflow library synchronization cannot be started or continued by voice. Use the Sync control on the Automations page.",
+  // Phase 19.1 — sensitive browser actions and desktop input/screen reading.
+  // Read-only browser actions stay allowed, and ending a desktop session is
+  // always allowed: revoking control must not require a typed turn.
+  ...COMPUTER_CONTROL_VOICE_REFUSED_TOOLS,
 });
 
 /** The refusal for this tool on this turn, or null when it may run. */

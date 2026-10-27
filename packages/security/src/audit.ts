@@ -1,5 +1,10 @@
 import type { AuditEntry, AuditQueryFilters, IAuditRepository } from "@jarvis/core";
-import { redactSecrets } from "@jarvis/core";
+import {
+  computerControlApprovalSummary,
+  isComputerControlAction,
+  parseComputerControlRequest,
+  redactSecrets,
+} from "@jarvis/core";
 
 // ---------------------------------------------------------------------------
 // Sprint 9.8 — redaction happens BEFORE persistence, not after.
@@ -84,11 +89,61 @@ function redactRecord(
   return out;
 }
 
-/** Exported for the security tests; the redaction rule should be assertable. */
-export function redactAuditParams(
+/**
+ * Phase 19.1 — the tool-aware pass for browser and desktop actions.
+ *
+ * The generic passes above know a credential's NAME and SHAPE, but a browser
+ * request carries free text under ordinary names (`text`, or a `fields` map's
+ * values) and no token pattern. Key/shape redaction therefore used to write
+ * what a person typed, and every submitted field value, into the audit trail.
+ *
+ * For an action in the Phase 19 contract the audit row keeps an ALLOWLISTED
+ * projection instead: the action, its fixed summary sentence, the normalized
+ * origin and sanitized field names/counts. The request is parsed first; an
+ * invalid one is recorded as refused with only its code, never its payload.
+ * The projection is then passed through the generic redaction as a final net.
+ */
+function auditParametersForTool(
+  toolId: string | undefined,
   params: Record<string, unknown>
 ): Record<string, unknown> {
-  return redactRecord(params);
+  if (!toolId || !isComputerControlAction(toolId)) return redactRecord(params);
+
+  const parsed = parseComputerControlRequest({ ...params, action: toolId });
+  if (!parsed.ok) {
+    return { action: toolId, refused: true, reason: parsed.code };
+  }
+
+  const summary = computerControlApprovalSummary(parsed.value);
+  return redactRecord({
+    action: toolId,
+    summary: summary.actionSummary,
+    ...(summary.targetResource ? { targetResource: summary.targetResource } : {}),
+    details: summary.detailLines.map(({ label, value }) => ({ label, value })),
+  });
+}
+
+/**
+ * Exported for the security tests; the redaction rule should be assertable.
+ *
+ * Phase 19.1 — every audit writer goes through this, the `AuditLogger` and the
+ * `ToolApprovalService` alike. It fails CLOSED: if the projection itself
+ * throws, the row records that the parameters were withheld, never the
+ * parameters.
+ */
+export function redactAuditParams(
+  params: Record<string, unknown>,
+  toolId?: string
+): Record<string, unknown> {
+  try {
+    return auditParametersForTool(toolId, params);
+  } catch {
+    return {
+      ...(toolId ? { action: toolId } : {}),
+      redacted: true,
+      reason: "REDACTION_FAILED",
+    };
+  }
 }
 
 export class AuditLogger {
@@ -100,7 +155,12 @@ export class AuditLogger {
     const safeEntry: Omit<AuditEntry, "id" | "timestamp"> = {
       ...entry,
       ...(entry.parameters
-        ? { parameters: redactAuditParams(entry.parameters as Record<string, unknown>) }
+        ? {
+            parameters: redactAuditParams(
+              entry.parameters as Record<string, unknown>,
+              entry.toolId
+            ),
+          }
         : {}),
       ...(entry.metadata
         ? { metadata: redactAuditParams(entry.metadata as Record<string, unknown>) }

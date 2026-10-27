@@ -61,8 +61,10 @@ describe("the executor and the registry are untouched", () => {
     // Phase 18.2 changed it once more: a spoken turn is refused a tool on the
     // voice list, and the turn's input mode reaches the tool's context.
     // Phase 18.3A: a spoken turn never spends an approval.
+    // Phase 19.1: after every check, the executor issues the grant a browser
+    // write requires (execution-grant.ts); a direct call has none.
     expect(sha256(read("packages/tools/src/executor.ts"))).toBe(
-      "4fd510b9779cc70d49e7a4d9116d44ca97d22dbccd09419674933de6171deb37"
+      "2db742ccb826faf43068da775560836d11af9b0f81fd909ee4aeadae255fc308"
     );
     expect(sha256(read("packages/tools/src/registry.ts"))).toBe(
       "f62f401378deecdf774a700b88cd5a4a375b142dfbc93406065445c58b6495ac"

@@ -9,6 +9,10 @@
 //     and hands the scope it was given to the approval store's consumption.
 //   • A write that carries an Organization's scope never runs without an
 //     approval — not even through the old no-approval test seam.
+//   • Phase 19.1 — and a Meta write runs only with the executor's grant for
+//     that exact call (src/execution-grant.ts). The calls below carry one,
+//     as the executor's would; a call with none is refused before the
+//     authorizer is asked (meta-ads-write-boundary-p19 covers the rest).
 //
 // No provider is real: the Meta provider is the in-memory mock, spied on, and
 // every test asserts what reached it.
@@ -27,11 +31,13 @@ import type {
   Role,
   SharedConnectionScope,
   ToolAccessGate,
+  ToolContext,
 } from "@jarvis/core";
 import { ToolExecutor } from "../src/executor.js";
 import { MetaPauseCampaignTool, clearExecutionStore } from "../src/tools/meta-ads-write-tools.js";
 import { createMockMetaProvider } from "../src/tools/meta-ads-mock.js";
 import { MemoryExecutionJournal } from "../src/execution-journal.js";
+import { issueExecutionGrant } from "../src/execution-grant.js";
 import type { MetaAccountAuthorizer } from "../src/tools/meta-ads-provider.js";
 
 const ACCOUNT = "act_111111111";
@@ -171,6 +177,19 @@ function writeSetup(authorizer: MetaAccountAuthorizer, consumed = consumption())
   return { tool, write, reads, consumed };
 }
 
+/** The context the executor hands a write it authorized, with approval `apr-1`. */
+function granted(userId: string): ToolContext {
+  const context: ToolContext = { userId, approvalId: "apr-1" };
+  issueExecutionGrant(context, {
+    toolId: "meta.campaign.pause",
+    userId,
+    paramsHash: computeParamsHash(PARAMS),
+    approvalId: "apr-1",
+    sharedAccessChecked: true,
+  });
+  return context;
+}
+
 const tokenReaches: Pick<MetaAccountAuthorizer, "getAuthorizedAccountIds" | "isAuthorized"> = {
   getAuthorizedAccountIds: async () => [ACCOUNT],
   isAuthorized: async () => true,
@@ -185,7 +204,7 @@ describe("a Meta write asks for the WRITE as it runs", () => {
         reason: "Your organization role does not allow changes through Meta Ads. Ask an owner or admin of your organization.",
       })),
     });
-    const result = await tool.execute(PARAMS, { userId: "viewer-1", approvalId: "apr-1" });
+    const result = await tool.execute(PARAMS, granted("viewer-1"));
     expect(result).toMatchObject({ success: false });
     expect(result.error).toMatch(/does not allow changes/);
     expect(reads).not.toHaveBeenCalled();
@@ -198,7 +217,7 @@ describe("a Meta write asks for the WRITE as it runs", () => {
       ...tokenReaches,
       authorizeWrite: vi.fn(async () => { throw new Error("tenant store down"); }),
     });
-    const result = await tool.execute(PARAMS, { userId: "admin-1", approvalId: "apr-1" });
+    const result = await tool.execute(PARAMS, granted("admin-1"));
     expect(result.error).toMatch(/could not be verified/);
     expect(reads).not.toHaveBeenCalled();
     expect(write).not.toHaveBeenCalled();
@@ -221,7 +240,7 @@ describe("a Meta write asks for the WRITE as it runs", () => {
       return createMockMetaProvider().updateCampaignStatus(...args);
     });
 
-    const result = await tool.execute(PARAMS, { userId: "admin-1", approvalId: "apr-1" });
+    const result = await tool.execute(PARAMS, granted("admin-1"));
 
     expect(result.success).toBe(true);
     expect(consumed.inputs).toHaveLength(1);
@@ -240,27 +259,30 @@ describe("a Meta write asks for the WRITE as it runs", () => {
       { ...tokenReaches, authorizeWrite: vi.fn(async () => ({ allowed: true as const, tenantScope: SCOPE })) },
       consumption({ ok: false, reason: "the requester's organization role no longer allows this change" })
     );
-    const result = await tool.execute(PARAMS, { userId: "admin-1", approvalId: "apr-1" });
+    const result = await tool.execute(PARAMS, granted("admin-1"));
     expect(result.success).toBe(false);
     expect(result.error).toMatch(/no longer allows/);
     expect(write).not.toHaveBeenCalled();
   });
 
   it("never runs an Organization's write without an approval — not through the no-approval seam either", async () => {
-    const { tool, write, consumed } = writeSetup({
-      ...tokenReaches,
-      authorizeWrite: vi.fn(async () => ({ allowed: true as const, tenantScope: SCOPE })),
-    });
+    // Phase 19.1 — the no-approval seam is gone: a call with no approval
+    // carries no executor grant, so it is refused before the authorizer, the
+    // provider or the store is asked.
+    const authorizeWrite = vi.fn(async () => ({ allowed: true as const, tenantScope: SCOPE }));
+    const { tool, write, reads, consumed } = writeSetup({ ...tokenReaches, authorizeWrite });
     const result = await tool.execute(PARAMS, { userId: "admin-1" });
     expect(result.success).toBe(false);
-    expect(result.error).toMatch(/owner or admin of the organization must approve/);
+    expect(result.error).toMatch(/run only after an approval is checked/);
+    expect(authorizeWrite).not.toHaveBeenCalled();
+    expect(reads).not.toHaveBeenCalled();
     expect(write).not.toHaveBeenCalled();
     expect(consumed.port.consumeForExecution).not.toHaveBeenCalled();
   });
 
   it("keeps the account check it always had for an authorizer without authorizeWrite", async () => {
     const { tool, write, consumed } = writeSetup({ ...tokenReaches });
-    const result = await tool.execute(PARAMS, { userId: "user-1", approvalId: "apr-1" });
+    const result = await tool.execute(PARAMS, granted("user-1"));
     expect(result.success).toBe(true);
     expect(write).toHaveBeenCalledTimes(1);
     expect(consumed.inputs[0]!.tenantScope).toBeUndefined();

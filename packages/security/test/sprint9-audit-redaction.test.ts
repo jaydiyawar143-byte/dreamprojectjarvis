@@ -177,3 +177,79 @@ describe("Sprint 9.8 — the redactor itself", () => {
     expect(output).toEqual({ body: { confirmationToken: "[REDACTED]" } });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 19.1 (audit C2) — browser free text has no secret SHAPE. A typed
+// password, a card number, a submitted field value and a cookie all look like
+// ordinary strings, so key/shape redaction alone wrote them into the trail.
+// The real path is asserted here: AuditLogger.log, the copy the repository
+// receives, and the console line derived from it.
+// ---------------------------------------------------------------------------
+describe("Phase 19.1 — a browser action is audited as an allowlisted projection", () => {
+  const typed = "hunter2-typed-into-a-page";
+  const card = "4111111111111111";
+
+  it("keeps no typed text or submitted field value in the durable row", async () => {
+    await logger.log({
+      ...base,
+      toolId: "browser.type",
+      parameters: {
+        url: "https://example.com/login?token=abc",
+        selector: 'input[name="password"]',
+        text: typed,
+      },
+    });
+
+    const row = repository.created[0]!;
+    expect(persisted()).not.toContain(typed);
+    expect(persisted()).not.toContain("example.com/login");
+    expect(row.parameters).toMatchObject({ action: "browser.type" });
+    expect((row.parameters as Record<string, unknown>).text).toBeUndefined();
+    expect((row.parameters as Record<string, unknown>).url).toBeUndefined();
+  });
+
+  it("keeps no nested submitted values, cookie or header", async () => {
+    await logger.log({
+      ...base,
+      toolId: "browser.submit",
+      parameters: {
+        url: "https://example.com/checkout",
+        selector: "#pay",
+        fields: { "#card": card, "#name": typed },
+        cookies: [{ name: "session", value: "cookie-value" }],
+        headers: { authorization: "Bearer header-value" },
+      },
+    });
+
+    expect(persisted()).not.toContain(card);
+    expect(persisted()).not.toContain(typed);
+    expect(persisted()).not.toContain("cookie-value");
+    expect(persisted()).not.toContain("header-value");
+  });
+
+  it("records an invalid browser request as refused, never its payload", async () => {
+    await logger.log({
+      ...base,
+      toolId: "browser.type",
+      parameters: { url: "not-a-url", text: typed },
+    });
+
+    const row = repository.created[0]!;
+    expect(persisted()).not.toContain(typed);
+    expect(row.parameters).toMatchObject({ action: "browser.type", refused: true });
+    expect((row.parameters as Record<string, unknown>).reason).toEqual(expect.any(String));
+  });
+
+  it("writes the same projection to the console line", async () => {
+    await logger.log({
+      ...base,
+      toolId: "browser.type",
+      parameters: { url: "https://example.com/", selector: "#q", text: typed },
+    });
+
+    const calls = vi.mocked(console.log).mock.calls;
+    const line = String(calls[calls.length - 1]?.[0] ?? "");
+    expect(line).toContain("browser.type");
+    expect(line).not.toContain(typed);
+  });
+});

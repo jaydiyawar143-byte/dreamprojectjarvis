@@ -32,6 +32,7 @@ import {
   executeApprovedGoogleWrite,
   isGoogleWriteApprovalAction,
 } from "../services/google/execute-approved-action.js";
+import { clientPendingAction } from "../services/client-views.js";
 
 /**
  * How a refused answer is reported: a different action waiting, or an action
@@ -98,7 +99,7 @@ export function createPendingActionsRouter(container: Container): Router {
 
       res.status(200).json({
         success: true,
-        data: pending,
+        data: pending ? clientPendingAction(pending) : null,
         traceId,
         timestamp: new Date().toISOString(),
       });
@@ -236,7 +237,7 @@ export function createPendingActionsRouter(container: Container): Router {
           res.status(200).json({
             success: true,
             data: {
-              pendingAction: result.pendingAction,
+              pendingAction: clientPendingAction(result.pendingAction),
               executionResult: {
                 status: executionResult.status,
                 result: executionResult.result,
@@ -252,7 +253,9 @@ export function createPendingActionsRouter(container: Container): Router {
 
       res.status(200).json({
         success: true,
-        data: { pendingAction: result.pendingAction },
+        data: {
+          pendingAction: result.pendingAction ? clientPendingAction(result.pendingAction) : null,
+        },
         traceId,
         timestamp: new Date().toISOString(),
       });
@@ -372,7 +375,7 @@ export function createPendingActionsRouter(container: Container): Router {
       res.status(200).json({
         success: true,
         data: {
-          pendingAction: result.pendingAction,
+          pendingAction: result.pendingAction ? clientPendingAction(result.pendingAction) : null,
           message: result.message,
         },
         traceId,

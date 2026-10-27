@@ -554,10 +554,14 @@ database-backed test in `apps/api` or `packages/memory` must be named
 `*-pg.integration.test.ts`, or CI never gives it a database.
 
 CI does not run the tests of `@jarvis/core`, `tools`, `agents`, `browser` or
-`meta-graph` as workspaces. Four slices of them are gated by **file name**:
+`meta-graph` as workspaces. Seven slices of them are gated by **file name**:
 the memory contracts, the marketing contracts, the shared-connection
-contracts (`shared-connection*` in `tools` and `agents`) and the Automation
-Library's rules (`automation-library*` in `core`, `tools` and `agents`). A new contract test for any
+contracts (`shared-connection*` in `tools` and `agents`), the Automation
+Library's rules (`automation-library*` in `core`, `tools` and `agents`), and
+since Phase 19.1 the computer-control contracts (`computer-control*` in `core`
+and `tools`, and `sprint7-browser-tools`), the Meta Ads write contracts
+(`meta-ads*` and three journal suites in `tools`) and the tool-execution
+boundary pins (`mcp-boundaries-s8`, `mcp-tools-boundaries-s8`). A new contract test for any
 of them must match the names its step selects (`.github/workflows/ci.yml`), or
 CI never runs it.
 

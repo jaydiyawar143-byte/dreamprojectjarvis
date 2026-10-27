@@ -18,6 +18,8 @@
 // the account's.
 // ---------------------------------------------------------------------------
 
+import { BROWSER_TOOL_IDS } from "./browser.js";
+
 /** A role inside one tenant. Stored as the `TenantRole` enum. */
 export const TENANT_ROLES = ["owner", "admin", "member", "viewer"] as const;
 
@@ -83,6 +85,11 @@ export interface SharedConnectorKey {
  * integrations of the Integration Control Center. Google is absent because it
  * is always one user's own consent, never a deployment's.
  *
+ * Phase 19 — `browser` is the deployment's one browser-control service. It is
+ * a shared connection, not a per-user browser profile: while `BROWSER_ENABLED`
+ * is off no browser tool is registered, and once on, every browser tool runs
+ * only for a member of the Organization the operator assigned here.
+ *
  * An unassigned connection belongs to nobody: its tools, its connection test
  * and its diagnostics are refused to everyone — account-wide owners and admins
  * included — until an operator assigns it.
@@ -94,6 +101,7 @@ export const SHARED_INTEGRATION_CONNECTORS = {
   "google-maps": { providerId: "google-maps", connector: "server-key" },
   mcp: { providerId: "mcp", connector: "servers" },
   omniroute: { providerId: "omniroute", connector: "gateway" },
+  browser: { providerId: "browser", connector: "service" },
 } as const satisfies Record<string, SharedConnectorKey>;
 
 export type SharedIntegrationId = keyof typeof SHARED_INTEGRATION_CONNECTORS;
@@ -149,6 +157,22 @@ export const SHARED_CONNECTION_TOOLS: Readonly<
   // triggerable through the deployment's n8n connection: an Organization's
   // write, approved by another of its owners or admins.
   "automation.library.allowlist.add": { integration: "n8n", access: "write" },
+  // Phase 19.1 — the browser is the deployment's one service, so its tools run
+  // on the Organization that owns it. Reads (look at a page) need membership;
+  // every action that changes or sends (click, type, select, download, submit,
+  // upload) is a write and needs an owner or admin. The approval for a write is
+  // bound to that Organization, and a spoken turn may not start any of them
+  // (`COMPUTER_CONTROL_VOICE_REFUSED_TOOLS`).
+  [BROWSER_TOOL_IDS.navigate]: { integration: "browser", access: "read" },
+  [BROWSER_TOOL_IDS.inspect]: { integration: "browser", access: "read" },
+  [BROWSER_TOOL_IDS.extract]: { integration: "browser", access: "read" },
+  [BROWSER_TOOL_IDS.screenshot]: { integration: "browser", access: "read" },
+  [BROWSER_TOOL_IDS.click]: { integration: "browser", access: "write" },
+  [BROWSER_TOOL_IDS.type]: { integration: "browser", access: "write" },
+  [BROWSER_TOOL_IDS.select]: { integration: "browser", access: "write" },
+  [BROWSER_TOOL_IDS.download]: { integration: "browser", access: "write" },
+  [BROWSER_TOOL_IDS.submit]: { integration: "browser", access: "write" },
+  [BROWSER_TOOL_IDS.upload]: { integration: "browser", access: "write" },
 };
 
 /** What a tool does with its shared connection, or null when it uses none. */
