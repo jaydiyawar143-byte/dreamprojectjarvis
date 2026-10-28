@@ -20,6 +20,7 @@
 // ---------------------------------------------------------------------------
 
 import {
+  MARKETING_TOOL_IDS,
   isComputerControlAction,
   isGoogleWriteAction,
   type Approval,
@@ -175,6 +176,16 @@ function pendingPreview(toolId: string, params: Record<string, unknown>): Record
   // selected value, nested submitted fields. Never project any of it, even a
   // key whose name happens to look safe.
   if (isComputerControlAction(toolId)) return {};
+
+  if (toolId === MARKETING_TOOL_IDS.contentPublish) {
+    const out: Record<string, unknown> = {};
+    const allowed = ["contentId", "targetId", "targetName", "message", "link", "earlierAttempt"];
+    for (const key of allowed) {
+      const value = params[key];
+      if (typeof value === "string") out[key] = value;
+    }
+    return out;
+  }
 
   const out: Record<string, unknown> = {};
   for (const key of SAFE_PENDING_SCALARS) {
