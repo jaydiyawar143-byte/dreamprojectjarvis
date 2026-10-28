@@ -12,6 +12,11 @@
 # Secrets come from the repo-root .env via `env_file`. The three values below
 # each service's `env_file` are overrides that MUST differ inside a container:
 # `localhost` there means the container itself, not the host.
+#
+# The browser service is the exception: it has NO `env_file`. It receives only
+# the variables its `environment` block names, so the database URL, JWT and
+# encryption keys and every provider credential in .env never enter the
+# container that runs Chromium.
 # ---------------------------------------------------------------------------
 
 name: jarvis
@@ -99,6 +104,12 @@ services:
     command: >
       sh -lc "pnpm --filter @jarvis/db exec prisma migrate deploy &&
               node apps/api/dist/index.js"
+    # Phase 19.2 — the API is the one service on both networks: `default` for
+    # PostgreSQL and the web app, `browser` for the browser service. The
+    # browser service is on `browser` only, so it has no route to PostgreSQL.
+    networks:
+      - default
+      - browser
     ports:
       - "3101:3001"
     healthcheck:
@@ -144,6 +155,117 @@ services:
       retries: 12
       start_period: 30s
     restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Phase 19.2 — the isolated browser service.
+  #
+  # OFF BY DEFAULT, and that is the safe state: this service is started only by
+  # `docker compose --profile browser-service up`, and the API reaches it only
+  # when BROWSER_SERVICE_URL is also set. Chromium is a second switch again —
+  # `BROWSER_SERVICE_CHROMIUM_ENABLED=true` — so a running container with no
+  # browser refuses every session rather than launching one.
+  #
+  # No `ports`: nothing on the host can reach it, and it is not the API's job to
+  # proxy arbitrary browser traffic. It is on the `browser` network only, which
+  # it shares with the API and nothing else — PostgreSQL and the web app are
+  # not on it (Stage 19.2 audit, H3). That network is NOT egress control: the
+  # container can still open connections out, including to the host's
+  # published ports. Default-deny egress is Stage 19.3 and is not implemented.
+  #
+  # No `env_file` (Stage 19.2 audit, H3). Every variable it receives is named
+  # below. The `${…:-}` forms are filled from the shell or the project .env at
+  # `docker compose` time, so the same .env still configures both sides — but
+  # only these names cross into the container. Nothing else in .env does.
+  #
+  # The limits below are the outer bound. The service's own limits (sessions,
+  # body size, deadlines) are the inner one; either can refuse, and both are
+  # counted before work starts.
+  #
+  # A container is a process boundary, NOT a security sandbox. Chromium keeps
+  # its own sandbox — the launcher sets `chromiumSandbox: true`, without which
+  # Playwright would add `--no-sandbox` itself — which is why
+  # `seccomp:unconfined` is NOT used here: if the host cannot give the sandbox
+  # what it needs, sessions fail.
+  # ---------------------------------------------------------------------------
+  browser-service:
+    profiles: ["browser-service"]
+    build:
+      context: .
+      dockerfile: apps/browser-service/Dockerfile
+      target: runtime
+    image: jarvis-browser-service:latest
+    container_name: jarvis-docker-browser
+    networks:
+      - browser
+    environment:
+      NODE_ENV: production
+      BROWSER_SERVICE_HOST: "0.0.0.0"
+      BROWSER_SERVICE_PORT: 3200
+      # The loopback-only liveness listener the healthcheck below asks. It
+      # binds 127.0.0.1 inside this container and serves /healthz only.
+      BROWSER_SERVICE_HEALTH_PORT: 3201
+      # The browser's artifacts stay inside this container's tmpfs. Nothing is
+      # written to the host and nothing survives a restart.
+      BROWSER_SERVICE_DOWNLOAD_DIR: /tmp/jarvis-browser-artifacts
+      BROWSER_HEADLESS: "true"
+      CHROME_PATH: /usr/bin/chromium
+      # Authentication. The TLS paths name files a docker-compose.override.yml
+      # mounts; this file mounts none (docs/DEPLOYMENT.md).
+      BROWSER_SERVICE_KEY_ID: ${BROWSER_SERVICE_KEY_ID:-}
+      BROWSER_SERVICE_SHARED_SECRET: ${BROWSER_SERVICE_SHARED_SECRET:-}
+      BROWSER_SERVICE_PEER_IDENTITY: ${BROWSER_SERVICE_PEER_IDENTITY:-}
+      BROWSER_SERVICE_TLS_CERT_PATH: ${BROWSER_SERVICE_TLS_CERT_PATH:-}
+      BROWSER_SERVICE_TLS_KEY_PATH: ${BROWSER_SERVICE_TLS_KEY_PATH:-}
+      BROWSER_SERVICE_TLS_CA_PATH: ${BROWSER_SERVICE_TLS_CA_PATH:-}
+      BROWSER_SERVICE_HEALTH_TOKEN: ${BROWSER_SERVICE_HEALTH_TOKEN:-}
+      # Chromium stays off unless this is exactly "true".
+      BROWSER_SERVICE_CHROMIUM_ENABLED: ${BROWSER_SERVICE_CHROMIUM_ENABLED:-false}
+      # Limits. Empty means the service's own default.
+      BROWSER_SERVICE_CLOCK_SKEW_MS: ${BROWSER_SERVICE_CLOCK_SKEW_MS:-}
+      BROWSER_SERVICE_SESSION_TTL_MS: ${BROWSER_SERVICE_SESSION_TTL_MS:-}
+      BROWSER_SERVICE_MAX_SESSIONS: ${BROWSER_SERVICE_MAX_SESSIONS:-}
+      BROWSER_SERVICE_MAX_SESSIONS_PER_ORGANIZATION: ${BROWSER_SERVICE_MAX_SESSIONS_PER_ORGANIZATION:-}
+      BROWSER_SERVICE_REQUEST_TIMEOUT_MS: ${BROWSER_SERVICE_REQUEST_TIMEOUT_MS:-}
+      BROWSER_SERVICE_MAX_BODY_BYTES: ${BROWSER_SERVICE_MAX_BODY_BYTES:-}
+      # The navigation policy's own settings.
+      BROWSER_NAVIGATION_TIMEOUT_MS: ${BROWSER_NAVIGATION_TIMEOUT_MS:-}
+      BROWSER_DOMAIN_ALLOWLIST: ${BROWSER_DOMAIN_ALLOWLIST:-}
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # Chromium's own IPC needs a process table; the ceiling keeps a fork bomb or
+    # a runaway renderer from consuming the host.
+    pids_limit: 512
+    mem_limit: 2g
+    cpus: 2
+    shm_size: 512m
+    healthcheck:
+      # Port 3200 accepts mutual TLS only, and a healthcheck holds no client
+      # certificate (Stage 19.2 audit, M1). It asks the loopback-only listener
+      # on 3201 instead: same fixed body — the protocol version and whether
+      # Chromium is on — and no route to a browser operation. The header is
+      # sent even when no token is configured, which the service ignores.
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"fetch('http://127.0.0.1:3201/healthz',{headers:{'x-jarvis-health-token':process.env.BROWSER_SERVICE_HEALTH_TOKEN||''}}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\"",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    stop_grace_period: 20s
+    restart: unless-stopped
+
+networks:
+  # Phase 19.2 — the API and the browser service, and nothing else. Not
+  # `internal`: Chromium must reach the sites it browses, so this separates the
+  # browser from PostgreSQL without restricting egress (Stage 19.3).
+  browser:
 
 volumes:
   jarvis-docker-pgdata:

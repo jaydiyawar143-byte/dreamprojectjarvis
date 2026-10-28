@@ -1,0 +1,124 @@
+// ---------------------------------------------------------------------------
+// Phase 19, Stage 19.2 audit (H1) — the engine asks for Chromium's sandbox.
+//
+// Playwright appends `--no-sandbox` to every Chromium launch unless the launch
+// options carry `chromiumSandbox: true`; its default is false. Leaving the
+// flag out of `args` is therefore not enough, and a test that only reads
+// `args` would pass on an unsandboxed browser.
+//
+// These tests replace `playwright-core` with a stand-in that records what the
+// real engine path — `createBrowserEngine` → `BrowserRuntime` → the launcher —
+// hands to `chromium.launch`, so no browser starts. The stand-in then fails
+// the way Playwright does on a host with no usable sandbox, to show that the
+// failure is a refused session and that nothing relaunches without it.
+//
+// The real-browser check (S10) is `scripts/s10-sandbox-check.mjs`; it is not
+// run here because it needs a Chromium.
+// ---------------------------------------------------------------------------
+
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+
+const launches = vi.hoisted(() => [] as Array<Record<string, unknown>>);
+
+vi.mock("playwright-core", () => ({
+  chromium: {
+    launch: async (options: Record<string, unknown>) => {
+      launches.push(options);
+      // What Playwright reports when the host cannot give Chromium a sandbox.
+      throw new Error("Chromium sandboxing failed! No usable sandbox!");
+    },
+  },
+}));
+
+import type { BrowserServiceConfig } from "../src/config.js";
+import { createBrowserEngine } from "../src/engine.js";
+
+const downloadDir = mkdtempSync(join(tmpdir(), "jarvis-browser-sandbox-"));
+const previousChromePath = process.env.CHROME_PATH;
+// Any existing file satisfies the runtime's executable lookup; the stand-in
+// launcher never runs it.
+process.env.CHROME_PATH = process.execPath;
+
+afterAll(() => {
+  if (previousChromePath === undefined) delete process.env.CHROME_PATH;
+  else process.env.CHROME_PATH = previousChromePath;
+  rmSync(downloadDir, { recursive: true, force: true });
+});
+
+function enabledConfig(): BrowserServiceConfig {
+  return {
+    host: "127.0.0.1",
+    port: 3200,
+    healthPort: 3201,
+    keyId: "api-key-1",
+    secret: "0123456789abcdef0123456789abcdef",
+    peerIdentity: "jarvis-api",
+    tls: { certPath: "unused", keyPath: "unused", caPath: "unused" },
+    healthToken: null,
+    clockSkewMs: 60_000,
+    sessionTtlMs: 60_000,
+    maxSessions: 2,
+    maxSessionsPerOrganization: 2,
+    requestTimeoutMs: 4_000,
+    maxBodyBytes: 64 * 1024,
+    chromiumEnabled: true,
+    chromium: {
+      headless: true,
+      maxConcurrentSessions: 2,
+      navigationTimeoutMs: 5_000,
+      downloadDir,
+      domainAllowlist: [],
+    },
+  };
+}
+
+beforeEach(() => {
+  launches.length = 0;
+});
+
+describe("the browser engine's Chromium launch", () => {
+  it("asks for the sandbox explicitly, through the real engine path", async () => {
+    const handle = createBrowserEngine(enabledConfig());
+    expect(handle.chromiumEnabled).toBe(true);
+    await handle.engine.withSession("user-1", async () => "never").catch(() => undefined);
+
+    expect(launches).toHaveLength(1);
+    const options = launches[0]!;
+    expect(options.chromiumSandbox).toBe(true);
+    expect(options.headless).toBe(true);
+    expect(options.args as string[]).not.toContain("--no-sandbox");
+    for (const arg of options.args as string[]) expect(arg).not.toMatch(/sandbox|zygote/i);
+    await handle.shutdown();
+  });
+
+  it("fails closed when the host has no usable sandbox — and never relaunches without it", async () => {
+    const handle = createBrowserEngine(enabledConfig());
+    let ran = false;
+    const first = await handle.engine
+      .withSession("user-1", async () => {
+        ran = true;
+      })
+      .then(
+        () => "opened",
+        (error: unknown) => (error instanceof Error ? error.message : "refused")
+      );
+    expect(first).toMatch(/Browser unavailable/);
+    expect(ran).toBe(false);
+
+    // A second session tries again — with the sandbox again.
+    await handle.engine.withSession("user-2", async () => undefined).catch(() => undefined);
+    expect(launches.length).toBe(2);
+    expect(launches.every((options) => options.chromiumSandbox === true)).toBe(true);
+    await handle.shutdown();
+  });
+
+  it("launches nothing while Chromium is switched off", async () => {
+    const handle = createBrowserEngine({ ...enabledConfig(), chromiumEnabled: false });
+    await handle.engine.withSession("user-1", async () => "never").catch(() => undefined);
+    expect(launches).toHaveLength(0);
+  });
+});

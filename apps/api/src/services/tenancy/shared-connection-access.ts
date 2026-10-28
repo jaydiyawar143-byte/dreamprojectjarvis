@@ -130,6 +130,45 @@ export function createBrowserWriteScopeResolver(
   };
 }
 
+/**
+ * Phase 19.2 — which Organization a remote browser session belongs to.
+ *
+ * The browser service binds a session to the organization its opening request
+ * named, and refuses every later request that claims another. The API must
+ * therefore resolve that organization itself: never from a request body, and
+ * never from a session id. This asks the one shared-connection reader, so the
+ * browser service sees exactly the membership answer every other shared
+ * connection sees.
+ *
+ * A refusal carries no reason. The protocol has one fixed sentence for it, and
+ * the service is never told whether the caller was a non-member, an outsider or
+ * a deployment whose connection nobody owns.
+ */
+export interface BrowserSessionTenantResolver {
+  resolveSessionOrganization(
+    userId: string
+  ): Promise<{ ok: true; organizationId: string } | { ok: false }>;
+}
+
+export function createBrowserSessionTenantResolver(
+  access: SharedConnectionAccessPort
+): BrowserSessionTenantResolver {
+  return {
+    async resolveSessionOrganization(
+      userId: string
+    ): Promise<{ ok: true; organizationId: string } | { ok: false }> {
+      let decision: SharedAccessDecision;
+      try {
+        decision = await access.check(userId, SHARED_INTEGRATION_CONNECTORS.browser, "read");
+      } catch {
+        return { ok: false };
+      }
+      if (!decision.allowed) return { ok: false };
+      return { ok: true, organizationId: decision.tenantId };
+    },
+  };
+}
+
 /** The fixed answer to anyone outside the owning Organization. Names no one. */
 export function sharedConnectionUnavailable(integrationName: string): string {
   return `${integrationName} is not available to your account.`;
