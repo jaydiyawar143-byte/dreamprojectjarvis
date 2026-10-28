@@ -193,3 +193,98 @@ describe("a failure before anything was sent stays FAILED, and may be tried agai
     expect(record.errorMessage).toBe("Form submission failed");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Stage 19.2 audit (H2) — the remote browser service's failures.
+//
+// Over the network the browser's own words never reach the API: the service
+// answers with a fixed code, and `@jarvis/browser-protocol` says on the error
+// whether the request was sent and whether the action may have happened
+// (`BrowserServiceError`: `outcome`, `phase`, `sideEffectPossible`). The
+// journal reads those fields. Tools does not depend on the protocol package,
+// so the error is built here in its exact shape.
+// ---------------------------------------------------------------------------
+
+type RemoteOutcome = "not-sent" | "no-effect" | "uncertain";
+
+const REMOTE_SENTENCES: Record<string, string> = {
+  TIMEOUT: "The browser service did not answer in time.",
+  UNAVAILABLE: "The browser service is not available.",
+  PROVIDER_ERROR: "The browser could not perform the action.",
+  UNKNOWN_OUTCOME: "The outcome of the action is unknown; it was not retried.",
+  SESSION_NOT_FOUND: "The session was not found.",
+};
+
+function remoteError(code: keyof typeof REMOTE_SENTENCES, outcome: RemoteOutcome): Error {
+  const error = new Error(REMOTE_SENTENCES[code]) as Error & Record<string, unknown>;
+  error.name = "BrowserServiceError";
+  error.code = code;
+  error.outcome = outcome;
+  error.phase = outcome === "not-sent" ? "before-send" : "in-flight";
+  error.sideEffectPossible = outcome === "uncertain";
+  return error;
+}
+
+describe("a remote write that may have reached the site is UNKNOWN, and is never sent again", () => {
+  it.each(["TIMEOUT", "UNAVAILABLE", "PROVIDER_ERROR", "UNKNOWN_OUTCOME"] as const)("%s", async (code) => {
+    runtime.session.actionError = remoteError(code, "uncertain");
+    const tool = new BrowserSubmitTool(runtime, journal, approvals, access);
+    expect((await tool.execute(SUBMIT, ctx("browser.submit", SUBMIT, "approval-1"))).success).toBe(false);
+    expect(await journalStatus(SUBMIT, "browser.submit")).toBe("UNKNOWN");
+
+    // A new approval for the same submit: no browser is opened, nothing is sent.
+    runtime.session.actionError = null;
+    const actionsBefore = runtime.session.actions;
+    const openedBefore = runtime.opened;
+    const retry = await tool.execute(SUBMIT, ctx("browser.submit", SUBMIT, "approval-2"));
+    expect(retry).toMatchObject({ success: false, error: "Execution already unknown" });
+    expect(runtime.session.actions).toBe(actionsBefore);
+    expect(runtime.opened).toBe(openedBefore);
+  });
+
+  it("records it as an ambiguous outcome, with the fixed fallback text", async () => {
+    runtime.session.actionError = remoteError("TIMEOUT", "uncertain");
+    await new BrowserClickTool(runtime, journal, approvals, access).execute(CLICK, ctx("browser.click", CLICK, "approval-1"));
+    const record = await journal.begin({
+      userId: "user-1",
+      toolId: "browser.click",
+      idempotencyKey: `browser.click:${computeParamsHash(CLICK)}`,
+      paramsHash: computeParamsHash(CLICK),
+      provider: "browser",
+    });
+    expect(record.status).toBe("UNKNOWN");
+    expect(record.errorCode).toBe("AMBIGUOUS_OUTCOME");
+  });
+});
+
+describe("a remote write known not to have acted stays FAILED, and may be tried again", () => {
+  it.each([
+    ["never sent", "UNAVAILABLE", "not-sent", "CANCELLED_BEFORE_SEND"],
+    ["refused by the service before acting", "SESSION_NOT_FOUND", "no-effect", "REQUEST_CANCELLED"],
+  ] as const)("%s", async (_label, code, outcome, errorCode) => {
+    runtime.session.actionError = remoteError(code, outcome);
+    const tool = new BrowserSubmitTool(runtime, journal, approvals, access);
+    expect((await tool.execute(SUBMIT, ctx("browser.submit", SUBMIT, "approval-1"))).success).toBe(false);
+    const record = await journal.begin({
+      userId: "user-1",
+      toolId: "browser.submit",
+      idempotencyKey: `browser.submit:${computeParamsHash(SUBMIT)}`,
+      paramsHash: computeParamsHash(SUBMIT),
+      provider: "browser",
+    });
+    expect(record.status).toBe("FAILED");
+    expect(record.errorCode).toBe(errorCode);
+
+    runtime.session.actionError = null;
+    const retry = await tool.execute(SUBMIT, ctx("browser.submit", SUBMIT, "approval-2"));
+    expect(retry.success, retry.error).toBe(true);
+  });
+
+  it("a remote error that does not say what happened is UNKNOWN, never FAILED", async () => {
+    const bare = new Error("The browser could not perform the action.");
+    bare.name = "BrowserServiceError";
+    runtime.session.actionError = bare;
+    await new BrowserSubmitTool(runtime, journal, approvals, access).execute(SUBMIT, ctx("browser.submit", SUBMIT, "approval-1"));
+    expect(await journalStatus(SUBMIT, "browser.submit")).toBe("UNKNOWN");
+  });
+});

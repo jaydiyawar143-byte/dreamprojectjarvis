@@ -141,6 +141,119 @@ curl http://localhost:3100/healthz
 
 `ready` is the one that proves the deployment works. `live` only proves a process exists.
 
+### The isolated browser service (Phase 19.2, optional)
+
+A separate container runs Chromium for the browser tools. It is **off**, and it
+is not part of `docker compose up` — it is a compose profile, and the API only
+uses it when `BROWSER_SERVICE_URL` is set as well.
+
+It is not a sandbox by itself. It is a container with limits; Chromium keeps its
+own sandbox (the launcher sets Playwright's `chromiumSandbox: true`, without
+which Playwright would add `--no-sandbox` itself), and if the host cannot
+support that, sessions fail rather than run unsandboxed. Under the shipped
+compose settings that failure is likely: Docker's default seccomp profile
+refuses the user namespaces Chromium's Linux sandbox uses. This has not been
+observed yet — see step 5. Do not "fix" it with `seccomp:unconfined` or
+`--no-sandbox`.
+
+What the container receives is limited, and how far:
+
+- **Variables.** It has no `env_file`. Compose passes it only the
+  `BROWSER_SERVICE_*` and `BROWSER_*` names listed in its `environment` block
+  (filled from `.env` at `docker compose` time), plus `NODE_ENV` and
+  `CHROME_PATH`. The database URL, the JWT and encryption secrets and every
+  provider credential stay out of it.
+- **Network.** It is on the `browser` network only, with the API; PostgreSQL
+  and the web app are not on it. That network is **not** egress control: the
+  container can still open outbound connections, including to the host's
+  published ports. Default-deny egress is Stage 19.3, so do not treat this
+  container as a place to send traffic you would not otherwise allow.
+
+To enable it:
+
+1. Generate the TLS material yourself. This deployment ships none, and both
+   sides refuse to run without it: a certificate and key for the service, a CA
+   both sides trust, and a client certificate for the API whose CN/SAN is the
+   value of `BROWSER_SERVICE_PEER_IDENTITY`. Mount the directory into both
+   containers with a `docker-compose.override.yml`; nothing here mounts it for
+   you. Certificate lifetime, rotation and revocation are **not decided** (U2,
+   `docs/phases/phase-19.md` §14.7): nothing rotates or revokes a certificate,
+   and a leaked client certificate stays valid until you replace its CA.
+2. In `.env`, set `BROWSER_ENABLED="true"` and
+   `BROWSER_SERVICE_URL="https://browser-service:3200"` (an `http:` URL is
+   refused), the same `BROWSER_SERVICE_KEY_ID`, `BROWSER_SERVICE_SHARED_SECRET`
+   (32+ random characters) and `BROWSER_SERVICE_PEER_IDENTITY` for both sides,
+   the API's `BROWSER_SERVICE_CLIENT_CERT_PATH`, `BROWSER_SERVICE_CLIENT_KEY_PATH`
+   and `BROWSER_SERVICE_CA_PATH`, and the service's
+   `BROWSER_SERVICE_TLS_CERT_PATH`, `BROWSER_SERVICE_TLS_KEY_PATH` and
+   `BROWSER_SERVICE_TLS_CA_PATH`, as mounted. Mutual TLS is the only mode: the
+   service will not start if `BROWSER_SERVICE_REQUIRE_MTLS` is set to anything
+   but `true` or `BROWSER_SERVICE_TRUST_FORWARDED_PEER_IDENTITY` to anything but
+   `false`.
+3. Set `BROWSER_SERVICE_CHROMIUM_ENABLED="true"` for the service. Without it the
+   container is up and refuses every session, by design.
+4. Start it, then restart the API so it reads the endpoint:
+
+```bash
+docker compose --profile browser-service up -d browser-service
+docker compose up -d api
+```
+
+Check it without a published port — there is none, deliberately. Port 3200
+answers only a peer with a client certificate from your CA, so the check — like
+the compose healthcheck — asks the loopback-only health listener on 3201, which
+exists inside the container only and serves `/healthz` and nothing else:
+
+```bash
+docker compose --profile browser-service ps
+docker compose exec browser-service node -e "fetch('http://127.0.0.1:3201/healthz').then(async r => console.log(r.status, await r.text()))"
+```
+
+The answer is a fixed body: `status`, `service`, the protocol version and
+`chromium: enabled|disabled`. It says nothing about sessions, users or pages. If
+`BROWSER_SERVICE_HEALTH_TOKEN` is set, add the header the compose healthcheck
+sends.
+
+5. Check Chromium's sandbox once in the running container (S10). It launches a
+   headless browser the way the service does, offline, and prints pass/fail:
+
+```bash
+docker compose exec browser-service node apps/browser-service/scripts/s10-sandbox-check.mjs
+```
+
+   A failure to start Chromium with its sandbox means the host refuses what the
+   sandbox needs, and sessions will be refused. Keep the service's Chromium off
+   until a reviewed seccomp profile allows it; never answer it with
+   `seccomp:unconfined` or `--no-sandbox`.
+
+A browser write whose outcome the API cannot prove — a timeout, a dropped
+connection, a provider error after the request was sent — is recorded `UNKNOWN`
+and is not sent again, even with a new approval. Treat such an action as
+possibly done, and check the site before asking for it a second time.
+
+The API log names the choice at start-up, with no address credentials:
+
+```
+{"level":"info","event":"browser_tools_enabled","mode":"remote","serviceHost":"browser-service:3200",…}
+```
+
+If the API logs `browser_tools_disabled`, `BROWSER_ENABLED` is not `"true"`. If
+it logs `browser_registration_skipped`, the endpoint configuration is unusable
+or the service could not be reached at that moment — in both cases **no browser
+tool is registered**, and there is no fallback to an in-process browser.
+
+**Rolling back** is stopping the profile and unsetting the variable: no
+migration belongs to this stage, so there is no schema to undo.
+
+```bash
+docker compose --profile browser-service stop browser-service
+# remove BROWSER_SERVICE_URL from .env, then
+docker compose up -d api
+```
+
+The API returns to the in-process browser when one is configured, or to no
+browser tools.
+
 ## 7. Check the confirmation store
 
 Since Phase 13, a confirmation of an external write is a row in PostgreSQL rather than memory in one process. After a deploy, check that its table arrived with the migrations:

@@ -156,13 +156,26 @@ export function createBrowserConfig(
 }
 
 /**
+ * Whether the operator has switched browsing on at all, independent of where
+ * the browser runs.
+ *
+ * Phase 19.2: a deployment that points at a browser service needs no Chrome in
+ * this process, so "may this deployment browse?" has to be answerable on its
+ * own. `isBrowserConfigured` remains the local-Chrome question and adds the
+ * second half.
+ */
+export function isBrowserEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.BROWSER_ENABLED === "true";
+}
+
+/**
  * Whether the container should mount the browser tools at all.
  *
  * Both halves are required: an operator has switched browsing on AND a browser
  * exists to drive. Either alone is a misconfiguration, not a capability.
  */
 export function isBrowserConfigured(env: NodeJS.ProcessEnv = process.env): boolean {
-  if (env.BROWSER_ENABLED !== "true") return false;
+  if (!isBrowserEnabled(env)) return false;
   return resolveChromePath(env) !== null;
 }
 

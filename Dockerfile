@@ -6,6 +6,12 @@
 # building those packages twice and keeping two dependency graphs honest. The
 # compose file runs this image twice with different commands and ports.
 #
+# THE BROWSER SERVICE IS NOT IN THIS IMAGE. Phase 19.2 gives it its own image
+# (apps/browser-service/Dockerfile) precisely so the API holds no browser: the
+# tools reach it over a signed request, and Chromium runs with its own user,
+# limits and network position. Its manifest is copied below only because the
+# shared lockfile covers it.
+#
 # Multi-stage so the runtime layer carries no source, no dev dependencies and
 # no build toolchain — only the compiled output and what it needs to run.
 #
@@ -46,12 +52,14 @@ FROM base AS deps
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml turbo.json ./
 COPY apps/api/package.json ./apps/api/
+COPY apps/browser-service/package.json ./apps/browser-service/
 COPY apps/web/package.json ./apps/web/
 COPY packages/agents/package.json ./packages/agents/
 COPY packages/ai-anthropic/package.json ./packages/ai-anthropic/
 COPY packages/ai-elevenlabs/package.json ./packages/ai-elevenlabs/
 COPY packages/ai-openai/package.json ./packages/ai-openai/
 COPY packages/browser/package.json ./packages/browser/
+COPY packages/browser-protocol/package.json ./packages/browser-protocol/
 COPY packages/config/package.json ./packages/config/
 COPY packages/core/package.json ./packages/core/
 COPY packages/db/package.json ./packages/db/

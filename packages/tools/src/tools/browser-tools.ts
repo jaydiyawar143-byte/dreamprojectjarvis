@@ -1,6 +1,11 @@
 import { BaseTool } from "../base-tool.js";
 import { sanitizeToolResult } from "../output-sanitizer.js";
-import { withSafeTerminalTransitions, classifyWriteOutcome, TIMEOUT_ERROR_CODES } from "../execution-journal.js";
+import {
+  withSafeTerminalTransitions,
+  classifyWriteOutcome,
+  hasTransportOutcome,
+  TIMEOUT_ERROR_CODES,
+} from "../execution-journal.js";
 import { verifyExecutionGrant } from "../execution-grant.js";
 import type {
   ToolResult,
@@ -141,11 +146,16 @@ abstract class BaseBrowserTool extends BaseTool {
    * Errors are stringified through `Error.message` only. A JarvisError from the
    * navigation policy already carries a safe, specific reason; anything else is
    * reduced to its message so a stack never reaches a caller.
+   *
+   * `cause` is the thrown value itself, for the journal's classification only
+   * and never returned to a caller: the remote browser service's error says on
+   * itself whether the request was sent and whether the action may have
+   * happened (Stage 19.2 audit, H2), and its message alone cannot.
    */
   protected async inSession<T>(
     context: ToolContext,
     run: (session: BrowserSessionPort) => Promise<T>
-  ): Promise<{ ok: true; value: T } | { ok: false; error: string }> {
+  ): Promise<{ ok: true; value: T } | { ok: false; error: string; cause: unknown }> {
     try {
       const value = await this.runtime.withSession(context.userId, run, {
         signal: context.signal,
@@ -153,7 +163,7 @@ abstract class BaseBrowserTool extends BaseTool {
       return { ok: true, value };
     } catch (error) {
       const message = error instanceof Error ? error.message : "Browser action failed";
-      return { ok: false, error: message };
+      return { ok: false, error: message, cause: error };
     }
   }
 
@@ -509,7 +519,8 @@ abstract class BaseBrowserWriteTool extends BaseBrowserTool {
   protected async recordJournalError(
     executionId: string,
     error: unknown,
-    fallback: string
+    fallback: string,
+    cause?: unknown
   ): Promise<void> {
     // What is stored is unchanged (an Error's message, or the fixed fallback);
     // the browser's own text is consulted only to classify the outcome.
@@ -528,7 +539,12 @@ abstract class BaseBrowserWriteTool extends BaseBrowserTool {
       await this.journal.markUnknown(executionId, { code: TIMEOUT_ERROR_CODES.AMBIGUOUS_OUTCOME, message });
       return;
     }
-    const classification = classifyWriteOutcome(error);
+    // Stage 19.2 audit (H2): a remote browser failure carries its own answer
+    // — sent or not, and whether the action may have happened — and is
+    // classified by it. Its message is a fixed sentence that says neither, so
+    // reading only the message would make a submit that reached the site an
+    // ordinary FAILED that a new approval sends again.
+    const classification = classifyWriteOutcome(hasTransportOutcome(cause) ? cause : error);
     if (classification.status === "UNKNOWN") {
       await this.journal.markUnknown(executionId, { code: classification.code, message });
     } else {
@@ -573,7 +589,7 @@ abstract class BaseBrowserWriteTool extends BaseBrowserTool {
 
     const outcome = await this.inSession(context, run);
     if (!outcome.ok) {
-      await this.recordJournalError(ensured.executionId, outcome.error, failureLabel);
+      await this.recordJournalError(ensured.executionId, outcome.error, failureLabel, outcome.cause);
       return this.failure(outcome.error);
     }
 

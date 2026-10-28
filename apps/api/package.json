@@ -17,6 +17,7 @@
     "@jarvis/ai-elevenlabs": "workspace:*",
     "@jarvis/ai-openai": "workspace:*",
     "@jarvis/browser": "workspace:*",
+    "@jarvis/browser-protocol": "workspace:*",
     "@jarvis/config": "workspace:*",
     "@jarvis/core": "workspace:*",
     "@jarvis/db": "workspace:*",

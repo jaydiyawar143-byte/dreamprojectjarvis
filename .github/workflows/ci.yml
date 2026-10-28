@@ -270,6 +270,25 @@ jobs:
           pnpm --filter @jarvis/core exec vitest run computer-control
           pnpm --filter @jarvis/tools exec vitest run computer-control sprint7-browser-tools
 
+      # Phase 19, Stage 19.2 — the isolated browser service. The protocol
+      # workspace holds the versioned envelope, the signing and replay rules,
+      # the size and deadline bounds, the endpoint loader and the API's typed
+      # client; the service workspace holds its own refusals — no caller
+      # identity, no session, a cross-Organization reuse, a disabled engine, a
+      # provider error's words kept out of the response and the log — and,
+      # since the Stage 19.2 audit, the write outcomes (an uncertain write is
+      # never a plain failure), the mutual-TLS-only configuration, the loopback
+      # health listener, Chromium's sandbox launch option and the compose
+      # file's isolation of the browser container. The service suite runs real
+      # mutual TLS on 127.0.0.1, with certificates made for the run and a fake
+      # engine, so no Chromium starts and no external site is reached. Selected
+      # by file name, because neither workspace is gated as a whole.
+      - name: Test browser-service contracts (@jarvis/browser-protocol, @jarvis/browser-service)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          pnpm --filter @jarvis/browser-protocol exec vitest run browser-service
+          pnpm --filter @jarvis/browser-service exec vitest run browser-service
+
       # Phase 19, Stage 19.1 — the Meta Ads write boundary: all nine writes run
       # only with the executor's grant for that exact call, consume their
       # approval once with the Organization's scope, and leave the journal in

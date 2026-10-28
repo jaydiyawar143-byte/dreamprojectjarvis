@@ -69,9 +69,12 @@ export const TIMEOUT_ERROR_CODES = {
 } as const;
 
 /**
- * Shape of the typed transport error thrown by @jarvis/meta-graph's HTTP
- * client on abort/timeout. Declared structurally so this package does NOT
- * depend on meta-graph (dependency direction: meta-graph -> tools).
+ * Shape of the typed transport errors that say whether a request was sent:
+ * @jarvis/meta-graph's `MetaRequestAbortedError` on abort/timeout, and (Phase
+ * 19, Stage 19.2 audit, H2) @jarvis/browser-protocol's `BrowserServiceError`
+ * for every failure of a call to the remote browser service. Declared
+ * structurally so this package depends on neither (dependency direction:
+ * provider -> tools).
  */
 interface TransportAbortShape {
   name: string;
@@ -79,8 +82,18 @@ interface TransportAbortShape {
   sideEffectPossible?: boolean;
 }
 
+const TRANSPORT_OUTCOME_ERRORS: ReadonlySet<string> = new Set([
+  "MetaRequestAbortedError",
+  "BrowserServiceError",
+]);
+
 function isTransportAbort(err: unknown): err is TransportAbortShape & Error {
-  return err instanceof Error && err.name === "MetaRequestAbortedError";
+  return err instanceof Error && TRANSPORT_OUTCOME_ERRORS.has(err.name);
+}
+
+/** True when the error is one of the typed transport errors above. */
+export function hasTransportOutcome(err: unknown): boolean {
+  return isTransportAbort(err);
 }
 
 export type WriteOutcomeClassification =

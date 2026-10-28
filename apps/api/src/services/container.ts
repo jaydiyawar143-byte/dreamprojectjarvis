@@ -1,4 +1,4 @@
-import type { IOrchestrator, IToolExecutor, ITool, AIToolDefinition, ShutdownLifecycle, IMemoryStore, IEmbeddingProvider, IKnowledgeRetriever, IAIProvider } from "@jarvis/core";
+import type { IOrchestrator, IToolExecutor, ITool, AIToolDefinition, ShutdownLifecycle, IMemoryStore, IEmbeddingProvider, IKnowledgeRetriever, IAIProvider, BrowserRuntimePort } from "@jarvis/core";
 import { ExecutionOutcomeService } from "./execution-outcome-service.js";
 import { ObjectiveEvaluationService } from "./objective-evaluation-service.js";
 import type { TokenService } from "@jarvis/security";
@@ -64,6 +64,7 @@ import {
 import {
   BrowserRuntime,
   createBrowserConfig,
+  isBrowserEnabled,
   isBrowserConfigured,
   describeBrowserConfigStatus,
   // Phase 15 — one bounded read of a public page, under the same navigation policy.
@@ -71,6 +72,11 @@ import {
   isPageResearchEnabled,
   pageResearchPolicy,
 } from "@jarvis/browser";
+import {
+  BrowserServiceClient,
+  RemoteBrowserRuntime,
+  readBrowserServiceEndpoint,
+} from "@jarvis/browser-protocol";
 import { createMetaGraphProvider, createMetaPagePublisher, isPagePublishingEnabled } from "@jarvis/meta-graph";
 import {
   createGoogleAdsProvider,
@@ -195,6 +201,7 @@ import { AtomicRateLimiter, RATE_LIMIT_NAMESPACES } from "./rate-limiter.js";
 import { buildIntegrationCommandService } from "./integrations/build.js";
 import {
   SharedConnectionAccess,
+  createBrowserSessionTenantResolver,
   createBrowserWriteScopeResolver,
   createSharedConnectionToolGate,
   type SharedConnectionAccessPort,
@@ -520,8 +527,12 @@ let _container: Container | null = null;
  * creates it, but the process lifecycle is what has to end it, and threading a
  * return value out of the factory would change a signature the Sprint 6 drift
  * test pins.
+ *
+ * Phase 19.2: either the in-process runtime or a client for the isolated
+ * browser service. Both are the same port, so the tools, their grants and
+ * their approvals do not know or care where the session runs.
  */
-let _browserRuntime: BrowserRuntime | null = null;
+let _browserRuntime: BrowserRuntimePort | null = null;
 
 /**
  * S8.4 — one connection per reviewed MCP server, held so shutdown can close
@@ -811,16 +822,76 @@ function createMetaToolRegistry(
   // -------------------------------------------------------------------------
   // Sprint 7.3 — browser tools (READS OPEN, ACTIONS APPROVAL-GATED)
   // -------------------------------------------------------------------------
-  // Mounted only when an operator has switched browsing on AND a Chrome exists
-  // to drive. Browsing is never inferred from "a browser is installed", for the
-  // same reason Sprint 8 refused to infer voice from an OpenAI key being
-  // present: every machine has one, and inferring would hand a live automation
-  // surface to deployments that never asked for it.
+  // Mounted only when an operator has switched browsing on. Browsing is never
+  // inferred from "a browser is installed", for the same reason Sprint 8
+  // refused to infer voice from an OpenAI key being present: every machine has
+  // one, and inferring would hand a live automation surface to deployments that
+  // never asked for it.
+  //
+  // Phase 19.2 — two places a browser can run, one set of tools:
+  //
+  //   • BROWSER_SERVICE_URL set  → the isolated browser service. Chromium lives
+  //     in its own process, image and network namespace; this process holds a
+  //     signed client and no browser at all.
+  //   • BROWSER_SERVICE_URL unset → the in-process runtime, exactly as before.
+  //
+  // A browser service URL that names an unusable configuration registers NO
+  // tools. There is deliberately no fall back to the local browser: an operator
+  // who asked for isolation and was given an in-process Chromium instead would
+  // have been told the opposite of the truth.
   //
   // Where the browser may navigate is decided below the tools, in
-  // @jarvis/browser, so no prompt and no request body can widen it.
+  // @jarvis/browser or in the service's own runtime, so no prompt and no
+  // request body can widen it.
   // -------------------------------------------------------------------------
-  if (isBrowserConfigured()) {
+  const browserService = readBrowserServiceEndpoint();
+  if (!isBrowserEnabled()) {
+    console.log(JSON.stringify({
+      level: "info",
+      event: "browser_tools_disabled",
+      reason: describeBrowserConfigStatus().reason,
+    }));
+  } else if (browserService.state === "invalid") {
+    // The operator configured a remote browser and got it wrong. Refusing here
+    // keeps the failure visible: the tools are absent, so a request that needs
+    // one is answered "not available", never silently run somewhere else.
+    console.log(JSON.stringify({
+      level: "warn",
+      event: "browser_registration_skipped",
+      reason: browserService.reason,
+    }));
+  } else if (browserService.state === "ready") {
+    try {
+      const client = new BrowserServiceClient({ config: browserService.config });
+      const runtime = new RemoteBrowserRuntime({
+        client,
+        tenant: createBrowserSessionTenantResolver(sharedAccess),
+      });
+      _browserRuntime = runtime;
+
+      const browserJournal = new PrismaToolExecutionRepository(prisma);
+      for (const tool of createBrowserTools(runtime, browserJournal, approvalConsumption, browserWriteScope)) {
+        registry.register(tool);
+      }
+
+      console.log(JSON.stringify({
+        level: "info",
+        event: "browser_tools_enabled",
+        // The service's address is not a secret, but it is also not useful to
+        // an operator reading logs; the host and port identify it.
+        mode: "remote",
+        serviceHost: new URL(browserService.config.baseUrl).host,
+        timeoutMs: browserService.config.timeoutMs,
+        mutualTls: browserService.config.tls !== null,
+      }));
+    } catch (err) {
+      console.log(JSON.stringify({
+        level: "warn",
+        event: "browser_registration_skipped",
+        reason: err instanceof Error ? err.message : "unknown",
+      }));
+    }
+  } else if (isBrowserConfigured()) {
     try {
       const browserConfig = createBrowserConfig();
       const runtime = new BrowserRuntime({ config: browserConfig });
@@ -834,6 +905,7 @@ function createMetaToolRegistry(
       console.log(JSON.stringify({
         level: "info",
         event: "browser_tools_enabled",
+        mode: "local",
         chromePath: browserConfig.chromePath,
         maxConcurrentSessions: browserConfig.maxConcurrentSessions,
         domainAllowlist: browserConfig.domainAllowlist.length,
@@ -2284,7 +2356,7 @@ export function getContainer(options?: {
  * Exposed so the shutdown controller can close Chrome during RELEASE_RESOURCES
  * rather than orphaning it when the API exits.
  */
-export function getBrowserRuntime(): BrowserRuntime | null {
+export function getBrowserRuntime(): BrowserRuntimePort | null {
   return _browserRuntime;
 }
 
