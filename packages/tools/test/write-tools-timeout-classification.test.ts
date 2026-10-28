@@ -14,6 +14,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { MetaPauseCampaignTool } from "../src/tools/meta-ads-write-tools.js";
 import type { MetaAdsProvider, MetaAdsWriteProvider, MetaAccountAuthorizer } from "../src/tools/meta-ads-provider.js";
 import { MemoryExecutionJournal } from "../src/execution-journal.js";
+import { ApprovedWrites } from "./helpers/approved-write.js";
 
 type WriteProvider = MetaAdsProvider & MetaAdsWriteProvider;
 
@@ -60,15 +61,19 @@ const PARAMS = { accountId: "act_111111111", campaignId: "100000001" };
 const CONTEXT = { userId: "user-1" };
 
 let journal: MemoryExecutionJournal;
+// Phase 19.1 — each run is approved and carries the executor's grant
+// (helpers/approved-write.ts); the store claims this journal's row.
+let approved: ApprovedWrites;
 
 beforeEach(() => {
   journal = new MemoryExecutionJournal();
+  approved = new ApprovedWrites(journal);
 });
 
 async function runWith(behavior: () => Promise<never>) {
   const { provider } = makeProvider(behavior);
-  const tool = new MetaPauseCampaignTool(provider, authorizer, journal);
-  return tool.execute(PARAMS, CONTEXT);
+  const tool = new MetaPauseCampaignTool(provider, authorizer, journal, approved.approvals);
+  return approved.run(tool, PARAMS, CONTEXT);
 }
 
 describe("Phase 10.4 — timeout/abort classification (failure injection)", () => {
@@ -114,8 +119,8 @@ describe("Phase 10.4 — timeout/abort classification (failure injection)", () =
           campaign: { ...ACTIVE_CAMPAIGN, status: "PAUSED" },
         }) as unknown as Promise<never>
     );
-    const tool = new MetaPauseCampaignTool(provider, authorizer, journal);
-    const result = await tool.execute(PARAMS, CONTEXT);
+    const tool = new MetaPauseCampaignTool(provider, authorizer, journal, approved.approvals);
+    const result = await approved.run(tool, PARAMS, CONTEXT);
     expect(result.success).toBe(true);
     const record = journal.findByAnyKey("meta.campaign.pause:act_111111111:100000001:PAUSED");
     expect(record!.status).toBe("SUCCEEDED");
@@ -134,13 +139,13 @@ describe("Phase 10.4 — timeout/abort classification (failure injection)", () =
   it("concurrent duplicate executions are single-winner (abort cannot create duplicates)", async () => {
     let release!: (v: void) => void;
     const gate = new Promise<void>((r) => (release = r));
-    const { provider } = makeProvider(async () => {
+    const { provider, updateSpy } = makeProvider(async () => {
       await gate;
       throw structuralAbort("in-flight", "POST");
     });
-    const tool = new MetaPauseCampaignTool(provider, authorizer, journal);
-    const p1 = tool.execute(PARAMS, CONTEXT);
-    const p2 = tool.execute(PARAMS, CONTEXT);
+    const tool = new MetaPauseCampaignTool(provider, authorizer, journal, approved.approvals);
+    const p1 = approved.run(tool, PARAMS, CONTEXT);
+    const p2 = approved.run(tool, PARAMS, CONTEXT);
     // Release the write gate so the winner can finish (as an abort).
     setTimeout(release, 10);
     const [a, b] = await Promise.allSettled([p1, p2]);
@@ -149,9 +154,10 @@ describe("Phase 10.4 — timeout/abort classification (failure injection)", () =
     );
     // Exactly one claim wins; the loser must NOT have executed a second write.
     const blocked = outcomes.filter(
-      (m) => /already executing|already unknown/i.test(m)
+      (m) => /already executing|already unknown|not in a claimable state/i.test(m)
     );
     expect(blocked.length).toBeGreaterThanOrEqual(1);
+    expect(updateSpy).toHaveBeenCalledTimes(1);
     const rows = [...(journal as unknown as { rows: Map<string, { status: string }> }).rows.values()];
     expect(rows.filter((r) => r.status === "EXECUTING").length).toBeLessThanOrEqual(1);
   });
@@ -160,8 +166,8 @@ describe("Phase 10.4 — timeout/abort classification (failure injection)", () =
     const { provider } = makeProvider(() =>
       Promise.reject(new Error("timeout after send access_token=abc123"))
     );
-    const tool = new MetaPauseCampaignTool(provider, authorizer, journal);
-    await tool.execute(PARAMS, { userId: "user-1", traceId: "trace-104" });
+    const tool = new MetaPauseCampaignTool(provider, authorizer, journal, approved.approvals);
+    await approved.run(tool, PARAMS, { userId: "user-1", traceId: "trace-104" });
     const record = journal.findByAnyKey("meta.campaign.pause:act_111111111:100000001:PAUSED")!;
     expect(record.traceId).toBe("trace-104");
     // The memory journal stores raw message; durable store redacts. Here we

@@ -10,6 +10,7 @@ import {
 import type { MetaAdsProvider, MetaAdsWriteProvider, MetaAccountAuthorizer } from "../src/tools/meta-ads-provider.js";
 import { createMockMetaProvider, createFailingMetaProvider } from "../src/tools/meta-ads-mock.js";
 import { MemoryExecutionJournal } from "../src/execution-journal.js";
+import { ApprovedWrites } from "./helpers/approved-write.js";
 import type {
   AuditLogger,
   ExecutionJournalPort,
@@ -84,17 +85,40 @@ function makeBrokenBeginJournal(): ExecutionJournalPort {
 
 beforeEach(() => { clearExecutionStore(); });
 
+// Phase 19.1 — a Meta write runs only approved, with the executor's grant
+// (helpers/approved-write.ts). Each tool here gets the approval store for
+// ITS journal, so the store claims the very row the tool begins — and two
+// callers racing for one row are decided by that claim.
+const approvedByJournal = new WeakMap<ExecutionJournalPort, ApprovedWrites>();
+const approvedByTool = new WeakMap<MetaPauseCampaignTool, ApprovedWrites>();
+
+function pauseTool(provider: WriteProvider, authorizer: MetaAccountAuthorizer, journal: ExecutionJournalPort): MetaPauseCampaignTool {
+  let approved = approvedByJournal.get(journal);
+  if (!approved) {
+    approved = new ApprovedWrites(journal);
+    approvedByJournal.set(journal, approved);
+  }
+  const tool = new MetaPauseCampaignTool(provider, authorizer, journal, approved.approvals);
+  approvedByTool.set(tool, approved);
+  return tool;
+}
+
+/** Run `tool` approved and granted, as the executor would. */
+function run(tool: MetaPauseCampaignTool, params: Record<string, unknown>, context: { userId: string }) {
+  return approvedByTool.get(tool)!.run(tool, params, context);
+}
+
 describe("PHASE 10.2 — concurrent execution single-winner (tool level)", () => {
   it("x2 concurrent identical requests -> exactly ONE provider write", async () => {
     const { provider, writes } = makeCountingProvider();
     const authorizer = createAuthorizer();
     const journal = new MemoryExecutionJournal();
-    const t1 = new MetaPauseCampaignTool(provider, authorizer, journal);
-    const t2 = new MetaPauseCampaignTool(provider, authorizer, journal);
+    const t1 = pauseTool(provider, authorizer, journal);
+    const t2 = pauseTool(provider, authorizer, journal);
 
     const [r1, r2] = await Promise.all([
-      t1.execute(PARAMS, CTX),
-      t2.execute(PARAMS, CTX),
+      run(t1, PARAMS, CTX),
+      run(t2, PARAMS, CTX),
     ]);
 
     expect(writes()).toBe(1); // external side effect happened exactly once
@@ -102,7 +126,7 @@ describe("PHASE 10.2 — concurrent execution single-winner (tool level)", () =>
     expect(successes).toHaveLength(1);
     // The loser must NOT report success as if it had written anything.
     const loser = [r1, r2].find((r) => !r.success)!;
-    expect(loser.error).toContain("already");
+    expect(loser.error).toMatch(/already|not in a claimable state/);
   });
 
   it("x5 concurrent identical requests -> exactly ONE provider write", async () => {
@@ -112,7 +136,7 @@ describe("PHASE 10.2 — concurrent execution single-winner (tool level)", () =>
 
     const results = await Promise.all(
       Array.from({ length: 5 }, () =>
-        new MetaPauseCampaignTool(provider, authorizer, journal).execute(PARAMS, CTX)
+        run(pauseTool(provider, authorizer, journal), PARAMS, CTX)
       )
     );
 
@@ -127,7 +151,7 @@ describe("PHASE 10.2 — concurrent execution single-winner (tool level)", () =>
 
     const results = await Promise.all(
       Array.from({ length: 10 }, () =>
-        new MetaPauseCampaignTool(provider, authorizer, journal).execute(PARAMS, CTX)
+        run(pauseTool(provider, authorizer, journal), PARAMS, CTX)
       )
     );
 
@@ -150,7 +174,7 @@ describe("PHASE 10.2 — crash mid-execution & stale recovery (tool level)", () 
     const { provider, writes } = makeCountingProvider();
     const authorizer = createAuthorizer();
     const journal = new MemoryExecutionJournal();
-    const tool = new MetaPauseCampaignTool(provider, authorizer, journal);
+    const tool = pauseTool(provider, authorizer, journal);
 
     // Simulate a worker that claimed ownership and then crashed:
     const rec = await journal.begin({
@@ -163,7 +187,7 @@ describe("PHASE 10.2 — crash mid-execution & stale recovery (tool level)", () 
     await journal.claimForExecution(rec.executionId, { ownerId: "crashed-worker", leaseMs: 60_000 });
 
     // While the lease is valid, a new request is blocked — no takeover.
-    const duringLease = await tool.execute(PARAMS, CTX);
+    const duringLease = await run(tool, PARAMS, CTX);
     expect(duringLease.success).toBe(false);
     expect(duringLease.error).toContain("already executing");
     expect(writes()).toBe(0);
@@ -175,7 +199,7 @@ describe("PHASE 10.2 — crash mid-execution & stale recovery (tool level)", () 
     expect(recovered[0]!.status).toBe("UNKNOWN"); // never FAILED automatically
 
     // After recovery the outcome is uncertain: retry stays blocked.
-    const afterRecovery = await tool.execute(PARAMS, CTX);
+    const afterRecovery = await run(tool, PARAMS, CTX);
     expect(afterRecovery.success).toBe(false);
     expect(afterRecovery.error).toContain("already unknown");
     expect(writes()).toBe(0); // NO duplicate external side effect
@@ -184,7 +208,7 @@ describe("PHASE 10.2 — crash mid-execution & stale recovery (tool level)", () 
   it("recovered record preserves full audit context", async () => {
     const { provider } = makeCountingProvider();
     const journal = new MemoryExecutionJournal();
-    const tool = new MetaPauseCampaignTool(provider, createAuthorizer(), journal);
+    const tool = pauseTool(provider, createAuthorizer(), journal);
 
     const rec = await journal.begin({
       userId: "user-audit",
@@ -213,9 +237,9 @@ describe("PHASE 10.2 — crash mid-execution & stale recovery (tool level)", () 
 describe("PHASE 10.2 — DB failure safety (tool level)", () => {
   it("journal down BEFORE claim: fail closed, no ownership, no provider call", async () => {
     const { provider, writes } = makeCountingProvider();
-    const tool = new MetaPauseCampaignTool(provider, createAuthorizer(), makeBrokenBeginJournal());
+    const tool = pauseTool(provider, createAuthorizer(), makeBrokenBeginJournal());
 
-    const result = await tool.execute(PARAMS, CTX);
+    const result = await run(tool, PARAMS, CTX);
 
     expect(result.success).toBe(false);
     expect(result.error).toContain("journal unavailable");
@@ -227,10 +251,10 @@ describe("PHASE 10.2 — DB failure safety (tool level)", () => {
     const failing = createMockMetaProvider({ throwOnCall: "updateCampaignStatus" });
     const base = new MemoryExecutionJournal();
     const flaky = makeFlakyJournal(base, "markFailed");
-    const tool = new MetaPauseCampaignTool(failing, createAuthorizer(), flaky);
+    const tool = pauseTool(failing, createAuthorizer(), flaky);
 
     // Must not throw even though markFailed rejects after the claim.
-    const result = await tool.execute(PARAMS, CTX);
+    const result = await run(tool, PARAMS, CTX);
 
     expect(result.success).toBe(false);
     expect(result.error).toContain("Meta API error");
@@ -251,8 +275,8 @@ describe("PHASE 10.2 — DB failure safety (tool level)", () => {
 
     // And UNKNOWN never auto-retries through the tool.
     const healthy = makeCountingProvider();
-    const retryTool = new MetaPauseCampaignTool(healthy.provider, createAuthorizer(), base);
-    const retry = await retryTool.execute(PARAMS, CTX);
+    const retryTool = pauseTool(healthy.provider, createAuthorizer(), base);
+    const retry = await run(retryTool, PARAMS, CTX);
     expect(retry.success).toBe(false);
     expect(healthy.writes()).toBe(0);
   });
@@ -261,10 +285,10 @@ describe("PHASE 10.2 — DB failure safety (tool level)", () => {
     const { provider, writes } = makeCountingProvider();
     const base = new MemoryExecutionJournal();
     const flaky = makeFlakyJournal(base, "markSucceeded");
-    const tool = new MetaPauseCampaignTool(provider, createAuthorizer(), flaky);
+    const tool = pauseTool(provider, createAuthorizer(), flaky);
 
     // The external write succeeded; only the journal completion failed.
-    const result = await tool.execute(PARAMS, CTX);
+    const result = await run(tool, PARAMS, CTX);
     expect(result.success).toBe(true);
     expect(writes()).toBe(1);
 
@@ -281,8 +305,8 @@ describe("PHASE 10.2 — DB failure safety (tool level)", () => {
     expect(recovered[0]!.status).toBe("UNKNOWN");
 
     // A repeat request must NOT trigger a second external write.
-    const healthyTool = new MetaPauseCampaignTool(provider, createAuthorizer(), base);
-    const repeat = await healthyTool.execute(PARAMS, CTX);
+    const healthyTool = pauseTool(provider, createAuthorizer(), base);
+    const repeat = await run(healthyTool, PARAMS, CTX);
     expect(repeat.success).toBe(false);
     expect(repeat.error).toContain("already unknown");
     expect(writes()).toBe(1);
@@ -291,14 +315,14 @@ describe("PHASE 10.2 — DB failure safety (tool level)", () => {
   it("KNOWN FAILURE still allows explicit retry (FAILED -> EXECUTING)", async () => {
     const base = new MemoryExecutionJournal();
     const failing = createFailingMetaProvider("Meta API error: definitive rejection") as unknown as WriteProvider;
-    const first = new MetaPauseCampaignTool(failing, createAuthorizer(), base);
-    const r1 = await first.execute(PARAMS, CTX);
+    const first = pauseTool(failing, createAuthorizer(), base);
+    const r1 = await run(first, PARAMS, CTX);
     expect(r1.success).toBe(false);
 
     // Definitive failure recorded -> operator retries with a healthy provider.
     const { provider, writes } = makeCountingProvider();
-    const second = new MetaPauseCampaignTool(provider, createAuthorizer(), base);
-    const r2 = await second.execute(PARAMS, CTX);
+    const second = pauseTool(provider, createAuthorizer(), base);
+    const r2 = await run(second, PARAMS, CTX);
     expect(r2.success).toBe(true);
     expect(writes()).toBe(1);
   });
@@ -306,8 +330,8 @@ describe("PHASE 10.2 — DB failure safety (tool level)", () => {
   it("SUCCEEDED execution can never be claimed again (journal-level guard)", async () => {
     const { provider } = makeCountingProvider();
     const journal = new MemoryExecutionJournal();
-    const tool = new MetaPauseCampaignTool(provider, createAuthorizer(), journal);
-    const ok = await tool.execute(PARAMS, CTX);
+    const tool = pauseTool(provider, createAuthorizer(), journal);
+    const ok = await run(tool, PARAMS, CTX);
     expect(ok.success).toBe(true);
 
     const rec = (await journal.findByIdempotentKey(

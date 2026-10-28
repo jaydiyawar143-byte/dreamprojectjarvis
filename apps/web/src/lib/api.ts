@@ -583,7 +583,9 @@ export interface ApprovalRecord extends ApprovalSummaryInfo {
   createdAt: string;
   expiresAt: string;
   resolvedAt?: string;
-  params: Record<string, unknown>;
+  // Phase 19.1 (C1) — raw approval parameters are never returned to the client.
+  // A Google write carries a reviewed `plan` instead.
+  plan?: Record<string, unknown>;
   executionId?: string;
   executionStatus?: string;
   /**

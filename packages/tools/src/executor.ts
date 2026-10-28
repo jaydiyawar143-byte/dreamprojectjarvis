@@ -9,6 +9,7 @@ import type {
   ToolResult,
   ShutdownLifecycle,
   ToolAccessGate,
+  ToolContext,
 } from "@jarvis/core";
 import {
   APPROVAL_TTL_MS,
@@ -18,6 +19,7 @@ import {
   voiceConfirmationRefusal,
   voiceToolRefusal,
 } from "@jarvis/core";
+import { issueExecutionGrant } from "./execution-grant.js";
 
 /**
  * The authoritative execution deadline.
@@ -462,16 +464,30 @@ export class ToolExecutor implements IToolExecutor {
           return;
         }
         deadlineController.signal.addEventListener("abort", onDeadlineAbort, { once: true });
-        tool
-          .execute(request.params, {
+        const toolContext: ToolContext = {
+          userId: request.userId,
+          agentId: request.agentId,
+          conversationId: request.conversationId,
+          traceId: request.traceId,
+          approvalId: approvalIdForExecution,
+          signal: contextSignal,
+          ...(request.inputMode ? { inputMode: request.inputMode } : {}),
+        };
+        // Phase 19.1 — every check above passed for an approval-gated call:
+        // say so to the tool in the one way a caller cannot forge (see
+        // execution-grant.ts). A browser write refuses to run without it.
+        if (approvalIdForExecution) {
+          issueExecutionGrant(toolContext, {
+            toolId: tool.id ?? request.toolId,
             userId: request.userId,
-            agentId: request.agentId,
-            conversationId: request.conversationId,
-            traceId: request.traceId,
+            paramsHash: computeParamsHash(request.params),
             approvalId: approvalIdForExecution,
-            signal: contextSignal,
             ...(request.inputMode ? { inputMode: request.inputMode } : {}),
-          })
+            sharedAccessChecked: this.accessGate !== undefined,
+          });
+        }
+        tool
+          .execute(request.params, toolContext)
           .then(
             (value) => {
               deadlineController.signal.removeEventListener("abort", onDeadlineAbort);

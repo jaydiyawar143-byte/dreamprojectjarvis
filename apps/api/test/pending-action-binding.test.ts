@@ -156,13 +156,20 @@ function world(hooks: RaceHooks = {}) {
     return { status: response.status, body: (await response.json()) as Reply["body"] };
   }
 
+  async function get(path: string, user = "user-1"): Promise<Reply> {
+    const response = await fetch(base + path, {
+      headers: { authorization: `Bearer token-${user}` },
+    });
+    return { status: response.status, body: (await response.json()) as Reply["body"] };
+  }
+
   async function propose(toolId: string, params: Record<string, unknown>, conversationId = "conv-1", userId = "user-1") {
     const { pendingAction } = await pending.createPendingAction({ conversationId, userId, toolId, action: `Run ${toolId}`, params, riskLevel: "HIGH_IMPACT" });
     return pendingAction;
   }
 
   const statusOf = (id: string) => approvals.rows.get(id)?.status;
-  return { call, propose, pending, approvals, executed, statusOf };
+  return { call, get, propose, pending, approvals, executed, statusOf };
 }
 
 const FORGET = { memoryIds: ["m-1"], versions: ["2026-09-01T10:00:00.000Z"] };
@@ -403,5 +410,68 @@ describe("F2 — Meta writes and modification keep working, bound the same way",
     expect(env.statusOf(correction.id)).toBe("pending");
     expect(env.approvals.rows.get(correction.id)!.params).toEqual(CORRECT);
     expect(env.approvals.rows.size).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 19.1 (audit C1) — a pending action is shown as a safe preview. A
+// browser action's parameters ARE the sensitive payload: its typed text, its
+// selected value, nested submitted values. The page still gets the id, the
+// tool, the state and the approval id, so confirm/reject/modify keep working.
+// ---------------------------------------------------------------------------
+describe("Phase 19.1 — pending-action responses carry a safe preview only", () => {
+  const secret = "hunter2-typed-into-a-page";
+
+  it("GET returns no browser parameters and no typed value", async () => {
+    const env = world();
+    const shown = await env.propose("browser.type", {
+      url: "https://example.com/login?token=abc",
+      selector: 'input[name="password"]',
+      text: secret,
+    });
+
+    const reply = await env.get("/pending-actions?conversationId=conv-1");
+
+    expect(reply.status).toBe(200);
+    expect(reply.body.data?.id).toBe(shown.id);
+    expect(reply.body.data?.approvalId).toBe(shown.approvalId);
+    expect(reply.body.data?.toolId).toBe("browser.type");
+    expect(reply.body.data?.params).toEqual({});
+    expect(JSON.stringify(reply.body)).not.toContain(secret);
+    expect(JSON.stringify(reply.body)).not.toContain("example.com/login");
+  });
+
+  it("confirm returns no browser parameters and no typed value", async () => {
+    const env = world();
+    const shown = await env.propose("browser.submit", {
+      url: "https://example.com/checkout",
+      selector: "#pay",
+      fields: { "#card": secret },
+    });
+
+    const reply = await env.call(`/pending-actions/${shown.id}/confirm`, { conversationId: "conv-1" });
+
+    expect(reply.status).toBe(200);
+    expect(reply.body.data?.pendingAction?.params).toEqual({});
+    expect(JSON.stringify(reply.body)).not.toContain(secret);
+    // The executor still received the real parameters server-side; only the
+    // response is projected.
+    expect(env.executed[0]).toMatchObject({ toolId: "browser.submit", params: { fields: { "#card": secret } } });
+  });
+
+  it("a Meta preview keeps the campaign facts the card renders", async () => {
+    const env = world();
+    await env.propose("meta.campaign.budget.update", {
+      campaignId: "c-1",
+      dailyBudget: 3000,
+      status: "PAUSED",
+      internalNote: secret,
+    });
+
+    const reply = await env.get("/pending-actions?conversationId=conv-1");
+
+    expect(reply.status).toBe(200);
+    expect(reply.body.data?.params).toEqual({ campaignId: "c-1", dailyBudget: 3000, status: "PAUSED" });
+    expect(JSON.stringify(reply.body)).not.toContain(secret);
   });
 });

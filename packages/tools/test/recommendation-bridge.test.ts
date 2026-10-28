@@ -402,7 +402,10 @@ async function buildHarness(opts: {
     opts.perms ?? allowAllPerms,
     approvalHarness.mgr,
     audit.logger,
-    { lifecycle: opts.lifecycle }
+    // Phase 19.1 — production's executor asks the shared-connection gate, and
+    // a Meta write refuses a grant from one that did not. Who may use the
+    // connection is not under test here, so the gate allows.
+    { lifecycle: opts.lifecycle, accessGate: { check: async () => ({ allowed: true as const }) } }
   );
   const rawExecutorExecute = executor.execute.bind(executor);
   executor.execute = (async (req: Parameters<typeof executor.execute>[0]) => {

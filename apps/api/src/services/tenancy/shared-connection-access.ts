@@ -27,7 +27,10 @@
 import {
   getIntegrationDescriptor,
   sharedConnectionOfTool,
+  SHARED_INTEGRATION_CONNECTORS,
   type AutomationConnectorOwnerReader,
+  type BrowserWriteScopePort,
+  type BrowserWriteScopeResolution,
   type ConnectorOwnerLookup,
   type SharedConnectorKey,
   type TenantMembershipReader,
@@ -36,6 +39,7 @@ import {
 } from "@jarvis/core";
 import {
   authorizeSharedConnection,
+  sharedWriteScope,
   type SharedConnectionDenyCode,
   type SharedConnectionOperation,
 } from "@jarvis/security";
@@ -89,6 +93,41 @@ export class SharedConnectionAccess implements SharedConnectionAccessPort {
     if (decision.allowed) return { allowed: true, tenantId: decision.tenantId, role: decision.role };
     return { allowed: false, code: decision.code, member: membership !== null };
   }
+}
+
+/**
+ * The browser tools' implementation of `BrowserWriteScopePort`.
+ *
+ * A browser write is a write through the deployment's one shared browser
+ * connection. This asks the same reader every other surface asks, at execution
+ * time, and hands the result to the approval store. The store re-checks it
+ * under locks when it consumes the approval — including that the Organization
+ * still owns the connection — so an owner reassigned between approval and
+ * execution is refused there. A lookup that throws is a refusal.
+ */
+export function createBrowserWriteScopeResolver(
+  access: SharedConnectionAccessPort
+): BrowserWriteScopePort {
+  return {
+    async resolveWriteScope(userId: string): Promise<BrowserWriteScopeResolution> {
+      let decision: SharedAccessDecision;
+      try {
+        decision = await access.check(userId, SHARED_INTEGRATION_CONNECTORS.browser, "write");
+      } catch {
+        return { ok: false, message: SHARED_ACCESS_UNVERIFIED };
+      }
+      if (!decision.allowed) {
+        return {
+          ok: false,
+          message: sharedRefusalMessage("Browser control", "write", decision),
+        };
+      }
+      return {
+        ok: true,
+        tenantScope: sharedWriteScope(decision.tenantId, SHARED_INTEGRATION_CONNECTORS.browser),
+      };
+    },
+  };
 }
 
 /** The fixed answer to anyone outside the owning Organization. Names no one. */

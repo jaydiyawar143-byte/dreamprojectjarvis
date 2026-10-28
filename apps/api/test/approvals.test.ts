@@ -864,3 +864,74 @@ describe("PHASE 10.7 — real-write safety (mock provider injection)", () => {
     }
   }, 20_000);
 });
+
+// ---------------------------------------------------------------------------
+// Phase 19.1 (audit C1) — the API returns the plan a person decides on, never
+// the raw parameters an approval row holds. A browser value is the sharp case:
+// it is free text with no credential shape.
+// ---------------------------------------------------------------------------
+describe("Phase 19.1 — approval responses never carry raw parameters", () => {
+  const secret = "hunter2-typed-into-a-page";
+
+  it("detail omits browser params and their typed value", async () => {
+    const approval = seedPending(ctx.store, {
+      toolId: "browser.type",
+      params: {
+        url: "https://example.com/login?token=abc",
+        selector: 'input[name="password"]',
+        text: secret,
+      },
+    });
+
+    const res = await call(ctx.router, "GET", `/approvals/${approval.id}`, tokenA);
+    expect(res.status).toBe(200);
+    expect(res.body.data.params).toBeUndefined();
+    expect(res.body.data.plan).toBeUndefined();
+    expect(JSON.stringify(res.body)).not.toContain(secret);
+  });
+
+  it("list omits browser params and their typed value", async () => {
+    seedPending(ctx.store, {
+      toolId: "browser.submit",
+      params: {
+        url: "https://example.com/checkout",
+        selector: "#pay",
+        fields: { "#card": secret },
+      },
+    });
+
+    const res = await call(ctx.router, "GET", "/approvals", tokenA);
+    expect(res.status).toBe(200);
+    expect(res.body.data[0].params).toBeUndefined();
+    expect(JSON.stringify(res.body)).not.toContain(secret);
+  });
+
+  it("returns a reviewed Google plan instead of its raw parameters", async () => {
+    const approval = seedPending(ctx.store, {
+      toolId: "gmail.createDraft",
+      params: {
+        action: "gmail.createDraft",
+        target: { kind: "mailbox", label: "Work" },
+        recipients: ["ada@example.com"],
+        fields: [
+          { label: "Subject", after: "Quarterly update" },
+          { label: "Body", after: "The numbers are attached." },
+        ],
+        risk: { level: "medium", outwardFacing: true },
+        requiredScopes: ["https://www.googleapis.com/auth/gmail.compose"],
+        requestId: "req-1",
+        internalNote: secret,
+      },
+    });
+
+    const res = await call(ctx.router, "GET", `/approvals/${approval.id}`, tokenA);
+    expect(res.status).toBe(200);
+    expect(res.body.data.params).toBeUndefined();
+    expect(res.body.data.plan).toMatchObject({
+      action: "gmail.createDraft",
+      recipients: ["ada@example.com"],
+    });
+    expect(res.body.data.plan.fields).toHaveLength(2);
+    expect(JSON.stringify(res.body)).not.toContain(secret);
+  });
+});

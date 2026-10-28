@@ -9,6 +9,7 @@ import {
 import type { MetaAdsProvider, MetaAdsBudgetProvider, MetaAccountAuthorizer } from "../src/tools/meta-ads-provider.js";
 import { createMockMetaProvider, createFailingMetaProvider, createEmptyMetaProvider } from "../src/tools/meta-ads-mock.js";
 import { sanitizeToolResult } from "../src/output-sanitizer.js";
+import { ApprovedWrites } from "./helpers/approved-write.js";
 import { ToolRegistry as TR } from "../src/registry.js";
 import { ToolExecutor } from "../src/executor.js";
 import {
@@ -78,7 +79,11 @@ function strictGuardrails(): BudgetGuardrailsConfig {
   };
 }
 
-beforeEach(() => { clearExecutionStore(); });
+// Phase 19.1 — a write runs only as the executor runs it: approved, with the
+// executor's grant (see helpers/approved-write.ts). Every direct call below
+// is such a run; meta-ads-write-boundary-p19 covers one that is not.
+let approved: ApprovedWrites;
+beforeEach(() => { clearExecutionStore(); approved = new ApprovedWrites(); });
 
 // ===========================================================================
 // 1. BASIC — Campaign budget increase/decrease
@@ -227,8 +232,8 @@ describe("Phase 9.2 Campaign Budget", () => {
   });
 
   it("campaign budget increase succeeds", async () => {
-    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer);
-    const result = await tool.execute(
+    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer, undefined, approved.journal, approved.approvals);
+    const result = await approved.run(tool, 
       { accountId: "act_111111111", campaignId: "100000001", requestedDailyBudget: 120 },
       { userId: "user-1" }
     );
@@ -243,8 +248,8 @@ describe("Phase 9.2 Campaign Budget", () => {
   });
 
   it("campaign budget decrease succeeds", async () => {
-    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer);
-    const result = await tool.execute(
+    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer, undefined, approved.journal, approved.approvals);
+    const result = await approved.run(tool, 
       { accountId: "act_111111111", campaignId: "100000001", requestedDailyBudget: 80 },
       { userId: "user-1" }
     );
@@ -255,8 +260,8 @@ describe("Phase 9.2 Campaign Budget", () => {
   });
 
   it("ad-set budget increase succeeds", async () => {
-    const tool = new MetaUpdateAdSetBudgetTool(provider, authorizer);
-    const result = await tool.execute(
+    const tool = new MetaUpdateAdSetBudgetTool(provider, authorizer, undefined, approved.journal, approved.approvals);
+    const result = await approved.run(tool, 
       { accountId: "act_111111111", adSetId: "200000001", requestedDailyBudget: 60 },
       { userId: "user-1" }
     );
@@ -270,8 +275,8 @@ describe("Phase 9.2 Campaign Budget", () => {
   });
 
   it("ad-set budget decrease succeeds", async () => {
-    const tool = new MetaUpdateAdSetBudgetTool(provider, authorizer);
-    const result = await tool.execute(
+    const tool = new MetaUpdateAdSetBudgetTool(provider, authorizer, undefined, approved.journal, approved.approvals);
+    const result = await approved.run(tool, 
       { accountId: "act_111111111", adSetId: "200000001", requestedDailyBudget: 40 },
       { userId: "user-1" }
     );
@@ -293,8 +298,8 @@ describe("Guardrails Enforcement", () => {
 
   it("rejects max daily budget exceeded (campaign)", async () => {
     const provider = createMockMetaProvider();
-    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer, strictGuardrails());
-    const result = await tool.execute(
+    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer, strictGuardrails(), approved.journal, approved.approvals);
+    const result = await approved.run(tool, 
       { accountId: "act_111111111", campaignId: "100000001", requestedDailyBudget: 600 },
       { userId: "user-1" }
     );
@@ -304,8 +309,8 @@ describe("Guardrails Enforcement", () => {
 
   it("rejects max daily budget exceeded (adset)", async () => {
     const provider = createMockMetaProvider();
-    const tool = new MetaUpdateAdSetBudgetTool(provider, authorizer, strictGuardrails());
-    const result = await tool.execute(
+    const tool = new MetaUpdateAdSetBudgetTool(provider, authorizer, strictGuardrails(), approved.journal, approved.approvals);
+    const result = await approved.run(tool, 
       { accountId: "act_111111111", adSetId: "200000001", requestedDailyBudget: 600 },
       { userId: "user-1" }
     );
@@ -315,8 +320,8 @@ describe("Guardrails Enforcement", () => {
 
   it("rejects max increase percentage", async () => {
     const provider = createMockMetaProvider();
-    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer, strictGuardrails());
-    const result = await tool.execute(
+    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer, strictGuardrails(), approved.journal, approved.approvals);
+    const result = await approved.run(tool, 
       { accountId: "act_111111111", campaignId: "100000001", requestedDailyBudget: 150 },
       { userId: "user-1" }
     );
@@ -326,8 +331,8 @@ describe("Guardrails Enforcement", () => {
 
   it("rejects max increase absolute", async () => {
     const provider = createMockMetaProvider();
-    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer, strictGuardrails());
-    const result = await tool.execute(
+    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer, strictGuardrails(), approved.journal, approved.approvals);
+    const result = await approved.run(tool, 
       { accountId: "act_111111111", campaignId: "100000001", requestedDailyBudget: 250 },
       { userId: "user-1" }
     );
@@ -337,8 +342,8 @@ describe("Guardrails Enforcement", () => {
 
   it("rejects max decrease percentage", async () => {
     const provider = createMockMetaProvider();
-    const tool = new MetaUpdateAdSetBudgetTool(provider, authorizer, strictGuardrails());
-    const result = await tool.execute(
+    const tool = new MetaUpdateAdSetBudgetTool(provider, authorizer, strictGuardrails(), approved.journal, approved.approvals);
+    const result = await approved.run(tool, 
       { accountId: "act_111111111", adSetId: "200000001", requestedDailyBudget: 10 },
       { userId: "user-1" }
     );
@@ -348,8 +353,8 @@ describe("Guardrails Enforcement", () => {
 
   it("rejects max decrease absolute", async () => {
     const provider = createMockMetaProvider();
-    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer, strictGuardrails());
-    const result = await tool.execute(
+    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer, strictGuardrails(), approved.journal, approved.approvals);
+    const result = await approved.run(tool, 
       { accountId: "act_111111111", campaignId: "100000001", requestedDailyBudget: 10 },
       { userId: "user-1" }
     );
@@ -359,8 +364,8 @@ describe("Guardrails Enforcement", () => {
 
   it("rejects negative budget", async () => {
     const provider = createMockMetaProvider();
-    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer);
-    const result = await tool.execute(
+    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer, undefined, approved.journal, approved.approvals);
+    const result = await approved.run(tool, 
       { accountId: "act_111111111", campaignId: "100000001", requestedDailyBudget: -10 },
       { userId: "user-1" }
     );
@@ -370,8 +375,8 @@ describe("Guardrails Enforcement", () => {
 
   it("rejects zero budget", async () => {
     const provider = createMockMetaProvider();
-    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer);
-    const result = await tool.execute(
+    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer, undefined, approved.journal, approved.approvals);
+    const result = await approved.run(tool, 
       { accountId: "act_111111111", campaignId: "100000001", requestedDailyBudget: 0 },
       { userId: "user-1" }
     );
@@ -381,8 +386,8 @@ describe("Guardrails Enforcement", () => {
 
   it("rejects malformed budget", async () => {
     const provider = createMockMetaProvider();
-    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer);
-    const result = await tool.execute(
+    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer, undefined, approved.journal, approved.approvals);
+    const result = await approved.run(tool, 
       { accountId: "act_111111111", campaignId: "100000001", requestedDailyBudget: "not-a-number" },
       { userId: "user-1" }
     );
@@ -392,8 +397,8 @@ describe("Guardrails Enforcement", () => {
 
   it("rejects excessive precision", async () => {
     const provider = createMockMetaProvider();
-    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer);
-    const result = await tool.execute(
+    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer, undefined, approved.journal, approved.approvals);
+    const result = await approved.run(tool, 
       { accountId: "act_111111111", campaignId: "100000001", requestedDailyBudget: 100.999 },
       { userId: "user-1" }
     );
@@ -403,13 +408,13 @@ describe("Guardrails Enforcement", () => {
 
   it("accepts NaN/Infinity as invalid", async () => {
     const provider = createMockMetaProvider();
-    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer);
-    const r1 = await tool.execute(
+    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer, undefined, approved.journal, approved.approvals);
+    const r1 = await approved.run(tool, 
       { accountId: "act_111111111", campaignId: "100000001", requestedDailyBudget: NaN },
       { userId: "user-1" }
     );
     expect(r1.success).toBe(false);
-    const r2 = await tool.execute(
+    const r2 = await approved.run(tool, 
       { accountId: "act_111111111", campaignId: "100000001", requestedDailyBudget: Infinity },
       { userId: "user-1" }
     );
@@ -428,20 +433,20 @@ describe("Approval Flow", () => {
 
   it("budget tools require approval", () => {
     const authorizer = createAuthorizer();
-    expect(new MetaUpdateCampaignBudgetTool(provider, authorizer).requiresApproval).toBe(true);
-    expect(new MetaUpdateAdSetBudgetTool(provider, authorizer).requiresApproval).toBe(true);
+    expect(new MetaUpdateCampaignBudgetTool(provider, authorizer, undefined, approved.journal, approved.approvals).requiresApproval).toBe(true);
+    expect(new MetaUpdateAdSetBudgetTool(provider, authorizer, undefined, approved.journal, approved.approvals).requiresApproval).toBe(true);
   });
 
   it("budget tools have FINANCIAL risk", () => {
     const authorizer = createAuthorizer();
-    expect(new MetaUpdateCampaignBudgetTool(provider, authorizer).risk).toBe("FINANCIAL");
-    expect(new MetaUpdateAdSetBudgetTool(provider, authorizer).risk).toBe("FINANCIAL");
+    expect(new MetaUpdateCampaignBudgetTool(provider, authorizer, undefined, approved.journal, approved.approvals).risk).toBe("FINANCIAL");
+    expect(new MetaUpdateAdSetBudgetTool(provider, authorizer, undefined, approved.journal, approved.approvals).risk).toBe("FINANCIAL");
   });
 
   it("budget tools require read+write permissions", () => {
     const authorizer = createAuthorizer();
-    const t1 = new MetaUpdateCampaignBudgetTool(provider, authorizer);
-    const t2 = new MetaUpdateAdSetBudgetTool(provider, authorizer);
+    const t1 = new MetaUpdateCampaignBudgetTool(provider, authorizer, undefined, approved.journal, approved.approvals);
+    const t2 = new MetaUpdateAdSetBudgetTool(provider, authorizer, undefined, approved.journal, approved.approvals);
     expect(t1.requiredPermissions).toContain("read");
     expect(t1.requiredPermissions).toContain("write");
     expect(t2.requiredPermissions).toContain("read");
@@ -451,22 +456,22 @@ describe("Approval Flow", () => {
   it("budget tools have unique IDs", () => {
     const authorizer = createAuthorizer();
     const ids = [
-      new MetaUpdateCampaignBudgetTool(provider, authorizer).id,
-      new MetaUpdateAdSetBudgetTool(provider, authorizer).id,
+      new MetaUpdateCampaignBudgetTool(provider, authorizer, undefined, approved.journal, approved.approvals).id,
+      new MetaUpdateAdSetBudgetTool(provider, authorizer, undefined, approved.journal, approved.approvals).id,
     ];
     expect(new Set(ids).size).toBe(2);
   });
 
   it("budget tools have correct IDs", () => {
     const authorizer = createAuthorizer();
-    expect(new MetaUpdateCampaignBudgetTool(provider, authorizer).id).toBe("meta.campaign.budget.update");
-    expect(new MetaUpdateAdSetBudgetTool(provider, authorizer).id).toBe("meta.adset.budget.update");
+    expect(new MetaUpdateCampaignBudgetTool(provider, authorizer, undefined, approved.journal, approved.approvals).id).toBe("meta.campaign.budget.update");
+    expect(new MetaUpdateAdSetBudgetTool(provider, authorizer, undefined, approved.journal, approved.approvals).id).toBe("meta.adset.budget.update");
   });
 
   it("returns approval info in error when approval pending", async () => {
     const { mgr } = createApprovalMgr();
     const authorizer = createAuthorizer();
-    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer);
+    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer, undefined, approved.journal, approved.approvals);
     const registry = new TR();
     registry.register(tool);
     const executor = new ToolExecutor(registry, allowAllPerms, mgr, { log: vi.fn() } as AuditLogger);
@@ -489,12 +494,12 @@ describe("Stale State Protection", () => {
 
   it("re-validates guardrails after approval with changed current state", async () => {
     const provider = createMockMetaProvider();
-    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer, strictGuardrails());
+    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer, strictGuardrails(), approved.journal, approved.approvals);
 
     // Budget is 100. Request 110 (10% increase, within strict limits).
     // But if someone changes budget to 200 first, then requesting 110 would be a decrease.
     // The guardrails re-check handles this naturally.
-    const result = await tool.execute(
+    const result = await approved.run(tool, 
       { accountId: "act_111111111", campaignId: "100000001", requestedDailyBudget: 110 },
       { userId: "user-1" }
     );
@@ -516,8 +521,8 @@ describe("Stale State Protection", () => {
       }
       return result;
     };
-    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer);
-    const result = await tool.execute(
+    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer, undefined, approved.journal, approved.approvals);
+    const result = await approved.run(tool, 
       { accountId: "act_111111111", campaignId: "100000001", requestedDailyBudget: 120 },
       { userId: "user-1" }
     );
@@ -540,13 +545,12 @@ describe("Idempotency", () => {
   });
 
   it("duplicate execution is blocked when already executing", async () => {
-    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer);
+    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer, undefined, approved.journal, approved.approvals);
     const key = buildIdempotencyKey("meta.campaign.budget.update", "act_111111111", "100000001", "budget:120");
     // Manually set state to EXECUTING
-    const { setExecutionState } = await import("../src/tools/meta-ads-write-tools.js");
-    setExecutionState(key, "EXECUTING", "user-1");
+    await approved.seed(key, "EXECUTING", "user-1");
 
-    const result = await tool.execute(
+    const result = await approved.run(tool, 
       { accountId: "act_111111111", campaignId: "100000001", requestedDailyBudget: 120 },
       { userId: "user-1" }
     );
@@ -555,16 +559,16 @@ describe("Idempotency", () => {
   });
 
   it("blocks already succeeded execution", async () => {
-    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer);
+    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer, undefined, approved.journal, approved.approvals);
     const key = buildIdempotencyKey("meta.campaign.budget.update", "act_111111111", "100000001", "budget:120");
     // First execution succeeds
-    const r1 = await tool.execute(
+    const r1 = await approved.run(tool, 
       { accountId: "act_111111111", campaignId: "100000001", requestedDailyBudget: 120 },
       { userId: "user-1" }
     );
     expect(r1.success).toBe(true);
     // Second execution with same params — idempotency check (SUCCEEDED is not blocked)
-    const r2 = await tool.execute(
+    const r2 = await approved.run(tool, 
       { accountId: "act_111111111", campaignId: "100000001", requestedDailyBudget: 120 },
       { userId: "user-1" }
     );
@@ -573,12 +577,11 @@ describe("Idempotency", () => {
   });
 
   it("blocks cancelled execution", async () => {
-    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer);
+    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer, undefined, approved.journal, approved.approvals);
     const key = buildIdempotencyKey("meta.campaign.budget.update", "act_111111111", "100000001", "budget:120");
-    const { setExecutionState } = await import("../src/tools/meta-ads-write-tools.js");
-    setExecutionState(key, "CANCELLED", "user-1");
+    await approved.seed(key, "CANCELLED", "user-1");
 
-    const result = await tool.execute(
+    const result = await approved.run(tool, 
       { accountId: "act_111111111", campaignId: "100000001", requestedDailyBudget: 120 },
       { userId: "user-1" }
     );
@@ -587,13 +590,12 @@ describe("Idempotency", () => {
   });
 
   it("allows retry after failed execution", async () => {
-    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer);
+    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer, undefined, approved.journal, approved.approvals);
     const key = buildIdempotencyKey("meta.campaign.budget.update", "act_111111111", "100000001", "budget:120");
-    const { setExecutionState } = await import("../src/tools/meta-ads-write-tools.js");
-    setExecutionState(key, "FAILED", "user-1");
+    await approved.seed(key, "FAILED", "user-1");
 
     // FAILED is not in BLOCKED_STATES, so retry should be allowed
-    const result = await tool.execute(
+    const result = await approved.run(tool, 
       { accountId: "act_111111111", campaignId: "100000001", requestedDailyBudget: 120 },
       { userId: "user-1" }
     );
@@ -611,7 +613,7 @@ describe("Permissions", () => {
   beforeEach(() => { provider = createMockMetaProvider(); });
 
   it("rejects viewer (no write permission)", async () => {
-    const tool = new MetaUpdateCampaignBudgetTool(provider, createAuthorizer());
+    const tool = new MetaUpdateCampaignBudgetTool(provider, createAuthorizer(), undefined, approved.journal, approved.approvals);
     const { mgr } = createApprovalMgr();
     const registry = new TR();
     registry.register(tool);
@@ -624,8 +626,8 @@ describe("Permissions", () => {
   });
 
   it("rejects unauthorized Meta account", async () => {
-    const tool = new MetaUpdateCampaignBudgetTool(provider, createDenyAllAuthorizer());
-    const result = await tool.execute(
+    const tool = new MetaUpdateCampaignBudgetTool(provider, createDenyAllAuthorizer(), undefined, approved.journal, approved.approvals);
+    const result = await approved.run(tool, 
       { accountId: "act_111111111", campaignId: "100000001", requestedDailyBudget: 120 },
       { userId: "user-1" }
     );
@@ -635,8 +637,8 @@ describe("Permissions", () => {
 
   it("cross-user isolation: different users cannot share authorization", async () => {
     const auth1 = createAuthorizer(["act_111111111"]);
-    const tool = new MetaUpdateCampaignBudgetTool(provider, auth1);
-    const result = await tool.execute(
+    const tool = new MetaUpdateCampaignBudgetTool(provider, auth1, undefined, approved.journal, approved.approvals);
+    const result = await approved.run(tool, 
       { accountId: "act_222222222", campaignId: "100000001", requestedDailyBudget: 120 },
       { userId: "user-1" }
     );
@@ -656,8 +658,8 @@ describe("Execution", () => {
 
   it("Meta auth failure returns error", async () => {
     const provider = createFailingMetaProvider("Auth expired");
-    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer);
-    const result = await tool.execute(
+    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer, undefined, approved.journal, approved.approvals);
+    const result = await approved.run(tool, 
       { accountId: "act_111111111", campaignId: "100000001", requestedDailyBudget: 120 },
       { userId: "user-1" }
     );
@@ -667,8 +669,8 @@ describe("Execution", () => {
 
   it("provider error returns error", async () => {
     const provider = createFailingMetaProvider();
-    const tool = new MetaUpdateAdSetBudgetTool(provider, authorizer);
-    const result = await tool.execute(
+    const tool = new MetaUpdateAdSetBudgetTool(provider, authorizer, undefined, approved.journal, approved.approvals);
+    const result = await approved.run(tool, 
       { accountId: "act_111111111", adSetId: "200000001", requestedDailyBudget: 60 },
       { userId: "user-1" }
     );
@@ -678,8 +680,8 @@ describe("Execution", () => {
 
   it("non-existent campaign returns error", async () => {
     const provider = createMockMetaProvider();
-    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer);
-    const result = await tool.execute(
+    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer, undefined, approved.journal, approved.approvals);
+    const result = await approved.run(tool, 
       { accountId: "act_111111111", campaignId: "999999999", requestedDailyBudget: 120 },
       { userId: "user-1" }
     );
@@ -689,8 +691,8 @@ describe("Execution", () => {
 
   it("non-existent ad set returns error", async () => {
     const provider = createMockMetaProvider();
-    const tool = new MetaUpdateAdSetBudgetTool(provider, authorizer);
-    const result = await tool.execute(
+    const tool = new MetaUpdateAdSetBudgetTool(provider, authorizer, undefined, approved.journal, approved.approvals);
+    const result = await approved.run(tool, 
       { accountId: "act_111111111", adSetId: "999999999", requestedDailyBudget: 60 },
       { userId: "user-1" }
     );
@@ -700,8 +702,8 @@ describe("Execution", () => {
 
   it("empty provider returns campaign not found", async () => {
     const provider = createEmptyMetaProvider();
-    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer);
-    const result = await tool.execute(
+    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer, undefined, approved.journal, approved.approvals);
+    const result = await approved.run(tool, 
       { accountId: "act_111111111", campaignId: "100000001", requestedDailyBudget: 120 },
       { userId: "user-1" }
     );
@@ -715,8 +717,8 @@ describe("Execution", () => {
       objective: "TRAFFIC", lifetimeBudget: "5000.00",
     }];
     const provider = createMockMetaProvider({ campaigns });
-    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer);
-    const result = await tool.execute(
+    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer, undefined, approved.journal, approved.approvals);
+    const result = await approved.run(tool, 
       { accountId: "act_111111111", campaignId: "500000001", requestedDailyBudget: 120 },
       { userId: "user-1" }
     );
@@ -730,8 +732,8 @@ describe("Execution", () => {
       status: "ACTIVE" as const, lifetimeBudget: "2000.00",
     }];
     const provider = createMockMetaProvider({ adSets });
-    const tool = new MetaUpdateAdSetBudgetTool(provider, authorizer);
-    const result = await tool.execute(
+    const tool = new MetaUpdateAdSetBudgetTool(provider, authorizer, undefined, approved.journal, approved.approvals);
+    const result = await approved.run(tool, 
       { accountId: "act_111111111", adSetId: "600000001", requestedDailyBudget: 60 },
       { userId: "user-1" }
     );
@@ -751,8 +753,8 @@ describe("Post-Write Verification", () => {
 
   it("reports verified on matching budget", async () => {
     const provider = createMockMetaProvider();
-    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer);
-    const result = await tool.execute(
+    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer, undefined, approved.journal, approved.approvals);
+    const result = await approved.run(tool, 
       { accountId: "act_111111111", campaignId: "100000001", requestedDailyBudget: 120 },
       { userId: "user-1" }
     );
@@ -774,8 +776,8 @@ describe("Audit Metadata", () => {
 
   it("successful budget action includes full audit metadata", async () => {
     const provider = createMockMetaProvider();
-    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer);
-    const result = await tool.execute(
+    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer, undefined, approved.journal, approved.approvals);
+    const result = await approved.run(tool, 
       { accountId: "act_111111111", campaignId: "100000001", requestedDailyBudget: 120 },
       { userId: "user-1" }
     );
@@ -797,8 +799,8 @@ describe("Audit Metadata", () => {
 
   it("rejected action includes error classification", async () => {
     const provider = createMockMetaProvider();
-    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer);
-    const result = await tool.execute(
+    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer, undefined, approved.journal, approved.approvals);
+    const result = await approved.run(tool, 
       { accountId: "act_111111111", campaignId: "100000001", requestedDailyBudget: -50 },
       { userId: "user-1" }
     );
@@ -808,8 +810,8 @@ describe("Audit Metadata", () => {
 
   it("guardrail rejection returns structured error", async () => {
     const provider = createMockMetaProvider();
-    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer, strictGuardrails());
-    const result = await tool.execute(
+    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer, strictGuardrails(), approved.journal, approved.approvals);
+    const result = await approved.run(tool, 
       { accountId: "act_111111111", campaignId: "100000001", requestedDailyBudget: 1000 },
       { userId: "user-1" }
     );
@@ -829,8 +831,8 @@ describe("Security", () => {
 
   it("output sanitizer strips sensitive data", async () => {
     const provider = createMockMetaProvider();
-    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer);
-    const result = await tool.execute(
+    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer, undefined, approved.journal, approved.approvals);
+    const result = await approved.run(tool, 
       { accountId: "act_111111111", campaignId: "100000001", requestedDailyBudget: 120 },
       { userId: "user-1" }
     );
@@ -840,7 +842,7 @@ describe("Security", () => {
 
   it("malicious provider output does not break tool", async () => {
     const provider = createMockMetaProvider();
-    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer);
+    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer, undefined, approved.journal, approved.approvals);
     // Override getCampaigns to return XSS in name on first call
     let getCalls = 0;
     const origGet = provider.getCampaigns.bind(provider);
@@ -853,7 +855,7 @@ describe("Security", () => {
       }
       return result;
     };
-    const result = await tool.execute(
+    const result = await approved.run(tool, 
       { accountId: "act_111111111", campaignId: "100000001", requestedDailyBudget: 120 },
       { userId: "user-1" }
     );
@@ -863,7 +865,7 @@ describe("Security", () => {
 
   it("prompt injection in provider output does not break tool", async () => {
     const provider = createMockMetaProvider();
-    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer);
+    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer, undefined, approved.journal, approved.approvals);
     let getCalls = 0;
     const origGet = provider.getCampaigns.bind(provider);
     provider.getCampaigns = async (...args: Parameters<typeof origGet>) => {
@@ -875,7 +877,7 @@ describe("Security", () => {
       }
       return result;
     };
-    const result = await tool.execute(
+    const result = await approved.run(tool, 
       { accountId: "act_111111111", campaignId: "100000001", requestedDailyBudget: 120 },
       { userId: "user-1" }
     );
@@ -885,8 +887,8 @@ describe("Security", () => {
 
   it("arbitrary parameters rejected", async () => {
     const provider = createMockMetaProvider();
-    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer);
-    const result = await tool.execute(
+    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer, undefined, approved.journal, approved.approvals);
+    const result = await approved.run(tool, 
       { accountId: "act_111111111", campaignId: "100000001", requestedDailyBudget: 120, evil: true },
       { userId: "user-1" }
     );
@@ -905,16 +907,16 @@ describe("No Real Meta API", () => {
 
   it("all budget tools use mock provider", async () => {
     const provider = createMockMetaProvider();
-    const tool1 = new MetaUpdateCampaignBudgetTool(provider, authorizer);
-    const tool2 = new MetaUpdateAdSetBudgetTool(provider, authorizer);
+    const tool1 = new MetaUpdateCampaignBudgetTool(provider, authorizer, undefined, approved.journal, approved.approvals);
+    const tool2 = new MetaUpdateAdSetBudgetTool(provider, authorizer, undefined, approved.journal, approved.approvals);
 
-    const r1 = await tool1.execute(
+    const r1 = await approved.run(tool1, 
       { accountId: "act_111111111", campaignId: "100000001", requestedDailyBudget: 120 },
       { userId: "user-1" }
     );
     expect(r1.success).toBe(true);
 
-    const r2 = await tool2.execute(
+    const r2 = await approved.run(tool2, 
       { accountId: "act_111111111", adSetId: "200000001", requestedDailyBudget: 60 },
       { userId: "user-1" }
     );
@@ -923,8 +925,8 @@ describe("No Real Meta API", () => {
 
   it("failing provider returns errors", async () => {
     const provider = createFailingMetaProvider();
-    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer);
-    const result = await tool.execute(
+    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer, undefined, approved.journal, approved.approvals);
+    const result = await approved.run(tool, 
       { accountId: "act_111111111", campaignId: "100000001", requestedDailyBudget: 120 },
       { userId: "user-1" }
     );
@@ -941,8 +943,8 @@ describe("Registry Integration", () => {
     const provider = createMockMetaProvider();
     const authorizer = createAuthorizer();
     const registry = new TR();
-    registry.register(new MetaUpdateCampaignBudgetTool(provider, authorizer));
-    registry.register(new MetaUpdateAdSetBudgetTool(provider, authorizer));
+    registry.register(new MetaUpdateCampaignBudgetTool(provider, authorizer, undefined, approved.journal, approved.approvals));
+    registry.register(new MetaUpdateAdSetBudgetTool(provider, authorizer, undefined, approved.journal, approved.approvals));
 
     const tools = registry.list();
     const budgetTools = tools.filter(t => t.id.includes("budget"));
@@ -975,9 +977,9 @@ describe("Default Guardrails", () => {
       maxDecreasePercent: 10,
       maxDecreaseAbsolute: 500,
     };
-    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer, customGuardrails);
+    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer, customGuardrails, approved.journal, approved.approvals);
     // 100 → 120 = 20% increase, exceeds 10% custom limit
-    const result = await tool.execute(
+    const result = await approved.run(tool, 
       { accountId: "act_111111111", campaignId: "100000001", requestedDailyBudget: 120 },
       { userId: "user-1" }
     );
@@ -1000,8 +1002,8 @@ describe("Input Validation", () => {
   });
 
   it("rejects invalid account ID", async () => {
-    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer);
-    const result = await tool.execute(
+    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer, undefined, approved.journal, approved.approvals);
+    const result = await approved.run(tool, 
       { accountId: "invalid", campaignId: "100000001", requestedDailyBudget: 120 },
       { userId: "user-1" }
     );
@@ -1010,8 +1012,8 @@ describe("Input Validation", () => {
   });
 
   it("rejects invalid campaign ID", async () => {
-    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer);
-    const result = await tool.execute(
+    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer, undefined, approved.journal, approved.approvals);
+    const result = await approved.run(tool, 
       { accountId: "act_111111111", campaignId: "invalid", requestedDailyBudget: 120 },
       { userId: "user-1" }
     );
@@ -1020,8 +1022,8 @@ describe("Input Validation", () => {
   });
 
   it("rejects invalid ad set ID", async () => {
-    const tool = new MetaUpdateAdSetBudgetTool(provider, authorizer);
-    const result = await tool.execute(
+    const tool = new MetaUpdateAdSetBudgetTool(provider, authorizer, undefined, approved.journal, approved.approvals);
+    const result = await approved.run(tool, 
       { accountId: "act_111111111", adSetId: "invalid", requestedDailyBudget: 60 },
       { userId: "user-1" }
     );
@@ -1030,8 +1032,8 @@ describe("Input Validation", () => {
   });
 
   it("rejects missing budget parameter", async () => {
-    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer);
-    const result = await tool.execute(
+    const tool = new MetaUpdateCampaignBudgetTool(provider, authorizer, undefined, approved.journal, approved.approvals);
+    const result = await approved.run(tool, 
       { accountId: "act_111111111", campaignId: "100000001" },
       { userId: "user-1" }
     );

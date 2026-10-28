@@ -32,7 +32,8 @@ function makeApproval(overrides?: Partial<ApprovalRecord>): ApprovalRecord {
     status: "pending",
     createdAt: new Date().toISOString(),
     expiresAt: new Date(Date.now() + 9 * 60 * 1000).toISOString(),
-    params: { accountId: "act_111111111", name: "Summer Launch", dailyBudget: 25 },
+    // Phase 19.1 (C1) — the API no longer returns raw approval parameters;
+    // the card works from the server-generated summary below.
     actionSummary:
       'Create Meta campaign "Summer Launch" with objective OUTCOME_TRAFFIC and daily budget $25.00.',
     accountRedacted: "act_111••••1111",
@@ -59,11 +60,12 @@ describe("ApprovalCard states (31–35)", () => {
     expect(screen.getByTestId("approval-budget").textContent).toContain("$25.00");
     expect(screen.getByTestId("approve-button")).toBeInTheDocument();
     expect(screen.getByTestId("reject-button")).toBeInTheDocument();
-    // Parameters are display-only JSON; no editing affordance exists.
+    // No editing affordance exists.
     expect(screen.queryByLabelText(/edit/i)).toBeNull();
-    expect(screen.getByTestId("approval-params").textContent).toContain(
-      "Summer Launch"
-    );
+    // Phase 19.1 (C1) — the raw parameters panel is gone; what the person
+    // decides on is the server's summary, which still names the campaign.
+    expect(screen.queryByTestId("approval-params")).toBeNull();
+    expect(screen.getByTestId("approval-summary").textContent).toContain("Summer Launch");
   });
 
   it("32. approve success → success message, buttons removed", async () => {

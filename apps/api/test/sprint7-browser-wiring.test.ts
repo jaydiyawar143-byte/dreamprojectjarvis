@@ -119,7 +119,9 @@ describe("Sprint 7.4 — configuration cannot switch the SSRF defence off", () =
 describe("Sprint 7.4 — container wiring has not drifted", () => {
   it("registers the browser tools behind the opt-in guard", () => {
     expect(CONTAINER_SOURCE).toContain("isBrowserConfigured()");
-    expect(CONTAINER_SOURCE).toContain("createBrowserTools(runtime, browserJournal, approvalConsumption)");
+    expect(CONTAINER_SOURCE).toContain(
+      "createBrowserTools(runtime, browserJournal, approvalConsumption, browserWriteScope)"
+    );
   });
 
   it("registers the browser agent only when the tools are present", () => {

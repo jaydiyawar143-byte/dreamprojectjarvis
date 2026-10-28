@@ -127,14 +127,18 @@ export const ALL_BROWSER_TOOL_IDS: readonly string[] = Object.freeze([
  * belongs. Playwright would reject most of these anyway; refusing here keeps
  * the rejection in our own error vocabulary rather than a library's.
  */
+export const BROWSER_SELECTOR_MAX_LENGTH = 512;
+
 export const BrowserSelectorSchema = z
   .string()
   .min(1, "selector is required")
-  .max(512, "selector is too long")
+  .max(BROWSER_SELECTOR_MAX_LENGTH, "selector is too long")
   .refine((value) => !/[<>{}]/.test(value), "selector must not contain markup");
 
 /** Text typed into a field. Bounded so a single call cannot paste a novel. */
-export const BrowserInputTextSchema = z.string().max(10_000, "text is too long");
+export const BROWSER_INPUT_TEXT_MAX_LENGTH = 10_000;
+
+export const BrowserInputTextSchema = z.string().max(BROWSER_INPUT_TEXT_MAX_LENGTH, "text is too long");
 
 export const BROWSER_MAX_EXTRACT_FIELDS = 25;
 

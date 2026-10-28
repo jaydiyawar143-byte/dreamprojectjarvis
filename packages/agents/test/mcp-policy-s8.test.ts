@@ -89,7 +89,8 @@ describe("scheduled work", () => {
     const schedulable = schedulableToolIds();
     expect([...schedulable].sort()).toEqual([...expected].sort());
     for (const id of MCP_READ_TOOLS) expect(schedulable.has(id), id).toBe(false);
-    expect(spokenNever).toEqual(["automation.library.sync"]);
+    // Phase 19.1 adds sensitive browser/desktop actions to the same list.
+    expect(spokenNever).toContain("automation.library.sync");
     for (const id of spokenNever) expect(schedulable.has(id), id).toBe(false);
   });
 });

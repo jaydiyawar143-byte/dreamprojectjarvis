@@ -14,9 +14,10 @@ import type { MetaAdsProvider, MetaAdsWriteProvider, MetaAccountAuthorizer } fro
 import { createMockMetaProvider, createFailingMetaProvider, createEmptyMetaProvider } from "../src/tools/meta-ads-mock.js";
 import { MemoryExecutionJournal, MemoryApprovalConsumer } from "../src/execution-journal.js";
 import { sanitizeToolResult } from "../src/output-sanitizer.js";
+import { ApprovedWrites } from "./helpers/approved-write.js";
 import { ToolRegistry as TR } from "../src/registry.js";
 import { ToolExecutor } from "../src/executor.js";
-import type { AuditLogger, IPermissionChecker, IApprovalManager, Role, ToolResult, Approval, ApprovalStatus } from "@jarvis/core";
+import type { AuditLogger, IPermissionChecker, IApprovalManager, Role, ToolResult, Approval, ApprovalStatus, ToolAccessGate } from "@jarvis/core";
 import { computeParamsHash } from "@jarvis/core";
 
 type WriteProvider = MetaAdsProvider & MetaAdsWriteProvider;
@@ -40,6 +41,9 @@ function createDenyAllAuthorizer(): MetaAccountAuthorizer {
 const allowAllPerms: IPermissionChecker = { hasPermission: () => true };
 const denyWritePerms: IPermissionChecker = { hasPermission: (_r: Role, _res: string, action: string) => action === "read" };
 const denyAllPerms: IPermissionChecker = { hasPermission: () => false };
+// Phase 17 — production's executor asks the shared-connection gate; a Meta
+// write refuses a grant from an executor that did not (Phase 19.1).
+const allowGate: ToolAccessGate = { check: async () => ({ allowed: true }) };
 
 function createTrackingAudit(): { logger: AuditLogger; calls: unknown[] } {
   const calls: unknown[] = [];
@@ -66,7 +70,11 @@ function createApprovalMgr(): { mgr: IApprovalManager; approvals: Map<string, Ap
   };
 }
 
-beforeEach(() => { clearExecutionStore(); });
+// Phase 19.1 — a write runs only as the executor runs it: approved, with the
+// executor's grant (see helpers/approved-write.ts). Every direct call below
+// is such a run; meta-ads-write-boundary-p19 covers one that is not.
+let approved: ApprovedWrites;
+beforeEach(() => { clearExecutionStore(); approved = new ApprovedWrites(); });
 // ===========================================================================
 // 1. WRITE TOOL METADATA
 // ===========================================================================
@@ -77,32 +85,32 @@ describe("Phase 9.1 Write Tool Metadata", () => {
   beforeEach(() => { provider = createMockMetaProvider(); authorizer = createAuthorizer(); });
 
   it("all 6 write tools have EXTERNAL_SIDE_EFFECT risk", () => {
-    const tools = [new MetaPauseCampaignTool(provider, authorizer), new MetaResumeCampaignTool(provider, authorizer), new MetaPauseAdSetTool(provider, authorizer), new MetaResumeAdSetTool(provider, authorizer), new MetaPauseAdTool(provider, authorizer), new MetaResumeAdTool(provider, authorizer)];
+    const tools = [new MetaPauseCampaignTool(provider, authorizer, approved.journal, approved.approvals), new MetaResumeCampaignTool(provider, authorizer, approved.journal, approved.approvals), new MetaPauseAdSetTool(provider, authorizer, approved.journal, approved.approvals), new MetaResumeAdSetTool(provider, authorizer, approved.journal, approved.approvals), new MetaPauseAdTool(provider, authorizer, approved.journal, approved.approvals), new MetaResumeAdTool(provider, authorizer, approved.journal, approved.approvals)];
     for (const t of tools) expect(t.risk).toBe("EXTERNAL_SIDE_EFFECT");
   });
 
   it("all 6 write tools require approval", () => {
-    const tools = [new MetaPauseCampaignTool(provider, authorizer), new MetaResumeCampaignTool(provider, authorizer), new MetaPauseAdSetTool(provider, authorizer), new MetaResumeAdSetTool(provider, authorizer), new MetaPauseAdTool(provider, authorizer), new MetaResumeAdTool(provider, authorizer)];
+    const tools = [new MetaPauseCampaignTool(provider, authorizer, approved.journal, approved.approvals), new MetaResumeCampaignTool(provider, authorizer, approved.journal, approved.approvals), new MetaPauseAdSetTool(provider, authorizer, approved.journal, approved.approvals), new MetaResumeAdSetTool(provider, authorizer, approved.journal, approved.approvals), new MetaPauseAdTool(provider, authorizer, approved.journal, approved.approvals), new MetaResumeAdTool(provider, authorizer, approved.journal, approved.approvals)];
     for (const t of tools) expect(t.requiresApproval).toBe(true);
   });
 
   it("all 6 write tools require read+write permissions", () => {
-    const tools = [new MetaPauseCampaignTool(provider, authorizer), new MetaResumeCampaignTool(provider, authorizer), new MetaPauseAdSetTool(provider, authorizer), new MetaResumeAdSetTool(provider, authorizer), new MetaPauseAdTool(provider, authorizer), new MetaResumeAdTool(provider, authorizer)];
+    const tools = [new MetaPauseCampaignTool(provider, authorizer, approved.journal, approved.approvals), new MetaResumeCampaignTool(provider, authorizer, approved.journal, approved.approvals), new MetaPauseAdSetTool(provider, authorizer, approved.journal, approved.approvals), new MetaResumeAdSetTool(provider, authorizer, approved.journal, approved.approvals), new MetaPauseAdTool(provider, authorizer, approved.journal, approved.approvals), new MetaResumeAdTool(provider, authorizer, approved.journal, approved.approvals)];
     for (const t of tools) { expect(t.requiredPermissions).toContain("read"); expect(t.requiredPermissions).toContain("write"); }
   });
 
   it("all 6 write tools have unique IDs", () => {
-    const tools = [new MetaPauseCampaignTool(provider, authorizer), new MetaResumeCampaignTool(provider, authorizer), new MetaPauseAdSetTool(provider, authorizer), new MetaResumeAdSetTool(provider, authorizer), new MetaPauseAdTool(provider, authorizer), new MetaResumeAdTool(provider, authorizer)];
+    const tools = [new MetaPauseCampaignTool(provider, authorizer, approved.journal, approved.approvals), new MetaResumeCampaignTool(provider, authorizer, approved.journal, approved.approvals), new MetaPauseAdSetTool(provider, authorizer, approved.journal, approved.approvals), new MetaResumeAdSetTool(provider, authorizer, approved.journal, approved.approvals), new MetaPauseAdTool(provider, authorizer, approved.journal, approved.approvals), new MetaResumeAdTool(provider, authorizer, approved.journal, approved.approvals)];
     expect(new Set(tools.map(t => t.id)).size).toBe(6);
   });
 
   it("write tools have correct IDs", () => {
-    expect(new MetaPauseCampaignTool(provider, authorizer).id).toBe("meta.campaign.pause");
-    expect(new MetaResumeCampaignTool(provider, authorizer).id).toBe("meta.campaign.resume");
-    expect(new MetaPauseAdSetTool(provider, authorizer).id).toBe("meta.adset.pause");
-    expect(new MetaResumeAdSetTool(provider, authorizer).id).toBe("meta.adset.resume");
-    expect(new MetaPauseAdTool(provider, authorizer).id).toBe("meta.ad.pause");
-    expect(new MetaResumeAdTool(provider, authorizer).id).toBe("meta.ad.resume");
+    expect(new MetaPauseCampaignTool(provider, authorizer, approved.journal, approved.approvals).id).toBe("meta.campaign.pause");
+    expect(new MetaResumeCampaignTool(provider, authorizer, approved.journal, approved.approvals).id).toBe("meta.campaign.resume");
+    expect(new MetaPauseAdSetTool(provider, authorizer, approved.journal, approved.approvals).id).toBe("meta.adset.pause");
+    expect(new MetaResumeAdSetTool(provider, authorizer, approved.journal, approved.approvals).id).toBe("meta.adset.resume");
+    expect(new MetaPauseAdTool(provider, authorizer, approved.journal, approved.approvals).id).toBe("meta.ad.pause");
+    expect(new MetaResumeAdTool(provider, authorizer, approved.journal, approved.approvals).id).toBe("meta.ad.resume");
   });
 });
 
@@ -112,10 +120,10 @@ describe("Phase 9.1 Write Tool Metadata", () => {
 
 describe("Pause Campaign", () => {
   let provider: WriteProvider; let authorizer: MetaAccountAuthorizer; let tool: MetaPauseCampaignTool;
-  beforeEach(() => { provider = createMockMetaProvider(); authorizer = createAuthorizer(); tool = new MetaPauseCampaignTool(provider, authorizer); });
+  beforeEach(() => { provider = createMockMetaProvider(); authorizer = createAuthorizer(); tool = new MetaPauseCampaignTool(provider, authorizer, approved.journal, approved.approvals); });
 
   it("pauses an active campaign", async () => {
-    const result = await tool.execute({ accountId: "act_111111111", campaignId: "100000001" }, { userId: "user-1" });
+    const result = await approved.run(tool, { accountId: "act_111111111", campaignId: "100000001" }, { userId: "user-1" });
     expect(result.success).toBe(true);
     const data = result.data as Record<string, unknown>;
     expect(data.action).toBe("pause_campaign");
@@ -125,26 +133,26 @@ describe("Pause Campaign", () => {
   });
 
   it("returns idempotent success for already-paused campaign", async () => {
-    const result = await tool.execute({ accountId: "act_111111111", campaignId: "100000003" }, { userId: "user-1" });
+    const result = await approved.run(tool, { accountId: "act_111111111", campaignId: "100000003" }, { userId: "user-1" });
     expect(result.success).toBe(true);
     const data = result.data as Record<string, unknown>;
     expect(data.idempotent).toBe(true);
   });
 
   it("rejects non-existent campaign", async () => {
-    const result = await tool.execute({ accountId: "act_111111111", campaignId: "999999999" }, { userId: "user-1" });
+    const result = await approved.run(tool, { accountId: "act_111111111", campaignId: "999999999" }, { userId: "user-1" });
     expect(result.success).toBe(false);
     expect(result.error).toContain("not found");
   });
 
   it("rejects invalid account ID", async () => {
-    const result = await tool.execute({ accountId: "invalid", campaignId: "100000001" }, { userId: "user-1" });
+    const result = await approved.run(tool, { accountId: "invalid", campaignId: "100000001" }, { userId: "user-1" });
     expect(result.success).toBe(false);
     expect(result.error).toContain("Invalid account ID");
   });
 
   it("rejects invalid campaign ID", async () => {
-    const result = await tool.execute({ accountId: "act_111111111", campaignId: "bad" }, { userId: "user-1" });
+    const result = await approved.run(tool, { accountId: "act_111111111", campaignId: "bad" }, { userId: "user-1" });
     expect(result.success).toBe(false);
     expect(result.error).toContain("Invalid campaign ID");
   });
@@ -155,8 +163,8 @@ describe("Resume Campaign", () => {
   beforeEach(() => { provider = createMockMetaProvider(); authorizer = createAuthorizer(); });
 
   it("resumes a paused campaign", async () => {
-    const tool = new MetaResumeCampaignTool(provider, authorizer);
-    const result = await tool.execute({ accountId: "act_111111111", campaignId: "100000003" }, { userId: "user-1" });
+    const tool = new MetaResumeCampaignTool(provider, authorizer, approved.journal, approved.approvals);
+    const result = await approved.run(tool, { accountId: "act_111111111", campaignId: "100000003" }, { userId: "user-1" });
     expect(result.success).toBe(true);
     const data = result.data as Record<string, unknown>;
     expect(data.action).toBe("resume_campaign");
@@ -166,15 +174,15 @@ describe("Resume Campaign", () => {
   });
 
   it("returns idempotent success for already-active campaign", async () => {
-    const tool = new MetaResumeCampaignTool(provider, authorizer);
-    const result = await tool.execute({ accountId: "act_111111111", campaignId: "100000001" }, { userId: "user-1" });
+    const tool = new MetaResumeCampaignTool(provider, authorizer, approved.journal, approved.approvals);
+    const result = await approved.run(tool, { accountId: "act_111111111", campaignId: "100000001" }, { userId: "user-1" });
     expect(result.success).toBe(true);
     expect((result.data as Record<string, unknown>).idempotent).toBe(true);
   });
 
   it("rejects non-existent campaign", async () => {
-    const tool = new MetaResumeCampaignTool(provider, authorizer);
-    const result = await tool.execute({ accountId: "act_111111111", campaignId: "999999999" }, { userId: "user-1" });
+    const tool = new MetaResumeCampaignTool(provider, authorizer, approved.journal, approved.approvals);
+    const result = await approved.run(tool, { accountId: "act_111111111", campaignId: "999999999" }, { userId: "user-1" });
     expect(result.success).toBe(false);
   });
 });
@@ -186,8 +194,8 @@ describe("Resume Campaign", () => {
 describe("Pause Ad Set", () => {
   it("pauses an active ad set", async () => {
     const provider = createMockMetaProvider(); const authorizer = createAuthorizer();
-    const tool = new MetaPauseAdSetTool(provider, authorizer);
-    const result = await tool.execute({ accountId: "act_111111111", adSetId: "200000001" }, { userId: "user-1" });
+    const tool = new MetaPauseAdSetTool(provider, authorizer, approved.journal, approved.approvals);
+    const result = await approved.run(tool, { accountId: "act_111111111", adSetId: "200000001" }, { userId: "user-1" });
     expect(result.success).toBe(true);
     expect((result.data as Record<string, unknown>).action).toBe("pause_adset");
     expect((result.data as Record<string, unknown>).actualState).toBe("PAUSED");
@@ -195,8 +203,8 @@ describe("Pause Ad Set", () => {
 
   it("rejects non-existent ad set", async () => {
     const provider = createMockMetaProvider(); const authorizer = createAuthorizer();
-    const tool = new MetaPauseAdSetTool(provider, authorizer);
-    const result = await tool.execute({ accountId: "act_111111111", adSetId: "999999999" }, { userId: "user-1" });
+    const tool = new MetaPauseAdSetTool(provider, authorizer, approved.journal, approved.approvals);
+    const result = await approved.run(tool, { accountId: "act_111111111", adSetId: "999999999" }, { userId: "user-1" });
     expect(result.success).toBe(false);
   });
 });
@@ -204,10 +212,10 @@ describe("Pause Ad Set", () => {
 describe("Resume Ad Set", () => {
   it("resumes a paused ad set", async () => {
     const provider = createMockMetaProvider(); const authorizer = createAuthorizer();
-    const pauseTool = new MetaPauseAdSetTool(provider, authorizer);
-    await pauseTool.execute({ accountId: "act_111111111", adSetId: "200000002" }, { userId: "user-1" });
-    const resumeTool = new MetaResumeAdSetTool(provider, authorizer);
-    const result = await resumeTool.execute({ accountId: "act_111111111", adSetId: "200000002" }, { userId: "user-1" });
+    const pauseTool = new MetaPauseAdSetTool(provider, authorizer, approved.journal, approved.approvals);
+    await approved.run(pauseTool, { accountId: "act_111111111", adSetId: "200000002" }, { userId: "user-1" });
+    const resumeTool = new MetaResumeAdSetTool(provider, authorizer, approved.journal, approved.approvals);
+    const result = await approved.run(resumeTool, { accountId: "act_111111111", adSetId: "200000002" }, { userId: "user-1" });
     expect(result.success).toBe(true);
     expect((result.data as Record<string, unknown>).actualState).toBe("ACTIVE");
   });
@@ -219,8 +227,8 @@ describe("Resume Ad Set", () => {
 describe("Pause Ad", () => {
   it("pauses an active ad", async () => {
     const provider = createMockMetaProvider(); const authorizer = createAuthorizer();
-    const tool = new MetaPauseAdTool(provider, authorizer);
-    const result = await tool.execute({ accountId: "act_111111111", adId: "300000001" }, { userId: "user-1" });
+    const tool = new MetaPauseAdTool(provider, authorizer, approved.journal, approved.approvals);
+    const result = await approved.run(tool, { accountId: "act_111111111", adId: "300000001" }, { userId: "user-1" });
     expect(result.success).toBe(true);
     expect((result.data as Record<string, unknown>).action).toBe("pause_ad");
     expect((result.data as Record<string, unknown>).actualState).toBe("PAUSED");
@@ -228,8 +236,8 @@ describe("Pause Ad", () => {
 
   it("rejects non-existent ad", async () => {
     const provider = createMockMetaProvider(); const authorizer = createAuthorizer();
-    const tool = new MetaPauseAdTool(provider, authorizer);
-    const result = await tool.execute({ accountId: "act_111111111", adId: "999999999" }, { userId: "user-1" });
+    const tool = new MetaPauseAdTool(provider, authorizer, approved.journal, approved.approvals);
+    const result = await approved.run(tool, { accountId: "act_111111111", adId: "999999999" }, { userId: "user-1" });
     expect(result.success).toBe(false);
   });
 });
@@ -237,18 +245,18 @@ describe("Pause Ad", () => {
 describe("Resume Ad", () => {
   it("resumes a paused ad", async () => {
     const provider = createMockMetaProvider(); const authorizer = createAuthorizer();
-    const pauseTool = new MetaPauseAdTool(provider, authorizer);
-    await pauseTool.execute({ accountId: "act_111111111", adId: "300000002" }, { userId: "user-1" });
-    const resumeTool = new MetaResumeAdTool(provider, authorizer);
-    const result = await resumeTool.execute({ accountId: "act_111111111", adId: "300000002" }, { userId: "user-1" });
+    const pauseTool = new MetaPauseAdTool(provider, authorizer, approved.journal, approved.approvals);
+    await approved.run(pauseTool, { accountId: "act_111111111", adId: "300000002" }, { userId: "user-1" });
+    const resumeTool = new MetaResumeAdTool(provider, authorizer, approved.journal, approved.approvals);
+    const result = await approved.run(resumeTool, { accountId: "act_111111111", adId: "300000002" }, { userId: "user-1" });
     expect(result.success).toBe(true);
     expect((result.data as Record<string, unknown>).actualState).toBe("ACTIVE");
   });
 
   it("returns idempotent success for already-active ad", async () => {
     const provider = createMockMetaProvider(); const authorizer = createAuthorizer();
-    const tool = new MetaResumeAdTool(provider, authorizer);
-    const result = await tool.execute({ accountId: "act_111111111", adId: "300000001" }, { userId: "user-1" });
+    const tool = new MetaResumeAdTool(provider, authorizer, approved.journal, approved.approvals);
+    const result = await approved.run(tool, { accountId: "act_111111111", adId: "300000001" }, { userId: "user-1" });
     expect(result.success).toBe(true);
     expect((result.data as Record<string, unknown>).idempotent).toBe(true);
   });
@@ -264,7 +272,7 @@ describe("Approval Flow", () => {
     const { logger } = createTrackingAudit();
     const { mgr } = createApprovalMgr();
     const registry = new TR();
-    registry.register(new MetaPauseCampaignTool(provider, authorizer));
+    registry.register(new MetaPauseCampaignTool(provider, authorizer, approved.journal, approved.approvals));
     const executor = new ToolExecutor(registry, allowAllPerms, mgr, logger);
     const result = await executor.execute({ toolId: "meta.campaign.pause", params: { accountId: "act_111111111", campaignId: "100000001" }, userId: "user-1", role: "admin", traceId: "t-1" });
     expect(result.status).toBe("approval_pending");
@@ -276,7 +284,7 @@ describe("Approval Flow", () => {
     const { logger } = createTrackingAudit();
     const { mgr, approvals } = createApprovalMgr();
     const registry = new TR();
-    registry.register(new MetaPauseCampaignTool(provider, authorizer));
+    registry.register(new MetaPauseCampaignTool(provider, authorizer, approved.journal, approved.approvals));
     const executor = new ToolExecutor(registry, allowAllPerms, mgr, logger);
     await executor.execute({ toolId: "meta.campaign.pause", params: { accountId: "act_111111111", campaignId: "100000001" }, userId: "user-1", role: "admin", traceId: "t-1" });
     expect(approvals.size).toBe(1);
@@ -290,7 +298,7 @@ describe("Approval Flow", () => {
     const { logger } = createTrackingAudit();
     const { mgr, approvals } = createApprovalMgr();
     const registry = new TR();
-    registry.register(new MetaPauseCampaignTool(provider, authorizer));
+    registry.register(new MetaPauseCampaignTool(provider, authorizer, approved.journal, approved.approvals));
     const executor = new ToolExecutor(registry, allowAllPerms, mgr, logger);
     const r1 = await executor.execute({ toolId: "meta.campaign.pause", params: { accountId: "act_111111111", campaignId: "100000001" }, userId: "user-1", role: "admin", traceId: "t-1" });
     const approvalId = r1.approvalId!;
@@ -305,7 +313,7 @@ describe("Approval Flow", () => {
     const { logger } = createTrackingAudit();
     const { mgr } = createApprovalMgr();
     const registry = new TR();
-    registry.register(new MetaPauseCampaignTool(provider, authorizer));
+    registry.register(new MetaPauseCampaignTool(provider, authorizer, approved.journal, approved.approvals));
     const executor = new ToolExecutor(registry, allowAllPerms, mgr, logger);
     await executor.execute({ toolId: "meta.campaign.pause", params: { accountId: "act_111111111", campaignId: "100000001" }, userId: "user-1", role: "admin", traceId: "t-1" });
     const r2 = await executor.execute({ toolId: "meta.campaign.pause", params: { accountId: "act_111111111", campaignId: "100000001" }, userId: "user-2", role: "admin", traceId: "t-2" });
@@ -319,8 +327,8 @@ describe("Approval Flow", () => {
 describe("Stale State Protection", () => {
   it("already-paused target returns idempotent success", async () => {
     const provider = createMockMetaProvider(); const authorizer = createAuthorizer();
-    const tool = new MetaPauseCampaignTool(provider, authorizer);
-    const r = await tool.execute({ accountId: "act_111111111", campaignId: "100000003" }, { userId: "user-1" });
+    const tool = new MetaPauseCampaignTool(provider, authorizer, approved.journal, approved.approvals);
+    const r = await approved.run(tool, { accountId: "act_111111111", campaignId: "100000003" }, { userId: "user-1" });
     expect(r.success).toBe(true);
     expect((r.data as Record<string, unknown>).idempotent).toBe(true);
     expect((r.data as Record<string, unknown>).previousState).toBe("PAUSED");
@@ -328,16 +336,16 @@ describe("Stale State Protection", () => {
 
   it("already-active target returns idempotent success on resume", async () => {
     const provider = createMockMetaProvider(); const authorizer = createAuthorizer();
-    const tool = new MetaResumeCampaignTool(provider, authorizer);
-    const r = await tool.execute({ accountId: "act_111111111", campaignId: "100000001" }, { userId: "user-1" });
+    const tool = new MetaResumeCampaignTool(provider, authorizer, approved.journal, approved.approvals);
+    const r = await approved.run(tool, { accountId: "act_111111111", campaignId: "100000001" }, { userId: "user-1" });
     expect(r.success).toBe(true);
     expect((r.data as Record<string, unknown>).idempotent).toBe(true);
   });
 
   it("target not found returns failure", async () => {
     const provider = createMockMetaProvider(); const authorizer = createAuthorizer();
-    const tool = new MetaPauseAdTool(provider, authorizer);
-    const r = await tool.execute({ accountId: "act_111111111", adId: "999999999" }, { userId: "user-1" });
+    const tool = new MetaPauseAdTool(provider, authorizer, approved.journal, approved.approvals);
+    const r = await approved.run(tool, { accountId: "act_111111111", adId: "999999999" }, { userId: "user-1" });
     expect(r.success).toBe(false);
     expect(r.error).toContain("not found");
   });
@@ -350,29 +358,29 @@ describe("Stale State Protection", () => {
 describe("Idempotency", () => {
   it("duplicate execution is blocked by idempotency key", async () => {
     const provider = createMockMetaProvider(); const authorizer = createAuthorizer();
-    const tool = new MetaPauseCampaignTool(provider, authorizer);
-    const r1 = await tool.execute({ accountId: "act_111111111", campaignId: "100000001" }, { userId: "user-1" });
+    const tool = new MetaPauseCampaignTool(provider, authorizer, approved.journal, approved.approvals);
+    const r1 = await approved.run(tool, { accountId: "act_111111111", campaignId: "100000001" }, { userId: "user-1" });
     expect(r1.success).toBe(true);
-    const r2 = await tool.execute({ accountId: "act_111111111", campaignId: "100000001" }, { userId: "user-1" });
+    const r2 = await approved.run(tool, { accountId: "act_111111111", campaignId: "100000001" }, { userId: "user-1" });
     expect(r2.success).toBe(true);
     expect((r2.data as Record<string, unknown>).idempotent).toBe(true);
   });
 
   it("execution already succeeded returns idempotent", async () => {
     const provider = createMockMetaProvider(); const authorizer = createAuthorizer();
-    const tool = new MetaPauseAdTool(provider, authorizer);
-    await tool.execute({ accountId: "act_111111111", adId: "300000001" }, { userId: "user-1" });
-    const r = await tool.execute({ accountId: "act_111111111", adId: "300000001" }, { userId: "user-1" });
+    const tool = new MetaPauseAdTool(provider, authorizer, approved.journal, approved.approvals);
+    await approved.run(tool, { accountId: "act_111111111", adId: "300000001" }, { userId: "user-1" });
+    const r = await approved.run(tool, { accountId: "act_111111111", adId: "300000001" }, { userId: "user-1" });
     expect(r.success).toBe(true);
     expect((r.data as Record<string, unknown>).idempotent).toBe(true);
   });
 
   it("different targets have independent idempotency keys", async () => {
     const provider = createMockMetaProvider(); const authorizer = createAuthorizer();
-    const tool = new MetaPauseCampaignTool(provider, authorizer);
-    const r1 = await tool.execute({ accountId: "act_111111111", campaignId: "100000001" }, { userId: "user-1" });
+    const tool = new MetaPauseCampaignTool(provider, authorizer, approved.journal, approved.approvals);
+    const r1 = await approved.run(tool, { accountId: "act_111111111", campaignId: "100000001" }, { userId: "user-1" });
     expect(r1.success).toBe(true);
-    const r2 = await tool.execute({ accountId: "act_111111111", campaignId: "100000002" }, { userId: "user-1" });
+    const r2 = await approved.run(tool, { accountId: "act_111111111", campaignId: "100000002" }, { userId: "user-1" });
     expect(r2.success).toBe(true);
     expect((r2.data as Record<string, unknown>).idempotent).toBeUndefined();
   });
@@ -385,8 +393,8 @@ describe("Idempotency", () => {
 describe("Authorization", () => {
   it("unauthorized Meta account is rejected", async () => {
     const provider = createMockMetaProvider(); const authorizer = createAuthorizer(["act_111111111"]);
-    const tool = new MetaPauseCampaignTool(provider, authorizer);
-    const r = await tool.execute({ accountId: "act_222222222", campaignId: "100000001" }, { userId: "user-1" });
+    const tool = new MetaPauseCampaignTool(provider, authorizer, approved.journal, approved.approvals);
+    const r = await approved.run(tool, { accountId: "act_222222222", campaignId: "100000001" }, { userId: "user-1" });
     expect(r.success).toBe(false);
     expect(r.error).toContain("Not authorized");
   });
@@ -395,7 +403,7 @@ describe("Authorization", () => {
     const provider = createMockMetaProvider(); const authorizer = createAuthorizer();
     const { logger } = createTrackingAudit();
     const registry = new TR();
-    registry.register(new MetaPauseCampaignTool(provider, authorizer));
+    registry.register(new MetaPauseCampaignTool(provider, authorizer, approved.journal, approved.approvals));
     const executor = new ToolExecutor(registry, denyWritePerms, { requestApproval: vi.fn(), findExistingForTool: vi.fn() } as unknown as IApprovalManager, logger);
     const r = await executor.execute({ toolId: "meta.campaign.pause", params: { accountId: "act_111111111", campaignId: "100000001" }, userId: "viewer-1", role: "viewer", traceId: "t-1" });
     expect(r.status).toBe("permission_denied");
@@ -406,7 +414,7 @@ describe("Authorization", () => {
     const { logger } = createTrackingAudit();
     const { mgr } = createApprovalMgr();
     const registry = new TR();
-    registry.register(new MetaPauseCampaignTool(provider, authorizer));
+    registry.register(new MetaPauseCampaignTool(provider, authorizer, approved.journal, approved.approvals));
     const executor = new ToolExecutor(registry, allowAllPerms, mgr, logger);
     const r = await executor.execute({ toolId: "meta.campaign.pause", params: { accountId: "act_111111111", campaignId: "100000001" }, userId: "member-1", role: "member", traceId: "t-1" });
     expect(r.status).toBe("approval_pending");
@@ -417,7 +425,7 @@ describe("Authorization", () => {
     const { logger } = createTrackingAudit();
     const { mgr } = createApprovalMgr();
     const registry = new TR();
-    registry.register(new MetaPauseCampaignTool(provider, authorizer));
+    registry.register(new MetaPauseCampaignTool(provider, authorizer, approved.journal, approved.approvals));
     const executor = new ToolExecutor(registry, allowAllPerms, mgr, logger);
     const r = await executor.execute({ toolId: "meta.campaign.pause", params: { accountId: "act_111111111", campaignId: "100000001" }, userId: "admin-1", role: "admin", traceId: "t-1" });
     expect(r.status).toBe("approval_pending");
@@ -430,10 +438,10 @@ describe("Authorization", () => {
 describe("Security", () => {
   it("arbitrary Graph API path rejected via ID validation", async () => {
     const provider = createMockMetaProvider(); const authorizer = createAuthorizer();
-    const tool = new MetaPauseCampaignTool(provider, authorizer);
-    const r1 = await tool.execute({ accountId: "../../etc/passwd", campaignId: "100000001" }, { userId: "user-1" });
+    const tool = new MetaPauseCampaignTool(provider, authorizer, approved.journal, approved.approvals);
+    const r1 = await approved.run(tool, { accountId: "../../etc/passwd", campaignId: "100000001" }, { userId: "user-1" });
     expect(r1.success).toBe(false);
-    const r2 = await tool.execute({ accountId: "act_111111111", campaignId: "123/../../admin" }, { userId: "user-1" });
+    const r2 = await approved.run(tool, { accountId: "act_111111111", campaignId: "123/../../admin" }, { userId: "user-1" });
     expect(r2.success).toBe(false);
   });
 
@@ -446,8 +454,8 @@ describe("Security", () => {
 
   it("malicious provider response is sanitized", async () => {
     const provider = createMockMetaProvider(); const authorizer = createAuthorizer();
-    const tool = new MetaPauseCampaignTool(provider, authorizer);
-    const r = await tool.execute({ accountId: "act_111111111", campaignId: "100000001" }, { userId: "user-1" });
+    const tool = new MetaPauseCampaignTool(provider, authorizer, approved.journal, approved.approvals);
+    const r = await approved.run(tool, { accountId: "act_111111111", campaignId: "100000001" }, { userId: "user-1" });
     expect(r.success).toBe(true);
     const sanitized = sanitizeToolResult(r);
     const json = JSON.stringify(sanitized.result);
@@ -457,8 +465,8 @@ describe("Security", () => {
 
   it("prompt injection in provider output is neutralized", async () => {
     const provider = createMockMetaProvider(); const authorizer = createAuthorizer();
-    const tool = new MetaPauseCampaignTool(provider, authorizer);
-    const r = await tool.execute({ accountId: "act_111111111", campaignId: "100000001" }, { userId: "user-1" });
+    const tool = new MetaPauseCampaignTool(provider, authorizer, approved.journal, approved.approvals);
+    const r = await approved.run(tool, { accountId: "act_111111111", campaignId: "100000001" }, { userId: "user-1" });
     const data = r.data as Record<string, unknown>;
     expect(typeof data.campaignName).toBe("string");
     expect(data.campaignName).not.toContain("<script>");
@@ -468,8 +476,8 @@ describe("Security", () => {
   it("cross-user isolation", async () => {
     const provider = createMockMetaProvider();
     const auth1 = createAuthorizer(["act_111111111"]);
-    const tool = new MetaPauseCampaignTool(provider, auth1);
-    const r = await tool.execute({ accountId: "act_222222222", campaignId: "100000001" }, { userId: "user-1" });
+    const tool = new MetaPauseCampaignTool(provider, auth1, approved.journal, approved.approvals);
+    const r = await approved.run(tool, { accountId: "act_222222222", campaignId: "100000001" }, { userId: "user-1" });
     expect(r.success).toBe(false);
     expect(r.error).toContain("Not authorized");
   });
@@ -477,12 +485,12 @@ describe("Security", () => {
   it("no write tools registered in forbidden list", () => {
     const provider = createMockMetaProvider(); const authorizer = createAuthorizer();
     const registry = new TR();
-    registry.register(new MetaPauseCampaignTool(provider, authorizer));
-    registry.register(new MetaResumeCampaignTool(provider, authorizer));
-    registry.register(new MetaPauseAdSetTool(provider, authorizer));
-    registry.register(new MetaResumeAdSetTool(provider, authorizer));
-    registry.register(new MetaPauseAdTool(provider, authorizer));
-    registry.register(new MetaResumeAdTool(provider, authorizer));
+    registry.register(new MetaPauseCampaignTool(provider, authorizer, approved.journal, approved.approvals));
+    registry.register(new MetaResumeCampaignTool(provider, authorizer, approved.journal, approved.approvals));
+    registry.register(new MetaPauseAdSetTool(provider, authorizer, approved.journal, approved.approvals));
+    registry.register(new MetaResumeAdSetTool(provider, authorizer, approved.journal, approved.approvals));
+    registry.register(new MetaPauseAdTool(provider, authorizer, approved.journal, approved.approvals));
+    registry.register(new MetaResumeAdTool(provider, authorizer, approved.journal, approved.approvals));
     const ids = registry.getAll().map(t => t.id);
     const forbidden = ["meta.create_campaign", "meta.update_campaign", "meta.delete_campaign", "meta.update_budget", "meta.create_ad", "meta.update_ad", "meta.publish"];
     for (const f of forbidden) expect(ids).not.toContain(f);
@@ -496,8 +504,8 @@ describe("Security", () => {
 describe("Post-Execution Verification", () => {
   it("successful state verification", async () => {
     const provider = createMockMetaProvider(); const authorizer = createAuthorizer();
-    const tool = new MetaPauseCampaignTool(provider, authorizer);
-    const r = await tool.execute({ accountId: "act_111111111", campaignId: "100000001" }, { userId: "user-1" });
+    const tool = new MetaPauseCampaignTool(provider, authorizer, approved.journal, approved.approvals);
+    const r = await approved.run(tool, { accountId: "act_111111111", campaignId: "100000001" }, { userId: "user-1" });
     expect(r.success).toBe(true);
     expect((r.data as Record<string, unknown>).verified).toBe(true);
     expect((r.data as Record<string, unknown>).actualState).toBe("PAUSED");
@@ -506,8 +514,8 @@ describe("Post-Execution Verification", () => {
   it("provider failure returns structured error", async () => {
     const failProvider = createFailingMetaProvider("Meta API unavailable");
     const authorizer = createAuthorizer();
-    const tool = new MetaPauseCampaignTool(failProvider, authorizer);
-    const r = await tool.execute({ accountId: "act_111111111", campaignId: "100000001" }, { userId: "user-1" });
+    const tool = new MetaPauseCampaignTool(failProvider, authorizer, approved.journal, approved.approvals);
+    const r = await approved.run(tool, { accountId: "act_111111111", campaignId: "100000001" }, { userId: "user-1" });
     expect(r.success).toBe(false);
     expect(r.error).toContain("Meta API error");
   });
@@ -517,8 +525,8 @@ describe("Post-Execution Verification", () => {
     const authorizer = createAuthorizer();
     const { logger } = createTrackingAudit();
     const registry = new TR();
-    registry.register(new MetaPauseCampaignTool(slowProvider, authorizer));
-    const executor = new ToolExecutor(registry, allowAllPerms, { requestApproval: vi.fn(), findExistingForTool: vi.fn().mockResolvedValue({ id: "a1", userId: "user-1", toolId: "meta.campaign.pause", status: "approved", expiresAt: new Date(Date.now() + 60000).toISOString(), paramsHash: computeParamsHash({ accountId: "act_111111111", campaignId: "100000001" }) }) } as unknown as IApprovalManager, logger, { defaultTimeoutMs: 100 });
+    registry.register(new MetaPauseCampaignTool(slowProvider, authorizer, approved.journal, approved.approvals));
+    const executor = new ToolExecutor(registry, allowAllPerms, { requestApproval: vi.fn(), findExistingForTool: vi.fn().mockResolvedValue({ id: "a1", userId: "user-1", toolId: "meta.campaign.pause", status: "approved", expiresAt: new Date(Date.now() + 60000).toISOString(), paramsHash: computeParamsHash({ accountId: "act_111111111", campaignId: "100000001" }) }) } as unknown as IApprovalManager, logger, { defaultTimeoutMs: 100, accessGate: allowGate });
     const r = await executor.execute({ toolId: "meta.campaign.pause", params: { accountId: "act_111111111", campaignId: "100000001" }, userId: "user-1", role: "admin", traceId: "t-1" });
     expect(r.status).toBe("timed_out");
   });
@@ -539,7 +547,7 @@ describe("Audit", () => {
     const consumer = new MemoryApprovalConsumer(journal);
     registry.register(new MetaPauseCampaignTool(provider, authorizer, journal, consumer));
     const { mgr, approvals } = createApprovalMgr();
-    const executor = new ToolExecutor(registry, allowAllPerms, mgr, logger);
+    const executor = new ToolExecutor(registry, allowAllPerms, mgr, logger, { accessGate: allowGate });
     await executor.execute({ toolId: "meta.campaign.pause", params: { accountId: "act_111111111", campaignId: "100000001" }, userId: "user-1", role: "admin", traceId: "t-1" });
     const approval = Array.from(approvals.values())[0];
     approval.status = "approved" as ApprovalStatus;
@@ -562,7 +570,7 @@ describe("Audit", () => {
     const { mgr, approvals } = createApprovalMgr();
     const provider = createMockMetaProvider(); const authorizer = createAuthorizer();
     const registry = new TR();
-    registry.register(new MetaPauseCampaignTool(provider, authorizer));
+    registry.register(new MetaPauseCampaignTool(provider, authorizer, approved.journal, approved.approvals));
     const executor = new ToolExecutor(registry, denyAllPerms, mgr, logger);
     await executor.execute({ toolId: "meta.campaign.pause", params: { accountId: "act_111111111", campaignId: "100000001" }, userId: "user-1", role: "viewer", traceId: "t-1" });
     expect(calls.length).toBeGreaterThanOrEqual(1);
@@ -575,7 +583,7 @@ describe("Audit", () => {
     const { mgr } = createApprovalMgr();
     const provider = createMockMetaProvider(); const authorizer = createAuthorizer();
     const registry = new TR();
-    registry.register(new MetaPauseCampaignTool(provider, authorizer));
+    registry.register(new MetaPauseCampaignTool(provider, authorizer, approved.journal, approved.approvals));
     const executor = new ToolExecutor(registry, allowAllPerms, mgr, logger);
     await executor.execute({ toolId: "meta.campaign.pause", params: { accountId: "act_111111111", campaignId: "100000001" }, userId: "user-1", role: "admin", traceId: "t-1" });
     expect(calls.length).toBeGreaterThanOrEqual(1);
@@ -592,8 +600,8 @@ describe("No Real API Calls", () => {
   it("mock write provider never makes HTTP requests", async () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch");
     const provider = createMockMetaProvider(); const authorizer = createAuthorizer();
-    const tool = new MetaPauseCampaignTool(provider, authorizer);
-    await tool.execute({ accountId: "act_111111111", campaignId: "100000001" }, { userId: "user-1" });
+    const tool = new MetaPauseCampaignTool(provider, authorizer, approved.journal, approved.approvals);
+    await approved.run(tool, { accountId: "act_111111111", campaignId: "100000001" }, { userId: "user-1" });
     expect(fetchSpy).not.toHaveBeenCalled();
     fetchSpy.mockRestore();
   });
@@ -607,12 +615,12 @@ describe("Tool Registry Integration", () => {
   it("registers all 6 write tools", () => {
     const provider = createMockMetaProvider(); const authorizer = createAuthorizer();
     const registry = new TR();
-    registry.register(new MetaPauseCampaignTool(provider, authorizer));
-    registry.register(new MetaResumeCampaignTool(provider, authorizer));
-    registry.register(new MetaPauseAdSetTool(provider, authorizer));
-    registry.register(new MetaResumeAdSetTool(provider, authorizer));
-    registry.register(new MetaPauseAdTool(provider, authorizer));
-    registry.register(new MetaResumeAdTool(provider, authorizer));
+    registry.register(new MetaPauseCampaignTool(provider, authorizer, approved.journal, approved.approvals));
+    registry.register(new MetaResumeCampaignTool(provider, authorizer, approved.journal, approved.approvals));
+    registry.register(new MetaPauseAdSetTool(provider, authorizer, approved.journal, approved.approvals));
+    registry.register(new MetaResumeAdSetTool(provider, authorizer, approved.journal, approved.approvals));
+    registry.register(new MetaPauseAdTool(provider, authorizer, approved.journal, approved.approvals));
+    registry.register(new MetaResumeAdTool(provider, authorizer, approved.journal, approved.approvals));
     expect(registry.count()).toBe(6);
     expect(registry.get("meta.campaign.pause")).toBeDefined();
     expect(registry.get("meta.campaign.resume")).toBeDefined();
@@ -625,8 +633,8 @@ describe("Tool Registry Integration", () => {
   it("filters by EXTERNAL_SIDE_EFFECT risk", () => {
     const provider = createMockMetaProvider(); const authorizer = createAuthorizer();
     const registry = new TR();
-    registry.register(new MetaPauseCampaignTool(provider, authorizer));
-    registry.register(new MetaResumeAdTool(provider, authorizer));
+    registry.register(new MetaPauseCampaignTool(provider, authorizer, approved.journal, approved.approvals));
+    registry.register(new MetaResumeAdTool(provider, authorizer, approved.journal, approved.approvals));
     const write = registry.getByRisk("EXTERNAL_SIDE_EFFECT");
     expect(write.length).toBeGreaterThanOrEqual(2);
   });
@@ -634,8 +642,8 @@ describe("Tool Registry Integration", () => {
   it("filters by requiresApproval", () => {
     const provider = createMockMetaProvider(); const authorizer = createAuthorizer();
     const registry = new TR();
-    registry.register(new MetaPauseCampaignTool(provider, authorizer));
-    registry.register(new MetaPauseAdTool(provider, authorizer));
+    registry.register(new MetaPauseCampaignTool(provider, authorizer, approved.journal, approved.approvals));
+    registry.register(new MetaPauseAdTool(provider, authorizer, approved.journal, approved.approvals));
     const approvalRequired = registry.getRequiringApproval();
     expect(approvalRequired.length).toBeGreaterThanOrEqual(2);
   });
@@ -643,7 +651,7 @@ describe("Tool Registry Integration", () => {
   it("generates correct tool descriptions", () => {
     const provider = createMockMetaProvider(); const authorizer = createAuthorizer();
     const registry = new TR();
-    registry.register(new MetaPauseCampaignTool(provider, authorizer));
+    registry.register(new MetaPauseCampaignTool(provider, authorizer, approved.journal, approved.approvals));
     const descs = registry.getToolDescriptions("user-1", "admin");
     expect(descs.length).toBe(1);
     expect(descs[0].name).toBe("meta.campaign.pause");

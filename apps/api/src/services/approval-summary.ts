@@ -12,6 +12,14 @@
 //  - no tokens/keys/URLs ever enter these strings
 // ---------------------------------------------------------------------------
 
+import {
+  computerControlApprovalSummary,
+  isComputerControlAction,
+  isGoogleWriteAction,
+  parseComputerControlRequest,
+} from "@jarvis/core";
+import { clientWritePlan } from "./client-views.js";
+
 export interface ApprovalSummary {
   /** Human-readable action sentence, e.g. "Create Meta campaign …". */
   actionSummary: string;
@@ -58,6 +66,29 @@ export function buildApprovalSummary(
   toolId: string,
   params: Record<string, unknown>
 ): ApprovalSummary {
+  // Phase 19.1 — browser and desktop actions have their own value-free
+  // summary. The generic loop below echoes scalar parameters, which would put
+  // `browser.type`'s text or a submitted field value on the approval screen.
+  // The action is forced from `toolId`, so a stored `action` cannot redirect
+  // the summary to another action.
+  if (isComputerControlAction(toolId)) {
+    return buildComputerControlApprovalSummary(toolId, params);
+  }
+
+  // Phase 19.1 (audit C1) — a Google write is approved on the reviewed plan,
+  // which the response carries separately as `plan`. The generic loop below
+  // echoes every scalar parameter, and a plan can carry fields that are not
+  // part of what a person is deciding (an internal note, a provider draft id).
+  // Those must not leak back through the summary.
+  if (isGoogleWriteAction(toolId)) {
+    const plan = clientWritePlan(toolId, params);
+    return {
+      actionSummary: `Execute ${toolId} exactly as reviewed in the plan. Nothing outside the plan can run.`,
+      targetResource: plan?.target?.label ?? plan?.target?.id,
+      detailLines: [],
+    };
+  }
+
   const accountRedacted = redactAccountId(params.accountId);
   const detailLines: ApprovalSummary["detailLines"] = [];
 
@@ -181,5 +212,35 @@ export function buildApprovalSummary(
     }.`,
     accountRedacted,
     detailLines,
+  };
+}
+
+/**
+ * Phase 19.1 — a browser or desktop approval, built only from the validated
+ * action and bounded fields. It never echoes a typed value, an option value,
+ * a submitted field value, a path/query, a cookie or a token.
+ *
+ * A stored row whose parameters no longer parse gets a fixed, honest sentence
+ * and no parameter echo: it cannot be approved on the strength of a summary it
+ * cannot show. Execution validates the parameters again, so nothing runs.
+ */
+function buildComputerControlApprovalSummary(
+  toolId: string,
+  params: Record<string, unknown>
+): ApprovalSummary {
+  const parsed = parseComputerControlRequest({ ...params, action: toolId });
+  if (!parsed.ok) {
+    const surface = toolId.startsWith("desktop.") ? "desktop" : "browser";
+    return {
+      actionSummary: `A ${surface} control action could not be verified from its stored parameters. Do not approve it unless you asked for it; nothing will run.`,
+      detailLines: [{ label: "Action", value: toolId }],
+    };
+  }
+
+  const summary = computerControlApprovalSummary(parsed.value);
+  return {
+    actionSummary: summary.actionSummary,
+    targetResource: summary.targetResource,
+    detailLines: [...summary.detailLines],
   };
 }

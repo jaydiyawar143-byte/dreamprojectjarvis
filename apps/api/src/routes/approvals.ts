@@ -27,6 +27,7 @@ import type { Container } from "../services/container.js";
 import {
   buildApprovalSummary,
 } from "../services/approval-summary.js";
+import { clientApproval, clientWritePlan } from "../services/client-views.js";
 import {
   APPROVAL_RATE_LIMITS,
   DbBackedRateLimiter,
@@ -53,10 +54,9 @@ const APPROVER_ROLES = rolesHoldingSharedPermission("shared:approve");
  * waits for someone else, and whether they may decide it.
  */
 function publicApproval(approval: Approval, readerIs: "requester" | "approver") {
-  const { tenantId: _tenantId, decidedById: _decidedById, ...rest } = approval;
   const independent = needsIndependentApproval(approval);
   return {
-    ...rest,
+    ...clientApproval(approval),
     needsIndependentApproval: independent,
     // The requester of an Organization's write never approves it; an approver
     // may decide it while it waits. The store enforces both regardless.
@@ -267,7 +267,10 @@ export function createApprovalsRouter(container: Container): Router {
         createdAt: approval.createdAt,
         expiresAt: approval.expiresAt,
         resolvedAt: approval.resolvedAt ?? undefined,
-        params: approval.params,
+        // Phase 19.1 (C1): never the raw approval parameters. A Google write
+        // gets its reviewed plan, which is the only part a person needs to
+        // decide; every other tool's parameters stay server-side.
+        plan: clientWritePlan(approval.toolId, approval.params),
         proposedByAi: false, // values may originate from AI; representation is server-generated
         executionId,
         executionStatus,

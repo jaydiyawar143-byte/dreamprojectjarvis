@@ -1,17 +1,18 @@
-import crypto from "node:crypto";
-
 import { BaseTool } from "../base-tool.js";
 import { sanitizeToolResult } from "../output-sanitizer.js";
-import { withSafeTerminalTransitions, classifyWriteOutcome } from "../execution-journal.js";
+import { withSafeTerminalTransitions, classifyWriteOutcome, TIMEOUT_ERROR_CODES } from "../execution-journal.js";
+import { verifyExecutionGrant } from "../execution-grant.js";
 import type {
   ToolResult,
   ToolContext,
   ToolParameter,
   BrowserRuntimePort,
   BrowserSessionPort,
+  BrowserWriteScopePort,
   ExecutionJournalPort,
   IApprovalConsumptionPort,
   ApprovalConsumptionResult,
+  SharedConnectionScope,
 } from "@jarvis/core";
 import {
   BROWSER_TOOL_IDS,
@@ -19,9 +20,10 @@ import {
   BrowserSelectorSchema,
   BrowserInputTextSchema,
   BLOCKED_STATUSES,
-  DEFAULT_LEASE_MS,
   computeParamsHash,
+  parseComputerControlRequest,
   untrustedContentMetadata,
+  voiceToolRefusal,
 } from "@jarvis/core";
 
 // ---------------------------------------------------------------------------
@@ -111,7 +113,21 @@ abstract class BaseBrowserTool extends BaseTool {
     if (!super.validate(params)) return false;
     if ("url" in params && validateUrlShape(params.url) === null) return false;
     if ("selector" in params && validateSelector(params.selector) === null) return false;
-    return true;
+    return this.validControlRequest(params);
+  }
+
+  /**
+   * Phase 19.1 — the closed request contract, enforced at the tool boundary.
+   *
+   * `BaseTool.validate` only knows the declared parameter list; it accepts an
+   * extra key and cannot refuse a raw Playwright object, a CDP command, a
+   * script or a path. The Phase 19 contract schema does: the action must be one
+   * of the ten, every field must be known, and every value bounded. It is
+   * checked here AND at the top of each `execute`, because a caller can reach a
+   * tool without going through `validate`.
+   */
+  protected validControlRequest(params: Record<string, unknown>): boolean {
+    return parseComputerControlRequest({ ...params, action: this.id }).ok;
   }
 
   /** Metadata every browser tool attaches, matching the repo's convention. */
@@ -172,6 +188,7 @@ export class BrowserNavigateTool extends BaseBrowserTool {
   }
 
   async execute(params: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
+    if (!this.validControlRequest(params)) return this.failure("Invalid input parameters");
     const url = validateUrlShape(params.url);
     if (!url) return this.failure("Invalid URL");
 
@@ -197,6 +214,7 @@ export class BrowserInspectTool extends BaseBrowserTool {
   }
 
   async execute(params: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
+    if (!this.validControlRequest(params)) return this.failure("Invalid input parameters");
     const url = validateUrlShape(params.url);
     if (!url) return this.failure("Invalid URL");
 
@@ -257,6 +275,7 @@ export class BrowserExtractTool extends BaseBrowserTool {
   }
 
   async execute(params: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
+    if (!this.validControlRequest(params)) return this.failure("Invalid input parameters");
     const url = validateUrlShape(params.url);
     if (!url) return this.failure("Invalid URL");
 
@@ -291,6 +310,7 @@ export class BrowserScreenshotTool extends BaseBrowserTool {
   }
 
   async execute(params: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
+    if (!this.validControlRequest(params)) return this.failure("Invalid input parameters");
     const url = validateUrlShape(params.url);
     if (!url) return this.failure("Invalid URL");
 
@@ -313,138 +333,6 @@ export class BrowserScreenshotTool extends BaseBrowserTool {
 // from an agent whose policy sets `writesRequireApproval`.
 // ---------------------------------------------------------------------------
 
-export class BrowserClickTool extends BaseBrowserTool {
-  constructor(runtime: BrowserRuntimePort) {
-    super(
-      BROWSER_TOOL_IDS.click,
-      "Click Page Element",
-      "Open a page and click one element on it. Requires human approval.",
-      [URL_PARAM, SELECTOR_PARAM],
-      runtime,
-      true,
-      ["read", "write"],
-      "LOW_IMPACT"
-    );
-  }
-
-  async execute(params: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
-    const url = validateUrlShape(params.url);
-    const selector = validateSelector(params.selector);
-    if (!url) return this.failure("Invalid URL");
-    if (!selector) return this.failure("Invalid selector");
-
-    const outcome = await this.inSession(context, async (session) => {
-      await session.navigate(url);
-      return session.click(selector);
-    });
-    if (!outcome.ok) return this.failure(outcome.error);
-
-    return this.sanitized(outcome.value, this.browserMetadata(context));
-  }
-}
-
-export class BrowserTypeTool extends BaseBrowserTool {
-  constructor(runtime: BrowserRuntimePort) {
-    super(
-      BROWSER_TOOL_IDS.type,
-      "Type Into Page Field",
-      "Open a page and type a value into one field. Requires human approval. The value does not persist to a later call; use browser.submit to fill and submit a form together.",
-      [
-        URL_PARAM,
-        SELECTOR_PARAM,
-        { name: "text", type: "string", description: "Value to type.", required: true },
-      ],
-      runtime,
-      true,
-      ["read", "write"],
-      "LOW_IMPACT"
-    );
-  }
-
-  async execute(params: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
-    const url = validateUrlShape(params.url);
-    const selector = validateSelector(params.selector);
-    const text = BrowserInputTextSchema.safeParse(params.text);
-    if (!url) return this.failure("Invalid URL");
-    if (!selector) return this.failure("Invalid selector");
-    if (!text.success) return this.failure("Invalid text");
-
-    const outcome = await this.inSession(context, async (session) => {
-      await session.navigate(url);
-      return session.type(selector, text.data);
-    });
-    if (!outcome.ok) return this.failure(outcome.error);
-
-    return this.sanitized(outcome.value, this.browserMetadata(context));
-  }
-}
-
-export class BrowserSelectTool extends BaseBrowserTool {
-  constructor(runtime: BrowserRuntimePort) {
-    super(
-      BROWSER_TOOL_IDS.select,
-      "Choose Dropdown Option",
-      "Open a page and choose one option in a dropdown. Requires human approval.",
-      [
-        URL_PARAM,
-        SELECTOR_PARAM,
-        { name: "value", type: "string", description: "Option value to select.", required: true },
-      ],
-      runtime,
-      true,
-      ["read", "write"],
-      "LOW_IMPACT"
-    );
-  }
-
-  async execute(params: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
-    const url = validateUrlShape(params.url);
-    const selector = validateSelector(params.selector);
-    const value = BrowserInputTextSchema.safeParse(params.value);
-    if (!url) return this.failure("Invalid URL");
-    if (!selector) return this.failure("Invalid selector");
-    if (!value.success) return this.failure("Invalid value");
-
-    const outcome = await this.inSession(context, async (session) => {
-      await session.navigate(url);
-      return session.select(selector, value.data);
-    });
-    if (!outcome.ok) return this.failure(outcome.error);
-
-    return this.sanitized(outcome.value, this.browserMetadata(context));
-  }
-}
-
-export class BrowserDownloadTool extends BaseBrowserTool {
-  constructor(runtime: BrowserRuntimePort) {
-    super(
-      BROWSER_TOOL_IDS.download,
-      "Download File From Page",
-      "Open a page, click a download control, and keep the file. The file is stored and referenced by id; its bytes and its path are never returned. Requires human approval.",
-      [URL_PARAM, SELECTOR_PARAM],
-      runtime,
-      true,
-      ["read", "write"],
-      "LOW_IMPACT"
-    );
-  }
-
-  async execute(params: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
-    const url = validateUrlShape(params.url);
-    const selector = validateSelector(params.selector);
-    if (!url) return this.failure("Invalid URL");
-    if (!selector) return this.failure("Invalid selector");
-
-    const outcome = await this.inSession(context, async (session) => {
-      await session.navigate(url);
-      return session.download(selector);
-    });
-    if (!outcome.ok) return this.failure(outcome.error);
-
-    return this.sanitized(outcome.value, this.browserMetadata(context));
-  }
-}
-
 // ---------------------------------------------------------------------------
 // External side effects — approval consumed atomically with a journal claim
 //
@@ -455,25 +343,39 @@ export class BrowserDownloadTool extends BaseBrowserTool {
 // ---------------------------------------------------------------------------
 
 /**
+ * Phase 19.1 — the one answer to a browser write that did not come through the
+ * executor's checks. It names no check, so it tells a caller nothing about
+ * which one it would have to get past.
+ */
+const BROWSER_WRITE_NOT_AUTHORIZED =
+  "Browser actions run only after an approval is checked, so nothing was done.";
+
+/**
  * Copied in shape from meta-ads-write-tools.ts.
  *
  * Fail-closed in both directions: an approval id with no consumption port
  * never executes, and a consumption failure never claims.
+ *
+ * Phase 19.1 — and no approval id never executes either. A browser write is
+ * claimed ONLY by consuming its approval; there is no unapproved claim.
+ *
+ * Phase 19.1 — `tenantScope` is the Organization the browser connection's
+ * owner record names, resolved by the server a moment ago. For a browser write
+ * it is always present; the approval store re-checks it under locks, so an
+ * approval granted for one Organization can never execute after the connection
+ * moves to another, and an Organization-bound approval consumed without it is
+ * refused.
  */
 async function authorizeAndClaim(
   approvals: IApprovalConsumptionPort | undefined,
-  journal: ExecutionJournalPort,
   toolId: string,
   executionId: string,
   params: Record<string, unknown>,
-  context: ToolContext
+  context: ToolContext,
+  tenantScope?: SharedConnectionScope
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   if (!context.approvalId) {
-    const claimed = await journal.claimForExecution(executionId, {
-      ownerId: crypto.randomUUID(),
-      leaseMs: DEFAULT_LEASE_MS,
-    });
-    return claimed ? { ok: true } : { ok: false, error: "Execution already executing" };
+    return { ok: false, error: BROWSER_WRITE_NOT_AUTHORIZED };
   }
   if (!approvals) {
     return { ok: false, error: "Approval verification unavailable" };
@@ -486,6 +388,7 @@ async function authorizeAndClaim(
       toolId,
       paramsHash: computeParamsHash(params),
       executionId,
+      ...(tenantScope ? { tenantScope } : {}),
     });
   } catch {
     return { ok: false, error: "Approval verification unavailable" };
@@ -494,9 +397,20 @@ async function authorizeAndClaim(
   return { ok: true };
 }
 
+/**
+ * Browser failures whose action may already have reached the other site. The
+ * messages are the browser runtime's own (`packages/browser`: the session
+ * deadline in runtime.ts, the post-action navigation check in session.ts).
+ */
+const BROWSER_POST_ACTION_FAILURES: readonly RegExp[] = [
+  /exceeded its time limit/i,
+  /navigated to a refused URL/i,
+];
+
 abstract class BaseBrowserWriteTool extends BaseBrowserTool {
   protected readonly journal: ExecutionJournalPort;
   protected readonly approvals?: IApprovalConsumptionPort;
+  protected readonly access?: BrowserWriteScopePort;
 
   constructor(
     id: string,
@@ -505,12 +419,66 @@ abstract class BaseBrowserWriteTool extends BaseBrowserTool {
     parameters: ToolParameter[],
     runtime: BrowserRuntimePort,
     journal: ExecutionJournalPort,
-    approvals?: IApprovalConsumptionPort
+    approvals: IApprovalConsumptionPort | undefined,
+    access: BrowserWriteScopePort | undefined,
+    risk: "LOW_IMPACT" | "EXTERNAL_SIDE_EFFECT" = "EXTERNAL_SIDE_EFFECT"
   ) {
-    super(id, name, description, parameters, runtime, true, ["read", "write"], "EXTERNAL_SIDE_EFFECT");
+    super(id, name, description, parameters, runtime, true, ["read", "write"], risk);
     // A journal outage AFTER a claim must never look like a retryable failure.
     this.journal = withSafeTerminalTransitions(journal);
     this.approvals = approvals;
+    this.access = access;
+  }
+
+  /**
+   * Phase 19.1 — did the executor authorize THIS call? The executor's grant
+   * for this exact context, tool, user, parameters and approval
+   * (`verifyExecutionGrant`), spent here, synchronously, before anything is
+   * awaited. Nothing here opens a session, writes a journal row or touches
+   * the approval: a refused call has spent nothing.
+   */
+  private authorizedByExecutor(
+    params: Record<string, unknown>,
+    context: ToolContext
+  ): { ok: true } | { ok: false; error: string } {
+    const verdict = verifyExecutionGrant(this.id, params, context);
+    if (verdict.ok) return { ok: true };
+    return {
+      ok: false,
+      error:
+        verdict.refusal === "spoken"
+          ? (voiceToolRefusal(this.id, "voice") ?? BROWSER_WRITE_NOT_AUTHORIZED)
+          : BROWSER_WRITE_NOT_AUTHORIZED,
+    };
+  }
+
+  /**
+   * The Organization that owns the browser connection, read at execution time.
+   *
+   * Every write must resolve one: there is no unapproved browser write to
+   * exempt. A resolver that is missing, throws or returns nothing refuses the
+   * write: the store would refuse an Organization-bound approval without its
+   * scope anyway, and refusing here spends no slot, no journal row and no
+   * browser session.
+   */
+  private async resolveWriteScope(
+    context: ToolContext
+  ): Promise<{ ok: true; tenantScope: SharedConnectionScope } | { ok: false; error: string }> {
+    if (!context.approvalId) return { ok: false, error: BROWSER_WRITE_NOT_AUTHORIZED };
+    if (!this.access) {
+      return { ok: false, error: "Organization access could not be verified" };
+    }
+    let resolved;
+    try {
+      resolved = await this.access.resolveWriteScope(context.userId);
+    } catch {
+      return { ok: false, error: "Organization access could not be verified" };
+    }
+    if (!resolved.ok) return { ok: false, error: resolved.message };
+    if (!resolved.tenantScope) {
+      return { ok: false, error: "Organization access could not be verified" };
+    }
+    return { ok: true, tenantScope: resolved.tenantScope };
   }
 
   protected async ensureExecutable(
@@ -543,13 +511,245 @@ abstract class BaseBrowserWriteTool extends BaseBrowserTool {
     error: unknown,
     fallback: string
   ): Promise<void> {
-    const classification = classifyWriteOutcome(error);
+    // What is stored is unchanged (an Error's message, or the fixed fallback);
+    // the browser's own text is consulted only to classify the outcome.
     const message = error instanceof Error ? error.message : fallback;
+    const detail = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+    // Phase 19.1 — two browser failures can come AFTER the action was sent,
+    // and neither matches the generic timeout/abort patterns: the session's
+    // own deadline ("…exceeded its time limit"), which can interrupt a click
+    // already dispatched, and a click or submit that then navigated somewhere
+    // the policy refuses, which by construction happened after the action.
+    // Either may have reached the other site, so the outcome is UNKNOWN and is
+    // never retried — the rule this base states above. Failures that precede
+    // the action (a refused or failed navigation, a missing element) stay
+    // FAILED.
+    if (BROWSER_POST_ACTION_FAILURES.some((pattern) => pattern.test(detail))) {
+      await this.journal.markUnknown(executionId, { code: TIMEOUT_ERROR_CODES.AMBIGUOUS_OUTCOME, message });
+      return;
+    }
+    const classification = classifyWriteOutcome(error);
     if (classification.status === "UNKNOWN") {
       await this.journal.markUnknown(executionId, { code: classification.code, message });
     } else {
       await this.journal.markFailed(executionId, { code: classification.code, message });
     }
+  }
+
+  /**
+   * The one path every sensitive browser action takes.
+   *
+   * Order matters: require the executor's grant, authorize the Organization,
+   * journal the attempt, consume the approval and claim the execution in ONE
+   * conditional step, then open a session. A refused write has therefore
+   * opened no browser and sent nothing. A write whose result is unknown stays
+   * UNKNOWN; it is never retried here.
+   */
+  protected async runWrite<T>(
+    params: Record<string, unknown>,
+    context: ToolContext,
+    run: (session: BrowserSessionPort) => Promise<T>,
+    failureLabel: string
+  ): Promise<ToolResult> {
+    const authorized = this.authorizedByExecutor(params, context);
+    if (!authorized.ok) return this.failure(authorized.error);
+
+    const scope = await this.resolveWriteScope(context);
+    if (!scope.ok) return this.failure(scope.error);
+
+    const idempotencyKey = `${this.id}:${computeParamsHash(params)}`;
+    const ensured = await this.ensureExecutable(idempotencyKey, params, context);
+    if (!ensured.ok) return this.failure(ensured.error);
+
+    const claim = await authorizeAndClaim(
+      this.approvals,
+      this.id,
+      ensured.executionId,
+      params,
+      context,
+      scope.tenantScope
+    );
+    if (!claim.ok) return this.failure(claim.error);
+
+    const outcome = await this.inSession(context, run);
+    if (!outcome.ok) {
+      await this.recordJournalError(ensured.executionId, outcome.error, failureLabel);
+      return this.failure(outcome.error);
+    }
+
+    await this.journal.markSucceeded(ensured.executionId).catch(() => undefined);
+    return this.sanitized(
+      outcome.value,
+      this.browserMetadata(context, { executionId: ensured.executionId })
+    );
+  }
+}
+
+export class BrowserClickTool extends BaseBrowserWriteTool {
+  constructor(
+    runtime: BrowserRuntimePort,
+    journal: ExecutionJournalPort,
+    approvals?: IApprovalConsumptionPort,
+    access?: BrowserWriteScopePort
+  ) {
+    super(
+      BROWSER_TOOL_IDS.click,
+      "Click Page Element",
+      "Open a page and click one element on it. Requires human approval.",
+      [URL_PARAM, SELECTOR_PARAM],
+      runtime,
+      journal,
+      approvals,
+      access,
+      "LOW_IMPACT"
+    );
+  }
+
+  async execute(params: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
+    if (!this.validControlRequest(params)) return this.failure("Invalid input parameters");
+    const url = validateUrlShape(params.url);
+    const selector = validateSelector(params.selector);
+    if (!url) return this.failure("Invalid URL");
+    if (!selector) return this.failure("Invalid selector");
+
+    return this.runWrite(
+      params,
+      context,
+      async (session) => {
+        await session.navigate(url);
+        return session.click(selector);
+      },
+      "Click failed"
+    );
+  }
+}
+
+export class BrowserTypeTool extends BaseBrowserWriteTool {
+  constructor(
+    runtime: BrowserRuntimePort,
+    journal: ExecutionJournalPort,
+    approvals?: IApprovalConsumptionPort,
+    access?: BrowserWriteScopePort
+  ) {
+    super(
+      BROWSER_TOOL_IDS.type,
+      "Type Into Page Field",
+      "Open a page and type a value into one field. Requires human approval. The value does not persist to a later call; use browser.submit to fill and submit a form together.",
+      [
+        URL_PARAM,
+        SELECTOR_PARAM,
+        { name: "text", type: "string", description: "Value to type.", required: true },
+      ],
+      runtime,
+      journal,
+      approvals,
+      access,
+      "LOW_IMPACT"
+    );
+  }
+
+  async execute(params: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
+    if (!this.validControlRequest(params)) return this.failure("Invalid input parameters");
+    const url = validateUrlShape(params.url);
+    const selector = validateSelector(params.selector);
+    const text = BrowserInputTextSchema.safeParse(params.text);
+    if (!url) return this.failure("Invalid URL");
+    if (!selector) return this.failure("Invalid selector");
+    if (!text.success) return this.failure("Invalid text");
+
+    return this.runWrite(
+      params,
+      context,
+      async (session) => {
+        await session.navigate(url);
+        return session.type(selector, text.data);
+      },
+      "Typing failed"
+    );
+  }
+}
+
+export class BrowserSelectTool extends BaseBrowserWriteTool {
+  constructor(
+    runtime: BrowserRuntimePort,
+    journal: ExecutionJournalPort,
+    approvals?: IApprovalConsumptionPort,
+    access?: BrowserWriteScopePort
+  ) {
+    super(
+      BROWSER_TOOL_IDS.select,
+      "Choose Dropdown Option",
+      "Open a page and choose one option in a dropdown. Requires human approval.",
+      [
+        URL_PARAM,
+        SELECTOR_PARAM,
+        { name: "value", type: "string", description: "Option value to select.", required: true },
+      ],
+      runtime,
+      journal,
+      approvals,
+      access,
+      "LOW_IMPACT"
+    );
+  }
+
+  async execute(params: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
+    if (!this.validControlRequest(params)) return this.failure("Invalid input parameters");
+    const url = validateUrlShape(params.url);
+    const selector = validateSelector(params.selector);
+    const value = BrowserInputTextSchema.safeParse(params.value);
+    if (!url) return this.failure("Invalid URL");
+    if (!selector) return this.failure("Invalid selector");
+    if (!value.success) return this.failure("Invalid value");
+
+    return this.runWrite(
+      params,
+      context,
+      async (session) => {
+        await session.navigate(url);
+        return session.select(selector, value.data);
+      },
+      "Selecting failed"
+    );
+  }
+}
+
+export class BrowserDownloadTool extends BaseBrowserWriteTool {
+  constructor(
+    runtime: BrowserRuntimePort,
+    journal: ExecutionJournalPort,
+    approvals?: IApprovalConsumptionPort,
+    access?: BrowserWriteScopePort
+  ) {
+    super(
+      BROWSER_TOOL_IDS.download,
+      "Download File From Page",
+      "Open a page, click a download control, and keep the file. The file is stored and referenced by id; its bytes and its path are never returned. Requires human approval.",
+      [URL_PARAM, SELECTOR_PARAM],
+      runtime,
+      journal,
+      approvals,
+      access,
+      "LOW_IMPACT"
+    );
+  }
+
+  async execute(params: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
+    if (!this.validControlRequest(params)) return this.failure("Invalid input parameters");
+    const url = validateUrlShape(params.url);
+    const selector = validateSelector(params.selector);
+    if (!url) return this.failure("Invalid URL");
+    if (!selector) return this.failure("Invalid selector");
+
+    return this.runWrite(
+      params,
+      context,
+      async (session) => {
+        await session.navigate(url);
+        return session.download(selector);
+      },
+      "Download failed"
+    );
   }
 }
 
@@ -557,7 +757,8 @@ export class BrowserSubmitTool extends BaseBrowserWriteTool {
   constructor(
     runtime: BrowserRuntimePort,
     journal: ExecutionJournalPort,
-    approvals?: IApprovalConsumptionPort
+    approvals?: IApprovalConsumptionPort,
+    access?: BrowserWriteScopePort
   ) {
     super(
       BROWSER_TOOL_IDS.submit,
@@ -581,7 +782,8 @@ export class BrowserSubmitTool extends BaseBrowserWriteTool {
       ],
       runtime,
       journal,
-      approvals
+      approvals,
+      access
     );
   }
 
@@ -603,6 +805,7 @@ export class BrowserSubmitTool extends BaseBrowserWriteTool {
   }
 
   async execute(params: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
+    if (!this.validControlRequest(params)) return this.failure("Invalid input parameters");
     const url = validateUrlShape(params.url);
     const selector = validateSelector(params.selector);
     const fields = this.parseFields(params.fields);
@@ -610,40 +813,18 @@ export class BrowserSubmitTool extends BaseBrowserWriteTool {
     if (!selector) return this.failure("Invalid selector");
     if (!fields) return this.failure("Invalid fields");
 
-    // The key binds the exact page, the exact control and the exact values, so
-    // a re-run of the SAME submission is idempotent while a different one is
-    // not mistaken for it.
-    const idempotencyKey = `${this.id}:${computeParamsHash({ url, selector, fields })}`;
-    const ensured = await this.ensureExecutable(idempotencyKey, params, context);
-    if (!ensured.ok) return this.failure(ensured.error);
-
-    const claim = await authorizeAndClaim(
-      this.approvals,
-      this.journal,
-      this.id,
-      ensured.executionId,
+    return this.runWrite(
       params,
-      context
-    );
-    if (!claim.ok) return this.failure(claim.error);
-
-    const outcome = await this.inSession(context, async (session) => {
-      await session.navigate(url);
-      for (const [fieldSelector, value] of fields) {
-        await session.type(fieldSelector, value);
-      }
-      return session.submit(selector);
-    });
-
-    if (!outcome.ok) {
-      await this.recordJournalError(ensured.executionId, outcome.error, "Form submission failed");
-      return this.failure(outcome.error);
-    }
-
-    await this.journal.markSucceeded(ensured.executionId).catch(() => undefined);
-    return this.sanitized(
-      { ...outcome.value, fieldsFilled: fields.length },
-      this.browserMetadata(context, { executionId: ensured.executionId })
+      context,
+      async (session) => {
+        await session.navigate(url);
+        for (const [fieldSelector, value] of fields) {
+          await session.type(fieldSelector, value);
+        }
+        const value = await session.submit(selector);
+        return { ...value, fieldsFilled: fields.length };
+      },
+      "Form submission failed"
     );
   }
 }
@@ -652,7 +833,8 @@ export class BrowserUploadTool extends BaseBrowserWriteTool {
   constructor(
     runtime: BrowserRuntimePort,
     journal: ExecutionJournalPort,
-    approvals?: IApprovalConsumptionPort
+    approvals?: IApprovalConsumptionPort,
+    access?: BrowserWriteScopePort
   ) {
     super(
       BROWSER_TOOL_IDS.upload,
@@ -670,48 +852,30 @@ export class BrowserUploadTool extends BaseBrowserWriteTool {
       ],
       runtime,
       journal,
-      approvals
+      approvals,
+      access
     );
   }
 
   async execute(params: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
-    const url = validateUrlShape(params.url);
-    const selector = validateSelector(params.selector);
     const downloadId = typeof params.downloadId === "string" ? params.downloadId.trim() : "";
-    if (!url) return this.failure("Invalid URL");
-    if (!selector) return this.failure("Invalid selector");
     // A UUID and nothing else. Anything path-shaped is refused before it can
     // reach the store, which would refuse it again.
     if (!/^[0-9a-fA-F-]{36}$/.test(downloadId)) return this.failure("Invalid download id");
+    if (!this.validControlRequest(params)) return this.failure("Invalid input parameters");
+    const url = validateUrlShape(params.url);
+    const selector = validateSelector(params.selector);
+    if (!url) return this.failure("Invalid URL");
+    if (!selector) return this.failure("Invalid selector");
 
-    const idempotencyKey = `${this.id}:${computeParamsHash({ url, selector, downloadId })}`;
-    const ensured = await this.ensureExecutable(idempotencyKey, params, context);
-    if (!ensured.ok) return this.failure(ensured.error);
-
-    const claim = await authorizeAndClaim(
-      this.approvals,
-      this.journal,
-      this.id,
-      ensured.executionId,
+    return this.runWrite(
       params,
-      context
-    );
-    if (!claim.ok) return this.failure(claim.error);
-
-    const outcome = await this.inSession(context, async (session) => {
-      await session.navigate(url);
-      return session.upload(selector, downloadId);
-    });
-
-    if (!outcome.ok) {
-      await this.recordJournalError(ensured.executionId, outcome.error, "Upload failed");
-      return this.failure(outcome.error);
-    }
-
-    await this.journal.markSucceeded(ensured.executionId).catch(() => undefined);
-    return this.sanitized(
-      outcome.value,
-      this.browserMetadata(context, { executionId: ensured.executionId })
+      context,
+      async (session) => {
+        await session.navigate(url);
+        return session.upload(selector, downloadId);
+      },
+      "Upload failed"
     );
   }
 }
@@ -720,18 +884,19 @@ export class BrowserUploadTool extends BaseBrowserWriteTool {
 export function createBrowserTools(
   runtime: BrowserRuntimePort,
   journal: ExecutionJournalPort,
-  approvals?: IApprovalConsumptionPort
+  approvals?: IApprovalConsumptionPort,
+  access?: BrowserWriteScopePort
 ): BaseBrowserTool[] {
   return [
     new BrowserNavigateTool(runtime),
     new BrowserInspectTool(runtime),
     new BrowserExtractTool(runtime),
     new BrowserScreenshotTool(runtime),
-    new BrowserClickTool(runtime),
-    new BrowserTypeTool(runtime),
-    new BrowserSelectTool(runtime),
-    new BrowserDownloadTool(runtime),
-    new BrowserSubmitTool(runtime, journal, approvals),
-    new BrowserUploadTool(runtime, journal, approvals),
+    new BrowserClickTool(runtime, journal, approvals, access),
+    new BrowserTypeTool(runtime, journal, approvals, access),
+    new BrowserSelectTool(runtime, journal, approvals, access),
+    new BrowserDownloadTool(runtime, journal, approvals, access),
+    new BrowserSubmitTool(runtime, journal, approvals, access),
+    new BrowserUploadTool(runtime, journal, approvals, access),
   ];
 }

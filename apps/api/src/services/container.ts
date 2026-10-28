@@ -195,6 +195,7 @@ import { AtomicRateLimiter, RATE_LIMIT_NAMESPACES } from "./rate-limiter.js";
 import { buildIntegrationCommandService } from "./integrations/build.js";
 import {
   SharedConnectionAccess,
+  createBrowserWriteScopeResolver,
   createSharedConnectionToolGate,
   type SharedConnectionAccessPort,
 } from "./tenancy/shared-connection-access.js";
@@ -618,6 +619,9 @@ function createMetaToolRegistry(
   sharedAccess: SharedConnectionAccessPort
 ): ToolRegistry {
   const registry = new ToolRegistry();
+  // Phase 19.1 — the browser tools resolve the owning Organization through the
+  // same reader as every other shared connection, on every approved write.
+  const browserWriteScope = createBrowserWriteScopeResolver(sharedAccess);
   const metaAccessToken = process.env.META_ACCESS_TOKEN;
   const metaAccountId = process.env.META_AD_ACCOUNT_ID;
 
@@ -823,7 +827,7 @@ function createMetaToolRegistry(
       _browserRuntime = runtime;
 
       const browserJournal = new PrismaToolExecutionRepository(prisma);
-      for (const tool of createBrowserTools(runtime, browserJournal, approvalConsumption)) {
+      for (const tool of createBrowserTools(runtime, browserJournal, approvalConsumption, browserWriteScope)) {
         registry.register(tool);
       }
 

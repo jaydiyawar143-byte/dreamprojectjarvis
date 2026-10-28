@@ -3,12 +3,12 @@ import {
   MetaCreateCampaignTool,
   validateCampaignProposal,
   buildIdempotencyKey,
-  getExecutionState,
   clearExecutionStore,
 } from "../src/tools/meta-ads-write-tools.js";
 import type { MetaAdsProvider, MetaAdsBudgetProvider, MetaCampaignCreatorProvider, MetaAccountAuthorizer } from "../src/tools/meta-ads-provider.js";
 import { createMockMetaProvider, createFailingMetaProvider, createEmptyMetaProvider } from "../src/tools/meta-ads-mock.js";
 import { sanitizeToolResult } from "../src/output-sanitizer.js";
+import { ApprovedWrites } from "./helpers/approved-write.js";
 import { ToolRegistry as TR } from "../src/registry.js";
 import { ToolExecutor } from "../src/executor.js";
 import { DEFAULT_BUDGET_GUARDRAILS } from "../src/tools/meta-ads-budget-guardrails.js";
@@ -89,7 +89,11 @@ function toolContext(userId = "user-1", accountId = "act_111111111") {
   return { userId, resourceId: accountId, traceId: `trace-${Date.now()}` };
 }
 
-beforeEach(() => { clearExecutionStore(); });
+// Phase 19.1 — a write runs only as the executor runs it: approved, with the
+// executor's grant (see helpers/approved-write.ts). Every direct call below
+// is such a run; meta-ads-write-boundary-p19 covers one that is not.
+let approved: ApprovedWrites;
+beforeEach(() => { clearExecutionStore(); approved = new ApprovedWrites(); });
 
 // ===========================================================================
 // 1. PROPOSAL VALIDATION (10 tests)
@@ -182,27 +186,27 @@ describe("Proposal Validation", () => {
 
 describe("MetaCreateCampaignTool Metadata", () => {
   it("has correct tool id", () => {
-    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer());
+    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer(), undefined, approved.journal, approved.approvals);
     expect(tool.id).toBe("meta.campaign.create");
   });
 
   it("requires approval", () => {
-    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer());
+    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer(), undefined, approved.journal, approved.approvals);
     expect(tool.requiresApproval).toBe(true);
   });
 
   it("has risk level EXTERNAL_SIDE_EFFECT", () => {
-    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer());
+    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer(), undefined, approved.journal, approved.approvals);
     expect(tool.risk).toBe("EXTERNAL_SIDE_EFFECT");
   });
 
   it("has category marketing", () => {
-    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer());
+    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer(), undefined, approved.journal, approved.approvals);
     expect(tool.category).toBe("marketing");
   });
 
   it("requires read and write permissions", () => {
-    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer());
+    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer(), undefined, approved.journal, approved.approvals);
     expect(tool.requiredPermissions).toEqual(["read", "write"]);
   });
 });
@@ -213,35 +217,35 @@ describe("MetaCreateCampaignTool Metadata", () => {
 
 describe("Authorization", () => {
   it("fails with invalid account ID format", async () => {
-    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer());
-    const result = await tool.execute({ accountId: "invalid", proposal: validProposal() }, toolContext());
+    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer(), undefined, approved.journal, approved.approvals);
+    const result = await approved.run(tool, { accountId: "invalid", proposal: validProposal() }, toolContext());
     expect(result.success).toBe(false);
     expect(result.error).toContain("Invalid account ID format");
   });
 
   it("fails when user not authorized for account", async () => {
-    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createDenyAllAuthorizer());
-    const result = await tool.execute({ accountId: "act_111111111", proposal: validProposal() }, toolContext());
+    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createDenyAllAuthorizer(), undefined, approved.journal, approved.approvals);
+    const result = await approved.run(tool, { accountId: "act_111111111", proposal: validProposal() }, toolContext());
     expect(result.success).toBe(false);
     expect(result.error).toContain("Not authorized");
   });
 
   it("succeeds with authorized account", async () => {
-    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer());
-    const result = await tool.execute({ accountId: "act_111111111", proposal: validProposal() }, toolContext());
+    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer(), undefined, approved.journal, approved.approvals);
+    const result = await approved.run(tool, { accountId: "act_111111111", proposal: validProposal() }, toolContext());
     expect(result.success).toBe(true);
   });
 
   it("fails with proposal validation error", async () => {
-    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer());
-    const result = await tool.execute({ accountId: "act_111111111", proposal: { name: "", objective: "X", adSets: [] } }, toolContext());
+    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer(), undefined, approved.journal, approved.approvals);
+    const result = await approved.run(tool, { accountId: "act_111111111", proposal: { name: "", objective: "X", adSets: [] } }, toolContext());
     expect(result.success).toBe(false);
     expect(result.error).toContain("Invalid proposal");
   });
 
   it("fails without proposal parameter", async () => {
-    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer());
-    const result = await tool.execute({ accountId: "act_111111111" }, toolContext());
+    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer(), undefined, approved.journal, approved.approvals);
+    const result = await approved.run(tool, { accountId: "act_111111111" }, toolContext());
     expect(result.success).toBe(false);
     expect(result.error).toContain("proposal");
   });
@@ -253,8 +257,8 @@ describe("Authorization", () => {
 
 describe("Campaign Creation", () => {
   it("creates campaign with valid proposal", async () => {
-    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer());
-    const result = await tool.execute({ accountId: "act_111111111", proposal: validProposal() }, toolContext());
+    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer(), undefined, approved.journal, approved.approvals);
+    const result = await approved.run(tool, { accountId: "act_111111111", proposal: validProposal() }, toolContext());
     expect(result.success).toBe(true);
     const data = result.data as any;
     expect(data.action).toBe("create_campaign");
@@ -265,8 +269,8 @@ describe("Campaign Creation", () => {
 
   it("creates campaign and returns correct metadata", async () => {
     const proposal = validProposal({ confidence: 0.9, aiProvider: "claude", aiModel: "claude-sonnet-4-20250514" });
-    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer());
-    const result = await tool.execute({ accountId: "act_111111111", proposal }, toolContext());
+    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer(), undefined, approved.journal, approved.approvals);
+    const result = await approved.run(tool, { accountId: "act_111111111", proposal }, toolContext());
     expect(result.success).toBe(true);
     const data = result.data as any;
     expect(data.aiProvider).toBe("claude");
@@ -275,8 +279,8 @@ describe("Campaign Creation", () => {
   });
 
   it("fails when provider.createCampaign fails", async () => {
-    const tool = new MetaCreateCampaignTool(createFailingMetaProvider() as any, createAuthorizer());
-    const result = await tool.execute({ accountId: "act_111111111", proposal: validProposal() }, toolContext());
+    const tool = new MetaCreateCampaignTool(createFailingMetaProvider() as any, createAuthorizer(), undefined, approved.journal, approved.approvals);
+    const result = await approved.run(tool, { accountId: "act_111111111", proposal: validProposal() }, toolContext());
     expect(result.success).toBe(false);
     expect(result.error).toContain("Meta API error");
   });
@@ -288,31 +292,31 @@ describe("Campaign Creation", () => {
         { name: "AS2", optimizationGoal: "LINK_CLICKS", dailyBudget: 20 },
       ],
     });
-    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer());
-    const result = await tool.execute({ accountId: "act_111111111", proposal }, toolContext());
+    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer(), undefined, approved.journal, approved.approvals);
+    const result = await approved.run(tool, { accountId: "act_111111111", proposal }, toolContext());
     expect(result.success).toBe(true);
     expect((result.data as any).adSetCount).toBe(2);
   });
 
   it("enforces budget guardrails on proposal dailyBudget", async () => {
     const proposal = validProposal({ dailyBudget: 1000 });
-    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer(), strictGuardrails());
-    const result = await tool.execute({ accountId: "act_111111111", proposal }, toolContext());
+    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer(), strictGuardrails(), approved.journal, approved.approvals);
+    const result = await approved.run(tool, { accountId: "act_111111111", proposal }, toolContext());
     expect(result.success).toBe(false);
     expect(result.error).toContain("Budget guardrail");
   });
 
   it("passes guardrails when budget within limits", async () => {
     const proposal = validProposal({ dailyBudget: 100 });
-    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer(), strictGuardrails());
-    const result = await tool.execute({ accountId: "act_111111111", proposal }, toolContext());
+    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer(), strictGuardrails(), approved.journal, approved.approvals);
+    const result = await approved.run(tool, { accountId: "act_111111111", proposal }, toolContext());
     expect(result.success).toBe(true);
   });
 
   it("includes warnings and assumptions in result", async () => {
     const proposal = validProposal({ warnings: ["Low confidence"], assumptions: ["Test market"] });
-    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer());
-    const result = await tool.execute({ accountId: "act_111111111", proposal }, toolContext());
+    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer(), undefined, approved.journal, approved.approvals);
+    const result = await approved.run(tool, { accountId: "act_111111111", proposal }, toolContext());
     expect(result.success).toBe(true);
     const data = result.data as any;
     expect(data.warnings).toContain("Low confidence");
@@ -320,8 +324,8 @@ describe("Campaign Creation", () => {
   });
 
   it("creates campaign in PAUSED state by default", async () => {
-    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer());
-    const result = await tool.execute({ accountId: "act_111111111", proposal: validProposal() }, toolContext());
+    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer(), undefined, approved.journal, approved.approvals);
+    const result = await approved.run(tool, { accountId: "act_111111111", proposal: validProposal() }, toolContext());
     expect(result.success).toBe(true);
     expect((result.data as any).status).toBe("PAUSED");
   });
@@ -333,36 +337,36 @@ describe("Campaign Creation", () => {
 
 describe("Idempotency", () => {
   it("allows first execution of unique proposal", async () => {
-    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer());
-    const result = await tool.execute({ accountId: "act_111111111", proposal: validProposal() }, toolContext());
+    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer(), undefined, approved.journal, approved.approvals);
+    const result = await approved.run(tool, { accountId: "act_111111111", proposal: validProposal() }, toolContext());
     expect(result.success).toBe(true);
   });
 
   it("blocks duplicate execution with same proposal name and objective", async () => {
-    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer());
-    const result1 = await tool.execute({ accountId: "act_111111111", proposal: validProposal() }, toolContext("user-1"));
+    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer(), undefined, approved.journal, approved.approvals);
+    const result1 = await approved.run(tool, { accountId: "act_111111111", proposal: validProposal() }, toolContext("user-1"));
     expect(result1.success).toBe(true);
 
-    const result2 = await tool.execute({ accountId: "act_111111111", proposal: validProposal() }, toolContext("user-1"));
+    const result2 = await approved.run(tool, { accountId: "act_111111111", proposal: validProposal() }, toolContext("user-1"));
     expect(result2.success).toBe(false);
     expect(result2.error).toContain("already");
   });
 
   it("allows same proposal with different account", async () => {
-    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer(["act_111111111", "act_222222222"]));
-    const result1 = await tool.execute({ accountId: "act_111111111", proposal: validProposal() }, toolContext("user-1", "act_111111111"));
+    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer(["act_111111111", "act_222222222"]), undefined, approved.journal, approved.approvals);
+    const result1 = await approved.run(tool, { accountId: "act_111111111", proposal: validProposal() }, toolContext("user-1", "act_111111111"));
     expect(result1.success).toBe(true);
 
-    const result2 = await tool.execute({ accountId: "act_222222222", proposal: validProposal() }, toolContext("user-1", "act_222222222"));
+    const result2 = await approved.run(tool, { accountId: "act_222222222", proposal: validProposal() }, toolContext("user-1", "act_222222222"));
     expect(result2.success).toBe(true);
   });
 
   it("allows same proposal name with different objective", async () => {
-    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer());
-    const result1 = await tool.execute({ accountId: "act_111111111", proposal: validProposal({ objective: "OUTCOME_AWARENESS" }) }, toolContext("user-1"));
+    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer(), undefined, approved.journal, approved.approvals);
+    const result1 = await approved.run(tool, { accountId: "act_111111111", proposal: validProposal({ objective: "OUTCOME_AWARENESS" }) }, toolContext("user-1"));
     expect(result1.success).toBe(true);
 
-    const result2 = await tool.execute({ accountId: "act_111111111", proposal: validProposal({ objective: "OUTCOME_TRAFFIC" }) }, toolContext("user-1"));
+    const result2 = await approved.run(tool, { accountId: "act_111111111", proposal: validProposal({ objective: "OUTCOME_TRAFFIC" }) }, toolContext("user-1"));
     expect(result2.success).toBe(true);
   });
 
@@ -376,16 +380,15 @@ describe("Idempotency", () => {
       return origCreate.apply(mockProvider, args as any);
     });
 
-    const tool = new MetaCreateCampaignTool(mockProvider as any, createAuthorizer());
-    const result1 = await tool.execute({ accountId: "act_111111111", proposal: validProposal() }, toolContext("user-1"));
+    const tool = new MetaCreateCampaignTool(mockProvider as any, createAuthorizer(), undefined, approved.journal, approved.approvals);
+    const result1 = await approved.run(tool, { accountId: "act_111111111", proposal: validProposal() }, toolContext("user-1"));
     expect(result1.success).toBe(false);
 
     const key = buildIdempotencyKey("meta.campaign.create", "act_111111111", "proposal:Q1 Brand Awareness", "OUTCOME_AWARENESS");
-    const state = getExecutionState(key);
-    expect(state?.state).toBe("FAILED");
+    expect(approved.status(key)).toBe("FAILED");
 
     // After FAILED, another execution should be allowed (FAILED not in BLOCKED_STATES)
-    const result2 = await tool.execute({ accountId: "act_111111111", proposal: validProposal() }, toolContext("user-2"));
+    const result2 = await approved.run(tool, { accountId: "act_111111111", proposal: validProposal() }, toolContext("user-2"));
     expect(result2.success).toBe(true);
   });
 });
@@ -396,8 +399,8 @@ describe("Idempotency", () => {
 
 describe("Metrics and Audit", () => {
   it("returns success with correct action metadata", async () => {
-    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer());
-    const result = await tool.execute({ accountId: "act_111111111", proposal: validProposal() }, toolContext());
+    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer(), undefined, approved.journal, approved.approvals);
+    const result = await approved.run(tool, { accountId: "act_111111111", proposal: validProposal() }, toolContext());
     expect(result.success).toBe(true);
     const data = result.data as any;
     expect(data.action).toBe("create_campaign");
@@ -408,28 +411,28 @@ describe("Metrics and Audit", () => {
   });
 
   it("returns audit-compatible toolId in metadata", async () => {
-    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer());
-    const result = await tool.execute({ accountId: "act_111111111", proposal: validProposal() }, toolContext());
+    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer(), undefined, approved.journal, approved.approvals);
+    const result = await approved.run(tool, { accountId: "act_111111111", proposal: validProposal() }, toolContext());
     expect(result.metadata).toBeDefined();
     expect(result.metadata!.toolId).toBe("meta.campaign.create");
   });
 
   it("includes risk level in audit metadata", async () => {
-    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer());
-    const result = await tool.execute({ accountId: "act_111111111", proposal: validProposal() }, toolContext());
+    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer(), undefined, approved.journal, approved.approvals);
+    const result = await approved.run(tool, { accountId: "act_111111111", proposal: validProposal() }, toolContext());
     expect(result.metadata!.risk).toBe("EXTERNAL_SIDE_EFFECT");
   });
 
   it("includes userId in audit metadata", async () => {
-    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer());
-    const result = await tool.execute({ accountId: "act_111111111", proposal: validProposal() }, toolContext("user-42"));
+    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer(), undefined, approved.journal, approved.approvals);
+    const result = await approved.run(tool, { accountId: "act_111111111", proposal: validProposal() }, toolContext("user-42"));
     expect(result.metadata!.userId).toBe("user-42");
   });
 
   it("includes confidence and warnings in result data", async () => {
     const proposal = validProposal({ confidence: 0.72, warnings: ["Budget tight"] });
-    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer());
-    const result = await tool.execute({ accountId: "act_111111111", proposal }, toolContext());
+    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer(), undefined, approved.journal, approved.approvals);
+    const result = await approved.run(tool, { accountId: "act_111111111", proposal }, toolContext());
     expect(result.success).toBe(true);
     const data = result.data as any;
     expect(data.confidence).toBe(0.72);
@@ -443,23 +446,23 @@ describe("Metrics and Audit", () => {
 
 describe("Output Sanitizer", () => {
   it("sanitizes successful result", async () => {
-    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer());
-    const result = await tool.execute({ accountId: "act_111111111", proposal: validProposal() }, toolContext());
+    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer(), undefined, approved.journal, approved.approvals);
+    const result = await approved.run(tool, { accountId: "act_111111111", proposal: validProposal() }, toolContext());
     const sanitized = sanitizeToolResult(result);
     expect(sanitized.result.success).toBe(true);
     expect(sanitized.result).toBeDefined();
   });
 
   it("sanitizes failure result", async () => {
-    const tool = new MetaCreateCampaignTool(createFailingMetaProvider() as any, createAuthorizer());
-    const result = await tool.execute({ accountId: "act_111111111", proposal: validProposal() }, toolContext());
+    const tool = new MetaCreateCampaignTool(createFailingMetaProvider() as any, createAuthorizer(), undefined, approved.journal, approved.approvals);
+    const result = await approved.run(tool, { accountId: "act_111111111", proposal: validProposal() }, toolContext());
     const sanitized = sanitizeToolResult(result);
     expect(sanitized.result.success).toBe(false);
   });
 
   it("sanitizes unauthorized result", async () => {
-    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createDenyAllAuthorizer());
-    const result = await tool.execute({ accountId: "act_111111111", proposal: validProposal() }, toolContext());
+    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createDenyAllAuthorizer(), undefined, approved.journal, approved.approvals);
+    const result = await approved.run(tool, { accountId: "act_111111111", proposal: validProposal() }, toolContext());
     const sanitized = sanitizeToolResult(result);
     expect(sanitized.result.success).toBe(false);
   });
@@ -472,14 +475,14 @@ describe("Output Sanitizer", () => {
 describe("Executor, RBAC, Approval", () => {
   it("registers tool in registry", () => {
     const reg = new TR();
-    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer());
+    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer(), undefined, approved.journal, approved.approvals);
     reg.register(tool);
     expect(reg.get("meta.campaign.create")).toBeDefined();
   });
 
   it("executor blocks tool when user lacks read permission", async () => {
     const reg = new TR();
-    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer());
+    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer(), undefined, approved.journal, approved.approvals);
     reg.register(tool);
     const ex = new ToolExecutor(reg, denyAllPerms, createApprovalMgr().mgr, createTrackingAudit().logger);
     const result = await ex.execute({ toolId: "meta.campaign.create", userId: "user-1", role: "user", params: { accountId: "act_111111111", proposal: validProposal() } });
@@ -489,7 +492,7 @@ describe("Executor, RBAC, Approval", () => {
 
   it("executor blocks tool when user lacks write permission", async () => {
     const reg = new TR();
-    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer());
+    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer(), undefined, approved.journal, approved.approvals);
     reg.register(tool);
     const ex = new ToolExecutor(reg, denyWritePerms, createApprovalMgr().mgr, createTrackingAudit().logger);
     const result = await ex.execute({ toolId: "meta.campaign.create", userId: "user-1", role: "user", params: { accountId: "act_111111111", proposal: validProposal() } });
@@ -499,7 +502,7 @@ describe("Executor, RBAC, Approval", () => {
 
   it("executor requests approval and returns pending", async () => {
     const reg = new TR();
-    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer());
+    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer(), undefined, approved.journal, approved.approvals);
     reg.register(tool);
     const { mgr } = createApprovalMgr();
     const { logger, calls } = createTrackingAudit();
@@ -525,31 +528,31 @@ describe("Executor, RBAC, Approval", () => {
 
 describe("Security", () => {
   it("fails with malformed account ID (injection test)", async () => {
-    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer());
-    const result = await tool.execute({ accountId: "act_111111111; DROP TABLE", proposal: validProposal() }, toolContext());
+    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer(), undefined, approved.journal, approved.approvals);
+    const result = await approved.run(tool, { accountId: "act_111111111; DROP TABLE", proposal: validProposal() }, toolContext());
     expect(result.success).toBe(false);
     expect(result.error).toContain("Invalid account ID format");
   });
 
   it("fails with SQL injection in proposal name", async () => {
     const proposal = validProposal({ name: "test'; DROP TABLE campaigns; --" } as any);
-    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer());
-    const result = await tool.execute({ accountId: "act_111111111", proposal }, toolContext());
+    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer(), undefined, approved.journal, approved.approvals);
+    const result = await approved.run(tool, { accountId: "act_111111111", proposal }, toolContext());
     expect(result.success).toBe(true); // SQL injection is harmless in this context; proposal was valid
   });
 
   it("rejects proposal with negative budget", async () => {
     const proposal = validProposal({ dailyBudget: -100 });
-    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer());
-    const result = await tool.execute({ accountId: "act_111111111", proposal }, toolContext());
+    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer(), undefined, approved.journal, approved.approvals);
+    const result = await approved.run(tool, { accountId: "act_111111111", proposal }, toolContext());
     expect(result.success).toBe(false);
     expect(result.error).toContain("Invalid proposal");
   });
 
   it("rejects proposal with xss payload in name", async () => {
     const proposal = validProposal({ name: "<script>alert('xss')</script>" } as any);
-    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer());
-    const result = await tool.execute({ accountId: "act_111111111", proposal }, toolContext());
+    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer(), undefined, approved.journal, approved.approvals);
+    const result = await approved.run(tool, { accountId: "act_111111111", proposal }, toolContext());
     // XSS in name is valid string; creation succeeds but result doesn't execute script
     expect(result.success).toBe(true);
     expect((result.data as any).campaignName).toBe("<script>alert('xss')</script>");
@@ -557,8 +560,8 @@ describe("Security", () => {
 
   it("proposal with empty adSets is rejected by validation", async () => {
     const proposal = validProposal({ adSets: [] as any });
-    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer());
-    const result = await tool.execute({ accountId: "act_111111111", proposal }, toolContext());
+    const tool = new MetaCreateCampaignTool(createMockMetaProvider() as any, createAuthorizer(), undefined, approved.journal, approved.approvals);
+    const result = await approved.run(tool, { accountId: "act_111111111", proposal }, toolContext());
     expect(result.success).toBe(false);
     expect(result.error).toContain("adSet");
   });

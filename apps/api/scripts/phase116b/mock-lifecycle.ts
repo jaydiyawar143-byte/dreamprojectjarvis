@@ -47,6 +47,7 @@ import {
   ensureSmokeUser,
   makeLiveStatePort,
   prisma,
+  refuseSensitiveWrites,
   type Stack,
 } from "./lib.js";
 
@@ -264,6 +265,9 @@ async function journalCount(idempotencyKey: string): Promise<number> {
 }
 
 async function main(): Promise<void> {
+  // Phase 19.1 - this lifecycle ends in a Meta Ads write; see refuseSensitiveWrites().
+  refuseSensitiveWrites("mock-lifecycle.ts");
+
   console.log("PHASE 11.6B â€” MOCK LIFECYCLE (real DB + engines, mocked Meta HTTP)");
   console.log(`account=${ACCOUNT_ID}`);
 

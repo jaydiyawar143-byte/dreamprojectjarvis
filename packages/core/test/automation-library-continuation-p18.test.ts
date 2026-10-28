@@ -155,7 +155,10 @@ describe("what speech may not start", () => {
     expect(voiceToolRefusal(AUTOMATION_LIBRARY_TOOL_IDS.status, "voice")).toBeNull();
     // An inherited name is not a listed tool.
     expect(voiceToolRefusal("constructor", "voice")).toBeNull();
-    expect(Object.keys(VOICE_REFUSED_TOOLS)).toEqual([AUTOMATION_LIBRARY_TOOL_IDS.sync]);
+    // Phase 19.1 adds sensitive browser/desktop actions to the same list; this
+    // test owns the library's entry, so it asserts presence rather than the
+    // whole evolving list.
+    expect(Object.keys(VOICE_REFUSED_TOOLS)).toContain(AUTOMATION_LIBRARY_TOOL_IDS.sync);
     expect(VOICE_TOOL_REFUSED_CODE).toBe("VOICE_NOT_ALLOWED");
   });
 
