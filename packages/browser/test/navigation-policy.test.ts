@@ -312,3 +312,38 @@ describe("Sprint 7.5 — the test-only escape hatch", () => {
     expect(port.allowed).toBe(false);
   });
 });
+
+describe("Phase 19.3 — addressCheck: literal-only (behind the egress proxy)", () => {
+  const behindProxy: NavigationPolicyConfig = {
+    addressCheck: "literal-only",
+    resolveHost: async () => {
+      throw new Error("must not resolve: the egress proxy resolves");
+    },
+  };
+
+  it("does not resolve a host name, and returns no addresses", async () => {
+    const decision = await allow("https://www.example.com/path", behindProxy);
+    expect(decision.addresses).toEqual([]);
+  });
+
+  it("still judges an IP literal", async () => {
+    for (const url of ["http://127.0.0.1/", "http://169.254.169.254/latest", "http://[::ffff:10.0.0.1]/", "http://0x7f.1/"]) {
+      const decision = await deny(url, behindProxy);
+      expect(decision.reason).toBe("blocked-address");
+    }
+  });
+
+  it("still applies every other rule", async () => {
+    expect((await deny("ftp://www.example.com/", behindProxy)).reason).toBe("blocked-scheme");
+    expect((await deny("https://user:pw@www.example.com/", behindProxy)).reason).toBe("credentials-in-url");
+    expect((await deny("https://www.example.com:8443/", behindProxy)).reason).toBe("blocked-port");
+    expect(
+      (await deny("https://www.other.org/", { ...behindProxy, domainAllowlist: ["example.com"] })).reason
+    ).toBe("not-allowlisted");
+  });
+
+  it("is off by default: a name is resolved and judged as before", async () => {
+    const decision = await deny("https://rebinds.example.com/", resolvesTo("10.0.0.5"));
+    expect(decision.reason).toBe("blocked-address");
+  });
+});

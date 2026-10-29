@@ -7,6 +7,7 @@
 // ---------------------------------------------------------------------------
 
 export * from "./ip-rules.js";
+export * from "./host-rules.js";
 export * from "./navigation-policy.js";
 export * from "./config.js";
 export * from "./download.js";

@@ -34,6 +34,13 @@
 // `--host-resolver-rules=MAP host ip`), which is a browser-launch flag and so
 // cannot vary per navigation with a shared browser. It is documented as a known
 // limitation rather than silently assumed away.
+//
+// Phase 19.3 closes it for the isolated browser service another way: Chromium
+// is given an egress proxy and may resolve nothing else, and the proxy
+// resolves, judges and connects to the address it judged. There, this policy
+// runs with `addressCheck: "literal-only"` — every rule above still applies and
+// a literal address is still judged, but host names are left to the proxy,
+// whose answer is the one actually used.
 // ---------------------------------------------------------------------------
 
 import { lookup } from "node:dns/promises";
@@ -68,6 +75,15 @@ export interface NavigationPolicyConfig {
    */
   domainAllowlist?: readonly string[];
   maxUrlLength?: number;
+  /**
+   * How a host is judged. `"resolve"` (the default) resolves it and judges
+   * every address. `"literal-only"` judges an IP literal as before but does not
+   * resolve a name: it is ONLY for a browser whose every connection goes
+   * through an egress proxy that resolves, judges and pins (Phase 19.3), and
+   * the browser service refuses to select it without one. An allowed name then
+   * carries no `addresses`.
+   */
+  addressCheck?: "resolve" | "literal-only";
   /**
    * DNS seam. Present so the test suite can resolve deterministically without
    * a network; production never sets it and gets `node:dns`.
@@ -257,6 +273,11 @@ export async function validateNavigationTarget(
     const blocked = permitPrivate ? null : isBlockedAddress(hostname);
     if (blocked) return addressDenial(hostname, hostname, blocked);
     return { allowed: true, url: url.toString(), hostname, addresses: [hostname] };
+  }
+
+  // Phase 19.3: the egress proxy resolves, judges and pins this name.
+  if (config.addressCheck === "literal-only") {
+    return { allowed: true, url: url.toString(), hostname, addresses: [] };
   }
 
   let addresses: string[];

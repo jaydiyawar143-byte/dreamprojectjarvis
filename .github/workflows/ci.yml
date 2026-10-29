@@ -283,11 +283,18 @@ jobs:
       # mutual TLS on 127.0.0.1, with certificates made for the run and a fake
       # engine, so no Chromium starts and no external site is reached. Selected
       # by file name, because neither workspace is gated as a whole.
-      - name: Test browser-service contracts (@jarvis/browser-protocol, @jarvis/browser-service)
+      #
+      # Phase 19.3 adds the browser's egress: the proxy's policy and its
+      # behaviour over loopback sockets (`browser-service-egress`, with DNS and
+      # dialling replaced, so nothing is resolved or dialled off the machine),
+      # and the address, host-name and navigation rules in @jarvis/browser that
+      # it and the API's own page reads share.
+      - name: Test browser-service contracts (@jarvis/browser-protocol, @jarvis/browser-service, @jarvis/browser)
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: |
           pnpm --filter @jarvis/browser-protocol exec vitest run browser-service
           pnpm --filter @jarvis/browser-service exec vitest run browser-service
+          pnpm --filter @jarvis/browser exec vitest run ip-rules host-rules navigation-policy
 
       # Phase 19, Stage 19.1 — the Meta Ads write boundary: all nine writes run
       # only with the executor's grant for that exact call, consume their

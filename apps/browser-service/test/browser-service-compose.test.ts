@@ -156,8 +156,8 @@ describe("the browser container's network position (H3)", () => {
     expect(listItems(api, "networks").sort()).toEqual(["browser", "default"]);
   });
 
-  it("declares the network at the top level, and does not pretend it controls egress", () => {
-    expect(compose).toMatch(/\nnetworks:\n(?: +#.*\n)* {2}browser:/);
+  it("declares the network at the top level, as INTERNAL: no route out but the egress proxy (Phase 19.3)", () => {
+    expect(compose).toMatch(/\nnetworks:\n(?: +#.*\n)* {2}browser:\n {4}internal: true\n/);
   });
 
   it("publishes no port and stays behind its profile", () => {
@@ -192,5 +192,76 @@ describe("the browser container's health check works under mutual TLS (M1)", () 
   it("is a port the service listens on separately from the mTLS one", () => {
     expect(environment.get("BROWSER_SERVICE_PORT")).toBe("3200");
     expect(read("apps/browser-service/src/index.ts")).toContain('const HEALTH_HOST = "127.0.0.1"');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 19.3 — the egress proxy is the browser's only way out.
+//
+// What this file can prove is the declared topology. Whether Docker enforces
+// it on a given host — that the internal network really has no other path —
+// is the container check S11 (docs/DEPLOYMENT.md), not this test.
+// ---------------------------------------------------------------------------
+
+const egress = serviceBlock("browser-egress");
+const egressEnvironment = mappingKeys(egress, "environment");
+const web = serviceBlock("web");
+
+describe("the browser's egress proxy (Phase 19.3)", () => {
+  it("is the only service on both the internal browser network and the outbound one", () => {
+    expect(listItems(egress, "networks").sort()).toEqual(["browser", "browser-egress"]);
+    for (const [name, block] of [["postgres", postgres], ["api", api], ["web", web], ["browser-service", browser]] as const) {
+      expect(listItems(block, "networks"), name).not.toContain("browser-egress");
+    }
+    expect(compose).toMatch(/\n {2}browser-egress:\n(?! {4}internal: true)/);
+  });
+
+  it("is never on the default network, so PostgreSQL is not even routable from it", () => {
+    expect(listItems(egress, "networks")).not.toContain("default");
+  });
+
+  it("runs the proxy from the browser-service image, behind the same profile, with no port and no env_file", () => {
+    const body = code(egress);
+    expect(body).toMatch(/^ {4}command: \["node", "apps\/browser-service\/dist\/egress\/main\.js"\]$/m);
+    expect(body).toMatch(/^ {4}image: jarvis-browser-service:latest$/m);
+    expect(body).toMatch(/^ {4}profiles: \["browser-service"\]$/m);
+    expect(body).not.toMatch(/^ {4}(ports|env_file):/m);
+    expect(read("apps/browser-service/src/egress/main.ts")).toContain("loadEgressConfig");
+  });
+
+  it("receives only its own variables, each under its own name", () => {
+    for (const [name, value] of egressEnvironment) {
+      if (name === "NODE_ENV") continue;
+      expect(name).toMatch(/^BROWSER_EGRESS_/);
+      const reference = value.match(/^\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-[^}]*)?\}$/);
+      if (reference) expect(reference[1], name).toBe(name);
+    }
+    const sources = readdirSync(new URL("apps/browser-service/src/egress/", REPO))
+      .filter((file) => file.endsWith(".ts"))
+      .map((file) => read(`apps/browser-service/src/egress/${file}`))
+      .join("\n");
+    for (const name of new Set([...sources.matchAll(/\b(BROWSER_EGRESS_[A-Z_]+)\b/g)].map((match) => match[1]!))) {
+      expect(egressEnvironment.has(name), `${name} is read but not passed`).toBe(true);
+    }
+  });
+
+  it("keeps its container limits", () => {
+    const body = code(egress);
+    expect(body).toMatch(/^ {4}read_only: true$/m);
+    expect(listItems(egress, "cap_drop")).toEqual(["ALL"]);
+    expect(listItems(egress, "security_opt")).toContain("no-new-privileges:true");
+    expect(body).not.toMatch(/privileged: true|NET_ADMIN|NET_RAW|SYS_ADMIN/);
+  });
+
+  it("has a loopback health check, so the browser starts only once it answers", () => {
+    expect(egress).toContain("http://127.0.0.1:3129/healthz");
+    expect(egressEnvironment.get("BROWSER_EGRESS_HEALTH_PORT")).toBe("3129");
+    expect(code(browser)).toMatch(/depends_on:\n {6}browser-egress:\n {8}condition: service_healthy/);
+  });
+
+  it("is the address the browser service is told to send everything to", () => {
+    expect(environment.get("BROWSER_SERVICE_EGRESS_PROXY_URL")).toBe("http://browser-egress:3128");
+    expect(egressEnvironment.get("BROWSER_EGRESS_PORT")).toBe("3128");
+    expect(listItems(browser, "networks")).toEqual(["browser"]);
   });
 });

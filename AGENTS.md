@@ -563,7 +563,8 @@ contracts, the shared-connection contracts (`shared-connection*` in `tools` and
 Meta Ads write contracts (`meta-ads*` and three journal suites in `tools`) and
 the tool-execution boundary pins (`mcp-boundaries-s8`, `mcp-tools-boundaries-s8`),
 and since Phase 19.2 the browser-service contracts (`browser-service*` in
-`browser-protocol` and `browser-service`). A new contract test for any
+`browser-protocol` and `browser-service`, and since Phase 19.3 `ip-rules`,
+`host-rules` and `navigation-policy` in `browser`). A new contract test for any
 of them must match the names its step selects (`.github/workflows/ci.yml`), or
 CI never runs it.
 

@@ -66,6 +66,7 @@ function enabledConfig(): BrowserServiceConfig {
     requestTimeoutMs: 4_000,
     maxBodyBytes: 64 * 1024,
     chromiumEnabled: true,
+    egressProxy: { url: "http://browser-egress:3128", host: "browser-egress", port: 3128 },
     chromium: {
       headless: true,
       maxConcurrentSessions: 2,
@@ -92,7 +93,18 @@ describe("the browser engine's Chromium launch", () => {
     expect(options.headless).toBe(true);
     expect(options.args as string[]).not.toContain("--no-sandbox");
     for (const arg of options.args as string[]) expect(arg).not.toMatch(/sandbox|zygote/i);
+    // Phase 19.3: the same real path sends everything to the egress proxy.
+    expect(options.proxy).toEqual({ server: "http://browser-egress:3128" });
+    expect(options.args as string[]).toContain("--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE browser-egress");
+    expect(options.args as string[]).toContain("--force-webrtc-ip-handling-policy=disable_non_proxied_udp");
     await handle.shutdown();
+  });
+
+  it("refuses to build a Chromium engine without an egress proxy, and launches nothing", () => {
+    expect(() => createBrowserEngine({ ...enabledConfig(), egressProxy: null })).toThrow(
+      /without an egress proxy; refusing to start a browser with unrestricted networking/
+    );
+    expect(launches).toHaveLength(0);
   });
 
   it("fails closed when the host has no usable sandbox — and never relaunches without it", async () => {

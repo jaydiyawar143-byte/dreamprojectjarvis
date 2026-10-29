@@ -163,11 +163,12 @@ What the container receives is limited, and how far:
   (filled from `.env` at `docker compose` time), plus `NODE_ENV` and
   `CHROME_PATH`. The database URL, the JWT and encryption secrets and every
   provider credential stay out of it.
-- **Network.** It is on the `browser` network only, with the API; PostgreSQL
-  and the web app are not on it. That network is **not** egress control: the
-  container can still open outbound connections, including to the host's
-  published ports. Default-deny egress is Stage 19.3, so do not treat this
-  container as a place to send traffic you would not otherwise allow.
+- **Network (Phase 19.3).** It is on the `browser` network only, with the API
+  and the egress proxy; PostgreSQL and the web app are not on it. `browser` is
+  an **internal** network: Docker gives it no route out, so the container's only
+  way to anything beyond the API is the `browser-egress` proxy (see "Browser
+  egress" below). Chromium is launched with that proxy for every connection,
+  loopback included, and can resolve no other name.
 
 To enable it:
 
@@ -191,8 +192,11 @@ To enable it:
    but `true` or `BROWSER_SERVICE_TRUST_FORWARDED_PEER_IDENTITY` to anything but
    `false`.
 3. Set `BROWSER_SERVICE_CHROMIUM_ENABLED="true"` for the service. Without it the
-   container is up and refuses every session, by design.
-4. Start it, then restart the API so it reads the endpoint:
+   container is up and refuses every session, by design. With it, the service
+   also requires `BROWSER_SERVICE_EGRESS_PROXY_URL`, which compose sets to
+   `http://browser-egress:3128`; it refuses to start without one.
+4. Start it — compose starts `browser-egress` first and the browser service only
+   once the proxy is healthy — then restart the API so it reads the endpoint:
 
 ```bash
 docker compose --profile browser-service up -d browser-service
@@ -226,10 +230,59 @@ docker compose exec browser-service node apps/browser-service/scripts/s10-sandbo
    until a reviewed seccomp profile allows it; never answer it with
    `seccomp:unconfined` or `--no-sandbox`.
 
+6. Check the network layer once in the running stack (S11, container mode). It
+   tries direct connections that the internal network must not allow — a public
+   address, the metadata address, PostgreSQL, the Docker host gateway's
+   published ports — and asks the proxy for destinations it must refuse:
+
+```bash
+docker compose exec browser-service node apps/browser-service/scripts/s11-egress-check.mjs --container
+```
+
+   Every line must pass. A direct connection that succeeds means this host's
+   Docker does not isolate internal networks the way the deployment relies on;
+   keep Chromium off until it does. The same script without `--container` runs
+   the application-layer check on any machine with a Chromium, offline.
+
 A browser write whose outcome the API cannot prove — a timeout, a dropped
 connection, a provider error after the request was sent — is recorded `UNKNOWN`
 and is not sent again, even with a new approval. Treat such an action as
 possibly done, and check the site before asking for it a second time.
+
+#### Browser egress (Phase 19.3)
+
+Three layers, each enforced without the others' help:
+
+| Layer | Where | What it does |
+|---|---|---|
+| Network | `docker-compose.yml`: `browser` is `internal: true`; only `browser-egress` is also on the outbound `browser-egress` network | The browser container has no route out except the proxy, and no route to PostgreSQL at all |
+| Proxy | `browser-egress` (`apps/browser-service/src/egress`) | Resolves every destination itself; refuses private, loopback, link-local, CGNAT, reserved, multicast, documentation and cloud-metadata addresses (IPv4 and IPv6, in every spelling — decimal, hex, octal, short, percent-encoded, IPv4-mapped, NAT64, 6to4, Teredo), single-label and special-use names, any name that resolves to one of them, and ports other than those allowed; then connects to exactly the address it judged |
+| Browser | the service's launch options | `--proxy-server` for everything, loopback included; `--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE browser-egress`, so Chromium resolves nothing itself; WebRTC may not send UDP outside the proxy; the navigation policy still refuses literal private addresses, schemes, ports and credentials before a request is made |
+
+Redirects are not followed by the proxy: each hop is a new request the browser
+makes, and the proxy judges it on its own. A DNS answer that changes between
+the check and the connection is never used: the proxy dials the address it
+judged.
+
+Configuration, all optional (`.env.example`): `BROWSER_EGRESS_ALLOWED_PORTS`
+(default `80,443`), `BROWSER_EGRESS_DOMAIN_ALLOWLIST` (default: any public
+host), and the DNS, connect and idle timeouts and the connection ceiling. They
+can only narrow the policy. No setting opens a private or metadata destination.
+
+**Troubleshooting**
+
+| You see | It means | Do |
+|---|---|---|
+| The browser service exits at start with `BROWSER_SERVICE_EGRESS_PROXY_URL is required` | Chromium is on and no proxy is configured | Start it through compose, which sets the URL; never run Chromium without the proxy |
+| `browser-service` stays `Created`, waiting | `browser-egress` is not healthy yet | `docker compose logs browser-egress`; a `browser_egress_config_invalid` line names the field to fix |
+| A navigation fails with `ERR_TUNNEL_CONNECTION_FAILED` or a `403` | The proxy refused the destination | `docker compose logs browser-egress` shows `egress_denied` with the reason, the host and the port (never a path) |
+| `egress_denied` with `reason: "dns-failure"` | The proxy's resolver did not answer, or the name does not exist | Check DNS from the proxy container; the browser container cannot resolve names by design |
+| `reason: "blocked-address"` for a public site | The name resolves, at least in part, to a private or reserved address | Expected; the site is not reachable from this browser. Do not add an exception: there is no switch for one |
+| `reason: "not-allowlisted"` | `BROWSER_EGRESS_DOMAIN_ALLOWLIST` is set and does not cover the host | Add the domain, if it should be reachable |
+| `reason: "blocked-port"` | The URL uses a port outside `BROWSER_EGRESS_ALLOWED_PORTS` | Add the port only if it is a public web service you mean to reach |
+
+The proxy logs one line per refusal with the reason, the host and the port. It
+logs no path, query, header or body, and nothing for an allowed request.
 
 The API log names the choice at start-up, with no address credentials:
 
@@ -246,7 +299,7 @@ tool is registered**, and there is no fallback to an in-process browser.
 migration belongs to this stage, so there is no schema to undo.
 
 ```bash
-docker compose --profile browser-service stop browser-service
+docker compose --profile browser-service stop browser-service browser-egress
 # remove BROWSER_SERVICE_URL from .env, then
 docker compose up -d api
 ```

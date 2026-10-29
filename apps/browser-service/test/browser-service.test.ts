@@ -71,6 +71,7 @@ function testConfig(overrides: Partial<BrowserServiceConfig> = {}): BrowserServi
     requestTimeoutMs: 4_000,
     maxBodyBytes: 64 * 1024,
     chromiumEnabled: false,
+    egressProxy: null,
     chromium: {
       headless: true,
       maxConcurrentSessions: 4,
@@ -444,6 +445,36 @@ describe("loadBrowserServiceConfig", () => {
     expect(Object.keys(config)).not.toContain("trustForwardedPeerIdentity");
   });
 
+  it("refuses to start Chromium without an egress proxy — there is no unproxied mode (Phase 19.3)", () => {
+    expect(() => loadBrowserServiceConfig({ ...base, BROWSER_SERVICE_CHROMIUM_ENABLED: "true" })).toThrow(
+      /BROWSER_SERVICE_EGRESS_PROXY_URL is required/
+    );
+    const config = loadBrowserServiceConfig({
+      ...base,
+      BROWSER_SERVICE_CHROMIUM_ENABLED: "true",
+      BROWSER_SERVICE_EGRESS_PROXY_URL: "http://browser-egress:3128",
+    });
+    expect(config.egressProxy).toEqual({ url: "http://browser-egress:3128", host: "browser-egress", port: 3128 });
+    // Chromium off needs no proxy.
+    expect(loadBrowserServiceConfig(base).egressProxy).toBeNull();
+  });
+
+  it("refuses an egress proxy URL it could not hand Chromium exactly", () => {
+    for (const url of [
+      "https://browser-egress:3128",
+      "http://user:pw@browser-egress:3128",
+      "http://browser-egress:3128/path",
+      "http://browser-egress:3128/?q=1",
+      "http://[::1]:3128",
+      "socks5://browser-egress:1080",
+      "not a url",
+    ]) {
+      expect(() => loadBrowserServiceConfig({ ...base, BROWSER_SERVICE_EGRESS_PROXY_URL: url }), url).toThrow(
+        /BROWSER_SERVICE_EGRESS_PROXY_URL must be/
+      );
+    }
+  });
+
   it("gives the loopback health listener its own port", () => {
     expect(loadBrowserServiceConfig(base).healthPort).toBe(3201);
     expect(loadBrowserServiceConfig({ ...base, BROWSER_SERVICE_HEALTH_PORT: "4000" }).healthPort).toBe(4000);
@@ -691,13 +722,35 @@ describe("browser service loopback health listener", () => {
 // ---------------------------------------------------------------------------
 
 describe("Chromium launch options", () => {
+  const EGRESS = { url: "http://browser-egress:3128", host: "browser-egress" };
+
   it("ask Playwright for the sandbox explicitly, and pass nothing that disables it", () => {
-    const options = sandboxedChromiumLaunchOptions({ chromePath: "/usr/bin/chromium", headless: true });
+    const options = sandboxedChromiumLaunchOptions({ chromePath: "/usr/bin/chromium", headless: true, egressProxy: EGRESS });
     // Playwright appends --no-sandbox unless this is exactly true.
     expect(options.chromiumSandbox).toBe(true);
     expect(options.executablePath).toBe("/usr/bin/chromium");
     for (const arg of options.args) {
       expect(arg).not.toMatch(/sandbox|zygote/i);
+    }
+  });
+
+  it("send every connection to the egress proxy, and let Chromium resolve nothing else (Phase 19.3)", () => {
+    const options = sandboxedChromiumLaunchOptions({ chromePath: "/usr/bin/chromium", headless: true, egressProxy: EGRESS });
+    // Playwright's own option; with no `bypass` it also proxies loopback.
+    expect(options.proxy).toEqual({ server: "http://browser-egress:3128" });
+    expect(options.args).toContain("--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE browser-egress");
+    expect(options.args).toContain("--force-webrtc-ip-handling-policy=disable_non_proxied_udp");
+    // Nothing that would route around the proxy.
+    for (const arg of options.args) {
+      expect(arg).not.toMatch(/^--(no-proxy-server|proxy-server|proxy-bypass-list|proxy-auto-detect|proxy-pac-url)/);
+    }
+  });
+
+  it("refuse a proxy host that could smuggle another rule into the resolver", () => {
+    for (const host of ["browser-egress , EXCLUDE *", "evil host", "[::1]", ""]) {
+      expect(() =>
+        sandboxedChromiumLaunchOptions({ chromePath: "/x", headless: true, egressProxy: { url: "http://x:1", host } })
+      ).toThrow(/egress proxy host/);
     }
   });
 });

@@ -33,6 +33,7 @@
 import {
   BrowserRuntime,
   createBrowserConfig,
+  navigationPolicyFor,
   type BrowserLauncher,
   type BrowserLike,
 } from "@jarvis/browser";
@@ -54,14 +55,23 @@ export class DisabledBrowserEngine implements BrowserRuntimePort {
   }
 }
 
-/** Switches that turn Chromium's sandbox, or part of it, off. Never passed. */
-const SANDBOX_DISABLING_SWITCHES: readonly string[] = [
+/**
+ * Switches never passed: those that turn Chromium's sandbox, or part of it,
+ * off, and those that would let it reach the network some way other than the
+ * egress proxy (Phase 19.3).
+ */
+const FORBIDDEN_SWITCHES: readonly string[] = [
   "--no-sandbox",
   "--disable-setuid-sandbox",
   "--disable-namespace-sandbox",
   "--disable-seccomp-filter-sandbox",
   "--disable-gpu-sandbox",
   "--no-zygote-sandbox",
+  "--no-proxy-server",
+  "--proxy-auto-detect",
+  "--proxy-pac-url",
+  "--proxy-bypass-list",
+  "--proxy-server",
 ];
 
 /** The fields of Playwright's launch options this service sets. */
@@ -69,6 +79,12 @@ export interface SandboxedChromiumLaunchOptions {
   executablePath: string;
   headless: boolean;
   chromiumSandbox: true;
+  /**
+   * The egress proxy, through Playwright's own option. With no `bypass`, it
+   * also sends loopback through the proxy (`<-loopback>`), so `localhost` is
+   * judged like any other destination instead of being dialled directly.
+   */
+  proxy: { server: string };
   args: string[];
 }
 
@@ -78,21 +94,35 @@ export interface SandboxedChromiumLaunchOptions {
  * `--disable-dev-shm-usage` remains: it is about `/dev/shm` size in a
  * container, not about privilege. The rest suppress background traffic that a
  * JARVIS session has no reason to make.
+ *
+ * Phase 19.3: every connection goes to the egress proxy, and the resolver can
+ * resolve the proxy's name and nothing else (`MAP * ~NOTFOUND`), so Chromium
+ * never learns an address the proxy did not judge. WebRTC may not send UDP
+ * outside the proxy.
  */
 export function sandboxedChromiumLaunchOptions(config: {
   chromePath: string;
   headless: boolean;
+  egressProxy: { url: string; host: string };
 }): SandboxedChromiumLaunchOptions {
+  if (!/^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/.test(config.egressProxy.host)) {
+    throw new Error("browser service configuration error: the egress proxy host cannot be named in a resolver rule");
+  }
   const args = [
     "--disable-dev-shm-usage",
     "--disable-background-networking",
     "--disable-sync",
     "--no-first-run",
     "--no-default-browser-check",
+    // One argv element, so no shell quoting: the value is the rule itself.
+    `--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE ${config.egressProxy.host}`,
+    "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
   ];
   for (const arg of args) {
-    if (SANDBOX_DISABLING_SWITCHES.some((switchName) => arg === switchName || arg.startsWith(`${switchName}=`))) {
-      throw new Error("browser service configuration error: a launch argument disables the Chromium sandbox");
+    if (FORBIDDEN_SWITCHES.some((switchName) => arg === switchName || arg.startsWith(`${switchName}=`))) {
+      throw new Error(
+        "browser service configuration error: a launch argument disables the Chromium sandbox or bypasses the egress proxy"
+      );
     }
   }
   return {
@@ -100,16 +130,21 @@ export function sandboxedChromiumLaunchOptions(config: {
     headless: config.headless,
     // Playwright's default is false, which appends --no-sandbox (H1).
     chromiumSandbox: true,
+    proxy: { server: config.egressProxy.url },
     args,
   };
 }
 
-/** Chromium, launched with its sandbox — or not at all. */
-const launchSandboxedChromium: BrowserLauncher = async (config) => {
-  const { chromium } = await import("playwright-core");
-  const browser = await chromium.launch(sandboxedChromiumLaunchOptions(config));
-  return browser as unknown as BrowserLike;
-};
+/** Chromium, launched with its sandbox and behind the egress proxy — or not at all. */
+function sandboxedChromiumLauncher(egressProxy: { url: string; host: string }): BrowserLauncher {
+  return async (config) => {
+    const { chromium } = await import("playwright-core");
+    const browser = await chromium.launch(
+      sandboxedChromiumLaunchOptions({ chromePath: config.chromePath, headless: config.headless, egressProxy })
+    );
+    return browser as unknown as BrowserLike;
+  };
+}
 
 export interface BrowserEngineHandle {
   engine: BrowserRuntimePort;
@@ -123,6 +158,13 @@ export function createBrowserEngine(config: BrowserServiceConfig): BrowserEngine
   if (!config.chromiumEnabled) {
     const engine = new DisabledBrowserEngine();
     return { engine, chromiumEnabled: false, shutdown: () => engine.shutdown() };
+  }
+  // Phase 19.3, fail closed: the config loader already refuses this, and the
+  // engine refuses it again for a config built any other way.
+  if (!config.egressProxy) {
+    throw new Error(
+      "browser service configuration error: Chromium is enabled without an egress proxy; refusing to start a browser with unrestricted networking"
+    );
   }
 
   const browserConfig = createBrowserConfig(
@@ -142,7 +184,14 @@ export function createBrowserEngine(config: BrowserServiceConfig): BrowserEngine
     process.env
   );
 
-  const runtime = new BrowserRuntime({ config: browserConfig, launcher: launchSandboxedChromium });
+  const runtime = new BrowserRuntime({
+    config: browserConfig,
+    launcher: sandboxedChromiumLauncher(config.egressProxy),
+    // Every rule of the navigation policy still runs in this process; host
+    // names are resolved, judged and pinned by the egress proxy, which is the
+    // only resolver Chromium can use (Phase 19.3).
+    policy: { ...navigationPolicyFor(browserConfig), addressCheck: "literal-only" },
+  });
   return {
     engine: runtime,
     chromiumEnabled: true,

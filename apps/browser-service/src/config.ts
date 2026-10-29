@@ -65,18 +65,31 @@ export interface BrowserServiceConfig {
   maxBodyBytes: number;
   chromiumEnabled: boolean;
   chromium: BrowserServiceChromiumConfig;
+  /**
+   * The egress proxy every Chromium connection goes through (Phase 19.3).
+   * Required whenever Chromium is enabled: there is no unproxied mode.
+   */
+  egressProxy: BrowserServiceEgressProxy | null;
+}
+
+export interface BrowserServiceEgressProxy {
+  /** `http://<host>:<port>`, exactly as Chromium is given it. */
+  url: string;
+  /** The one name Chromium's resolver is still allowed to resolve. */
+  host: string;
+  port: number;
 }
 
 const MIN_CLOCK_SKEW_MS = 1_000;
 const MAX_CLOCK_SKEW_MS = 300_000;
 const MAX_REQUEST_TIMEOUT_MS = 120_000;
 
-function trimmed(value: string | undefined): string | null {
+export function trimmed(value: string | undefined): string | null {
   const text = value?.trim();
   return text && text.length > 0 ? text : null;
 }
 
-function requestedInteger(
+export function requestedInteger(
   env: NodeJS.ProcessEnv,
   name: string,
   options: { fallback: number; min: number; max: number }
@@ -93,6 +106,31 @@ function requestedInteger(
     );
   }
   return value;
+}
+
+/**
+ * `http://<host>:<port>` and nothing else: no credentials, path, query or
+ * fragment, and a host Chromium's resolver rule can name — a DNS name or an
+ * IPv4 literal. Unset is `null`; set but unusable refuses to start.
+ */
+function parseEgressProxyUrl(raw: string | null): BrowserServiceEgressProxy | null {
+  if (raw === null) return null;
+  const refuse = (): never => {
+    throw new Error(
+      "browser service configuration error: BROWSER_SERVICE_EGRESS_PROXY_URL must be http://<host>:<port> with no credentials, path or query"
+    );
+  };
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return refuse();
+  }
+  if (url.protocol !== "http:" || url.username || url.password || url.search || url.hash) refuse();
+  if (url.pathname !== "/" && url.pathname !== "") refuse();
+  if (!/^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/.test(url.hostname)) refuse();
+  const port = url.port ? Number(url.port) : 80;
+  return { url: `http://${url.hostname}:${port}`, host: url.hostname, port };
 }
 
 function parseAllowlist(raw: string | undefined): string[] {
@@ -194,6 +232,17 @@ export function loadBrowserServiceConfig(
     );
   }
 
+  // Phase 19.3: Chromium has no route out except the egress proxy. With
+  // Chromium on and no proxy, the service refuses to start rather than run a
+  // browser whose traffic nothing judges.
+  const chromiumEnabled = env.BROWSER_SERVICE_CHROMIUM_ENABLED === "true";
+  const egressProxy = parseEgressProxyUrl(trimmed(env.BROWSER_SERVICE_EGRESS_PROXY_URL));
+  if (chromiumEnabled && egressProxy === null) {
+    throw new Error(
+      "browser service configuration error: BROWSER_SERVICE_EGRESS_PROXY_URL is required when BROWSER_SERVICE_CHROMIUM_ENABLED=true; the browser has no route except through the egress proxy"
+    );
+  }
+
   return {
     // Loopback by default. A deployment that must be reachable from another
     // container sets BROWSER_SERVICE_HOST=0.0.0.0 explicitly (compose does). A
@@ -225,7 +274,8 @@ export function loadBrowserServiceConfig(
       min: 1_024,
       max: BROWSER_PROTOCOL_MAX_BODY_BYTES,
     }),
-    chromiumEnabled: env.BROWSER_SERVICE_CHROMIUM_ENABLED === "true",
+    chromiumEnabled,
+    egressProxy,
     chromium: {
       headless: env.BROWSER_HEADLESS !== "false",
       maxConcurrentSessions: maxSessions,
