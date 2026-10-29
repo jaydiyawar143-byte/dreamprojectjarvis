@@ -167,10 +167,17 @@ services:
   #
   # No `ports`: nothing on the host can reach it, and it is not the API's job to
   # proxy arbitrary browser traffic. It is on the `browser` network only, which
-  # it shares with the API and nothing else — PostgreSQL and the web app are
-  # not on it (Stage 19.2 audit, H3). That network is NOT egress control: the
-  # container can still open connections out, including to the host's
-  # published ports. Default-deny egress is Stage 19.3 and is not implemented.
+  # it shares with the API and the egress proxy and nothing else — PostgreSQL
+  # and the web app are not on it (Stage 19.2 audit, H3).
+  #
+  # Phase 19.3 — egress. `browser` is an INTERNAL network: Docker gives it no
+  # route out, so this container's only way to anything beyond the API is the
+  # `browser-egress` proxy below, which judges every destination (private,
+  # loopback, link-local, reserved and metadata addresses refused; DNS resolved
+  # and pinned by the proxy). Chromium is told to use that proxy for everything
+  # and can resolve no other name. Whether Docker's internal network really
+  # blocks every other path on a given host is verified in the container (S11
+  # in docs/DEPLOYMENT.md), not assumed from this file.
   #
   # No `env_file` (Stage 19.2 audit, H3). Every variable it receives is named
   # below. The `${…:-}` forms are filled from the shell or the project .env at
@@ -197,10 +204,17 @@ services:
     container_name: jarvis-docker-browser
     networks:
       - browser
+    # No browser without its egress proxy: compose starts this only once the
+    # proxy answers its health check.
+    depends_on:
+      browser-egress:
+        condition: service_healthy
     environment:
       NODE_ENV: production
       BROWSER_SERVICE_HOST: "0.0.0.0"
       BROWSER_SERVICE_PORT: 3200
+      # Phase 19.3 — Chromium's only way out. Required whenever Chromium is on.
+      BROWSER_SERVICE_EGRESS_PROXY_URL: http://browser-egress:3128
       # The loopback-only liveness listener the healthcheck below asks. It
       # binds 127.0.0.1 inside this container and serves /healthz only.
       BROWSER_SERVICE_HEALTH_PORT: 3201
@@ -261,11 +275,76 @@ services:
     stop_grace_period: 20s
     restart: unless-stopped
 
+  # ---------------------------------------------------------------------------
+  # Phase 19.3 — the browser's egress proxy.
+  #
+  # The same image as the browser service, a different process: an HTTP proxy
+  # (CONNECT for HTTPS and WebSockets, absolute-form for plain HTTP) that
+  # resolves every destination itself, refuses any private, loopback,
+  # link-local, reserved, cloud-metadata or special-use destination — and any
+  # name that resolves to one — and connects to exactly the address it judged.
+  #
+  # It is the only container on both the internal `browser` network and the
+  # outbound `browser-egress` network, so it is the browser's only way out. It
+  # is not on `default`, so it has no route to PostgreSQL either, and it refuses
+  # private addresses anyway. No `ports`, no `env_file`, its own small limits.
+  # ---------------------------------------------------------------------------
+  browser-egress:
+    profiles: ["browser-service"]
+    build:
+      context: .
+      dockerfile: apps/browser-service/Dockerfile
+      target: runtime
+    image: jarvis-browser-service:latest
+    container_name: jarvis-docker-browser-egress
+    command: ["node", "apps/browser-service/dist/egress/main.js"]
+    networks:
+      - browser
+      - browser-egress
+    environment:
+      NODE_ENV: production
+      BROWSER_EGRESS_HOST: "0.0.0.0"
+      BROWSER_EGRESS_PORT: 3128
+      # The loopback-only liveness listener the healthcheck below asks.
+      BROWSER_EGRESS_HEALTH_PORT: 3129
+      # Policy. Empty means the safe default: ports 80 and 443, any PUBLIC host.
+      # These can only narrow it; no setting opens a private destination.
+      BROWSER_EGRESS_ALLOWED_PORTS: ${BROWSER_EGRESS_ALLOWED_PORTS:-}
+      BROWSER_EGRESS_DOMAIN_ALLOWLIST: ${BROWSER_EGRESS_DOMAIN_ALLOWLIST:-}
+      BROWSER_EGRESS_DNS_TIMEOUT_MS: ${BROWSER_EGRESS_DNS_TIMEOUT_MS:-}
+      BROWSER_EGRESS_CONNECT_TIMEOUT_MS: ${BROWSER_EGRESS_CONNECT_TIMEOUT_MS:-}
+      BROWSER_EGRESS_IDLE_TIMEOUT_MS: ${BROWSER_EGRESS_IDLE_TIMEOUT_MS:-}
+      BROWSER_EGRESS_MAX_CONNECTIONS: ${BROWSER_EGRESS_MAX_CONNECTIONS:-}
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 0.5
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"fetch('http://127.0.0.1:3129/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\"",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    stop_grace_period: 10s
+    restart: unless-stopped
+
 networks:
-  # Phase 19.2 — the API and the browser service, and nothing else. Not
-  # `internal`: Chromium must reach the sites it browses, so this separates the
-  # browser from PostgreSQL without restricting egress (Stage 19.3).
+  # Phase 19.2/19.3 — the API, the browser service and the egress proxy, and
+  # nothing else. INTERNAL: Docker gives it no route out, so the browser
+  # reaches the internet only through the proxy. The API keeps `default` for
+  # PostgreSQL and its own outbound calls.
   browser:
+    internal: true
+  # Phase 19.3 — the egress proxy's way out, and nobody else's.
+  browser-egress:
 
 volumes:
   jarvis-docker-pgdata:

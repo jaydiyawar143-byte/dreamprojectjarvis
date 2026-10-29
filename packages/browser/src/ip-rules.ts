@@ -171,6 +171,8 @@ const IPV4_DENY: Range[] = [
   { reason: "private", bytes: v4(172, 16, 0, 0), prefixBits: 12 },
   { reason: "reserved", bytes: v4(192, 0, 0, 0), prefixBits: 24 },
   { reason: "documentation", bytes: v4(192, 0, 2, 0), prefixBits: 24 },
+  // 6to4 relay anycast (RFC 7526 deprecated it); a relay hop, never a site.
+  { reason: "reserved", bytes: v4(192, 88, 99, 0), prefixBits: 24 },
   { reason: "private", bytes: v4(192, 168, 0, 0), prefixBits: 16 },
   { reason: "benchmarking", bytes: v4(198, 18, 0, 0), prefixBits: 15 },
   { reason: "documentation", bytes: v4(198, 51, 100, 0), prefixBits: 24 },
@@ -181,15 +183,18 @@ const IPV4_DENY: Range[] = [
 ];
 
 /**
- * Addresses that serve instance credentials.
+ * Addresses that serve instance credentials or platform control.
  *
- * Checked before the range table purely so the denial says *why* it matters.
- * Every one of these is already inside a denied range.
+ * Checked before the range table so the denial says *why* it matters. All but
+ * one are already inside a denied range; Azure's WireServer is the exception
+ * (Phase 19.3): 168.63.129.16 is publicly routable, so no range catches it,
+ * yet from inside an Azure VM it answers the platform's own agent.
  */
 const METADATA_V4: number[][] = [
   v4(169, 254, 169, 254), // AWS IMDS, GCP, Azure, DigitalOcean, Oracle, Alibaba
   v4(169, 254, 170, 2), // AWS ECS task metadata
   v4(100, 100, 100, 200), // Alibaba Cloud
+  v4(168, 63, 129, 16), // Azure WireServer
 ];
 
 const g = (...groups: number[]): number[] => {
@@ -201,11 +206,32 @@ const g = (...groups: number[]): number[] => {
 
 const IPV6_DENY: Range[] = [
   { reason: "unspecified", bytes: g(0), prefixBits: 128 },
+  // ::ffff:0:a.b.c.d — IPv4-translated (RFC 2765); never a site of its own.
+  { reason: "reserved", bytes: g(0, 0, 0, 0, 0xffff, 0), prefixBits: 96 },
+  // 64:ff9b:1::/48 — local-use NAT64 (RFC 8215). Unlike the well-known
+  // 64:ff9b::/96 it has no fixed place for the IPv4 address to unwrap from.
+  { reason: "reserved", bytes: g(0x64, 0xff9b, 0x1), prefixBits: 48 },
   // 100::/64 — the discard-only prefix.
   { reason: "reserved", bytes: g(0x100), prefixBits: 64 },
+  // 2001::/32 — Teredo. The IPv4 server and client inside are obfuscated, so
+  // the classifier could not judge where the tunnel ends; refused outright.
+  { reason: "reserved", bytes: g(0x2001, 0x0000), prefixBits: 32 },
+  { reason: "benchmarking", bytes: g(0x2001, 0x0002, 0x0000), prefixBits: 48 },
+  // 2001:10::/28 and 2001:20::/28 — ORCHID and ORCHIDv2: identifiers, not routes.
+  { reason: "reserved", bytes: g(0x2001, 0x0010), prefixBits: 28 },
+  { reason: "reserved", bytes: g(0x2001, 0x0020), prefixBits: 28 },
   { reason: "documentation", bytes: g(0x2001, 0x0db8), prefixBits: 32 },
+  // 2002::/16 — 6to4 (deprecated by RFC 7526). It carries an IPv4 destination
+  // a relay would decide on; refused rather than trusting that relay.
+  { reason: "reserved", bytes: g(0x2002), prefixBits: 16 },
+  // 3fff::/20 — documentation (RFC 9637).
+  { reason: "documentation", bytes: g(0x3fff), prefixBits: 20 },
+  // 5f00::/16 — SRv6 segment identifiers (RFC 9602).
+  { reason: "reserved", bytes: g(0x5f00), prefixBits: 16 },
   { reason: "private", bytes: g(0xfc00), prefixBits: 7 },
   { reason: "link-local", bytes: g(0xfe80), prefixBits: 10 },
+  // fec0::/10 — site-local, deprecated (RFC 3879) but still a private scope.
+  { reason: "private", bytes: g(0xfec0), prefixBits: 10 },
   { reason: "multicast", bytes: g(0xff00), prefixBits: 8 },
 ];
 

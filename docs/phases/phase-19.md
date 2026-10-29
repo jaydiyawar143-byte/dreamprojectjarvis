@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| Status | Owner-approved architecture. **Stage 19.1 implemented and merged** (PR #14, merge commit `473bda0`, 2026-10-28). **Stage 19.2 implemented in the working tree, not committed, and not complete** — see §14. |
+| Status | Owner-approved architecture. **Stage 19.1 implemented and merged** (PR #14, merge commit `473bda0`, 2026-10-28). **Stage 19.2 committed** (`863e4d3` on `feat/computer-control-phase-19-2`, pushed, not merged) **and not complete** — see §14. **Stage 19.3 (browser egress) implemented in the working tree, not committed, not verified in a container** — see §15. |
 | Date | 2026-10-23 (architecture); §13 added 2026-10-28; §14 added 2026-10-28; §14.11 (audit remediation) added 2026-10-28 |
 | Branch inspected | `feat/automation-engine-phase-18` @ `435c39f8` |
 | Phase 18 merge state | **Not merged** at the time of writing (`main` was `1fd1bb0e`, the Phase 17 merge). **Merged since:** PR #12 (2026-10-21) and PR #13 (2026-10-22), read from GitHub on 2026-10-28. |
@@ -632,7 +632,7 @@ Test evidence for 19.1 is in the commit and in CI's
 
 ---
 
-## 14. Stage 19.2 implementation record (working tree, not committed)
+## 14. Stage 19.2 implementation record (committed `863e4d3`, not merged)
 
 **Status: implemented in the working tree; NOT complete; NOT committed; NOT
 deployed.** The service skeleton, the authenticated transport, the image, the
@@ -853,7 +853,7 @@ performs an external write. The service tests use a real HTTP server on
 
 | Deferred | Why, and where it is tracked |
 |---|---|
-| **Default-deny network egress** | Owner decision (2026-10-28): the egress proxy is Stage 19.3, not 19.2. The service has ordinary outbound access today, is off by default, and must not be described as egress-filtered. ADR-19-008 remains the requirement; S4 is **not** met. |
+| **Default-deny network egress** | Owner decision (2026-10-28): the egress proxy is Stage 19.3, not 19.2. The service has ordinary outbound access today, is off by default, and must not be described as egress-filtered. ADR-19-008 remains the requirement; S4 is **not** met. *(2026-10-29: implemented in the working tree by Stage 19.3 — §15. Not yet verified in a container, so S4 is still not claimed.)* |
 | **Certificate lifetime, rotation, revocation (U2)** | **Unresolved.** Not invented and not implemented. The service and the API accept certificate/key/CA paths and refuse to start or send without them; nothing generates, rotates, revokes or distributes a certificate, there is no CRL or OCSP check, and a certificate is read again only when a process restarts (the API's client re-reads its files per request). Lifetimes, a rotation cadence and a revocation path are an owner decision; until it is made, certificates are a manual deployment concern and a compromised client certificate stays valid until its CA is replaced. |
 | **A shared nonce store across instances, and across restarts** | `ProcessNonceStore` is per process. Two browser-service replicas would each accept the same nonce once, and a restarted process forgets the nonces it saw, so a request captured within its clock-skew window (60 s default) could be accepted once more. The compose service runs one replica (`container_name`, no scaling); a shared store is a Stage 19.7 concern with the rest of the network hardening. |
 | **Pinned Chromium** | The image installs Alpine's `chromium`, which a rebuild can change. Version pinning and a signed package source are open. |
@@ -1147,3 +1147,112 @@ its Dockerfile comments and its service test;
 `docker-compose.yml`; `.env.example`; `.github/workflows/ci.yml` (the
 browser-service step's comment only — its selections already match the new
 files); `docs/DEPLOYMENT.md`; `docs/DEVELOPMENT.md`; this file.
+
+---
+
+## 15. Stage 19.3 implementation record — browser egress (working tree, not committed)
+
+**Status: implemented in the working tree; NOT committed; NOT verified in a
+container.** Docker was not available on the machine used, so the network
+layer below is declared and tested as configuration, and the application layer
+is tested with a real Chromium offline — but nothing here has run inside the
+compose stack. S4 is not claimed until S11 passes there (§15.6).
+
+### 15.1 Three layers, each standing on its own
+
+| Layer | Where | Enforces |
+|---|---|---|
+| Network | `docker-compose.yml` | `browser` is `internal: true`. The browser container is on it alone; `browser-egress` is the only service on both it and the outbound `browser-egress` network; PostgreSQL and the web app are on `default` only; the API keeps `default` and joins `browser` to reach the service. |
+| Proxy | `apps/browser-service/src/egress/` (same image, `node apps/browser-service/dist/egress/main.js`) | Every request the browser makes is judged here, one at a time, and connected to the address that was judged. |
+| Browser | `apps/browser-service/src/engine.ts` | Playwright's `proxy: { server }` for everything (it adds `<-loopback>`, so loopback is proxied too); `--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE <proxy host>`, so Chromium resolves nothing itself; `--force-webrtc-ip-handling-policy=disable_non_proxied_udp`. The launch options refuse any switch that would bypass the proxy. |
+
+The in-service navigation policy still runs every rule — schemes, ports,
+credentials, the domain allowlist, and literal addresses — but no longer
+resolves host names (`addressCheck: "literal-only"`): the browser container
+cannot resolve external names behind an internal network, and a second,
+unpinned resolution could not stop rebinding anyway. The proxy is the resolver,
+and its answer is the one used.
+
+### 15.2 The egress policy (`egress/policy.ts`)
+
+In order: the target is canonicalised by the WHATWG URL parser (so `0x7f.1`,
+`2130706433`, `0177.0.0.1`, `127.1` and `%31%32%37.0.0.1` are judged as
+`127.0.0.1`); the port must be allowed (80 and 443 by default); an IP literal is
+judged by `ip-rules`; a name is judged by `host-rules`; the optional domain
+allowlist; then the name is resolved and EVERY answer must be public. The
+decision names the one address to dial.
+
+`ip-rules` (`@jarvis/browser`) gained, for every caller: 6to4 `2002::/16`,
+Teredo `2001::/32`, local-use NAT64 `64:ff9b:1::/48`, IPv4-translated
+`::ffff:0:0:0/96`, ORCHID, IPv6 benchmarking, `3fff::/20`, `5f00::/16`,
+site-local `fec0::/10`, the 6to4 relay `192.88.99.0/24`, and Azure's
+publicly-routable WireServer `168.63.129.16` as cloud metadata.
+
+`host-rules` (`@jarvis/browser`, new) refuses, before any resolver is asked:
+single-label names (container names such as `postgres`, `api`, `metadata`),
+special-use names (`.localhost`, `.local`, `.internal`, `.home.arpa`, `.onion`,
+`.test`, `.invalid`, `.example`, `.localdomain`), and the GCP and AWS metadata
+names. It is applied by the egress proxy only — not by the shared navigation
+policy, whose page-research tests use `.example` and `.test` names.
+
+Fail closed: an unparsable target, a resolver error or timeout, and an empty
+answer are refusals. The configuration (`egress/config.ts`) is refused at start
+when unusable, and its allowlist may only list public domain names. No setting
+opens a private or metadata destination.
+
+### 15.3 The proxy (`egress/proxy.ts`)
+
+`CONNECT host:port` for HTTPS and WebSockets, tunnelled to the judged address;
+absolute-form `http://` requests forwarded to the judged address with its own
+`Host` header and the hop-by-hop and `Proxy-*` headers removed. A redirect is
+passed back and never followed: the browser's next request is judged on its
+own. Origin-form requests, `https://` absolute URLs and plain Upgrades are
+refused. A connection ceiling, connect and idle timeouts, and a loopback-only
+health listener on 3129 (as the service's, Stage 19.2 M1). One log line per
+refusal — reason, host, port; never a path, query, header or body.
+
+### 15.4 Fail closed
+
+- `BROWSER_SERVICE_CHROMIUM_ENABLED=true` without `BROWSER_SERVICE_EGRESS_PROXY_URL`
+  refuses to start (`config.ts`), and `createBrowserEngine` refuses again for a
+  config built any other way.
+- Compose starts the browser service only once the proxy is healthy.
+- Chromium given a proxy never falls back to a direct connection; a proxy that
+  is down fails the request.
+- The internal network leaves no other route even if all of the above failed —
+  **as declared; not yet verified on a running host.**
+
+### 15.5 Preserved
+
+Mutual TLS, the tenant binding, the executor grants, `UNKNOWN` write outcomes,
+`chromiumSandbox: true` and the authenticated health check are unchanged; their
+suites pass unchanged except for the new `egressProxy` field in two fixtures.
+
+### 15.6 Evidence (2026-10-29, Windows, working tree)
+
+| Check | Result |
+|---|---|
+| `@jarvis/browser-service` (whole) | **172 passed** (100 of them the new egress suite) |
+| `@jarvis/browser` (whole) | **312 passed** |
+| `turbo run build typecheck typecheck:tests lint --force --filter=...@jarvis/browser` | 28/28 tasks |
+| Every workspace, no database (`pnpm test -- --force --continue`, 22 workspaces) | 10,975 passed, 3 failed, 668 skipped. The skips are the database suites; the 3 failures are the MCP timeout tests of phase-15.md §15, as in every recent run on this machine |
+| Mutations: drop the host-name rules; judge only the first DNS answer; dial the requested host instead of the judged address; `internal: false`; drop the resolver lock | each caught (7, 1, 4, 1 and 2 failing tests); restored byte-identical |
+| S11 local — real Chrome 156, offline, the service's launch options, the proxy in-process with DNS and dialling replaced | **12 passed, 0 failed**: an allowed name loads; its `<img>` to the metadata address, its `fetch` to a privately resolving name and its `fetch` to `127.0.0.1` all went to the proxy and were refused; HTTPS to a private name failed at CONNECT; the proxy dialled only the judged address; the command line carries the proxy, the resolver lock and `<-loopback>` |
+| S10 — the sandbox check with the new options | 5 passed, 0 failed (Windows) |
+| S11 container mode — no direct route from the browser container (public address, metadata, PostgreSQL, the host's published ports on the default and the internal bridge gateways) | **Not run** — Docker was not running. **Unverified.** |
+| Image build, and the egress proxy as a container | **Not run.** **Unverified.** |
+
+What S11 local does not prove: that the resolver lock prevents a resolution
+(it checks the flag is on Chromium's command line; with a proxy, Chromium
+does not resolve destinations anyway), and anything about the network layer.
+
+### 15.7 Not done, and why
+
+| Not done | Why |
+|---|---|
+| Verification in a container | Docker unavailable. S11 `--container` is the check; until it passes on the deployment host, S4 is not met. |
+| Whether Docker's internal network blocks the host's own bridge address | Depends on the Docker version and its firewall rules; S11 `--container` probes the gateway of the container's own subnet for the published PostgreSQL and API ports. |
+| Proxy authentication | The proxy is reachable only on the internal `browser` network, by the browser service and the API. It also listens on its outbound network's interface (`0.0.0.0`), where only the host's bridge could reach it. |
+| UDP egress | Not proxied. WebRTC is held to the proxy; the internal network carries no other route. A UDP path out would only exist if the network layer failed. |
+| Per-request DNS caching | None: every request is resolved and judged again, which is what defeats rebinding. A slow resolver slows browsing; `BROWSER_EGRESS_DNS_TIMEOUT_MS` bounds it. |
+| HTTP/3 (QUIC) | Not reachable through an HTTP proxy; Chromium uses TCP through it. |

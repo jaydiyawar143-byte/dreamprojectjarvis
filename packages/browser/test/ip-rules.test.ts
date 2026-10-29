@@ -200,3 +200,34 @@ describe("Sprint 7.5 — fails closed", () => {
     expect(isPublicAddress(value)).toBe(false);
   });
 });
+
+describe("Phase 19.3 — ranges added for browser egress", () => {
+  const cases: Array<[string, string, BlockReason]> = [
+    ["Azure WireServer (publicly routable)", "168.63.129.16", "cloud-metadata"],
+    ["6to4 relay anycast", "192.88.99.1", "reserved"],
+    ["6to4 wrapping loopback", "2002:7f00:1::", "reserved"],
+    ["6to4 wrapping a public address", "2002:808:808::1", "reserved"],
+    ["Teredo", "2001:0:4136:e378:8000:63bf:3fff:fdd2", "reserved"],
+    ["local-use NAT64", "64:ff9b:1::a00:1", "reserved"],
+    ["IPv4-translated", "::ffff:0:7f00:1", "reserved"],
+    ["IPv6 benchmarking", "2001:2::1", "benchmarking"],
+    ["ORCHID", "2001:10::1", "reserved"],
+    ["ORCHIDv2", "2001:20::1", "reserved"],
+    ["IPv6 documentation 3fff::/20", "3fff::1", "documentation"],
+    ["SRv6 SIDs", "5f00::1", "reserved"],
+    ["site-local (deprecated)", "fec0::1", "private"],
+  ];
+
+  it.each(cases)("BLOCKS %s (%s)", (_label, address, reason) => {
+    expect(isBlockedAddress(address)).toBe(reason);
+  });
+
+  it.each([
+    ["public IPv6 next to Teredo", "2001:4860:4860::8888"],
+    ["public IPv6 next to 6to4", "2003::1"],
+    ["public IPv4 next to the 6to4 relay", "192.88.100.1"],
+    ["public IPv4 next to Azure WireServer", "168.63.129.17"],
+  ])("still ALLOWS %s (%s)", (_label, address) => {
+    expect(isBlockedAddress(address)).toBeNull();
+  });
+});

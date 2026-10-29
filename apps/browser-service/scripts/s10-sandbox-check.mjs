@@ -76,12 +76,18 @@ if (!chromePath) {
 const results = [];
 const record = (name, pass, detail) => results.push({ name, pass, detail });
 
-const options = sandboxedChromiumLaunchOptions({ chromePath, headless: true });
+// The service's own options, with its egress proxy pointed at the closed
+// local port: the same flags as production, and still nothing leaves.
+const options = sandboxedChromiumLaunchOptions({
+  chromePath,
+  headless: true,
+  egressProxy: { url: OFFLINE.server, host: "127.0.0.1" },
+});
 record("the service's launch options set chromiumSandbox: true", options.chromiumSandbox === true);
 
 let browser;
 try {
-  browser = await chromium.launch({ ...options, proxy: OFFLINE });
+  browser = await chromium.launch(options);
 } catch (error) {
   const first = error instanceof Error ? error.message.split("\n")[0] : "launch failed";
   record("Chromium starts with its sandbox on this host", false, first);
