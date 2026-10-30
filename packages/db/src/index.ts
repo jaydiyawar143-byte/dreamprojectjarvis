@@ -17,6 +17,7 @@ if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = prisma;
 
 export * from "@prisma/client";
 export {
+  ApprovalParamsSealingUnavailableError,
   PrismaApprovalRepository,
   SharedConnectionOwnerUnavailableError,
   type ApprovalForDecision,

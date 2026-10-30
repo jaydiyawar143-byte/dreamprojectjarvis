@@ -264,11 +264,19 @@ jobs:
       # `sprint7-browser-tools` holds the browser tools' 19.1 behaviour — atomic
       # single-use consumption with the Organization's scope, and the strict
       # request contract — so it is selected here too.
-      - name: Test computer-control contracts (@jarvis/core, @jarvis/tools)
+      #
+      # Phase 19.5 adds the value-free approval record and the UNKNOWN answers
+      # (core and tools, same names) and the chat's confirmation message for a
+      # browser or desktop action (`computer-control` in @jarvis/agents, which
+      # CI does not run as a whole). The sealed parameters are proven against
+      # PostgreSQL in the database steps below (@jarvis/db as a whole, and
+      # `computer-control-sealed-approval-p19-pg` in @jarvis/api).
+      - name: Test computer-control contracts (@jarvis/core, @jarvis/tools, @jarvis/agents)
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: |
           pnpm --filter @jarvis/core exec vitest run computer-control
           pnpm --filter @jarvis/tools exec vitest run computer-control sprint7-browser-tools
+          pnpm --filter @jarvis/agents exec vitest run computer-control
 
       # Phase 19, Stage 19.2 — the isolated browser service. The protocol
       # workspace holds the versioned envelope, the signing and replay rules,

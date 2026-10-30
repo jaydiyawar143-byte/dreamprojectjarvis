@@ -83,6 +83,17 @@ collapse `connection` (is it set up?) into `health` (does it work?).
 - The encryption key lives only in
   [`apps/api/src/services/integrations/build.ts`](apps/api/src/services/integrations/build.ts);
   the command service receives a `CredentialPort` and has no key at all.
+- **A browser or desktop approval keeps nothing that was typed (Phase 19.5,
+  S3).** Its `Approval.params` hold only the value-free record — action,
+  summary, origin, field names and counts — the same projection the audit row
+  keeps (`computerControlValueFreeParams` in core). The exact parameters are
+  sealed (`EncryptionService`, through the `ApprovalParamsSealer` port the API
+  builds in `approval-sealer.ts`) in `ApprovalSealedParams`, read back only
+  when they hash to the approval's `paramsHash`, and deleted when the
+  approval is rejected, consumed or expired. With no key, no such approval is
+  created and the browser write tools are not registered. Never store them in
+  the clear as a fallback, and never read `ApprovalSealedParams` outside the
+  approval store.
 
 ### External writes
 
@@ -559,7 +570,8 @@ slices of them are gated by **file name**: the memory contracts, the marketing
 contracts, the shared-connection contracts (`shared-connection*` in `tools` and
 `agents`), the Automation Library's rules (`automation-library*` in `core`,
 `tools` and `agents`), since Phase 19.1 the computer-control contracts
-(`computer-control*` in `core` and `tools`, and `sprint7-browser-tools`), the
+(`computer-control*` in `core` and `tools`, and `sprint7-browser-tools`; since
+Phase 19.5 also in `agents`), the
 Meta Ads write contracts (`meta-ads*` and three journal suites in `tools`) and
 the tool-execution boundary pins (`mcp-boundaries-s8`, `mcp-tools-boundaries-s8`),
 and since Phase 19.2 the browser-service contracts (`browser-service*` in

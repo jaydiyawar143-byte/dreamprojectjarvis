@@ -210,6 +210,7 @@ import {
 } from "./tenancy/shared-connection-access.js";
 import { createOrganizationMetaAuthorizer, metaAccountFor } from "./tenancy/meta-ads-access.js";
 import { errorMonitor, operationalLog } from "./observability/index.js";
+import { createApprovalParamsSealer } from "./approval-sealer.js";
 import { mcpToolUnavailable } from "./integration-registry.js";
 import { libraryInstanceKey, type LibraryPageSource, type LibraryTriggerTargetSource } from "@jarvis/core";
 import { AutomationLibraryService, LIBRARY_SYNC_BUDGETS } from "./automation-library/library-service.js";
@@ -629,12 +630,27 @@ function createMetaToolRegistry(
    * Phase 17 (H2) — who may use the deployment's Meta connection. Every Meta
    * tool's account authorizer asks it, on every call.
    */
-  sharedAccess: SharedConnectionAccessPort
+  sharedAccess: SharedConnectionAccessPort,
+  /**
+   * Phase 19.5 (S3) — whether a browser write's approval can keep what was
+   * typed out of its record (the approval store has a sealer). Without it the
+   * write tools are not registered: the store would refuse every one of their
+   * approvals, and a tool that can never run is not offered.
+   */
+  browserWritesSealed: boolean
 ): ToolRegistry {
   const registry = new ToolRegistry();
   // Phase 19.1 — the browser tools resolve the owning Organization through the
   // same reader as every other shared connection, on every approved write.
   const browserWriteScope = createBrowserWriteScopeResolver(sharedAccess);
+  // Phase 19.5 — said once, wherever the browser runs: reads are offered,
+  // writes are not, and why.
+  const logBrowserWritesUnavailable = () =>
+    console.log(JSON.stringify({
+      level: "warn",
+      event: "browser_writes_unavailable",
+      reason: "JARVIS_ENCRYPTION_KEY is not set or not valid; a browser write's approval cannot keep what is typed out of its record, so only the read tools are registered",
+    }));
   const metaAccessToken = process.env.META_ACCESS_TOKEN;
   const metaAccountId = process.env.META_AD_ACCOUNT_ID;
 
@@ -872,9 +888,12 @@ function createMetaToolRegistry(
       _browserRuntime = runtime;
 
       const browserJournal = new PrismaToolExecutionRepository(prisma);
-      for (const tool of createBrowserTools(runtime, browserJournal, approvalConsumption, browserWriteScope)) {
+      // Phase 19.5 — the write tools only where their approvals can be sealed.
+      for (const tool of createBrowserTools(runtime, browserJournal, approvalConsumption, browserWriteScope)
+        .filter((tool) => browserWritesSealed || !tool.requiresApproval)) {
         registry.register(tool);
       }
+      if (!browserWritesSealed) logBrowserWritesUnavailable();
 
       console.log(JSON.stringify({
         level: "info",
@@ -924,9 +943,12 @@ function createMetaToolRegistry(
       ).unref();
 
       const browserJournal = new PrismaToolExecutionRepository(prisma);
-      for (const tool of createBrowserTools(runtime, browserJournal, approvalConsumption, browserWriteScope)) {
+      // Phase 19.5 — the write tools only where their approvals can be sealed.
+      for (const tool of createBrowserTools(runtime, browserJournal, approvalConsumption, browserWriteScope)
+        .filter((tool) => browserWritesSealed || !tool.requiresApproval)) {
         registry.register(tool);
       }
+      if (!browserWritesSealed) logBrowserWritesUnavailable();
 
       console.log(JSON.stringify({
         level: "info",
@@ -1230,8 +1252,22 @@ export function getContainer(options?: {
 
   const permissionService = new PermissionService();
   // PHASE 10.7 — real durable approval store replaces the Phase-0 noop repo.
-  const approvalRepo = new PrismaApprovalRepository(prisma);
+  // Phase 19.5 (S3) — with the sealer, a browser or desktop approval keeps
+  // only its value-free record; its exact parameters are sealed with the
+  // deployment's key and deleted once it can no longer run. Without a key
+  // there is no sealer, no such approval is ever created, and the browser
+  // write tools are not registered (below).
+  const approvalSealer = createApprovalParamsSealer();
+  const approvalRepo = new PrismaApprovalRepository(prisma, approvalSealer ? { sealer: approvalSealer } : {});
   const approvalService = new ApprovalService(approvalRepo);
+  // What rejected, consumed or expired approvals left sealed is deleted at
+  // start-up and then on an interval; one left behind is unreadable without
+  // the key and can never run, whether or not this has run.
+  const approvalLog = operationalLog.child("approvals");
+  const purgeSealedParams = () =>
+    void approvalRepo.purgeExpiredSealedParams().catch(() => approvalLog.warn("approval_sealed_params_purge_failed"));
+  purgeSealedParams();
+  setInterval(purgeSealedParams, 10 * 60_000).unref();
 
   // Phase 17 — tenant READS, and the one answer to who may use a connection
   // the deployment configures for everyone. Built first: the integration
@@ -1373,7 +1409,8 @@ export function getContainer(options?: {
     googleWriteService,
     taskService,
     { describe: (userId) => selfKnowledgeService.describe(userId) },
-    sharedAccess
+    sharedAccess,
+    approvalSealer !== null
   );
   registryRef.current = toolRegistry;
 

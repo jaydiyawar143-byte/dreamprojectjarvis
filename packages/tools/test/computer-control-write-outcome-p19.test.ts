@@ -21,7 +21,7 @@ import type {
   IApprovalConsumptionPort,
   ToolContext,
 } from "@jarvis/core";
-import { computeParamsHash } from "@jarvis/core";
+import { COMPUTER_CONTROL_ALREADY_UNKNOWN_MESSAGE, computeParamsHash } from "@jarvis/core";
 import { MemoryExecutionJournal } from "../src/execution-journal.js";
 import { issueExecutionGrant } from "../src/execution-grant.js";
 import { BrowserClickTool, BrowserSubmitTool } from "../src/tools/browser-tools.js";
@@ -147,7 +147,8 @@ describe("a failure after the action was sent is UNKNOWN, and is never sent agai
     const actionsBefore = runtime.session.actions;
     const openedBefore = runtime.opened;
     const retry = await tool.execute(SUBMIT, ctx("browser.submit", SUBMIT, "approval-2"));
-    expect(retry).toMatchObject({ success: false, error: "Execution already unknown" });
+    // Phase 19.5: the refusal says why (was "Execution already unknown").
+    expect(retry).toMatchObject({ success: false, error: COMPUTER_CONTROL_ALREADY_UNKNOWN_MESSAGE });
     expect(runtime.session.actions).toBe(actionsBefore);
     expect(runtime.opened).toBe(openedBefore);
   });
@@ -237,7 +238,8 @@ describe("a remote write that may have reached the site is UNKNOWN, and is never
     const actionsBefore = runtime.session.actions;
     const openedBefore = runtime.opened;
     const retry = await tool.execute(SUBMIT, ctx("browser.submit", SUBMIT, "approval-2"));
-    expect(retry).toMatchObject({ success: false, error: "Execution already unknown" });
+    // Phase 19.5: the refusal says why (was "Execution already unknown").
+    expect(retry).toMatchObject({ success: false, error: COMPUTER_CONTROL_ALREADY_UNKNOWN_MESSAGE });
     expect(runtime.session.actions).toBe(actionsBefore);
     expect(runtime.opened).toBe(openedBefore);
   });

@@ -25,6 +25,8 @@ import {
   BrowserSelectorSchema,
   BrowserInputTextSchema,
   BLOCKED_STATUSES,
+  COMPUTER_CONTROL_ALREADY_UNKNOWN_MESSAGE,
+  COMPUTER_CONTROL_OUTCOME_UNKNOWN_MESSAGE,
   computeParamsHash,
   parseComputerControlRequest,
   untrustedContentMetadata,
@@ -510,18 +512,35 @@ abstract class BaseBrowserWriteTool extends BaseBrowserTool {
     } catch {
       return { ok: false, error: "Execution journal unavailable" };
     }
+    // Phase 19.5 — an earlier attempt whose outcome is unknown: refused with
+    // the reason, before any session opens or the new approval is spent.
+    if (record.status === "UNKNOWN") return { ok: false, error: COMPUTER_CONTROL_ALREADY_UNKNOWN_MESSAGE };
     if (BLOCKED_STATUSES.has(record.status)) {
       return { ok: false, error: `Execution already ${record.status.toLowerCase()}` };
     }
     return { ok: true, executionId: record.executionId };
   }
 
+  /**
+   * Phase 19.5 (S8) — the answer to a write that may have reached the site:
+   * one fixed sentence in both modes, never the browser's own words (which
+   * read as an ordinary failure), with the outcome and the execution beside it.
+   */
+  private unknownOutcome(executionId: string): ToolResult {
+    return {
+      success: false,
+      error: COMPUTER_CONTROL_OUTCOME_UNKNOWN_MESSAGE,
+      metadata: { toolId: this.id, outcome: "unknown", executionId },
+    };
+  }
+
+  /** Records the failure in the journal; returns the status it decided on. */
   protected async recordJournalError(
     executionId: string,
     error: unknown,
     fallback: string,
     cause?: unknown
-  ): Promise<void> {
+  ): Promise<"UNKNOWN" | "FAILED"> {
     // What is stored is unchanged (an Error's message, or the fixed fallback);
     // the browser's own text is consulted only to classify the outcome.
     const message = error instanceof Error ? error.message : fallback;
@@ -537,7 +556,7 @@ abstract class BaseBrowserWriteTool extends BaseBrowserTool {
     // FAILED.
     if (BROWSER_POST_ACTION_FAILURES.some((pattern) => pattern.test(detail))) {
       await this.journal.markUnknown(executionId, { code: TIMEOUT_ERROR_CODES.AMBIGUOUS_OUTCOME, message });
-      return;
+      return "UNKNOWN";
     }
     // Stage 19.2 audit (H2): a remote browser failure carries its own answer
     // — sent or not, and whether the action may have happened — and is
@@ -550,6 +569,7 @@ abstract class BaseBrowserWriteTool extends BaseBrowserTool {
     } else {
       await this.journal.markFailed(executionId, { code: classification.code, message });
     }
+    return classification.status;
   }
 
   /**
@@ -589,7 +609,8 @@ abstract class BaseBrowserWriteTool extends BaseBrowserTool {
 
     const outcome = await this.inSession(context, run);
     if (!outcome.ok) {
-      await this.recordJournalError(ensured.executionId, outcome.error, failureLabel, outcome.cause);
+      const status = await this.recordJournalError(ensured.executionId, outcome.error, failureLabel, outcome.cause);
+      if (status === "UNKNOWN") return this.unknownOutcome(ensured.executionId);
       return this.failure(outcome.error);
     }
 

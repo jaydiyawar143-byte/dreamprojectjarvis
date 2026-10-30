@@ -16,6 +16,7 @@
 
 import {
   BrowserServiceClient,
+  BROWSER_SERVICE_ERROR_MESSAGES,
   BrowserServiceTransportError,
   RemoteBrowserRuntime,
   failureEnvelope,
@@ -26,6 +27,8 @@ import {
 } from "@jarvis/browser-protocol";
 import {
   BROWSER_TOOL_IDS,
+  COMPUTER_CONTROL_ALREADY_UNKNOWN_MESSAGE,
+  COMPUTER_CONTROL_OUTCOME_UNKNOWN_MESSAGE,
   computeParamsHash,
   type Approval,
   type AuditLogger,
@@ -286,6 +289,9 @@ describe("a remote submit whose outcome cannot be proven is UNKNOWN, and a new a
     // The person is told the outcome is unknown — not that the service was
     // unavailable, which would read as "nothing happened".
     expect(first.error).toContain("The outcome of the action is unknown");
+    // Phase 19.5 — the same sentence the in-process browser now gives.
+    expect(first.error).toBe(COMPUTER_CONTROL_OUTCOME_UNKNOWN_MESSAGE);
+    expect(BROWSER_SERVICE_ERROR_MESSAGES.UNKNOWN_OUTCOME).toBe(COMPUTER_CONTROL_OUTCOME_UNKNOWN_MESSAGE);
 
     const row = await journalRow();
     expect(row.status).toBe("UNKNOWN");
@@ -298,7 +304,8 @@ describe("a remote submit whose outcome cannot be proven is UNKNOWN, and a new a
     const second = await submitWith("apr-2");
 
     expect(second.status).toBe("failed");
-    expect(second.error).toContain("Execution already unknown");
+    // Phase 19.5: the refusal says why (was "Execution already unknown").
+    expect(second.error).toBe(COMPUTER_CONTROL_ALREADY_UNKNOWN_MESSAGE);
     // Nothing reached the site, no browser session was opened, and the new
     // approval was not spent on a submit that never ran.
     expect(site.submits).toBe(1);

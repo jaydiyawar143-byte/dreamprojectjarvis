@@ -4,8 +4,8 @@
 
 | | |
 |---|---|
-| Status | Owner-approved architecture. **Stage 19.1 implemented and merged** (PR #14, merge commit `473bda0`, 2026-10-28). **Stage 19.2 merged** (PR #15, `863e4d3`) — see §14. **Stage 19.3 (browser egress) merged** (PR #16, `1592764`, merge `b4d3209`), **not verified in a container** — see §15. **Stage 19.4 (durable, scoped artifact storage) implemented in the working tree, not committed, not verified in a container** — see §16. The headings of §14 and §15 record each stage's state when it was written. |
-| Date | 2026-10-23 (architecture); §13 added 2026-10-28; §14 added 2026-10-28; §14.11 (audit remediation) added 2026-10-28; §15 added 2026-10-29; §16 added 2026-10-29 |
+| Status | Owner-approved architecture. **Stage 19.1 implemented and merged** (PR #14, merge commit `473bda0`, 2026-10-28). **Stage 19.2 merged** (PR #15, `863e4d3`) — see §14. **Stage 19.3 (browser egress) merged** (PR #16, `1592764`, merge `b4d3209`), **not verified in a container** — see §15. **Stage 19.4 (durable, scoped artifact storage) merged** (PR #17, merge `3707e09`), verified in a container on 2026-10-30 — see §16. **Stage 19.5 (value-free approval records, meaningful approval summaries, `UNKNOWN` answers) implemented in the working tree on `feat/browser-audit-phase-19-5`, not committed** — see §17. The headings of §14, §15 and §16 record each stage's state when it was written. |
+| Date | 2026-10-23 (architecture); §13 added 2026-10-28; §14 added 2026-10-28; §14.11 (audit remediation) added 2026-10-28; §15 added 2026-10-29; §16 added 2026-10-29; §17 added 2026-10-30 |
 | Branch inspected | `feat/automation-engine-phase-18` @ `435c39f8` |
 | Phase 18 merge state | **Not merged** at the time of writing (`main` was `1fd1bb0e`, the Phase 17 merge). **Merged since:** PR #12 (2026-10-21) and PR #13 (2026-10-22), read from GitHub on 2026-10-28. |
 | Scope of this stage | Documentation and validation only |
@@ -1436,3 +1436,178 @@ Not covered by the container check: a real browser session writing an
 artifact through the service — that needs a signed mutual-TLS client and the
 egress proxy reaching a site. The store was driven directly instead: the same
 compiled code, user and volume.
+
+---
+
+## 17. Stage 19.5 implementation record — value-free approval records, meaningful approval summaries, `UNKNOWN` answers (working tree, not committed)
+
+**Status: implemented in the working tree on `feat/browser-audit-phase-19-5`,
+branched from `origin/main` at `3707e09` (the PR #17 merge); NOT committed.**
+One additive migration.
+
+### 17.1 The brief against this record
+
+The plan's row for 19.5 (§8) is "Value-free audit, meaningful approval
+summaries, and `UNKNOWN` outcome handling", with the exit gate "Redaction and
+unknown-outcome tests pass; nothing is auto-retried". It answers findings F3
+and F4 (§4) and gates S3 and S8 (§7). Stages 19.1 and 19.2 had already done part
+of it; what remained was found by reading the code, not assumed:
+
+| Requirement | Already true before 19.5 | Gap found | Closed by |
+|---|---|---|---|
+| S3 / F3 — audit rows | Both audit writers keep only the value-free projection for a browser or desktop action (19.1) | None | Unchanged; the projection moved to core (`computerControlValueFreeParams`) so the approval record shares it |
+| S3 / F3 — approval records | — | **G1.** `Approval.params` held a browser write's exact parameters: the text typed, the option chosen, every submitted value, and the URL with its query. The chat's pending action is read from that row, so it was the source of what runs | §17.2 |
+| F4 — summaries on the Approvals page | Value-free browser and desktop summaries (19.1) | **G2.** Once an approval's parameters are sealed away (§17.2), a rejected, consumed or expired approval would have nothing to summarize from | The summary is read from the stored record |
+| F4 — summaries in the chat | The chat card carried no parameters for a browser action (19.1, C1) | **G3.** The confirmation message — the sentence a person confirms in the chat, stored with the conversation — named only the tool: no site, no field | §17.3 |
+| S8 — `UNKNOWN` recorded, never retried | Recorded `UNKNOWN` locally (19.1) and remotely (19.2, H2); a repeat is refused | **G4.** In the API process, an unknown outcome was answered with the browser's own error ("Action failed: Browser action aborted"), which reads as a failure to ask again for. **G5.** The repeat was refused as "Execution already unknown" | §17.4 |
+
+### 17.2 Value-free approval records (G1, G2)
+
+- **What the record keeps.** For a browser or desktop action, `Approval.params`
+  holds `{ withheld: "computer-control/v1", action, summary, targetResource,
+  details }`. It is the same projection as the audit row: the action, the fixed
+  summary sentence, the origin, field names and counts (`computerControlApprovalRecord`
+  in `@jarvis/core`). A request that does not parse keeps only its action and
+  the refusal code.
+- **What is sealed.** The exact parameters, encrypted by the API's
+  `EncryptionService` (AES-256-GCM envelopes, key version, retired keys) behind
+  core's `ApprovalParamsSealer` port (`apps/api/src/services/approval-sealer.ts`).
+  They sit in the new `ApprovalSealedParams` table, written in the same insert
+  as the approval. Nothing outside `PrismaApprovalRepository` reads it.
+- **The binding does not change.** `paramsHash` is still the hash of the exact
+  parameters. Every read hands back the exact parameters only when they unseal
+  and hash to it; otherwise it hands back the record. The record never hashes
+  to an approval's `paramsHash`, so it can never run. That covers no key,
+  another key, a sealed copy moved from another approval, and parameters
+  already deleted. Confirming, the Approvals page's integrity check, the
+  executor's match and the store's single-use consumption therefore work
+  unchanged, on any instance with the key.
+- **When the sealed parameters go.** In the transaction that consumes the
+  approval. When it is rejected (a cancel, a change, a veto). When its status
+  becomes consumed, rejected or expired. Past its expiry, by a purge that runs
+  when a sealed approval is created, at API start-up and every 10 minutes
+  (`purgeExpiredSealedParams`). An approved approval keeps them until its
+  requester runs it (Phase 17).
+- **No key, no browser writes.** Without a usable `JARVIS_ENCRYPTION_KEY` the
+  store refuses to create a browser or desktop approval
+  (`ApprovalParamsSealingUnavailableError`, nothing written). The API then
+  registers only the four read tools, in both modes, and logs
+  `browser_writes_unavailable`. That is the same rule as Google tokens: never
+  written unencrypted.
+- **The Approvals page after the fact (G2).** `buildApprovalSummary` reads a
+  rejected, consumed or expired approval's summary from its record, through core's one reader
+  (`readComputerControlApprovalRecord`). The reader accepts only this action's
+  record, only well formed and bounded, and nothing else.
+- **Compatibility.** The migration is additive. A browser approval created
+  before 19.5 still holds its parameters and runs as before within its
+  10-minute life. Under a release before 19.5, a browser approval made by 19.5
+  holds only its record, so it is refused, never run. Every other tool's
+  approval is unchanged (the `memory.forget` case is pinned).
+
+### 17.3 Meaningful approval summaries in the chat (G3)
+
+`PendingActionService` builds a browser or desktop action's confirmation from
+core's value-free summary — the same one the Approvals page shows: "Type into a
+field on https://shop.example." with `Site`, `Field` and `Characters` lines, or
+for a form its field names and "Reversible: No". A request that does not parse
+says its details could not be verified and that it will not run. No typed,
+selected or submitted value, no path or query and no artifact id is in it.
+
+### 17.4 `UNKNOWN` answers (G4, G5)
+
+- A browser write the journal records `UNKNOWN` answers with one fixed sentence
+  in both modes: `COMPUTER_CONTROL_OUTCOME_UNKNOWN_MESSAGE`, "The outcome of the
+  action is unknown; it was not retried." It is the remote service's own
+  sentence, pinned equal by a test, and comes with `metadata.outcome:
+  "unknown"` and the execution id. A failure known to come before the action
+  (a missing element, a refused navigation) keeps its own message and stays
+  `FAILED`, as in 19.1.
+- The same action asked for again is refused with
+  `COMPUTER_CONTROL_ALREADY_UNKNOWN_MESSAGE`: "This exact action was already
+  attempted and its outcome is unknown, so it was not run again. Check the site
+  before asking for anything that would repeat it." As before, no browser
+  opens, nothing is sent and the new approval is not spent. The 19.1 and 19.2
+  tests that pinned "Execution already unknown" now pin this sentence; the
+  behaviour they pin is unchanged.
+- Nothing is retried automatically: one approval, one attempt, however it ended
+  (tested).
+
+### 17.5 Files
+
+| Change | Where |
+|---|---|
+| Value-free projection, record and reader; sealer port; the two `UNKNOWN` sentences | `packages/core/src/computer-control.ts` |
+| Audit writer uses core's projection (output unchanged) | `packages/security/src/audit.ts` |
+| `ApprovalSealedParams` and its migration | `packages/db/prisma/schema.prisma`, `packages/db/prisma/migrations/20261030120000_phase19_approval_sealed_params/` |
+| Sealing, unsealing against the hash, deletion, purge | `packages/db/src/repositories/approval-repository.ts` (`ApprovalParamsSealingUnavailableError` exported from `@jarvis/db`) |
+| The sealer; the container's wiring, write-tool gate and purge | `apps/api/src/services/approval-sealer.ts`, `apps/api/src/services/container.ts` |
+| The Approvals page's summary from a record | `apps/api/src/services/approval-summary.ts` |
+| The chat's confirmation message | `packages/agents/src/pending-action-service.ts` |
+| The `UNKNOWN` answers | `packages/tools/src/tools/browser-tools.ts` |
+| CI: the agents `computer-control` slice | `.github/workflows/ci.yml` |
+| Documentation | `AGENTS.md` (the rule; the CI slice), `docs/DEVELOPMENT.md` (the CI slice), `docs/DEPLOYMENT.md` ("Browser writes: what an approval keeps, and an unknown outcome"), `.env.example` |
+
+New tests:
+
+- `packages/core/test/computer-control-approval-record-p19.test.ts`
+- `packages/db/test/approval-sealed-params-p19-pg.integration.test.ts`
+- `apps/api/test/computer-control-approval-record-p19.test.ts`
+- `apps/api/test/computer-control-approval-sealer-p19.test.ts`
+- `apps/api/test/computer-control-sealed-approval-p19-pg.integration.test.ts`
+- `packages/agents/test/computer-control-pending-action-p19.test.ts`
+- `packages/tools/test/computer-control-unknown-outcome-p19.test.ts`
+
+Changed tests: `packages/tools/test/computer-control-write-outcome-p19.test.ts`
+and `apps/api/test/browser-service-write-outcome.test.ts` (the repeat's
+sentence; the latter also pins the two `UNKNOWN` sentences equal).
+
+### 17.6 Evidence (2026-10-30, Windows, working tree)
+
+| Check | Result |
+|---|---|
+| New tests, each seen to fail first | core record 22 (the file did not load: nothing it tests existed); db sealed params 11 (10 failed against `main`'s repository); api record summary 4 (3 failed); api sealer and wiring 6 (the file did not load, then 3 failed until the container was wired); agents chat message 7 (3 failed); tools `UNKNOWN` answers 8 (6 failed). The end-to-end test (2) and two db cases added in the final review (§17.8) were written after the code, and are proven by the mutations below |
+| The end-to-end PostgreSQL test | 2 passed. Request (pending action), approval by another admin of the Organization, confirmation reading back exactly what was typed, `ToolExecutor` running the browser tool, which typed exactly that and consumed the approval. Afterwards the `Approval` row, `ApprovalSealedParams`, the audit rows and the journal held neither the typed text nor the URL's token, and the Approvals summary still read "Type into a field on https://shop.example." Without a key, nothing was created |
+| Mutations of the store, each restored byte-identical | Raw parameters stored again: db 4 failed, end-to-end 1 failed. No deletion on consume: 1 and 1. No hash check on unseal: db 1. No deletion on reject: db 1. Stored in the clear when there is no sealer: 1 and 1. Final review: the purge ignoring an approval's status: db 1; `updateStatus` keeping the sealed parameters: db 1 |
+| CI's database steps on a fresh pgvector database (re-run after the final review) | 37 migrations applied. `@jarvis/db` **447 passed** (32 files; 445 before the review's two cases). `@jarvis/memory` `pg.integration` **93 passed**. `@jarvis/api` `pg.integration sprint-1.1d-memory-e2e` **241 passed** (12 files). Nothing skipped |
+| Schema drift (`prisma migrate diff`, migrated database → schema) | None for `ApprovalSealedParams`. Only the drift already recorded (`OutcomeRecord`, `OutcomeRevision`, `PerformanceRecommendation`, `_Memory_v1_backup`) |
+| CI's computer-control selections | core 59 (`computer-control`); tools 268 (`computer-control sprint7-browser-tools`); agents 7 (`computer-control`). `ci.yml` parses |
+| `@jarvis/security` (whole) | 216 passed — unchanged by moving the projection to core |
+| `turbo run build --force` | 22/22, none cached |
+| `turbo run typecheck typecheck:tests lint --force --continue` | 67/67 tasks, none cached (21 `typecheck`, 5 `typecheck:tests`, 21 `lint`, and the builds they depend on) |
+| Every workspace, no database (`pnpm test -- --force --continue`, 22 workspaces, summed by script) | **11,085 passed, 3 failed, 681 skipped.** 47 more passed than §16.8's run: exactly this stage's new tests that need no database. The skips are the database suites (`@jarvis/db` 357, `@jarvis/api` 228, `@jarvis/memory` 96); this stage's two PostgreSQL files are among them, and ran in the database steps above. The three failures are the MCP timeout tests of `phase-15.md` §15 (one in `@jarvis/mcp`, two in `@jarvis/api`); each failed alone that day too, and this stage changes none of their files. **Re-run on the final tree after §17.8:** build 22/22 and checks 67/67 again, none cached. Twenty-one workspaces gave exactly the counts above (`@jarvis/db` skipping 2 more: §17.8's cases). `@jarvis/api` had 10 more failures, all "Test timed out in 30000ms" in MCP and marketing-chat files this stage does not touch. Their recorded durations, 267 s to 52 min, show the machine was paused during the run. `@jarvis/api` alone then gave 2,862 passed, 2 failed (the two MCP timeout tests), 228 skipped — its count above |
+
+### 17.7 Not done, and why
+
+| Not done | Why |
+|---|---|
+| A way for a person to settle an `UNKNOWN` browser write ("it happened" / "it did not") | It would be a new write surface: it decides whether the same submit may be sent again. It needs its own decisions — who may settle it (the requester, or an owner or admin of the Organization), whether voice may, and what the page shows — like `marketing.publish.resolve` (Phase 15). Until then an `UNKNOWN` write stays `UNKNOWN`, and the person is told to check the site |
+| The remote service's copy of the `UNKNOWN` sentence | `@jarvis/browser-protocol` keeps its own fixed sentences; the API test pins them equal rather than making the protocol depend on core |
+| Desktop approvals | Sealed by the same rule (every `computer-control` action), but no desktop tool exists until Stage 19.6 |
+| Approvals of other tools | Out of S3's scope. A marketing publish's approval holds the text to be posted on purpose: it is what the person approves, and it is public |
+
+### 17.8 Final review before commit (2026-10-30)
+
+Of the whole diff against `3707e09`. What it found, and what was changed:
+
+| # | Found | Done |
+|---|---|---|
+| FR1 | Several comments, the schema's and the migration's among them, said the sealed parameters go when an approval is "decided". An **approved** approval keeps them until its requester runs it | Corrected to "rejected, consumed or expired" wherever it was said |
+| FR2 | Two deletion paths had no test: `updateStatus` to a state that never runs (the path `ApprovalService.reject` takes), and the purge's clause on an approval's status, which only a real database can show works | Two db cases; each fails when its branch is removed (§17.6) |
+| FR3 | The upgrade notes did not say that approvals written **before** 19.5 are not rewritten, or that a rollback writes parameters in the clear again | `docs/DEPLOYMENT.md` says both, and gives a read-only query that counts such rows (checked on PostgreSQL) |
+
+Checked and found to hold, with no change:
+
+- **Hash binding survives the seal.** Core's canonical form skips `undefined` and writes non-finite numbers as `null`, as JSON does, so a parameter set hashes the same before and after the JSON round trip. Browser parameters are strings and maps of strings.
+- **Nothing typed reaches a durable row other than the sealed one.** Audit rows and the orchestrator's audit metadata hold reasons and ids. The journal stores a fixed failure label, never the browser's words. The chat stores the projected pending action. No log line prints tool arguments. Browser writes are not task tools (`schedulableToolIds` holds only the four reads), so no task row holds one.
+- **No automatic retry, in either mode.** The executor does not retry. A browser write is not schedulable. Reconciliation covers only `meta.campaign.create`. Start-up recovery maps a stale `EXECUTING` to `UNKNOWN` and runs nothing.
+- **CI picks up every new test.** Core, tools and agents by their `computer-control` slices. The two non-database API tests in `Test @jarvis/api`. The db suite and the end-to-end test in the PostgreSQL steps, which the no-skip assertion covers.
+
+Risks that remain, none introduced by this stage:
+
+| Risk | Note |
+|---|---|
+| `paramsHash` is an unsalted SHA-256 of the exact parameters (since Phase 10) | S3 allows hashes. With read access to the database, a short or common typed value could be guessed offline, because the field and site are in the record. A keyed hash (HMAC) would change the binding for every tool, so it is a separate decision |
+| Approvals written before 19.5 | Not rewritten (FR3). On the reference deployment, where browsing is off, there are normally none |
+| An in-process write whose navigation timed out before the action | Classified `UNKNOWN` since 19.1: a timeout cannot be told apart from one after the action. Since 19.5 the person is told the outcome is unknown, which matches the journal, but the same request stays blocked |
+| No way to settle an `UNKNOWN` write | §17.7 — an owner decision |
+| The container's gating of the write tools | Pinned in source, as the rest of the container's wiring is; not run as a container |

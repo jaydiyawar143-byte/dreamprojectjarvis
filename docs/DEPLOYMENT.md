@@ -350,6 +350,70 @@ still refused:
 | In the API process | "Browsing is not available to your account." (a write: "Browser control is not available to your account.") |
 | Through the separate service | "This action is not allowed." (`NOT_AUTHORIZED`; nothing is sent to the service) |
 
+#### Browser writes: what an approval keeps, and an unknown outcome (Phase 19.5)
+
+**Browser writes need `JARVIS_ENCRYPTION_KEY`** — the key that already protects
+OAuth tokens (`.env.example`). A browser write's approval is bound to exactly
+what it will do: the text to type, the option to choose, the values to submit,
+the full URL. None of that is kept in the approval record. The `Approval` row
+holds only the value-free record — the action, its summary sentence, the site's
+origin, field names and character counts, the same as its audit row. The exact
+parameters are sealed with the key in the `ApprovalSealedParams` table, used
+when the approval runs, and deleted when it is rejected, consumed or expired.
+The API also purges any left behind at start-up and every 10 minutes.
+
+Without the key, nothing could keep those values out of the clear, so the API
+registers the browser's read tools only (navigate, inspect, extract,
+screenshot), in both modes, and logs once at start-up:
+
+```
+{"level":"warn","event":"browser_writes_unavailable","reason":"JARVIS_ENCRYPTION_KEY is not set or not valid; …"}
+```
+
+Rotating the key follows the usual rule — keep the old one in
+`JARVIS_ENCRYPTION_KEY_RETIRED` — so approvals waiting during a rotation still
+run. If an approval's sealed parameters cannot be read (the key was removed or
+changed without the retired entry), it can no longer run: approving it answers
+`409 APPROVAL_PARAMS_MISMATCH`, and running it is refused. Ask for the action
+again.
+
+**The migration** (`20261030120000_phase19_approval_sealed_params`) is
+additive: one new table. Rolling back to a release before Phase 19.5 needs no
+schema change. That release does not know the table; a browser approval waiting
+at that moment holds only its record there, so it is refused rather than run —
+ask for it again. Browser approvals made under that release hold their
+parameters in the clear again, as before. Approvals for every other tool are
+unchanged.
+
+**Approvals from before Phase 19.5 are not rewritten.** The migration adds; it
+changes no row. If browser writes were ever approved on this database, those
+older approvals still hold what was typed. To see whether any exist (read-only):
+
+```bash
+docker compose exec postgres psql -U jarvis -d jarvis -c "SELECT count(*) FROM \"Approval\" WHERE (\"toolId\" LIKE 'browser.%' OR \"toolId\" LIKE 'desktop.%') AND NOT (params ? 'withheld');"
+```
+
+The reference deployment sets `BROWSER_ENABLED: "false"`, so there it is
+normally `0`. Rewriting older rows is an operator decision, not part of the
+upgrade.
+
+**A write whose outcome is unknown** — it may have reached the site, and no
+answer came back: a deadline cut it short, the connection dropped, or the page
+then went somewhere the policy refuses — is recorded `UNKNOWN` and never sent
+again (Phase 19.1, 19.2). Since Phase 19.5 the person is told so the same way
+wherever the browser runs: "The outcome of the action is unknown; it was not
+retried." Asking for the same action again is refused, opens no browser and
+spends no approval: "This exact action was already attempted and its outcome
+is unknown, so it was not run again. Check the site before asking for anything
+that would repeat it." There is no way to mark such an outcome resolved yet;
+find out on the site what happened.
+
+| You see | It means | Do |
+|---|---|---|
+| `browser_writes_unavailable` at start-up; only the read tools are offered | No usable `JARVIS_ENCRYPTION_KEY` | Set it (and restart the API) to offer browser writes |
+| `approval_sealed_params_purge_failed` in the `approvals` component | A purge of left-behind sealed parameters failed | Nothing is exposed — they are unreadable without the key, and an expired approval never runs. Check the database; the next purge retries |
+| "The outcome of the action is unknown; it was not retried." | The write may have happened | Check the site before asking again |
+
 #### Browser artifacts (Phase 19.4)
 
 A file a browser session downloads, and a screenshot it takes, is an artifact:
