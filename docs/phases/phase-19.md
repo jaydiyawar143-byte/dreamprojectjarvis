@@ -4,8 +4,8 @@
 
 | | |
 |---|---|
-| Status | Owner-approved architecture. **Stage 19.1 implemented and merged** (PR #14, merge commit `473bda0`, 2026-10-28). **Stage 19.2 committed** (`863e4d3` on `feat/computer-control-phase-19-2`, pushed, not merged) **and not complete** — see §14. **Stage 19.3 (browser egress) implemented in the working tree, not committed, not verified in a container** — see §15. |
-| Date | 2026-10-23 (architecture); §13 added 2026-10-28; §14 added 2026-10-28; §14.11 (audit remediation) added 2026-10-28 |
+| Status | Owner-approved architecture. **Stage 19.1 implemented and merged** (PR #14, merge commit `473bda0`, 2026-10-28). **Stage 19.2 merged** (PR #15, `863e4d3`) — see §14. **Stage 19.3 (browser egress) merged** (PR #16, `1592764`, merge `b4d3209`), **not verified in a container** — see §15. **Stage 19.4 (durable, scoped artifact storage) implemented in the working tree, not committed, not verified in a container** — see §16. The headings of §14 and §15 record each stage's state when it was written. |
+| Date | 2026-10-23 (architecture); §13 added 2026-10-28; §14 added 2026-10-28; §14.11 (audit remediation) added 2026-10-28; §15 added 2026-10-29; §16 added 2026-10-29 |
 | Branch inspected | `feat/automation-engine-phase-18` @ `435c39f8` |
 | Phase 18 merge state | **Not merged** at the time of writing (`main` was `1fd1bb0e`, the Phase 17 merge). **Merged since:** PR #12 (2026-10-21) and PR #13 (2026-10-22), read from GitHub on 2026-10-28. |
 | Scope of this stage | Documentation and validation only |
@@ -377,6 +377,8 @@ in the contracts, not inferred at runtime.
 ### ADR-19-007 — Artifact retention
 
 **Status:** Owner-approved. **Implementation:** proposed, not present.
+*(Since Stage 19.4: implemented in the working tree with a filesystem backend;
+the duration and the backend choice remain U4 — see §16.)*
 
 **Decision.** Browser artifacts (downloads, screenshots and other captured
 files) use **opaque identifiers**, **owner and Organization scoping**,
@@ -1256,3 +1258,181 @@ does not resolve destinations anyway), and anything about the network layer.
 | UDP egress | Not proxied. WebRTC is held to the proxy; the internal network carries no other route. A UDP path out would only exist if the network layer failed. |
 | Per-request DNS caching | None: every request is resolved and judged again, which is what defeats rebinding. A slow resolver slows browsing; `BROWSER_EGRESS_DNS_TIMEOUT_MS` bounds it. |
 | HTTP/3 (QUIC) | Not reachable through an HTTP proxy; Chromium uses TCP through it. |
+
+---
+
+## 16. Stage 19.4 implementation record — durable, scoped artifact storage (working tree, not committed)
+
+**Status: implemented in the working tree; NOT committed. Reviewed, and
+verified in a container, on 2026-10-30 (§16.8).** §16.6 is the record of
+2026-10-29, when Docker was not available. §16.8 records the review fixes
+since then, and the image build, the volume's ownership and the store's
+survival across a recreated container, observed on a host.
+
+### 16.1 The brief against this record
+
+Reported before the scope was widened, and resolved as follows:
+
+| Point | This record said | The brief asked | Resolution |
+|---|---|---|---|
+| Retention duration | U4: deployment policy; "does not invent a duration" (ADR-19-007) | Expiry and retention | **No default.** `BROWSER_ARTIFACT_RETENTION_HOURS` is required: the browser service refuses to start with Chromium on without it, and the API registers no in-process browser tools without it. |
+| Storage backend | U4: e.g. object storage versus a database-backed store | A durable storage abstraction | A **filesystem** backend behind the existing `DownloadStore`, on a named volume. No object-storage or database backend is built; U4's backend choice stays open (§16.7). |
+| "A second API instance cannot lose or fork an id" | ADR-19-007 | Multi-instance | Every instance that shares the directory sees the same ids and the same quotas (tested with two instances on one directory). Instances on different hosts need a shared filesystem; none is provided. |
+| Deletion | Not specified | Deletion and cleanup | `delete(scope, id)` on the store and the sweep. **No tool or route exposes deletion** to a user: that would be a new write surface needing its own approval decision. |
+| §14.4: "per user, per process" | Stage 19.2 | Organization scoping | Now per user **and** Organization, durable. A session cannot be opened without an Organization. |
+
+### 16.2 What was built, and where
+
+| Piece | Where |
+|---|---|
+| The durable store | `packages/browser/src/download.ts` (`DownloadStore`) |
+| Retention and quota configuration | `packages/browser/src/config.ts`; `artifactStoreFor` in `runtime.ts` |
+| A session must name its Organization | `BrowserRuntime.withSession` (`runtime.ts`); `organizationId` on `BrowserSessionOptions` (`@jarvis/core`) |
+| Session use of the store | `packages/browser/src/session.ts` (scope instead of user; `kind` screenshot/download) |
+| The service | `apps/browser-service/src/config.ts` (directory and retention required with Chromium), `engine.ts` (the store, `sweepArtifacts`), `session-registry.ts` (passes `subject.organizationId`), `index.ts` (start-up check and interval sweep) |
+| The API's in-process browser | `scopeBrowserRuntimeToOrganization` (`apps/api/src/services/tenancy/shared-connection-access.ts`), wired in `container.ts` with the operational log, a start-up sweep and an interval sweep |
+| Error codes | `ARTIFACT_QUOTA_EXCEEDED` (429), `ARTIFACT_STORE_UNAVAILABLE` (503) in `@jarvis/core` |
+| Deployment | `docker-compose.yml` (named volume `jarvis-browser-artifacts`, the `BROWSER_ARTIFACT_*` variables), `apps/browser-service/Dockerfile` (the directory, `node`, mode 700) |
+
+On disk:
+
+```
+<root>/.jarvis-artifact-store               marker; a non-empty root without it is refused
+<root>/tmp/                                 partial writes (.part), swept after 10 minutes
+<root>/orgs/<sha256(organizationId)[0:40]>/
+    meta/<uuid>.json                        the record: owner, Organization, kind, size, SHA-256, origin, created, expires
+    objects/<uuid><.ext>                    the bytes
+    .lock/                                  the Organization's lock (atomic mkdir)
+```
+
+### 16.3 How each requirement is met
+
+- **Opaque ids.** A random UUID v4; anything else is not found before the disk
+  is read. The client receives id and metadata — never a path, never bytes.
+- **Scope from the server.** The browser service takes the Organization from
+  the authenticated subject (19.2); the API's in-process runtime takes it from
+  the same shared-connection resolver the remote path uses, and replaces any
+  Organization a caller's options name. A lookup that fails opens no session.
+- **Not found, alike.** Another user's id, another Organization's id (the
+  Organization directory is a hash, so a foreign id is not even under the
+  caller's directory), an expired id, a deleted id and a malformed one all
+  answer `null` / not found.
+- **Validation.** User and Organization ids must match `[A-Za-z0-9_:@-]{1,200}`
+  (no `.`, no separators); every record field is re-validated on read; the
+  origin is kept only if it is an origin; the extension comes from the bytes'
+  magic number, with executables refused whatever their name.
+- **Traversal and links.** No caller-supplied text becomes a path: ids are
+  UUIDs, directories are hashes. A record or object that is a link, or not a
+  regular file, is refused (`lstat`). The sweep never follows a link: it
+  removes only entries of directory listings it judged with `lstat`, an
+  expired artifact's bytes included, and keeps the bytes behind a record
+  that is a link (§16.8, S1 and S2).
+- **Atomic writes; interrupted writes.** Bytes, then record, each written to a
+  `.part` file opened `wx`, flushed and renamed. A crash leaves a partial file
+  or an orphan object, never a record without bytes; the sweep removes both
+  after a grace period.
+- **Integrity.** Before an upload uses an object, its size and SHA-256 must
+  match the record.
+- **Quotas, atomically.** Per user and per Organization, by count and by bytes,
+  checked under the Organization's lock — an atomic `mkdir` shared by every
+  process on the directory, with stale-lock takeover after 30 s — and counted
+  again after the write: if the lock was ever shared (two writers taking a
+  crashed writer's lock at once, or a holder slower than the stale limit), a
+  writer over a quota removes its own write and is refused. What is kept never
+  exceeds a quota.
+- **Expiry.** Refused on read the moment it passes; deleted by the sweep, which
+  runs at start-up and on an interval in both modes (the API's start-up sweep
+  since §16.8, A1), is safe to repeat and to run on every instance at once.
+- **No silent ephemeral fallback.** No default retention; no default directory
+  for the service with Chromium on; a non-empty foreign directory is refused;
+  the service exits if its first sweep cannot use the store. Compose moves the
+  service's store off its tmpfs onto a named volume.
+- **Safe errors.** Every unexpected filesystem failure on a write or a delete
+  becomes `ARTIFACT_STORE_UNAVAILABLE` with a fixed sentence; an errno's
+  message, which names the store's path, never leaves the store.
+- **Logs.** Events with reasons and counts, and the opaque id on an integrity or
+  record failure — never a user, an Organization, a path, a file name, an
+  origin or contents (tested). The API writes them through the operational log
+  (`browser-artifacts`).
+
+### 16.4 Preserved
+
+Phase 19.1's executor grants and write authorization, Phase 19.2's mutual TLS,
+tenant binding and sandbox launch, and Phase 19.3's egress proxy, resolver lock
+and internal network are unchanged; their suites pass. The upload path keeps its
+19.1 checks and now also requires the artifact to be in the session's own user
+and Organization.
+
+### 16.5 Upgrade
+
+An earlier `storage/browser` directory is refused (non-empty, no marker). Point
+`BROWSER_DOWNLOAD_DIR` at a new, empty directory. Nothing reachable is lost: the
+old files were reachable only by the process that wrote them. No migration.
+
+### 16.6 Evidence (2026-10-29, Windows, working tree)
+
+| Check | Result |
+|---|---|
+| `@jarvis/browser` (whole) | **352 passed** — `artifact-store` (new) 39; `download` and `session` updated to the scoped store |
+| `@jarvis/browser-service` (whole) | **181 passed** — adds the Organization passed to the engine, the directory and retention requirements, the artifact limits' ranges, the engine's refusal without retention, its sweep, and four compose pins |
+| `@jarvis/api` `browser-service-wiring` | **12 passed** — four new: the in-process runtime's Organization replaces a caller's, a refusal or failed lookup opens no session, the container wraps its runtime, the store reports through the operational log |
+| CI's browser selection (`ip-rules host-rules navigation-policy artifact-store download session`) | 6 files, **294 passed**; `ci.yml` parses |
+| `turbo run build typecheck typecheck:tests lint --force --continue`, whole repo | 71 tasks: 70 passed. `@jarvis/web#typecheck` failed with `TS6053` on `.next/types` files that the `next build` in the same run was regenerating; run again alone, **passed** (2/2). No source of the web app is changed |
+| Every workspace, no database (`pnpm test -- --force --continue`, 22 workspaces) | **10,952 passed, 4 failed, 668 skipped.** The skips are the database suites. Three failures are the MCP timeout tests of `phase-15.md` §15 (two in `@jarvis/api`, one in `@jarvis/mcp`), which failed alone that day too. The fourth, `sprint-1.1a-memory-wiring` ("Orchestrator accepts non-noop store via config"), hit its 30 s limit on a dynamic import while every suite ran at once; alone, its file passed 24/24 |
+| Mutations of the store: no lock; no owner check; no expiry on read; no integrity check; the sweep keeping orphans; no post-write re-count; raw errors leaking | each caught (2, 4, 1, 1, 1, 2 and 1 failing tests); restored byte-identical |
+| Mutations of compose: the store back on `/tmp`; a retention default; the API mounting the volume | each caught (1 each); restored byte-identical |
+| `docker compose --profile browser-service config` | Valid; the volume, the directory and the seven variables resolve as declared |
+| Durability on real files — a restart (a new store over the same directory) and two instances sharing one directory and one quota | **Passed**, in process, on the Windows filesystem |
+| Quotas under concurrency — 20 writes at once capped at 5; 24 writes from two instances with every lock taken over, and with no lock at all | **Passed**: exactly 5 kept, and never more than 5 when the lock fails, with nothing left behind |
+| The image build; the volume's ownership and mode; artifacts surviving `--force-recreate`; the start-up check against a real volume | **Not run** that day — Docker was not available. Run on 2026-10-30, and passed: §16.8 |
+| Database | Not applicable: no migration and no repository in this stage |
+
+### 16.7 Not done, and why
+
+| Not done | Why |
+|---|---|
+| ~~Verification in a container~~ | Done on 2026-10-30 (§16.8). What it did not cover: a real browser session writing through the service. Artifacts were written by the image's own store, as `node`, on the volume. A deployment's own host is still checked with "Checking it on a host" in `docs/DEPLOYMENT.md`. |
+| An object-storage or database backend | U4's backend choice is the owner's. The filesystem backend needs a shared filesystem for instances on different hosts. |
+| A user-facing delete | A new write surface; it would need its own approval and voice decisions. Expiry is the deletion path today. |
+| A listing of a user's artifacts | Not asked for; a listing would be an enumeration surface. An id is returned only to the caller whose session made it. |
+| Encryption at rest of artifact bytes | Not in ADR-19-007. The volume is reachable only by the browser container's `node` user (mode 700); host-level disk encryption is the deployment's. |
+| Lock takeover on a network filesystem | `mkdir` is atomic on NFS, but mtime-based stale detection depends on synchronized clocks between hosts. The post-write re-count keeps quotas whole regardless. |
+| Quotas over a newer release's records | A record this release cannot judge (§16.8, R1) is kept with its bytes, but is not counted against this release's quotas. After a rollback, an Organization can briefly hold more on disk than its quota, bounded by what the newer release allowed, until those records expire under that release. |
+
+### 16.8 Review and container verification (2026-10-29 and 2026-10-30, working tree)
+
+Each finding was fixed in the working tree. Each code fix has a test that was
+seen to fail without it.
+
+| # | Found | Fix | Proven by |
+|---|---|---|---|
+| R1, R2 (10-29) | The sweep removed what it could not judge: a newer release's record and its bytes, the bytes of a record it could not read, names it did not write | Records are valid, unsupported (a newer release's) or corrupt. The sweep keeps unsupported and unreadable records with their bytes, skips links and names it did not write, and reports `preserved` and `skipped` | `artifact-store`: "the sweep removes only what is this store's own and broken", "the sweep never follows a link" |
+| R3, R4 (10-29) | `docs/DEPLOYMENT.md` did not say who may browse, and its troubleshooting mixed the two modes | "Who may browse"; troubleshooting with a "Where" column | Documentation |
+| C1 (10-29) | Compose passes an unset `${BROWSER_MAX_DOWNLOAD_BYTES:-}` as `""`, which `createBrowserConfig` coerced to 0, so the service did not start | An empty value is unset — for it and the four `BROWSER_ARTIFACT_*` limits. An explicit 0 is still refused | `artifact-store`: "reads an empty variable … as the default, never as zero"; the container started with the variable present and empty |
+| C2 (10-29) | `apps/browser-service/Dockerfile` had run no `prisma generate` since 19.2. `@jarvis/db` is in the service's build graph (browser → memory → db), so the image did not build | `RUN pnpm --filter @jarvis/db exec prisma generate` in the build stage, after `COPY . .` | `browser-service-compose`: "generates the Prisma client before the image compiles the service" (added 10-30; fails without the line); a `--no-cache` image build |
+| S1 (10-30) | The sweep removed an expired artifact's bytes by a path built from its record. With a link where `objects/` should be, that deleted a file **outside** the store with the object's name | The record is removed where it was listed. The bytes are removed only from the `lstat`-judged listing of a real `objects` directory, never through a link | `artifact-store`: "expires a record whose objects directory became a link, and removes nothing through the link" (a Windows junction). On Linux, in a container: the image built before the fix deleted the outside file, the fixed one did not |
+| S2 (10-30) | A link in a record's place was skipped but its id was not protected, so the sweep removed its bytes as an orphan, although it keeps the bytes of every other record it does not read | Its id is protected, like any record the sweep does not read | `artifact-store`: "keeps the bytes of a record that is a link"; the same Linux A/B |
+| A1 (10-30) | In the API process the store was swept every 10 minutes but not at start-up, although `docs/DEPLOYMENT.md` and §16.3 said it was. An unusable directory, such as a pre-19.4 `storage/browser`, showed only at the first screenshot | One sweep when the in-process browser is registered, logged if it fails; the tools stay registered | `browser-service-wiring`: "the in-process artifact store is swept once at start-up, then on an interval" |
+
+Evidence (2026-10-30, Windows, working tree):
+
+| Check | Result |
+|---|---|
+| `@jarvis/browser` (whole) | **360 passed** (`artifact-store` 47) |
+| `@jarvis/browser-service` (whole, which is CI's `browser-service` selection) | **182 passed** |
+| `@jarvis/api` `browser-service-wiring`, `sprint7-browser-wiring` | **32 passed** (wiring 13) |
+| CI's other browser and computer-control selections | `browser-protocol` 75; `browser` (`ip-rules host-rules navigation-policy artifact-store download session`) 302; `tools` (`computer-control sprint7-browser-tools`) 260; `core` (`computer-control`) 37 — all passed |
+| `turbo run build --force` | 22/22 |
+| `turbo run typecheck typecheck:tests lint --force --continue` | 67/67 tasks (21 `typecheck`, 5 `typecheck:tests`, 21 `lint`, and the builds they depend on). Re-run for `browser`, `browser-service` and `api` after the last test edit: 26/26 |
+| Every workspace, no database (`pnpm test -- --force --continue`, 22 workspaces) | **11,038 passed, 3 failed, 668 skipped.** The three are the MCP timeout tests of §15 (one in `@jarvis/mcp`, two in `@jarvis/api`); each failed alone too. The skips are the database suites |
+| Image | `docker build --no-cache -f apps/browser-service/Dockerfile .`: exit 0; `prisma generate` (Prisma Client 5.22.0) ran before the service's build |
+| Container: a separate compose project (`-p jarvis-s194-verify`, its own container names and env file), Chromium on, mutual TLS | Healthy; a start-up `artifact_sweep`. Runs as `node` (uid 1000). The volume is `node:node 700`, the marker `600`, `orgs/` and `tmp/` `700`. The root filesystem is read-only; only `/tmp` and the volume are writable; `cap_drop: ALL`, `no-new-privileges` |
+| Durability | Artifacts written on the volume by the image's own store, as `node`: read back intact by their owner; not found for another Organization, or for the same user in another Organization. Held after `--force-recreate` and after `down` and `up` (without `-v`). One written already expired was removed by the recreated container's start-up sweep (`expired: 1`) |
+| Start-up refusals | No retention: `browser_service_config_invalid`, exit 1. A volume holding `notes.txt`: `artifact_store_unavailable` (`init`), then `browser_service_artifacts_unavailable`, exit 1, `notes.txt` left in place. A root-owned volume holding only the marker: the same, exit 1. An *empty* root-owned volume was given `node:node 700` by Docker when mounted, and the service started |
+| Clean-up | The test containers, networks, five volumes and two image tags were removed by exact name. The deployment's own containers were not touched |
+| Database | Not applicable: no migration and no repository |
+
+Not covered by the container check: a real browser session writing an
+artifact through the service — that needs a signed mutual-TLS client and the
+egress proxy reaching a site. The store was driven directly instead: the same
+compiled code, user and volume.

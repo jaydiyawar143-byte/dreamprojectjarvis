@@ -289,12 +289,20 @@ jobs:
       # dialling replaced, so nothing is resolved or dialled off the machine),
       # and the address, host-name and navigation rules in @jarvis/browser that
       # it and the API's own page reads share.
+      #
+      # Phase 19.4 adds the durable artifact store (`artifact-store`,
+      # `download`) and the session's use of it (`session`): owner and
+      # Organization scoping, foreign and stale ids as not found, quotas under
+      # concurrency, expiry, interrupted writes, corrupt or tampered records,
+      # and a restart or a second instance over the same directory — each on a
+      # temporary directory made for the test. The engine's start-up
+      # refusals are in the service suite above.
       - name: Test browser-service contracts (@jarvis/browser-protocol, @jarvis/browser-service, @jarvis/browser)
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: |
           pnpm --filter @jarvis/browser-protocol exec vitest run browser-service
           pnpm --filter @jarvis/browser-service exec vitest run browser-service
-          pnpm --filter @jarvis/browser exec vitest run ip-rules host-rules navigation-policy
+          pnpm --filter @jarvis/browser exec vitest run ip-rules host-rules navigation-policy artifact-store download session
 
       # Phase 19, Stage 19.1 — the Meta Ads write boundary: all nine writes run
       # only with the executor's grant for that exact call, consume their

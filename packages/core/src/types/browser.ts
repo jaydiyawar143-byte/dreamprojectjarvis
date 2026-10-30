@@ -236,6 +236,13 @@ export interface BrowserUploadResult extends BrowserPageIdentity {
 export interface BrowserSessionOptions {
   /** Forwarded from `ToolContext.signal` so the executor's deadline wins. */
   signal?: AbortSignal;
+  /**
+   * Phase 19.4 — the Organization the session works for, resolved server-side
+   * (the shared-connection reader, never a request). Artifacts a session makes
+   * are scoped to this Organization AND the user. The in-process runtime
+   * refuses a session without it.
+   */
+  organizationId?: string;
 }
 
 /**

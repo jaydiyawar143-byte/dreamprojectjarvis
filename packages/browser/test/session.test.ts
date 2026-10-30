@@ -122,14 +122,23 @@ beforeEach(async () => {
     { chromePath: "C:/fake/chrome.exe", downloadDir: root, maxExtractChars: 50 },
     {} as NodeJS.ProcessEnv
   );
-  downloads = new DownloadStore({ root, maxBytes: 1024 * 1024 });
+  downloads = new DownloadStore({
+    root,
+    maxBytes: 1024 * 1024,
+    retentionMs: 60 * 60 * 1000,
+    maxBytesPerUser: 10 * 1024 * 1024,
+    maxBytesPerOrganization: 50 * 1024 * 1024,
+    maxArtifactsPerUser: 100,
+    maxArtifactsPerOrganization: 500,
+  });
 });
 
 function buildSession(
   page: FakePage,
   context: FakeContext,
   policy: NavigationPolicyConfig = publicPolicy(),
-  userId = "user-1"
+  userId = "user-1",
+  organizationId = "org-1"
 ) {
   return new BrowserSession({
     page,
@@ -138,6 +147,7 @@ function buildSession(
     policy,
     downloads,
     userId,
+    organizationId,
   });
 }
 
@@ -349,7 +359,7 @@ describe("Sprint 7.8 — uploads can only send back what the store already holds
   });
 
   it("REFUSES another user's download id", async () => {
-    const stored = await downloads.storeBytes("user-2", {
+    const stored = await downloads.storeBytes({ userId: "user-2", organizationId: "org-1" }, {
       fileName: "a.pdf",
       bytes: Buffer.from([0x25, 0x50, 0x44, 0x46, 0x2d]),
       sourceOrigin: "https://example.com",
@@ -366,7 +376,7 @@ describe("Sprint 7.8 — uploads can only send back what the store already holds
   });
 
   it("uploads the owner's own file and never echoes the path back", async () => {
-    const stored = await downloads.storeBytes("user-1", {
+    const stored = await downloads.storeBytes({ userId: "user-1", organizationId: "org-1" }, {
       fileName: "a.pdf",
       bytes: Buffer.from([0x25, 0x50, 0x44, 0x46, 0x2d]),
       sourceOrigin: "https://example.com",
@@ -380,6 +390,21 @@ describe("Sprint 7.8 — uploads can only send back what the store already holds
     expect(page.setInputFilesCalls.length).toBe(1);
     expect(result.downloadId).toBe(stored.downloadId);
     expect(JSON.stringify(result)).not.toContain(root);
+  });
+
+  it("REFUSES the same user's download id from another Organization (Phase 19.4)", async () => {
+    const stored = await downloads.storeBytes({ userId: "user-1", organizationId: "org-2" }, {
+      fileName: "a.pdf",
+      bytes: Buffer.from([0x25, 0x50, 0x44, 0x46, 0x2d]),
+      sourceOrigin: "https://example.com",
+    });
+
+    const page = new FakePage();
+    const session = buildSession(page, new FakeContext(), publicPolicy(), "user-1", "org-1");
+    await session.navigate("https://example.com/");
+
+    await expect(session.upload("#file", stored.downloadId)).rejects.toThrow(/Unknown download id/);
+    expect(page.setInputFilesCalls).toEqual([]);
   });
 });
 

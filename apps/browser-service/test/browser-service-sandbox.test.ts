@@ -73,6 +73,14 @@ function enabledConfig(): BrowserServiceConfig {
       navigationTimeoutMs: 5_000,
       downloadDir,
       domainAllowlist: [],
+      artifacts: {
+        retentionHours: 24,
+        quotaBytesPerUser: 100 * 1024 * 1024,
+        quotaBytesPerOrganization: 500 * 1024 * 1024,
+        maxCountPerUser: 200,
+        maxCountPerOrganization: 1_000,
+        sweepIntervalMs: 600_000,
+      },
     },
   };
 }
@@ -85,7 +93,7 @@ describe("the browser engine's Chromium launch", () => {
   it("asks for the sandbox explicitly, through the real engine path", async () => {
     const handle = createBrowserEngine(enabledConfig());
     expect(handle.chromiumEnabled).toBe(true);
-    await handle.engine.withSession("user-1", async () => "never").catch(() => undefined);
+    await handle.engine.withSession("user-1", async () => "never", { organizationId: "org-1" }).catch(() => undefined);
 
     expect(launches).toHaveLength(1);
     const options = launches[0]!;
@@ -100,6 +108,29 @@ describe("the browser engine's Chromium launch", () => {
     await handle.shutdown();
   });
 
+  it("refuses to build a Chromium engine without an artifact retention, and launches nothing (Phase 19.4)", () => {
+    const config = enabledConfig();
+    expect(() =>
+      createBrowserEngine({ ...config, chromium: { ...config.chromium, artifacts: { ...config.chromium.artifacts, retentionHours: null } } })
+    ).toThrow(/BROWSER_ARTIFACT_RETENTION_HOURS/);
+    expect(launches).toHaveLength(0);
+  });
+
+  it("gives the service a sweep for its artifacts (Phase 19.4)", async () => {
+    const handle = createBrowserEngine(enabledConfig());
+    expect(await handle.sweepArtifacts?.()).toEqual({
+      expired: 0,
+      orphans: 0,
+      partial: 0,
+      corrupt: 0,
+      preserved: 0,
+      skipped: 0,
+      failed: 0,
+    });
+    expect(launches).toHaveLength(0);
+    await handle.shutdown();
+  });
+
   it("refuses to build a Chromium engine without an egress proxy, and launches nothing", () => {
     expect(() => createBrowserEngine({ ...enabledConfig(), egressProxy: null })).toThrow(
       /without an egress proxy; refusing to start a browser with unrestricted networking/
@@ -111,9 +142,13 @@ describe("the browser engine's Chromium launch", () => {
     const handle = createBrowserEngine(enabledConfig());
     let ran = false;
     const first = await handle.engine
-      .withSession("user-1", async () => {
-        ran = true;
-      })
+      .withSession(
+        "user-1",
+        async () => {
+          ran = true;
+        },
+        { organizationId: "org-1" }
+      )
       .then(
         () => "opened",
         (error: unknown) => (error instanceof Error ? error.message : "refused")
@@ -122,7 +157,7 @@ describe("the browser engine's Chromium launch", () => {
     expect(ran).toBe(false);
 
     // A second session tries again — with the sandbox again.
-    await handle.engine.withSession("user-2", async () => undefined).catch(() => undefined);
+    await handle.engine.withSession("user-2", async () => undefined, { organizationId: "org-1" }).catch(() => undefined);
     expect(launches.length).toBe(2);
     expect(launches.every((options) => options.chromiumSandbox === true)).toBe(true);
     await handle.shutdown();
@@ -130,7 +165,7 @@ describe("the browser engine's Chromium launch", () => {
 
   it("launches nothing while Chromium is switched off", async () => {
     const handle = createBrowserEngine({ ...enabledConfig(), chromiumEnabled: false });
-    await handle.engine.withSession("user-1", async () => "never").catch(() => undefined);
+    await handle.engine.withSession("user-1", async () => "never", { organizationId: "org-1" }).catch(() => undefined);
     expect(launches).toHaveLength(0);
   });
 });

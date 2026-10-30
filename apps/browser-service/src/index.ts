@@ -60,7 +60,7 @@ function main(): void {
 
   let engine;
   try {
-    engine = createBrowserEngine(config);
+    engine = createBrowserEngine(config, log);
   } catch (error) {
     fail("browser_service_engine_unavailable", error instanceof Error ? error.message : "unknown");
   }
@@ -85,6 +85,25 @@ function main(): void {
   const sweeper = setInterval(() => registry.reap(), 1_000);
   sweeper.unref();
 
+  // Phase 19.4 — expired, half-written and unreadable artifacts are removed at
+  // start-up and then on an interval. The first sweep is also the store's
+  // start-up check: a directory the service cannot use (not writable, or not
+  // an artifact store) stops the service, rather than leaving it healthy and
+  // refusing every artifact. A later failed sweep is logged and retried at the
+  // next interval; an expired artifact is refused on read either way.
+  const sweepArtifacts = engine.sweepArtifacts;
+  let artifactSweeper: NodeJS.Timeout | undefined;
+  if (sweepArtifacts) {
+    void sweepArtifacts().catch(() =>
+      fail("browser_service_artifacts_unavailable", "the artifact store in BROWSER_SERVICE_DOWNLOAD_DIR cannot be used")
+    );
+    artifactSweeper = setInterval(
+      () => void sweepArtifacts().catch(() => log("artifact_sweep_failed")),
+      config.chromium.artifacts.sweepIntervalMs
+    );
+    artifactSweeper.unref();
+  }
+
   const health = createBrowserServiceHealthServer({
     config,
     chromiumEnabled: engine.chromiumEnabled,
@@ -107,6 +126,7 @@ function main(): void {
     shuttingDown = true;
     log("browser_service_stopping", { signal });
     clearInterval(sweeper);
+    if (artifactSweeper) clearInterval(artifactSweeper);
     health.close();
     server.close(() => {
       void registry

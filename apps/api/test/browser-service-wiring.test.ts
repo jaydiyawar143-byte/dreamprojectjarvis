@@ -26,6 +26,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   createBrowserSessionTenantResolver,
+  scopeBrowserRuntimeToOrganization,
   type SharedAccessDecision,
   type SharedConnectionAccessPort,
 } from "../src/services/tenancy/shared-connection-access.js";
@@ -151,5 +152,70 @@ describe("container wiring for the browser service", () => {
     const remote = CONTAINER_SOURCE.indexOf('browserService.state === "ready"');
     expect(disabled).toBeGreaterThan(-1);
     expect(remote).toBeGreaterThan(disabled);
+  });
+});
+
+describe("Phase 19.4 — the in-process browser is scoped like the remote one", () => {
+  function recordingRuntime() {
+    const sessions: Array<{ userId: string; organizationId: string | undefined }> = [];
+    const runtime = {
+      async withSession<T>(userId: string, run: (session: never) => Promise<T>, options?: { organizationId?: string }) {
+        sessions.push({ userId, organizationId: options?.organizationId });
+        return run(undefined as never);
+      },
+      shutdown: async () => undefined,
+    };
+    return { runtime, sessions };
+  }
+
+  it("opens the session for the Organization the shared-connection reader names, and no other", async () => {
+    const { runtime, sessions } = recordingRuntime();
+    const scoped = scopeBrowserRuntimeToOrganization(runtime, {
+      resolveSessionOrganization: async () => ({ ok: true, organizationId: "org-from-server" }),
+    });
+    // A caller-supplied Organization is replaced, never trusted.
+    expect(await scoped.withSession("user-1", async () => "done", { organizationId: "org-from-caller" })).toBe("done");
+    expect(sessions).toEqual([{ userId: "user-1", organizationId: "org-from-server" }]);
+  });
+
+  it("opens no session when the reader refuses, or cannot answer", async () => {
+    const { runtime, sessions } = recordingRuntime();
+    for (const resolveSessionOrganization of [
+      async () => ({ ok: false as const }),
+      async (): Promise<never> => {
+        throw new Error("database is down");
+      },
+    ]) {
+      const scoped = scopeBrowserRuntimeToOrganization(runtime, { resolveSessionOrganization });
+      await expect(scoped.withSession("user-1", async () => "never")).rejects.toMatchObject({
+        code: "AUTHORIZATION_FAILED",
+        message: "Browsing is not available to your account.",
+      });
+    }
+    expect(sessions).toEqual([]);
+  });
+
+  it("the container wraps its one in-process runtime with the same resolver the remote one uses", () => {
+    const local = CONTAINER_SOURCE.slice(CONTAINER_SOURCE.indexOf("} else if (isBrowserConfigured()) {"));
+    expect(local).toMatch(/scopeBrowserRuntimeToOrganization\(\s*localRuntime,\s*createBrowserSessionTenantResolver\(sharedAccess\)\s*\)/);
+    expect(local.indexOf("scopeBrowserRuntimeToOrganization(")).toBeLessThan(local.indexOf("createBrowserTools(runtime"));
+  });
+
+  it("the in-process artifact store reports through the operational log (Phase 19.4)", () => {
+    const local = CONTAINER_SOURCE.slice(CONTAINER_SOURCE.indexOf("} else if (isBrowserConfigured()) {"));
+    expect(local).toMatch(/artifactStoreFor\(browserConfig, \(event, fields\) =>/);
+    expect(local).toContain('operationalLog.child("browser-artifacts")');
+    expect(local).toMatch(/new BrowserRuntime\(\{ config: browserConfig, downloads \}\)/);
+  });
+
+  it("the in-process artifact store is swept once at start-up, then on an interval, as the service's is (Phase 19.4)", () => {
+    const local = CONTAINER_SOURCE.slice(CONTAINER_SOURCE.indexOf("} else if (isBrowserConfigured()) {"));
+    const firstSweep = local.indexOf("localRuntime.sweepArtifacts()");
+    const interval = local.indexOf("setInterval(");
+    expect(firstSweep).toBeGreaterThan(-1);
+    expect(interval).toBeGreaterThan(-1);
+    // The first sweep is not the interval's: it runs before the interval is set.
+    expect(firstSweep).toBeLessThan(interval);
+    expect(local.indexOf("localRuntime.sweepArtifacts()", interval)).toBeGreaterThan(interval);
   });
 });

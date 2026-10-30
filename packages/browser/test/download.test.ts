@@ -28,9 +28,35 @@ const ELF = Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0x02, 0x01, 0x01, 0x00]);
 let root: string;
 let store: DownloadStore;
 
+// Phase 19.4: every artifact belongs to a user AND an Organization.
+const U1 = { userId: "user-1", organizationId: "org-1" };
+const U2 = { userId: "user-2", organizationId: "org-1" };
+const OTHER_ORG = { userId: "user-3", organizationId: "org-2" };
+
+function storeConfig(storeRoot: string, overrides: { maxBytes?: number } = {}) {
+  return {
+    root: storeRoot,
+    maxBytes: overrides.maxBytes ?? 1024 * 1024,
+    retentionMs: 60 * 60 * 1000,
+    maxBytesPerUser: 10 * 1024 * 1024,
+    maxBytesPerOrganization: 50 * 1024 * 1024,
+    maxArtifactsPerUser: 100,
+    maxArtifactsPerOrganization: 500,
+  };
+}
+
+/** Every stored object, wherever the layout put it. */
+async function objectFiles(storeRoot: string): Promise<string[]> {
+  const out: string[] = [];
+  for (const org of await readdir(join(storeRoot, "orgs")).catch(() => [] as string[])) {
+    out.push(...(await readdir(join(storeRoot, "orgs", org, "objects")).catch(() => [] as string[])));
+  }
+  return out.sort();
+}
+
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), "jarvis-browser-"));
-  store = new DownloadStore({ root, maxBytes: 1024 * 1024 });
+  store = new DownloadStore(storeConfig(root));
 });
 
 afterEach(async () => {
@@ -75,7 +101,7 @@ describe("Sprint 7.7 — format detection trusts bytes, not claims", () => {
 
 describe("Sprint 7.7 — storing", () => {
   it("stores a file and returns an opaque id, never a path", async () => {
-    const stored = await store.storeBytes("user-1", {
+    const stored = await store.storeBytes(U1, {
       fileName: "report.pdf",
       bytes: PDF,
       sourceOrigin: "https://example.com",
@@ -93,7 +119,7 @@ describe("Sprint 7.7 — storing", () => {
   });
 
   it("GENERATES the stored filename from the id, ignoring the remote one", async () => {
-    const stored = await store.storeBytes("user-1", {
+    const stored = await store.storeBytes(U1, {
       fileName: "../../../etc/passwd",
       bytes: PDF,
       sourceOrigin: "https://evil.test",
@@ -103,30 +129,33 @@ describe("Sprint 7.7 — storing", () => {
     expect(stored.fileName).not.toContain("..");
     expect(stored.fileName).not.toContain("passwd");
 
-    const files = await readdir(resolve(root, "user-1"));
-    expect(files).toEqual([`${stored.downloadId}.pdf`]);
+    expect(await objectFiles(root)).toEqual([`${stored.downloadId}.pdf`]);
   });
 
-  it("keeps each user in their own directory", async () => {
-    await store.storeBytes("user-1", {
+  it("keeps each Organization in its own directory, named by a hash, never by the id", async () => {
+    await store.storeBytes(U1, {
       fileName: "a.pdf",
       bytes: PDF,
       sourceOrigin: "https://example.com",
     });
-    await store.storeBytes("user-2", {
+    await store.storeBytes(OTHER_ORG, {
       fileName: "b.png",
       bytes: PNG,
       sourceOrigin: "https://example.com",
     });
 
-    expect((await readdir(resolve(root, "user-1"))).length).toBe(1);
-    expect((await readdir(resolve(root, "user-2"))).length).toBe(1);
+    const orgs = await readdir(join(root, "orgs"));
+    expect(orgs).toHaveLength(2);
+    for (const org of orgs) {
+      expect(org).toMatch(/^[0-9a-f]{40}$/);
+      expect(await readdir(join(root, "orgs", org, "objects"))).toHaveLength(1);
+    }
   });
 
   it("REFUSES an empty file", async () => {
     await expectJarvisError(
       () =>
-        store.storeBytes("user-1", {
+        store.storeBytes(U1, {
           fileName: "empty.txt",
           bytes: Buffer.alloc(0),
           sourceOrigin: "https://example.com",
@@ -136,10 +165,10 @@ describe("Sprint 7.7 — storing", () => {
   });
 
   it("REFUSES a file over the size cap", async () => {
-    const small = new DownloadStore({ root, maxBytes: 8 });
+    const small = new DownloadStore(storeConfig(root, { maxBytes: 8 }));
     await expectJarvisError(
       () =>
-        small.storeBytes("user-1", {
+        small.storeBytes(U1, {
           fileName: "big.pdf",
           bytes: PDF,
           sourceOrigin: "https://example.com",
@@ -151,7 +180,7 @@ describe("Sprint 7.7 — storing", () => {
   it("REFUSES an unrecognised binary", async () => {
     await expectJarvisError(
       () =>
-        store.storeBytes("user-1", {
+        store.storeBytes(U1, {
           fileName: "payload.bin",
           bytes: ELF,
           sourceOrigin: "https://evil.test",
@@ -165,7 +194,7 @@ describe("Sprint 7.7 — storing", () => {
     async (extension) => {
       await expectJarvisError(
         () =>
-          store.storeBytes("user-1", {
+          store.storeBytes(U1, {
             fileName: `payload${extension}`,
             bytes: TEXT,
             sourceOrigin: "https://evil.test",
@@ -183,7 +212,7 @@ describe("Sprint 7.7 — storing", () => {
   ])("REFUSES %s as a user id", async (_label, userId) => {
     await expectJarvisError(
       () =>
-        store.storeBytes(userId, {
+        store.storeBytes({ userId, organizationId: "org-1" }, {
           fileName: "a.pdf",
           bytes: PDF,
           sourceOrigin: "https://example.com",
@@ -193,57 +222,62 @@ describe("Sprint 7.7 — storing", () => {
   });
 });
 
-describe("Sprint 7.8 — retrieval is scoped to the owner", () => {
+describe("Sprint 7.8 — retrieval is scoped to the owner (and, since 19.4, the Organization)", () => {
   it("returns metadata to the owner", async () => {
-    const stored = await store.storeBytes("user-1", {
+    const stored = await store.storeBytes(U1, {
       fileName: "a.pdf",
       bytes: PDF,
       sourceOrigin: "https://example.com",
     });
-    expect(store.get("user-1", stored.downloadId)?.fileName).toBe(stored.fileName);
+    expect((await store.get(U1, stored.downloadId))?.fileName).toBe(stored.fileName);
   });
 
   it("returns NOTHING to another user", async () => {
-    const stored = await store.storeBytes("user-1", {
+    const stored = await store.storeBytes(U1, {
       fileName: "a.pdf",
       bytes: PDF,
       sourceOrigin: "https://example.com",
     });
 
-    expect(store.get("user-2", stored.downloadId)).toBeNull();
-    expect(await store.readBytes("user-2", stored.downloadId)).toBeNull();
-    expect(await store.resolveForUpload("user-2", stored.downloadId)).toBeNull();
+    for (const other of [U2, OTHER_ORG, { userId: "user-1", organizationId: "org-2" }]) {
+      expect(await store.get(other, stored.downloadId)).toBeNull();
+      expect(await store.readBytes(other, stored.downloadId)).toBeNull();
+      expect(await store.resolveForUpload(other, stored.downloadId)).toBeNull();
+    }
   });
 
   it("returns nothing for an unknown id", async () => {
-    expect(store.get("user-1", "not-a-real-id")).toBeNull();
-    expect(await store.resolveForUpload("user-1", "not-a-real-id")).toBeNull();
+    expect(await store.get(U1, "not-a-real-id")).toBeNull();
+    expect(await store.resolveForUpload(U1, "not-a-real-id")).toBeNull();
   });
 
   it("never leaks a path through the metadata accessor", async () => {
-    const stored = await store.storeBytes("user-1", {
+    const stored = await store.storeBytes(U1, {
       fileName: "a.pdf",
       bytes: PDF,
       sourceOrigin: "https://example.com",
     });
-    const record = store.get("user-1", stored.downloadId)!;
+    const record = (await store.get(U1, stored.downloadId))!;
     expect(Object.keys(record)).toEqual([
       "downloadId",
       "fileName",
       "byteSize",
       "mimeType",
       "sourceOrigin",
+      "kind",
+      "createdAt",
+      "expiresAt",
     ]);
     expect(JSON.stringify(record)).not.toContain(root);
   });
 
   it("resolves an upload path only for the owner, and only inside the root", async () => {
-    const stored = await store.storeBytes("user-1", {
+    const stored = await store.storeBytes(U1, {
       fileName: "a.pdf",
       bytes: PDF,
       sourceOrigin: "https://example.com",
     });
-    const path = await store.resolveForUpload("user-1", stored.downloadId);
+    const path = await store.resolveForUpload(U1, stored.downloadId);
     expect(path).toBeTruthy();
     expect(resolve(path!).startsWith(resolve(root))).toBe(true);
   });

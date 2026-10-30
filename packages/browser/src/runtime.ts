@@ -37,7 +37,7 @@ import { JarvisError } from "@jarvis/core";
 import type { BrowserConfig } from "./config.js";
 import { navigationPolicyFor } from "./config.js";
 import type { NavigationPolicyConfig } from "./navigation-policy.js";
-import { DownloadStore } from "./download.js";
+import { DownloadStore, type ArtifactSweepResult } from "./download.js";
 import { BrowserSession, type ContextLike, type PageLike } from "./session.js";
 
 /** The slice of Playwright this runtime uses, so a test can substitute it. */
@@ -94,6 +94,31 @@ function runtimeError(message: string): JarvisError {
   return new JarvisError("TOOL_UNAVAILABLE", message);
 }
 
+/**
+ * The durable artifact store a config describes (Phase 19.4). Retention is
+ * deployment policy with no default (ADR-19-007): without it there is no
+ * store, so no runtime — the browser is refused rather than given storage that
+ * keeps files for a duration nobody chose.
+ */
+export function artifactStoreFor(
+  config: BrowserConfig,
+  log?: (event: string, fields?: Record<string, string | number | boolean>) => void
+): DownloadStore {
+  if (config.artifactRetentionHours === undefined) {
+    throw runtimeError("BROWSER_ARTIFACT_RETENTION_HOURS is not set; browser artifacts have no retention policy");
+  }
+  return new DownloadStore({
+    root: config.downloadDir,
+    maxBytes: config.maxDownloadBytes,
+    retentionMs: config.artifactRetentionHours * 60 * 60 * 1000,
+    maxBytesPerUser: config.artifactQuotaBytesPerUser,
+    maxBytesPerOrganization: config.artifactQuotaBytesPerOrganization,
+    maxArtifactsPerUser: config.artifactMaxCountPerUser,
+    maxArtifactsPerOrganization: config.artifactMaxCountPerOrganization,
+    ...(log ? { log } : {}),
+  });
+}
+
 export class BrowserRuntime implements BrowserRuntimePort {
   private readonly config: BrowserConfig;
   private readonly launcher: BrowserLauncher;
@@ -111,12 +136,12 @@ export class BrowserRuntime implements BrowserRuntimePort {
     this.config = deps.config;
     this.launcher = deps.launcher ?? launchChromium;
     this.policy = deps.policy ?? navigationPolicyFor(deps.config);
-    this.downloads =
-      deps.downloads ??
-      new DownloadStore({
-        root: deps.config.downloadDir,
-        maxBytes: deps.config.maxDownloadBytes,
-      });
+    this.downloads = deps.downloads ?? artifactStoreFor(deps.config);
+  }
+
+  /** Phase 19.4 — removes expired, half-written and unreadable artifacts. Safe to repeat. */
+  sweepArtifacts(): Promise<ArtifactSweepResult> {
+    return this.downloads.sweep();
   }
 
   /**
@@ -169,6 +194,13 @@ export class BrowserRuntime implements BrowserRuntimePort {
     if (typeof userId !== "string" || userId.length === 0) {
       throw runtimeError("A browser session requires a user id");
     }
+    // Phase 19.4: every artifact a session makes belongs to a user AND an
+    // Organization, resolved server-side by whoever opens the session. Without
+    // one there is nothing to scope to, so no session — before any browser.
+    const organizationId = options.organizationId;
+    if (typeof organizationId !== "string" || organizationId.length === 0) {
+      throw runtimeError("A browser session requires an Organization");
+    }
 
     await this.acquireSlot();
 
@@ -195,6 +227,7 @@ export class BrowserRuntime implements BrowserRuntimePort {
         policy: this.policy,
         downloads: this.downloads,
         userId,
+        organizationId,
       });
       await session.installNavigationGuard();
 

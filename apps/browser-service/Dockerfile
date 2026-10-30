@@ -69,6 +69,12 @@ COPY --from=deps /workspace/apps ./apps
 COPY --from=deps /workspace/packages ./packages
 COPY . .
 
+# Prisma first: @jarvis/db is in this service's build graph (@jarvis/browser ->
+# @jarvis/memory -> @jarvis/db), and its tsc build imports the generated
+# client's types. The schema is present by now — `COPY . .` above brings
+# packages/db/prisma/schema.prisma in.
+RUN pnpm --filter @jarvis/db exec prisma generate
+
 # The service and every workspace package it imports, in dependency order.
 RUN pnpm --filter @jarvis/browser-service... build
 
@@ -91,10 +97,13 @@ COPY --from=build /workspace/pnpm-workspace.yaml ./pnpm-workspace.yaml
 COPY --from=build /workspace/packages ./packages
 COPY --from=build /workspace/apps/browser-service ./apps/browser-service
 
-# A writable directory for a session's downloads, and nothing else writable in
-# the image. `BROWSER_SERVICE_DOWNLOAD_DIR` points here in compose.
-RUN mkdir -p /workspace/storage/downloads \
-    && chown -R node:node /workspace/storage
+# Phase 19.4 — the durable artifact store's directory, owned by the
+# unprivileged user and readable by nobody else. Compose mounts a named volume
+# here (`BROWSER_SERVICE_DOWNLOAD_DIR`); a new volume takes this ownership and
+# mode from the image. Nothing else in the image is writable.
+RUN mkdir -p /var/lib/jarvis-browser/artifacts \
+    && chown -R node:node /var/lib/jarvis-browser \
+    && chmod 700 /var/lib/jarvis-browser/artifacts
 
 USER node
 
