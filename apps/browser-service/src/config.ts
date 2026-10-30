@@ -12,8 +12,7 @@
 // nothing else does.
 // ---------------------------------------------------------------------------
 
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute } from "node:path";
 
 import {
   BROWSER_PROTOCOL_DEFAULT_CLOCK_SKEW_MS,
@@ -29,8 +28,24 @@ export interface BrowserServiceChromiumConfig {
   headless: boolean;
   maxConcurrentSessions: number;
   navigationTimeoutMs: number;
+  /**
+   * Phase 19.4 — the durable artifact store's directory: a persistent volume,
+   * named explicitly. Empty only while Chromium is off (nothing is stored).
+   */
   downloadDir: string;
   domainAllowlist: string[];
+  artifacts: BrowserServiceArtifactConfig;
+}
+
+/** Phase 19.4 — artifact retention, quotas and cleanup (ADR-19-007). */
+export interface BrowserServiceArtifactConfig {
+  /** Deployment policy with no default; required whenever Chromium is on. */
+  retentionHours: number | null;
+  quotaBytesPerUser: number;
+  quotaBytesPerOrganization: number;
+  maxCountPerUser: number;
+  maxCountPerOrganization: number;
+  sweepIntervalMs: number;
 }
 
 export interface BrowserServiceTlsConfig {
@@ -141,9 +156,68 @@ function parseAllowlist(raw: string | undefined): string[] {
     .filter((entry) => entry.length > 0);
 }
 
-function defaultDownloadDir(env: NodeJS.ProcessEnv): string {
-  const base = trimmed(env.BROWSER_SERVICE_DOWNLOAD_DIR);
-  return base ?? join(tmpdir(), "jarvis-browser-artifacts");
+/** A byte count: up to 12 digits, within bounds, named in the error, never echoed. */
+function requestedBytes(env: NodeJS.ProcessEnv, name: string, fallback: number, max: number): number {
+  const raw = trimmed(env[name]);
+  if (!raw) return fallback;
+  if (!/^[0-9]{1,12}$/.test(raw) || Number(raw) < 1 || Number(raw) > max) {
+    throw new Error(`browser service configuration error: ${name} must be a whole number of bytes between 1 and ${max}`);
+  }
+  return Number(raw);
+}
+
+/**
+ * Phase 19.4 — where artifacts live, and for how long. With Chromium on, both
+ * the directory and the retention must be named: there is no fallback to a
+ * temporary directory that a restart would empty, and no invented duration.
+ */
+function loadArtifactSettings(
+  env: NodeJS.ProcessEnv,
+  chromiumEnabled: boolean
+): { downloadDir: string; artifacts: BrowserServiceArtifactConfig } {
+  const downloadDir = trimmed(env.BROWSER_SERVICE_DOWNLOAD_DIR);
+  if (downloadDir !== null && !isAbsolute(downloadDir)) {
+    throw new Error("browser service configuration error: BROWSER_SERVICE_DOWNLOAD_DIR must be an absolute path");
+  }
+  const retentionRaw = trimmed(env.BROWSER_ARTIFACT_RETENTION_HOURS);
+  const retentionHours =
+    retentionRaw === null
+      ? null
+      : requestedInteger(env, "BROWSER_ARTIFACT_RETENTION_HOURS", { fallback: 0, min: 1, max: 24 * 366 });
+  if (chromiumEnabled && downloadDir === null) {
+    throw new Error(
+      "browser service configuration error: BROWSER_SERVICE_DOWNLOAD_DIR is required when BROWSER_SERVICE_CHROMIUM_ENABLED=true; artifacts need a durable directory"
+    );
+  }
+  if (chromiumEnabled && retentionHours === null) {
+    throw new Error(
+      "browser service configuration error: BROWSER_ARTIFACT_RETENTION_HOURS is required when BROWSER_SERVICE_CHROMIUM_ENABLED=true; artifact retention is deployment policy and has no default"
+    );
+  }
+  return {
+    downloadDir: downloadDir ?? "",
+    artifacts: {
+      retentionHours,
+      quotaBytesPerUser: requestedBytes(env, "BROWSER_ARTIFACT_QUOTA_BYTES_PER_USER", 100 * 1024 * 1024, 10 * 1024 ** 3),
+      quotaBytesPerOrganization: requestedBytes(
+        env,
+        "BROWSER_ARTIFACT_QUOTA_BYTES_PER_ORGANIZATION",
+        500 * 1024 * 1024,
+        100 * 1024 ** 3
+      ),
+      maxCountPerUser: requestedInteger(env, "BROWSER_ARTIFACT_MAX_COUNT_PER_USER", { fallback: 200, min: 1, max: 100_000 }),
+      maxCountPerOrganization: requestedInteger(env, "BROWSER_ARTIFACT_MAX_COUNT_PER_ORGANIZATION", {
+        fallback: 1_000,
+        min: 1,
+        max: 1_000_000,
+      }),
+      sweepIntervalMs: requestedInteger(env, "BROWSER_ARTIFACT_SWEEP_INTERVAL_MS", {
+        fallback: 10 * 60_000,
+        min: 10_000,
+        max: 24 * 60 * 60_000,
+      }),
+    },
+  };
 }
 
 export function loadBrowserServiceConfig(
@@ -242,6 +316,7 @@ export function loadBrowserServiceConfig(
       "browser service configuration error: BROWSER_SERVICE_EGRESS_PROXY_URL is required when BROWSER_SERVICE_CHROMIUM_ENABLED=true; the browser has no route except through the egress proxy"
     );
   }
+  const artifactSettings = loadArtifactSettings(env, chromiumEnabled);
 
   return {
     // Loopback by default. A deployment that must be reachable from another
@@ -284,8 +359,9 @@ export function loadBrowserServiceConfig(
         min: 1_000,
         max: 120_000,
       }),
-      downloadDir: defaultDownloadDir(env),
+      downloadDir: artifactSettings.downloadDir,
       domainAllowlist: parseAllowlist(env.BROWSER_DOMAIN_ALLOWLIST),
+      artifacts: artifactSettings.artifacts,
     },
   };
 }

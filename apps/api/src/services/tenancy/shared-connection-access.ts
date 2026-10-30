@@ -26,9 +26,11 @@
 
 import {
   getIntegrationDescriptor,
+  JarvisError,
   sharedConnectionOfTool,
   SHARED_INTEGRATION_CONNECTORS,
   type AutomationConnectorOwnerReader,
+  type BrowserRuntimePort,
   type BrowserWriteScopePort,
   type BrowserWriteScopeResolution,
   type ConnectorOwnerLookup,
@@ -166,6 +168,37 @@ export function createBrowserSessionTenantResolver(
       if (!decision.allowed) return { ok: false };
       return { ok: true, organizationId: decision.tenantId };
     },
+  };
+}
+
+/**
+ * Phase 19.4 — the in-process browser, scoped like the remote one.
+ *
+ * The browser runtime refuses a session without an Organization, because every
+ * artifact it makes belongs to a user AND an Organization (ADR-19-007). The
+ * remote runtime resolves that Organization through the resolver above before
+ * it opens a session; this gives the in-process runtime the same answer, from
+ * the same check. Whatever Organization a caller's options name is replaced:
+ * it is never trusted. A refusal, or a lookup that fails, opens no session.
+ */
+export function scopeBrowserRuntimeToOrganization(
+  runtime: BrowserRuntimePort,
+  tenant: BrowserSessionTenantResolver
+): BrowserRuntimePort {
+  return {
+    async withSession(userId, run, options = {}) {
+      let resolved: { ok: true; organizationId: string } | { ok: false };
+      try {
+        resolved = await tenant.resolveSessionOrganization(userId);
+      } catch {
+        resolved = { ok: false };
+      }
+      if (!resolved.ok) {
+        throw new JarvisError("AUTHORIZATION_FAILED", sharedConnectionUnavailable("Browsing"));
+      }
+      return runtime.withSession(userId, run, { ...options, organizationId: resolved.organizationId });
+    },
+    shutdown: () => runtime.shutdown(),
   };
 }
 

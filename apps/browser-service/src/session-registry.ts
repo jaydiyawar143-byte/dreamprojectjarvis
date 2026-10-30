@@ -165,7 +165,9 @@ export class BrowserSessionRegistry {
         // context and runs when this resolves, whatever the reason.
         await closing;
       },
-      {}
+      // Phase 19.4: the session's artifacts belong to this user in THIS
+      // Organization — the one the API resolved and this registry binds.
+      { organizationId: subject.organizationId }
     );
 
     run.then(

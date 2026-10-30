@@ -43,7 +43,7 @@ import { normalizeText, normalizeInlineText } from "@jarvis/memory";
 import type { BrowserConfig } from "./config.js";
 import type { NavigationPolicyConfig } from "./navigation-policy.js";
 import { validateNavigationTarget } from "./navigation-policy.js";
-import type { DownloadStore } from "./download.js";
+import type { ArtifactScope, DownloadStore } from "./download.js";
 
 /** Minimal shape of the Playwright objects we use, so tests can fake them. */
 export interface PageLike {
@@ -101,6 +101,8 @@ export interface BrowserSessionDeps {
   policy: NavigationPolicyConfig;
   downloads: DownloadStore;
   userId: string;
+  /** Phase 19.4: the Organization the session works for; artifacts are scoped to it and the user. */
+  organizationId: string;
 }
 
 const MAX_INSPECT_ELEMENTS = 60;
@@ -127,7 +129,7 @@ export class BrowserSession implements BrowserSessionPort {
   private readonly config: BrowserConfig;
   private readonly policy: NavigationPolicyConfig;
   private readonly downloads: DownloadStore;
-  private readonly userId: string;
+  private readonly scope: ArtifactScope;
 
   /** origin -> allowed. Bounded so a hostile page cannot grow it without limit. */
   private readonly originDecisions = new Map<string, boolean>();
@@ -142,7 +144,7 @@ export class BrowserSession implements BrowserSessionPort {
     this.config = deps.config;
     this.policy = deps.policy;
     this.downloads = deps.downloads;
-    this.userId = deps.userId;
+    this.scope = { userId: deps.userId, organizationId: deps.organizationId };
   }
 
   /**
@@ -317,11 +319,12 @@ export class BrowserSession implements BrowserSessionPort {
       throw browserError(`Screenshot failed: ${message}`);
     });
 
-    const stored = await this.downloads.storeBytes(this.userId, {
+    const stored = await this.downloads.storeBytes(this.scope, {
       fileName: `screenshot-${randomUUID()}.png`,
       bytes: buffer,
       mimeType: "image/png",
       sourceOrigin: safeOrigin(this.page.url()),
+      kind: "screenshot",
     });
 
     return {
@@ -453,10 +456,11 @@ export class BrowserSession implements BrowserSessionPort {
 
     try {
       const bytes = await readFile(temporaryPath);
-      const stored = await this.downloads.storeBytes(this.userId, {
+      const stored = await this.downloads.storeBytes(this.scope, {
         fileName: download.suggestedFilename(),
         bytes,
         sourceOrigin: origin,
+        kind: "download",
       });
       return {
         downloadId: stored.downloadId,
@@ -474,7 +478,7 @@ export class BrowserSession implements BrowserSessionPort {
    * Attaches a previously downloaded file to a file input.
    *
    * The only thing a caller can name is a `downloadId` this store already
-   * issued to THIS user. There is no parameter that accepts a path, so
+   * issued to THIS user in THIS Organization, unexpired and intact. There is no parameter that accepts a path, so
    * "upload /etc/shadow" has no expressible form — the containment is the
    * absence of the capability, not a check on its argument.
    */
@@ -485,11 +489,11 @@ export class BrowserSession implements BrowserSessionPort {
   ): Promise<BrowserUploadResult> {
     this.requireNavigated();
 
-    const record = this.downloads.get(this.userId, downloadId);
+    const record = await this.downloads.get(this.scope, downloadId);
     if (!record) {
       throw browserError("Unknown download id", { downloadId });
     }
-    const path = await this.downloads.resolveForUpload(this.userId, downloadId);
+    const path = await this.downloads.resolveForUpload(this.scope, downloadId);
     if (!path) {
       throw browserError("Stored file is no longer available", { downloadId });
     }

@@ -169,6 +169,11 @@ What the container receives is limited, and how far:
   way to anything beyond the API is the `browser-egress` proxy (see "Browser
   egress" below). Chromium is launched with that proxy for every connection,
   loopback included, and can resolve no other name.
+- **Storage (Phase 19.4).** Its root filesystem is read-only. The one writable,
+  persistent path is the named volume `jarvis-browser-artifacts`, mounted at
+  `/var/lib/jarvis-browser/artifacts` for its artifact store (see "Browser
+  artifacts" below); `/tmp` is a size-capped tmpfs for Chromium's scratch,
+  emptied on every restart. The volume is mounted into no other service.
 
 To enable it:
 
@@ -194,7 +199,9 @@ To enable it:
 3. Set `BROWSER_SERVICE_CHROMIUM_ENABLED="true"` for the service. Without it the
    container is up and refuses every session, by design. With it, the service
    also requires `BROWSER_SERVICE_EGRESS_PROXY_URL`, which compose sets to
-   `http://browser-egress:3128`; it refuses to start without one.
+   `http://browser-egress:3128`, and `BROWSER_ARTIFACT_RETENTION_HOURS`, which
+   has no default and which you set in `.env` (Phase 19.4, below); it refuses
+   to start without either.
 4. Start it — compose starts `browser-egress` first and the browser service only
    once the proxy is healthy — then restart the API so it reads the endpoint:
 
@@ -306,6 +313,187 @@ docker compose up -d api
 
 The API returns to the in-process browser when one is configured, or to no
 browser tools.
+
+#### Who may browse: the browser connection's Organization (both modes)
+
+Browsing is a shared connection, `browser/service`, and it follows the rule
+every shared connection does: **unassigned means nobody** (see "Every shared
+connection needs an owner"). Before any browser session opens — in the API
+process or in the separate service, it makes no difference — the API asks which
+Organization owns the browser connection and whether the user belongs to it.
+That Organization is also the one every artifact the session makes belongs to.
+Any member may browse and read pages; a browser write (a click, typing, a
+submit, a download or an upload) needs an owner or admin of that Organization,
+and its approval comes from another owner or admin, as for every shared
+connection.
+
+Assign it with the same command and `$T` as the other connections:
+
+```bash
+npx tsx scripts/tenant-admin/run.ts assign-connector --provider=browser --connector=service --tenant=<tenant id> $T --execute
+```
+
+Until it is assigned — and for anyone outside that Organization — every browser
+tool is refused before a session opens, in both modes, and nothing is stored.
+The first refusal is the check the executor runs for every shared connection,
+which answers "browser is not available to your account." A member whose role
+does not allow writes is told "Your organization role does not allow changes
+through browser. Ask an owner or admin of your organization." If the check
+itself cannot be made, the answer is "Organization access could not be
+verified, so nothing was done."
+
+The session repeats the check, so an assignment that changes between the two is
+still refused:
+
+| Browsing | A session is refused with |
+|---|---|
+| In the API process | "Browsing is not available to your account." (a write: "Browser control is not available to your account.") |
+| Through the separate service | "This action is not allowed." (`NOT_AUTHORIZED`; nothing is sent to the service) |
+
+#### Browser artifacts (Phase 19.4)
+
+A file a browser session downloads, and a screenshot it takes, is an artifact:
+kept in a durable store, answered to the tools as an opaque id with metadata,
+and never handed to a client as a path or as bytes. Each belongs to one user
+**and** one Organization — the Organization the API resolves from the shared
+connection's owner record, never one a request names. Any other user's or
+Organization's id, an expired one, a deleted one and a malformed one are all
+answered the same way: not found.
+
+| Where the browser runs | Store directory | Survives |
+|---|---|---|
+| The browser service (compose) | `/var/lib/jarvis-browser/artifacts`, on the named volume `jarvis-browser-artifacts` | A restart, a recreated container, a rebuilt image. **Not** `docker compose down -v` or removing the volume |
+| In the API process | `BROWSER_DOWNLOAD_DIR` (default `storage/browser`, relative to the API's working directory) | A restart of the process, while that directory is on persistent disk. Inside a container, put it on a volume; otherwise it ends with the container |
+
+**Configuration** (`.env.example`):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `BROWSER_ARTIFACT_RETENTION_HOURS` | **none — required** | How long an artifact is kept: 1 to 8784 hours. Your policy, not the code's. Without it the browser service refuses to start with Chromium on, and the API registers no in-process browser tools |
+| `BROWSER_ARTIFACT_QUOTA_BYTES_PER_USER` | 104857600 (100 MiB) | Bytes one user may hold in one Organization |
+| `BROWSER_ARTIFACT_QUOTA_BYTES_PER_ORGANIZATION` | 524288000 (500 MiB) | Bytes one Organization may hold |
+| `BROWSER_ARTIFACT_MAX_COUNT_PER_USER` | 200 | Artifacts one user may hold in one Organization |
+| `BROWSER_ARTIFACT_MAX_COUNT_PER_ORGANIZATION` | 1000 | Artifacts one Organization may hold |
+| `BROWSER_MAX_DOWNLOAD_BYTES` | 10485760 (10 MiB) | One artifact |
+| `BROWSER_ARTIFACT_SWEEP_INTERVAL_MS` | 600000 | The service's sweep interval (10000 to 86400000). The API, browsing in-process, sweeps at start-up and then every 10 minutes |
+
+**How it holds.**
+
+- **Writes are atomic.** The bytes are written to a temporary file in the
+  store, flushed, and renamed into place; then the record, the same way. A crash
+  leaves at most a temporary file, or bytes with no record — never a record
+  without its bytes. The sweep removes both after ten minutes.
+- **Quotas are checked under a lock**, one per Organization, which every process
+  on the same directory shares (an atomic `mkdir`; a lock left by a crashed
+  writer is taken over after 30 seconds). After the write, the quotas are
+  counted again: if two writers ever got past the lock together, the one that
+  finds itself over a quota removes its own write and is refused. A quota is
+  never exceeded by what is kept.
+- **Every read re-checks.** The record must be valid, its user and Organization
+  the caller's, and its expiry in the future. Before an upload uses the bytes,
+  their size and SHA-256 must match the record, and the file must be a regular
+  file, not a link. Anything else is not found.
+- **Expiry does not wait for the sweep.** An expired artifact is refused on read
+  at once; the sweep (at start-up and on the interval) deletes it later. A
+  sweep is safe to repeat and to run beside writers, and to run on every
+  instance that shares the directory.
+- **The sweep deletes only what is its own and broken.** That is: an expired
+  artifact; a partial write; bytes no record names; and a record that breaks the
+  contract it claims (not JSON, another id than its file's, or a wrong field of
+  its version). Partial writes, orphaned bytes and broken records are left for
+  ten minutes first. It **keeps**, sweep after sweep:
+  - a record written by a newer release — a newer version, or a kind or a
+    format this release does not know — together with its bytes, for that
+    release to judge;
+  - a record it could not read, with its bytes — a link in a record's place
+    among them;
+  - every object of a metadata directory it could not list;
+  - any file or directory whose name it did not write.
+
+  It never follows a link: a linked directory, wherever it sits in the store, is
+  neither read nor emptied, and an expired artifact's bytes are removed only
+  from a listing of the real `objects` directory — never through a link in its
+  place. A rollback, or two releases sharing one directory, therefore loses
+  nothing.
+- **The directory is the store's alone.** The store writes a marker file into
+  an empty directory the first time it is used, and refuses a non-empty
+  directory without one: it never adopts, or deletes, files it did not write.
+  Both modes check this with a sweep at start-up. The browser service exits if
+  the store cannot be used. The API, browsing in-process, logs it
+  (`artifact_store_unavailable` with `stage: "init"`, then
+  `artifact_sweep_failed`) and keeps running; its browser tools then refuse
+  every screenshot and download until the directory is fixed.
+
+**Logs.** Store events are `artifact_store_refused` (with a `reason`:
+`too-large`, `executable`, `format`, `quota` with the quota that was reached, or
+`busy`), `artifact_store_unavailable` (with the `stage`),
+`artifact_record_invalid` and `artifact_record_unsupported` (a newer release's
+record; with the opaque artifact id), `artifact_integrity_failed` (with the
+opaque artifact id), and `artifact_sweep` (counts: `expired`, `orphans`,
+`partial`, `corrupt`, `preserved` — kept for a newer release — `skipped` —
+links and names it did not write — and `failed`). Where browsing runs in the API
+process, they are written through the operational log, as the
+`browser-artifacts` component. Through the separate service, they are lines in
+its own log (`docker compose logs browser-service`), with `"service":"browser"`.
+No line carries a user, an Organization, a path, a file name, an origin or any
+contents.
+
+**Upgrading from before Phase 19.4.** An existing `storage/browser` directory
+from an earlier release holds files in the old layout, and the store will refuse
+it. Point `BROWSER_DOWNLOAD_DIR` at a new, empty directory, or empty the old one.
+Nothing is lost: those files were reachable only by the process that wrote
+them, and never after a restart. No database migration belongs to this stage,
+so rolling back is redeploying the previous release; the store's directory can
+stay, or be removed.
+
+**Checking it on a host.** Checked on 2026-10-30 (Docker Desktop 29.9.2,
+Linux containers on Windows), with an image built from
+`apps/browser-service/Dockerfile` with `--no-cache`, in a separate compose
+project (its own `-p`, container names and env file — never the deployment's).
+The service ran as `node`. A new volume took `node:node 700` from the image,
+and so did an empty volume created earlier with another owner: Docker copies
+the directory's owner and mode into a volume that is empty when it is mounted.
+Only the volume and `/tmp` were writable. Artifacts the store wrote on the
+volume were served intact to their owner, and not found for another
+Organization, after `--force-recreate` and after `down` and `up` (without
+`-v`). The new container's start-up sweep removed one that had expired. The
+service refused to start on a volume holding a file that is not the store's
+(left in place), on a non-empty volume `node` cannot write, and without a
+retention. To check your own host, after a session has taken a screenshot:
+
+```bash
+docker compose --profile browser-service exec browser-service sh -c 'id; stat -c "%U %a" /var/lib/jarvis-browser/artifacts; find /var/lib/jarvis-browser/artifacts/orgs -name "*.json" | wc -l'
+docker compose --profile browser-service up -d --force-recreate browser-service
+docker compose --profile browser-service exec browser-service sh -c 'find /var/lib/jarvis-browser/artifacts/orgs -name "*.json" | wc -l'
+```
+
+The service must run as `node`, the directory must be `node 700`, and the count
+must be the same after the recreate (less any that expired in between).
+
+**Troubleshooting**
+
+Where a refusal shows depends on where the browser runs. In the API process, a
+browser tool answers with the store's own sentence, and the API's log has the
+event. Through the separate service, the store's codes never cross the
+boundary: the service answers one of its fixed codes, and the store's event is
+in the service's log, next to a `browser_service_request_failed` line with that
+code.
+
+| You see | Where | It means | Do |
+|---|---|---|---|
+| The service exits with `BROWSER_ARTIFACT_RETENTION_HOURS is required` (in `browser_service_config_invalid`) | Separate service | Chromium is on and no retention is set | Set it in `.env` and start it again |
+| The service exits with `BROWSER_SERVICE_DOWNLOAD_DIR is required`, or says it must be absolute | Separate service | It was started outside compose without a store directory | Set an absolute path on persistent storage |
+| The service exits with `browser_service_artifacts_unavailable` | Separate service | The directory is not writable by `node`, or holds files that are not an artifact store | Check the volume's ownership; never point it at a directory with other files in it |
+| `browser_registration_skipped` with `BROWSER_ARTIFACT_RETENTION_HOURS is not set` | API process | The in-process browser has no retention policy | Set it; until then there are no in-process browser tools |
+| `artifact_store_unavailable` (`stage: "init"`) and `artifact_sweep_failed` just after start-up | API process | `BROWSER_DOWNLOAD_DIR` is not writable, or holds files that are not an artifact store — most often a `storage/browser` from before Phase 19.4 | See "Upgrading from before Phase 19.4" below, then restart the API |
+| "browser is not available to your account." — or, from the session itself, "Browsing is not available to your account.", "Browser control is not available to your account." or "This action is not allowed." | Both | The browser connection is unassigned, or the user is outside its Organization | See "Who may browse" above |
+| "Artifact storage quota reached; older artifacts must expire first" (`ARTIFACT_QUOTA_EXCEEDED`); the log has `artifact_store_refused`, `reason: "quota"` and which quota | API process | The user or the Organization is full | Wait for older artifacts to expire, or raise that quota |
+| "Artifact storage is not available" or "Artifact storage is busy; try again" (`ARTIFACT_STORE_UNAVAILABLE`) | API process | The store could not be written or read (`artifact_store_unavailable` names the stage), or its lock stayed busy for 5 seconds (`reason: "busy"`) | Check the directory's space and permissions; a busy lock that persists means a stuck process on the same directory |
+| "Unknown download id" or "Stored file is no longer available" for an upload | API process | The id is expired, deleted, malformed or another user's or Organization's — or its bytes no longer match their record | Download the file again |
+| "The browser could not perform the action." (`PROVIDER_ERROR`) for a screenshot | Separate service | A read failed. If the service log has `artifact_store_refused` or `artifact_store_unavailable` beside it, the screenshot was taken and could not be stored | As the two `API process` rows above, on the service's volume |
+| "The outcome of the action is unknown; it was not retried." (`UNKNOWN_OUTCOME`) for a download or an upload | Separate service | A write failed after it was handed to the browser. The store refusing the downloaded file is one cause (its event is in the service log); an upload of an expired, deleted or foreign id is another. The API records the write UNKNOWN and never retries it | Check the service log, and the site, before asking for it again |
+| `artifact_integrity_failed` | Both | An artifact's bytes no longer match its record | It is refused, and swept at expiry. Find out what changed the directory |
+| `artifact_record_unsupported`, or `preserved` above zero in `artifact_sweep` | Both | Records written by a newer release, after a rollback or beside a newer instance on the same directory | Expected. They are kept, and served again once the newer release runs |
 
 ## 7. Check the confirmation store
 
@@ -429,7 +617,7 @@ docker compose exec postgres psql -U jarvis -d jarvis -c '\d "Approval"'
 Then assign each connection this deployment configures, with the same command and the same `$T` as above:
 
 ```bash
-for key in meta/ads n8n/rest whatsapp/cloud-api google-maps/server-key mcp/servers omniroute/gateway; do
+for key in meta/ads n8n/rest whatsapp/cloud-api google-maps/server-key mcp/servers omniroute/gateway browser/service; do
   npx tsx scripts/tenant-admin/run.ts assign-connector --provider=${key%/*} --connector=${key#*/} --tenant=<tenant id> $T --execute
 done
 npx tsx scripts/tenant-admin/run.ts list --tenant=<tenant id> $T

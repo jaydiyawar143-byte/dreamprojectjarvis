@@ -78,6 +78,14 @@ function testConfig(overrides: Partial<BrowserServiceConfig> = {}): BrowserServi
       navigationTimeoutMs: 5_000,
       downloadDir: "unused",
       domainAllowlist: [],
+      artifacts: {
+        retentionHours: null,
+        quotaBytesPerUser: 100 * 1024 * 1024,
+        quotaBytesPerOrganization: 500 * 1024 * 1024,
+        maxCountPerUser: 200,
+        maxCountPerOrganization: 1_000,
+        sweepIntervalMs: 600_000,
+      },
     },
     ...overrides,
   };
@@ -89,13 +97,15 @@ interface FakeCalls {
   navigated: string[];
   clicked: string[];
   inspected: number;
+  /** Phase 19.4: the Organization each session was opened for. */
+  organizations: Array<string | undefined>;
 }
 
 function fakeEngine(overrides: Partial<BrowserSessionPort> = {}): {
   engine: BrowserRuntimePort;
   calls: FakeCalls;
 } {
-  const calls: FakeCalls = { opened: 0, closed: 0, navigated: [], clicked: [], inspected: 0 };
+  const calls: FakeCalls = { opened: 0, closed: 0, navigated: [], clicked: [], inspected: 0, organizations: [] };
   const page = { url: "https://example.com/", title: "Example", status: 200 };
   const session: BrowserSessionPort = {
     navigate: async (url) => {
@@ -137,8 +147,9 @@ function fakeEngine(overrides: Partial<BrowserSessionPort> = {}): {
   };
 
   const engine: BrowserRuntimePort = {
-    withSession: async (_userId, run) => {
+    withSession: async (_userId, run, options) => {
       calls.opened += 1;
+      calls.organizations.push(options?.organizationId);
       try {
         return await run(session);
       } finally {
@@ -453,6 +464,9 @@ describe("loadBrowserServiceConfig", () => {
       ...base,
       BROWSER_SERVICE_CHROMIUM_ENABLED: "true",
       BROWSER_SERVICE_EGRESS_PROXY_URL: "http://browser-egress:3128",
+      // Phase 19.4: Chromium also needs its durable artifact store.
+      BROWSER_SERVICE_DOWNLOAD_DIR: "/var/lib/jarvis-browser/artifacts",
+      BROWSER_ARTIFACT_RETENTION_HOURS: "24",
     });
     expect(config.egressProxy).toEqual({ url: "http://browser-egress:3128", host: "browser-egress", port: 3128 });
     // Chromium off needs no proxy.
@@ -472,6 +486,47 @@ describe("loadBrowserServiceConfig", () => {
       expect(() => loadBrowserServiceConfig({ ...base, BROWSER_SERVICE_EGRESS_PROXY_URL: url }), url).toThrow(
         /BROWSER_SERVICE_EGRESS_PROXY_URL must be/
       );
+    }
+  });
+
+  it("refuses Chromium without a durable artifact directory and a retention (Phase 19.4)", () => {
+    const chromium = {
+      ...base,
+      BROWSER_SERVICE_CHROMIUM_ENABLED: "true",
+      BROWSER_SERVICE_EGRESS_PROXY_URL: "http://browser-egress:3128",
+    };
+    expect(() => loadBrowserServiceConfig({ ...chromium, BROWSER_ARTIFACT_RETENTION_HOURS: "24" })).toThrow(
+      /BROWSER_SERVICE_DOWNLOAD_DIR is required/
+    );
+    expect(() =>
+      loadBrowserServiceConfig({ ...chromium, BROWSER_SERVICE_DOWNLOAD_DIR: "/var/lib/jarvis-browser/artifacts" })
+    ).toThrow(/BROWSER_ARTIFACT_RETENTION_HOURS is required/);
+    expect(() =>
+      loadBrowserServiceConfig({ ...chromium, BROWSER_SERVICE_DOWNLOAD_DIR: "relative/dir", BROWSER_ARTIFACT_RETENTION_HOURS: "24" })
+    ).toThrow(/must be an absolute path/);
+
+    const config = loadBrowserServiceConfig({
+      ...chromium,
+      BROWSER_SERVICE_DOWNLOAD_DIR: "/var/lib/jarvis-browser/artifacts",
+      BROWSER_ARTIFACT_RETENTION_HOURS: "72",
+      BROWSER_ARTIFACT_QUOTA_BYTES_PER_USER: "1048576",
+    });
+    expect(config.chromium.downloadDir).toBe("/var/lib/jarvis-browser/artifacts");
+    expect(config.chromium.artifacts).toMatchObject({ retentionHours: 72, quotaBytesPerUser: 1_048_576, maxCountPerUser: 200 });
+    // With Chromium off, nothing is stored and nothing is required.
+    expect(loadBrowserServiceConfig(base).chromium.artifacts.retentionHours).toBeNull();
+  });
+
+  it("refuses artifact limits out of range, naming the field", () => {
+    for (const [name, value] of [
+      ["BROWSER_ARTIFACT_RETENTION_HOURS", "0"],
+      ["BROWSER_ARTIFACT_RETENTION_HOURS", "9999"],
+      ["BROWSER_ARTIFACT_QUOTA_BYTES_PER_USER", "0"],
+      ["BROWSER_ARTIFACT_QUOTA_BYTES_PER_ORGANIZATION", "-5"],
+      ["BROWSER_ARTIFACT_MAX_COUNT_PER_USER", "abc"],
+      ["BROWSER_ARTIFACT_SWEEP_INTERVAL_MS", "10"],
+    ]) {
+      expect(() => loadBrowserServiceConfig({ ...base, [name!]: value }), name).toThrow(new RegExp(name!));
     }
   });
 
@@ -1011,6 +1066,14 @@ describe("browser service sessions", () => {
     await tick();
     expect(fake.calls.closed).toBe(1);
     expect(service.registry.activeSessions).toBe(0);
+  });
+
+  it("opens the engine's session for the Organization the request was bound to (Phase 19.4)", async () => {
+    const fake = fakeEngine();
+    const service = await startService(fake.engine);
+    await clientFor(service).execute({ operation: "session.open", subject: SUBJECT });
+    // The browser's artifacts are scoped to this Organization and this user.
+    expect(fake.calls.organizations).toEqual([ORG]);
   });
 
   it("refuses another Organization without touching the session", async () => {

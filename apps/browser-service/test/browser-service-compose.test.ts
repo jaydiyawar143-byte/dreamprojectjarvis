@@ -265,3 +265,74 @@ describe("the browser's egress proxy (Phase 19.3)", () => {
     expect(listItems(browser, "networks")).toEqual(["browser"]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 19.4 — the artifact store is durable, and nothing else is.
+//
+// What this file can prove is the declaration: a named volume, at the
+// directory the service is told to use, owned by the unprivileged user in the
+// image. That Docker keeps the volume's contents across a recreated container
+// on a given host is a container check (docs/DEPLOYMENT.md), not this test.
+// ---------------------------------------------------------------------------
+
+const ARTIFACT_DIR = "/var/lib/jarvis-browser/artifacts";
+const ARTIFACT_VOLUME = "jarvis-browser-artifacts";
+
+describe("the browser's artifact store (Phase 19.4)", () => {
+  it("is a named volume at the directory the service is told to use, never the tmpfs", () => {
+    expect(environment.get("BROWSER_SERVICE_DOWNLOAD_DIR")).toBe(ARTIFACT_DIR);
+    expect(listItems(browser, "volumes")).toEqual([`${ARTIFACT_VOLUME}:${ARTIFACT_DIR}`]);
+    for (const mount of listItems(browser, "tmpfs")) expect(ARTIFACT_DIR.startsWith(mount.split(":")[0]!)).toBe(false);
+    expect(compose).toMatch(new RegExp(`\\nvolumes:\\n(?: +.*\\n)*? {2}${ARTIFACT_VOLUME}:\\n`));
+  });
+
+  it("is mounted into the browser service alone — not the proxy, the API or the web app", () => {
+    for (const [name, block] of [["browser-egress", egress], ["api", api], ["web", web], ["postgres", postgres]] as const) {
+      expect(code(block), name).not.toContain(ARTIFACT_VOLUME);
+    }
+    // The root filesystem stays read-only beside it.
+    expect(code(browser)).toMatch(/^ {4}read_only: true$/m);
+  });
+
+  it("passes every artifact variable the service reads, retention with no default", () => {
+    const sources = [
+      ...readdirSync(new URL("apps/browser-service/src/", REPO))
+        .filter((file) => file.endsWith(".ts"))
+        .map((file) => `apps/browser-service/src/${file}`),
+      "packages/browser/src/config.ts",
+    ]
+      .map(read)
+      .join("\n");
+    const names = new Set([...sources.matchAll(/\b(BROWSER_ARTIFACT_[A-Z_]+)\b/g)].map((match) => match[1]!));
+    expect(names.size).toBeGreaterThanOrEqual(6);
+    for (const name of names) expect(environment.get(name), `${name} is read but not passed`).toBe(`\${${name}:-}`);
+    expect(environment.get("BROWSER_MAX_DOWNLOAD_BYTES")).toBe("${BROWSER_MAX_DOWNLOAD_BYTES:-}");
+  });
+
+  it("is created in the image, owned by the unprivileged user and closed to everyone else", () => {
+    const dockerfile = read("apps/browser-service/Dockerfile");
+    const runtime = dockerfile.slice(dockerfile.indexOf("FROM base AS runtime"));
+    const create = runtime.indexOf(`mkdir -p ${ARTIFACT_DIR}`);
+    expect(create).toBeGreaterThan(0);
+    expect(runtime).toContain("chown -R node:node /var/lib/jarvis-browser");
+    expect(runtime).toContain(`chmod 700 ${ARTIFACT_DIR}`);
+    // Before the switch to the unprivileged user, which the service runs as.
+    expect(create).toBeLessThan(runtime.indexOf("\nUSER node"));
+  });
+
+  it("generates the Prisma client before the image compiles the service, which reaches @jarvis/db", () => {
+    // @jarvis/browser -> @jarvis/memory -> @jarvis/db, whose tsc build needs
+    // the generated client; `turbo build` does not generate it. Without this
+    // step the image did not build from Stage 19.2 until the 19.4 review.
+    const dockerfile = read("apps/browser-service/Dockerfile");
+    const build = dockerfile.slice(dockerfile.indexOf("FROM base AS build"), dockerfile.indexOf("FROM base AS runtime"));
+    const lines = build.split("\n");
+    const generate = lines.findIndex((line) => /^RUN pnpm --filter @jarvis\/db exec prisma generate\b/.test(line));
+    const compile = lines.findIndex((line) => line.startsWith("RUN pnpm --filter @jarvis/browser-service... build"));
+    expect(generate).toBeGreaterThan(-1);
+    expect(compile).toBeGreaterThan(-1);
+    // After the schema arrives with the sources, before the compile needs it.
+    expect(generate).toBeGreaterThan(lines.indexOf("COPY . ."));
+    expect(generate).toBeLessThan(compile);
+  });
+});

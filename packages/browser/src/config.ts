@@ -96,6 +96,17 @@ const browserConfigSchema = z.object({
   ),
   downloadDir: z.string().min(1).default("storage/browser"),
   domainAllowlist: z.array(z.string().min(1)).default([]),
+  /**
+   * Phase 19.4 — how long a download or screenshot is kept. Deployment policy
+   * (ADR-19-007, U4): there is NO default, and the runtime refuses to store an
+   * artifact until it is set.
+   */
+  artifactRetentionHours: z.coerce.number().int().positive().max(24 * 366).optional(),
+  /** Per user, within one Organization. */
+  artifactQuotaBytesPerUser: z.coerce.number().int().positive().max(10 * 1024 ** 3).default(100 * 1024 * 1024),
+  artifactQuotaBytesPerOrganization: z.coerce.number().int().positive().max(100 * 1024 ** 3).default(500 * 1024 * 1024),
+  artifactMaxCountPerUser: z.coerce.number().int().positive().max(100_000).default(200),
+  artifactMaxCountPerOrganization: z.coerce.number().int().positive().max(1_000_000).default(1_000),
 });
 
 export type BrowserConfig = z.infer<typeof browserConfigSchema>;
@@ -110,6 +121,11 @@ export interface BrowserConfigInput {
   maxDownloadBytes?: number;
   downloadDir?: string;
   domainAllowlist?: string[];
+  artifactRetentionHours?: number;
+  artifactQuotaBytesPerUser?: number;
+  artifactQuotaBytesPerOrganization?: number;
+  artifactMaxCountPerUser?: number;
+  artifactMaxCountPerOrganization?: number;
 }
 
 function parseAllowlist(raw: string | undefined): string[] {
@@ -131,9 +147,17 @@ export function createBrowserConfig(
     navigationTimeoutMs: input.navigationTimeoutMs ?? env.BROWSER_NAVIGATION_TIMEOUT_MS,
     sessionTimeoutMs: input.sessionTimeoutMs ?? env.BROWSER_SESSION_TIMEOUT_MS,
     maxExtractChars: input.maxExtractChars ?? env.BROWSER_MAX_EXTRACT_CHARS,
-    maxDownloadBytes: input.maxDownloadBytes ?? env.BROWSER_MAX_DOWNLOAD_BYTES,
+    // Empty is unset: compose passes an unset `${VAR:-}` as "", which would coerce to 0.
+    maxDownloadBytes: input.maxDownloadBytes ?? (env.BROWSER_MAX_DOWNLOAD_BYTES || undefined),
     downloadDir: input.downloadDir ?? env.BROWSER_DOWNLOAD_DIR,
     domainAllowlist: input.domainAllowlist ?? parseAllowlist(env.BROWSER_DOMAIN_ALLOWLIST),
+    artifactRetentionHours: input.artifactRetentionHours ?? (env.BROWSER_ARTIFACT_RETENTION_HOURS || undefined),
+    artifactQuotaBytesPerUser: input.artifactQuotaBytesPerUser ?? (env.BROWSER_ARTIFACT_QUOTA_BYTES_PER_USER || undefined),
+    artifactQuotaBytesPerOrganization:
+      input.artifactQuotaBytesPerOrganization ?? (env.BROWSER_ARTIFACT_QUOTA_BYTES_PER_ORGANIZATION || undefined),
+    artifactMaxCountPerUser: input.artifactMaxCountPerUser ?? (env.BROWSER_ARTIFACT_MAX_COUNT_PER_USER || undefined),
+    artifactMaxCountPerOrganization:
+      input.artifactMaxCountPerOrganization ?? (env.BROWSER_ARTIFACT_MAX_COUNT_PER_ORGANIZATION || undefined),
   };
 
   // `undefined` must reach zod for `.default()` to fire; an env var that is

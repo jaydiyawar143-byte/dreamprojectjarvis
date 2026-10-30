@@ -218,9 +218,11 @@ services:
       # The loopback-only liveness listener the healthcheck below asks. It
       # binds 127.0.0.1 inside this container and serves /healthz only.
       BROWSER_SERVICE_HEALTH_PORT: 3201
-      # The browser's artifacts stay inside this container's tmpfs. Nothing is
-      # written to the host and nothing survives a restart.
-      BROWSER_SERVICE_DOWNLOAD_DIR: /tmp/jarvis-browser-artifacts
+      # Phase 19.4 — downloads and screenshots live in a durable store on the
+      # `jarvis-browser-artifacts` volume below: they survive a restart and a
+      # recreated container, scoped to their user and Organization, until the
+      # retention below passes. Not served by anything; never a response body.
+      BROWSER_SERVICE_DOWNLOAD_DIR: /var/lib/jarvis-browser/artifacts
       BROWSER_HEADLESS: "true"
       CHROME_PATH: /usr/bin/chromium
       # Authentication. The TLS paths name files a docker-compose.override.yml
@@ -244,6 +246,21 @@ services:
       # The navigation policy's own settings.
       BROWSER_NAVIGATION_TIMEOUT_MS: ${BROWSER_NAVIGATION_TIMEOUT_MS:-}
       BROWSER_DOMAIN_ALLOWLIST: ${BROWSER_DOMAIN_ALLOWLIST:-}
+      # Phase 19.4 — artifact retention and quotas. Retention has NO default:
+      # with Chromium on, the service refuses to start until it is set.
+      BROWSER_ARTIFACT_RETENTION_HOURS: ${BROWSER_ARTIFACT_RETENTION_HOURS:-}
+      BROWSER_ARTIFACT_QUOTA_BYTES_PER_USER: ${BROWSER_ARTIFACT_QUOTA_BYTES_PER_USER:-}
+      BROWSER_ARTIFACT_QUOTA_BYTES_PER_ORGANIZATION: ${BROWSER_ARTIFACT_QUOTA_BYTES_PER_ORGANIZATION:-}
+      BROWSER_ARTIFACT_MAX_COUNT_PER_USER: ${BROWSER_ARTIFACT_MAX_COUNT_PER_USER:-}
+      BROWSER_ARTIFACT_MAX_COUNT_PER_ORGANIZATION: ${BROWSER_ARTIFACT_MAX_COUNT_PER_ORGANIZATION:-}
+      BROWSER_ARTIFACT_SWEEP_INTERVAL_MS: ${BROWSER_ARTIFACT_SWEEP_INTERVAL_MS:-}
+      # The browser's per-download size ceiling (bytes).
+      BROWSER_MAX_DOWNLOAD_BYTES: ${BROWSER_MAX_DOWNLOAD_BYTES:-}
+    # The one writable, persistent path: the artifact store (Phase 19.4). The
+    # root filesystem stays read-only; /tmp is Chromium's scratch, emptied on
+    # every restart.
+    volumes:
+      - jarvis-browser-artifacts:/var/lib/jarvis-browser/artifacts
     read_only: true
     tmpfs:
       - /tmp:size=256m,mode=1777
@@ -348,3 +365,6 @@ networks:
 
 volumes:
   jarvis-docker-pgdata:
+  # Phase 19.4 — the browser service's artifact store. Removing it deletes every
+  # download and screenshot; `docker compose down` keeps it, `down -v` does not.
+  jarvis-browser-artifacts:

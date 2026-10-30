@@ -62,6 +62,7 @@ import {
   createAmbientTools,
 } from "@jarvis/tools";
 import {
+  artifactStoreFor,
   BrowserRuntime,
   createBrowserConfig,
   isBrowserEnabled,
@@ -203,6 +204,7 @@ import {
   SharedConnectionAccess,
   createBrowserSessionTenantResolver,
   createBrowserWriteScopeResolver,
+  scopeBrowserRuntimeToOrganization,
   createSharedConnectionToolGate,
   type SharedConnectionAccessPort,
 } from "./tenancy/shared-connection-access.js";
@@ -894,8 +896,32 @@ function createMetaToolRegistry(
   } else if (isBrowserConfigured()) {
     try {
       const browserConfig = createBrowserConfig();
-      const runtime = new BrowserRuntime({ config: browserConfig });
+      // Phase 19.4: refuses without BROWSER_ARTIFACT_RETENTION_HOURS (no tools
+      // then — logged below), and every session is scoped to the Organization
+      // the shared-connection reader names, exactly as the remote path is. The
+      // store's events carry reasons, counts and opaque ids — never a user, an
+      // Organization, a path, a name or an origin.
+      const artifactLog = operationalLog.child("browser-artifacts");
+      const downloads = artifactStoreFor(browserConfig, (event, fields) =>
+        event === "artifact_sweep" ? artifactLog.info(event, fields) : artifactLog.warn(event, fields)
+      );
+      const localRuntime = new BrowserRuntime({ config: browserConfig, downloads });
+      const runtime = scopeBrowserRuntimeToOrganization(
+        localRuntime,
+        createBrowserSessionTenantResolver(sharedAccess)
+      );
       _browserRuntime = runtime;
+      // Expired and half-written artifacts are reclaimed at start-up and then
+      // in the background; an expired one is refused on read whether or not
+      // this has run. The first sweep is also the store's start-up check: a
+      // directory it cannot use (not writable, or not an artifact store —
+      // an un-emptied pre-19.4 `storage/browser`) is in the log now, not at
+      // the first screenshot.
+      void localRuntime.sweepArtifacts().catch(() => artifactLog.warn("artifact_sweep_failed"));
+      setInterval(
+        () => void localRuntime.sweepArtifacts().catch(() => artifactLog.warn("artifact_sweep_failed")),
+        10 * 60_000
+      ).unref();
 
       const browserJournal = new PrismaToolExecutionRepository(prisma);
       for (const tool of createBrowserTools(runtime, browserJournal, approvalConsumption, browserWriteScope)) {

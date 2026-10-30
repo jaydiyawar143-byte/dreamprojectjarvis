@@ -32,8 +32,10 @@
 
 import {
   BrowserRuntime,
+  artifactStoreFor,
   createBrowserConfig,
   navigationPolicyFor,
+  type ArtifactSweepResult,
   type BrowserLauncher,
   type BrowserLike,
 } from "@jarvis/browser";
@@ -150,11 +152,15 @@ export interface BrowserEngineHandle {
   engine: BrowserRuntimePort;
   chromiumEnabled: boolean;
   shutdown(): Promise<void>;
+  /** Phase 19.4 — removes expired and half-written artifacts. Absent while Chromium is off. */
+  sweepArtifacts?(): Promise<ArtifactSweepResult>;
 }
+
+export type BrowserEngineLog = (event: string, fields?: Record<string, string | number | boolean>) => void;
 
 const RUNTIME_SESSION_GRACE_MS = 10_000;
 
-export function createBrowserEngine(config: BrowserServiceConfig): BrowserEngineHandle {
+export function createBrowserEngine(config: BrowserServiceConfig, log?: BrowserEngineLog): BrowserEngineHandle {
   if (!config.chromiumEnabled) {
     const engine = new DisabledBrowserEngine();
     return { engine, chromiumEnabled: false, shutdown: () => engine.shutdown() };
@@ -180,9 +186,20 @@ export function createBrowserEngine(config: BrowserServiceConfig): BrowserEngine
       ),
       downloadDir: config.chromium.downloadDir,
       domainAllowlist: config.chromium.domainAllowlist,
+      // Phase 19.4 — durable, scoped artifact storage (ADR-19-007).
+      ...(config.chromium.artifacts.retentionHours === null
+        ? {}
+        : { artifactRetentionHours: config.chromium.artifacts.retentionHours }),
+      artifactQuotaBytesPerUser: config.chromium.artifacts.quotaBytesPerUser,
+      artifactQuotaBytesPerOrganization: config.chromium.artifacts.quotaBytesPerOrganization,
+      artifactMaxCountPerUser: config.chromium.artifacts.maxCountPerUser,
+      artifactMaxCountPerOrganization: config.chromium.artifacts.maxCountPerOrganization,
     },
     process.env
   );
+  // Refuses without a retention policy, so a Chromium engine never exists
+  // without durable, bounded storage behind it.
+  const downloads = artifactStoreFor(browserConfig, log);
 
   const runtime = new BrowserRuntime({
     config: browserConfig,
@@ -191,10 +208,12 @@ export function createBrowserEngine(config: BrowserServiceConfig): BrowserEngine
     // names are resolved, judged and pinned by the egress proxy, which is the
     // only resolver Chromium can use (Phase 19.3).
     policy: { ...navigationPolicyFor(browserConfig), addressCheck: "literal-only" },
+    downloads,
   });
   return {
     engine: runtime,
     chromiumEnabled: true,
     shutdown: () => runtime.shutdown(),
+    sweepArtifacts: () => runtime.sweepArtifacts(),
   };
 }
