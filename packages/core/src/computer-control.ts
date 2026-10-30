@@ -1033,6 +1033,142 @@ export function computerControlApprovalSummary(
 }
 
 // ---------------------------------------------------------------------------
+// UNKNOWN outcomes — Phase 19.5 (S8)
+// ---------------------------------------------------------------------------
+
+/**
+ * The one answer to a browser or desktop write whose outcome is not known —
+ * the action may have reached the other side. The same sentence the remote
+ * browser service gives (`@jarvis/browser-protocol`, UNKNOWN_OUTCOME), so a
+ * person is told the same thing wherever the browser runs. Never "failed":
+ * that would invite asking again.
+ */
+export const COMPUTER_CONTROL_OUTCOME_UNKNOWN_MESSAGE = "The outcome of the action is unknown; it was not retried.";
+
+/**
+ * The answer to the same action asked for again while an earlier attempt's
+ * outcome is unknown. Nothing is opened or sent, and the new approval is not
+ * spent; whether the first attempt happened is for a person to find out.
+ */
+export const COMPUTER_CONTROL_ALREADY_UNKNOWN_MESSAGE =
+  "This exact action was already attempted and its outcome is unknown, so it was not run again. Check the site before asking for anything that would repeat it.";
+
+// ---------------------------------------------------------------------------
+// Value-free records — Phase 19.5 (S3, F3)
+// ---------------------------------------------------------------------------
+
+/**
+ * The value-free form of a browser or desktop request: what the audit trail
+ * and the approval record keep in place of its parameters. The action, the
+ * fixed summary sentence, the normalized origin and the summary's detail
+ * lines — sanitized field names and counts — and nothing a person typed,
+ * selected or submitted, no path, query or fragment, and no artifact id.
+ *
+ * A request that does not parse keeps only its action and the refusal code:
+ * nothing it carried is recorded.
+ */
+export type ComputerControlValueFreeParams =
+  | {
+      action: ComputerControlActionId;
+      summary: string;
+      targetResource?: string;
+      details: Array<{ label: string; value: string }>;
+    }
+  | { action: ComputerControlActionId; refused: true; reason: ComputerControlParseCode };
+
+/** Null for anything that is not a browser or desktop action. */
+export function computerControlValueFreeParams(
+  action: string,
+  params: Record<string, unknown>
+): ComputerControlValueFreeParams | null {
+  if (!isComputerControlAction(action)) return null;
+  const parsed = parseComputerControlRequest({ ...params, action });
+  if (!parsed.ok) return { action, refused: true, reason: parsed.code };
+  const summary = computerControlApprovalSummary(parsed.value);
+  return {
+    action,
+    summary: summary.actionSummary,
+    ...(summary.targetResource ? { targetResource: summary.targetResource } : {}),
+    details: summary.detailLines.map(({ label, value }) => ({ label, value })),
+  };
+}
+
+/** The marker an approval record carries where a request's parameters were. */
+export const COMPUTER_CONTROL_APPROVAL_RECORD = "computer-control/v1" as const;
+
+export type ComputerControlApprovalRecord = { withheld: typeof COMPUTER_CONTROL_APPROVAL_RECORD } & ComputerControlValueFreeParams;
+
+/**
+ * Whether an approval for this tool keeps its exact parameters out of the
+ * approval record (S3). Every browser and desktop action does: even a click's
+ * URL can carry a token in its query.
+ */
+export function sealsApprovalParams(toolId: string): boolean {
+  return isComputerControlAction(toolId);
+}
+
+/**
+ * What an approval record stores for a computer-control action in place of
+ * its parameters. Null for any other tool, whose parameters are its own.
+ */
+export function computerControlApprovalRecord(
+  toolId: string,
+  params: Record<string, unknown>
+): ComputerControlApprovalRecord | null {
+  const projection = computerControlValueFreeParams(toolId, params);
+  return projection ? { withheld: COMPUTER_CONTROL_APPROVAL_RECORD, ...projection } : null;
+}
+
+const STORED_SUMMARY_MAX = 500;
+const STORED_LABEL_MAX = 40;
+const STORED_VALUE_MAX = 300;
+const STORED_DETAILS_MAX = 10;
+
+const StoredApprovalRecordSchema = z
+  .object({
+    withheld: z.literal(COMPUTER_CONTROL_APPROVAL_RECORD),
+    action: z.string(),
+    summary: z.string().min(1).max(STORED_SUMMARY_MAX),
+    targetResource: z.string().max(STORED_VALUE_MAX).optional(),
+    details: z
+      .array(z.object({ label: z.string().max(STORED_LABEL_MAX), value: z.string().max(STORED_VALUE_MAX) }).strict())
+      .max(STORED_DETAILS_MAX),
+  })
+  .strict();
+
+/**
+ * The one reader of a stored approval record: the summary it was made from,
+ * for the approval's own tool, or null. A record is read from the database,
+ * so it is checked as untrusted input — its marker, its action, its exact
+ * fields and their bounds. A refused request's record, a record for another
+ * action, the exact parameters and anything malformed are all null.
+ */
+export function readComputerControlApprovalRecord(
+  toolId: string,
+  value: unknown
+): ComputerControlApprovalSummary | null {
+  const parsed = StoredApprovalRecordSchema.safeParse(value);
+  if (!parsed.success || parsed.data.action !== toolId || !isComputerControlAction(toolId)) return null;
+  return {
+    actionSummary: parsed.data.summary,
+    ...(parsed.data.targetResource !== undefined ? { targetResource: parsed.data.targetResource } : {}),
+    detailLines: parsed.data.details.map(({ label, value: detail }) => ({ label, value: detail })),
+  };
+}
+
+/**
+ * Phase 19.5 — seals a computer-control approval's exact parameters apart
+ * from its record, so they can be executed once approved and are never stored
+ * in the clear. The API implements it with `EncryptionService` (AES-256-GCM);
+ * the store that holds the sealed text deletes it once the approval is
+ * rejected, consumed or expired. `unseal` throws on anything it did not seal.
+ */
+export interface ApprovalParamsSealer {
+  seal(plaintext: string): string;
+  unseal(sealed: string): string;
+}
+
+// ---------------------------------------------------------------------------
 // Approval binding — Organization + user + action + canonical hash
 // ---------------------------------------------------------------------------
 

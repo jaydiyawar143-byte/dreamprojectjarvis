@@ -294,10 +294,32 @@ model Approval {
   user      User    @relation("ApprovalRequester", fields: [userId], references: [id])
   decidedBy User?   @relation("ApprovalDecider", fields: [decidedById], references: [id], onDelete: SetNull)
   tenant    Tenant? @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  /// Phase 19.5 — a browser or desktop approval's exact parameters, sealed.
+  sealedParams ApprovalSealedParams?
 
   @@index([conversationId])
   @@index([conversationId, status])
   @@index([tenantId, status])
+}
+
+/// Phase 19, Stage 19.5 — the exact parameters of a browser or desktop
+/// approval, sealed (AES-256-GCM, by the API's EncryptionService) apart from
+/// the approval record, whose `params` hold only the value-free record: what a
+/// person typed, selected or submitted, and a URL's path and query, are never
+/// stored in the clear. Written with the approval; deleted when it is rejected,
+/// consumed or expired, and with it. Nothing reads it but the approval store.
+model ApprovalSealedParams {
+  approvalId String   @id @map("approval_id")
+  /// The sealed JSON of the exact parameters. Opaque; never logged or returned.
+  sealed     String
+  /// The approval's own expiry: past it, the parameters can never run.
+  expiresAt  DateTime @map("expires_at")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  approval Approval @relation(fields: [approvalId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+  @@map("ApprovalSealedParams")
 }
 
 model AuditLog {

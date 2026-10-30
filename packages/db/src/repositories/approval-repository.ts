@@ -1,12 +1,19 @@
 import type {
   Approval,
+  ApprovalParamsSealer,
   ApprovalStatus,
   IApprovalRepository,
   ApprovalConsumptionInput,
   ApprovalConsumptionResult,
   TenantRole,
 } from "@jarvis/core";
-import { DEFAULT_LEASE_MS, sharedConnectionOfTool } from "@jarvis/core";
+import {
+  DEFAULT_LEASE_MS,
+  computeParamsHash,
+  computerControlApprovalRecord,
+  sealsApprovalParams,
+  sharedConnectionOfTool,
+} from "@jarvis/core";
 import { Prisma } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
 import { PrismaTenantRepository, TENANT_ROLE_TO_DB } from "./tenant-repository.js";
@@ -32,6 +39,25 @@ export class SharedConnectionOwnerUnavailableError extends Error {
     this.name = "SharedConnectionOwnerUnavailableError";
   }
 }
+
+/**
+ * Phase 19.5 — a browser or desktop approval could not be created, because
+ * nothing can seal its exact parameters (no `JARVIS_ENCRYPTION_KEY`, or the
+ * sealer failed). They are never stored in the clear instead, so nothing is
+ * created.
+ */
+export class ApprovalParamsSealingUnavailableError extends Error {
+  constructor() {
+    super("This action's details cannot be held securely for approval, so no approval was created.");
+    this.name = "ApprovalParamsSealingUnavailableError";
+  }
+}
+
+/** What each read takes of the sealed parameters: the sealed text alone. */
+const WITH_SEALED = { sealedParams: { select: { sealed: true } } } as const;
+
+/** States in which an approval can never run again, so its sealed parameters go. */
+const SPENT: ReadonlySet<ApprovalStatus> = new Set(["consumed", "rejected", "expired"]);
 
 /** One approval as an Organization's approver sees it. */
 export interface ApprovalForDecision {
@@ -109,9 +135,66 @@ class ConsumptionDenied extends Error {
 
 export class PrismaApprovalRepository implements IApprovalRepository {
   private readonly tenants: PrismaTenantRepository;
+  /**
+   * Phase 19.5 (S3) — seals a browser or desktop approval's exact parameters.
+   * Absent: such an approval is never created, and one already stored is
+   * read as its value-free record, which never runs.
+   */
+  private readonly sealer?: ApprovalParamsSealer;
 
-  constructor(private prisma: PrismaClient) {
+  constructor(private prisma: PrismaClient, options: { sealer?: ApprovalParamsSealer } = {}) {
     this.tenants = new PrismaTenantRepository(prisma);
+    this.sealer = options.sealer;
+  }
+
+  /**
+   * An approval as every caller sees it. A browser or desktop approval's row
+   * holds its value-free record; while its sealed parameters exist and
+   * unseal to exactly what it was bound to (`paramsHash`), they are handed
+   * back in its place, so confirming, re-checking and running it work as for
+   * any approval. Otherwise — rejected, consumed, expired, no key, another
+   * key, tampered — the record is what is read, and its hash never matches.
+   */
+  private present(row: Parameters<typeof toApproval>[0] & { sealedParams?: { sealed: string } | null }): Approval {
+    const approval = toApproval(row);
+    if (!sealsApprovalParams(approval.toolId)) return approval;
+    const exact = this.unseal(row.sealedParams?.sealed, approval.paramsHash);
+    return exact ? { ...approval, params: exact } : approval;
+  }
+
+  private unseal(sealed: string | undefined, paramsHash: string | undefined): Record<string, unknown> | null {
+    if (!sealed || !paramsHash || !this.sealer) return null;
+    try {
+      const value: unknown = JSON.parse(this.sealer.unseal(sealed));
+      if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+      const params = value as Record<string, unknown>;
+      return computeParamsHash(params) === paramsHash ? params : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Deletes an approval's sealed parameters once it can never run. Best
+   * effort: one left behind is unreadable without the key and goes with the
+   * next purge (`purgeExpiredSealedParams`).
+   */
+  private async forgetSealedParams(id: string): Promise<void> {
+    await this.prisma.approvalSealedParams.deleteMany({ where: { approvalId: id } }).catch(() => undefined);
+  }
+
+  /**
+   * Phase 19.5 — deletes the sealed parameters of every approval that can no
+   * longer run: past its expiry, or consumed, rejected or expired. Returns
+   * how many went. Safe to run on every instance at once.
+   */
+  async purgeExpiredSealedParams(now: Date = new Date()): Promise<number> {
+    const result = await this.prisma.approvalSealedParams.deleteMany({
+      where: {
+        OR: [{ expiresAt: { lte: now } }, { approval: { status: { in: ["CONSUMED", "REJECTED", "EXPIRED"] } } }],
+      },
+    });
+    return result.count;
   }
 
   /**
@@ -135,6 +218,22 @@ export class PrismaApprovalRepository implements IApprovalRepository {
       tenantId = owner.tenantId;
     }
 
+    // Phase 19.5 (S3) — a browser or desktop approval keeps its value-free
+    // record; its exact parameters are sealed beside it, in the same write.
+    // Nothing can seal them: nothing is created.
+    let params: unknown = data.params;
+    let sealed: string | null = null;
+    if (sealsApprovalParams(data.toolId)) {
+      const record = computerControlApprovalRecord(data.toolId, data.params);
+      if (!record || !this.sealer) throw new ApprovalParamsSealingUnavailableError();
+      try {
+        sealed = this.sealer.seal(JSON.stringify(data.params));
+      } catch {
+        throw new ApprovalParamsSealingUnavailableError();
+      }
+      params = record;
+    }
+
     const row = await this.prisma.approval.create({
       data: {
         userId: data.userId,
@@ -142,21 +241,25 @@ export class PrismaApprovalRepository implements IApprovalRepository {
         conversationId: data.conversationId ?? null,
         toolId: data.toolId,
         action: data.action,
-        params: data.params as unknown as Prisma.InputJsonValue,
+        params: params as Prisma.InputJsonValue,
         paramsHash: data.paramsHash ?? null,
         riskLevel: data.riskLevel ?? null,
         status: "PENDING",
         expiresAt: new Date(data.expiresAt),
         tenantId,
+        ...(sealed !== null ? { sealedParams: { create: { sealed, expiresAt: new Date(data.expiresAt) } } } : {}),
       },
+      include: WITH_SEALED,
     });
 
-    return toApproval(row);
+    // What earlier approvals left behind goes as new ones arrive.
+    if (sealed !== null) await this.purgeExpiredSealedParams().catch(() => 0);
+    return this.present(row);
   }
 
   async findById(id: string): Promise<Approval | null> {
-    const row = await this.prisma.approval.findUnique({ where: { id } });
-    return row ? toApproval(row) : null;
+    const row = await this.prisma.approval.findUnique({ where: { id }, include: WITH_SEALED });
+    return row ? this.present(row) : null;
   }
 
   async updateStatus(
@@ -175,7 +278,13 @@ export class PrismaApprovalRepository implements IApprovalRepository {
         },
       });
       if (result.count === 0) return null;
-      return await this.findById(id);
+      const updated = await this.findById(id);
+      // Phase 19.5 — an approval that can never run keeps no sealed parameters.
+      if (updated && SPENT.has(status) && sealsApprovalParams(updated.toolId)) {
+        await this.forgetSealedParams(id);
+        return await this.findById(id);
+      }
+      return updated;
     } catch {
       return null;
     }
@@ -185,8 +294,9 @@ export class PrismaApprovalRepository implements IApprovalRepository {
     const rows = await this.prisma.approval.findMany({
       where: { status: "PENDING" },
       orderBy: { createdAt: "asc" },
+      include: WITH_SEALED,
     });
-    return rows.map(toApproval);
+    return rows.map((row) => this.present(row));
   }
 
   async findExistingForTool(
@@ -196,8 +306,9 @@ export class PrismaApprovalRepository implements IApprovalRepository {
     const row = await this.prisma.approval.findFirst({
       where: { toolId, userId },
       orderBy: { createdAt: "desc" },
+      include: WITH_SEALED,
     });
-    return row ? toApproval(row) : null;
+    return row ? this.present(row) : null;
   }
 
   // -------------------------------------------------------------------------
@@ -243,12 +354,13 @@ export class PrismaApprovalRepository implements IApprovalRepository {
         orderBy: { createdAt: "desc" },
         skip: (page - 1) * limit,
         take: limit,
+        include: WITH_SEALED,
       }),
       this.prisma.approval.count({ where: where as never }),
     ]);
 
     return {
-      items: rows.map((row) => this.withEffectiveStatus(toApproval(row), now)),
+      items: rows.map((row) => this.withEffectiveStatus(this.present(row), now)),
       total,
     };
   }
@@ -265,8 +377,8 @@ export class PrismaApprovalRepository implements IApprovalRepository {
   }
 
   async findByIdForUser(id: string, userId: string): Promise<Approval | null> {
-    const row = await this.prisma.approval.findFirst({ where: { id, userId } });
-    return row ? this.withEffectiveStatus(toApproval(row), new Date()) : null;
+    const row = await this.prisma.approval.findFirst({ where: { id, userId }, include: WITH_SEALED });
+    return row ? this.withEffectiveStatus(this.present(row), new Date()) : null;
   }
 
   /**
@@ -402,6 +514,9 @@ export class PrismaApprovalRepository implements IApprovalRepository {
 
     if (changed === "forbidden") return { outcome: "forbidden" };
     if (changed === 1) {
+      // Phase 19.5 — a rejected approval never runs: its sealed parameters go.
+      // An approved one keeps them until its requester runs it.
+      if (decision === "reject" && sealsApprovalParams(row.toolId)) await this.forgetSealedParams(id);
       return { outcome: decision === "approve" ? "approved" : "rejected" };
     }
 
@@ -488,6 +603,12 @@ export class PrismaApprovalRepository implements IApprovalRepository {
         });
         if (claimed.count !== 1) {
           throw new ConsumptionDenied("execution is not in a claimable state");
+        }
+
+        // Phase 19.5 — the parameters run from the caller's copy now; the
+        // sealed one goes in the same transaction that spends the approval.
+        if (sealsApprovalParams(input.toolId)) {
+          await tx.approvalSealedParams.deleteMany({ where: { approvalId: input.approvalId } });
         }
       });
       return { ok: true };
@@ -611,8 +732,9 @@ export class PrismaApprovalRepository implements IApprovalRepository {
         ],
       },
       orderBy: { createdAt: "desc" },
+      include: WITH_SEALED,
     });
-    return row ? toApproval(row) : null;
+    return row ? this.present(row) : null;
   }
 
   // -------------------------------------------------------------------------
@@ -645,7 +767,7 @@ export class PrismaApprovalRepository implements IApprovalRepository {
     const [rows, total] = await Promise.all([
       this.prisma.approval.findMany({
         where,
-        include: { user: { select: { name: true } } },
+        include: { user: { select: { name: true } }, ...WITH_SEALED },
         orderBy: { createdAt: "desc" },
         skip: (page - 1) * limit,
         take: limit,
@@ -654,7 +776,7 @@ export class PrismaApprovalRepository implements IApprovalRepository {
     ]);
     return {
       items: rows.map((row) => ({
-        approval: this.withEffectiveStatus(toApproval(row), now),
+        approval: this.withEffectiveStatus(this.present(row), now),
         requesterName: row.user.name,
         readerIs: "approver" as const,
       })),
@@ -674,10 +796,10 @@ export class PrismaApprovalRepository implements IApprovalRepository {
   ): Promise<ApprovalForDecision | null> {
     const row = await this.prisma.approval.findUnique({
       where: { id },
-      include: { user: { select: { name: true } } },
+      include: { user: { select: { name: true } }, ...WITH_SEALED },
     });
     if (!row) return null;
-    const approval = this.withEffectiveStatus(toApproval(row), new Date());
+    const approval = this.withEffectiveStatus(this.present(row), new Date());
     if (row.userId === userId) return { approval, requesterName: row.user.name, readerIs: "requester" };
     if (!row.tenantId) return null;
     const roles: string[] = dbRoles(approverRoles);
@@ -696,6 +818,29 @@ export class PrismaApprovalRepository implements IApprovalRepository {
     paramsHash: string
   ): Promise<Approval | null> {
     try {
+      // Phase 19.5 — new parameters for a browser or desktop approval are
+      // sealed like the first ones, in one transaction with the record.
+      const current = await this.prisma.approval.findUnique({ where: { id }, select: { toolId: true, expiresAt: true } });
+      if (current && sealsApprovalParams(current.toolId)) {
+        const record = computerControlApprovalRecord(current.toolId, params);
+        if (!record || !this.sealer) return null;
+        const sealed = this.sealer.seal(JSON.stringify(params));
+        const changed = await this.prisma.$transaction(async (tx) => {
+          const result = await tx.approval.updateMany({
+            where: { id, status: "PENDING" },
+            data: { params: record as Prisma.InputJsonValue, paramsHash },
+          });
+          if (result.count === 0) return 0;
+          await tx.approvalSealedParams.upsert({
+            where: { approvalId: id },
+            create: { approvalId: id, sealed, expiresAt: current.expiresAt },
+            update: { sealed },
+          });
+          return result.count;
+        });
+        return changed === 0 ? null : await this.findById(id);
+      }
+
       const result = await this.prisma.approval.updateMany({
         where: { id, status: "PENDING" },
         data: {

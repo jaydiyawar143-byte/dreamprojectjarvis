@@ -17,6 +17,7 @@ import {
   isComputerControlAction,
   isGoogleWriteAction,
   parseComputerControlRequest,
+  readComputerControlApprovalRecord,
 } from "@jarvis/core";
 import { clientWritePlan } from "./client-views.js";
 
@@ -223,6 +224,11 @@ export function buildApprovalSummary(
  * A stored row whose parameters no longer parse gets a fixed, honest sentence
  * and no parameter echo: it cannot be approved on the strength of a summary it
  * cannot show. Execution validates the parameters again, so nothing runs.
+ *
+ * Phase 19.5 — once an approval is rejected, consumed or expired, its exact
+ * parameters are gone and the row holds only its value-free record (S3). The
+ * summary is then read from that record, by core's one reader, which accepts
+ * it only for this action and only well formed.
  */
 function buildComputerControlApprovalSummary(
   toolId: string,
@@ -230,6 +236,14 @@ function buildComputerControlApprovalSummary(
 ): ApprovalSummary {
   const parsed = parseComputerControlRequest({ ...params, action: toolId });
   if (!parsed.ok) {
+    const recorded = readComputerControlApprovalRecord(toolId, params);
+    if (recorded) {
+      return {
+        actionSummary: recorded.actionSummary,
+        targetResource: recorded.targetResource,
+        detailLines: [...recorded.detailLines],
+      };
+    }
     const surface = toolId.startsWith("desktop.") ? "desktop" : "browser";
     return {
       actionSummary: `A ${surface} control action could not be verified from its stored parameters. Do not approve it unless you asked for it; nothing will run.`,

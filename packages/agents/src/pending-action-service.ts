@@ -10,10 +10,27 @@ import {
   MARKETING_TOOL_IDS,
   MEMORY_CORRECT_TOOL_ID,
   computeParamsHash,
+  computerControlApprovalSummary,
+  isComputerControlAction,
   isDestructiveMemoryTool,
   needsIndependentApproval,
+  parseComputerControlRequest,
+  readComputerControlApprovalRecord,
 } from "@jarvis/core";
 import type { PendingAction, PendingActionState } from "@jarvis/core";
+
+/**
+ * Phase 19.5 — the lines a browser or desktop action is confirmed by: its
+ * value-free summary (core's, as on the Approvals page), from the exact
+ * parameters or, once they are sealed away, from the approval's record. A
+ * request that is neither says so, and nothing it carried is shown.
+ */
+function computerControlLines(toolId: string, params: Record<string, unknown>): string[] {
+  const parsed = parseComputerControlRequest({ ...params, action: toolId });
+  const summary = parsed.ok ? computerControlApprovalSummary(parsed.value) : readComputerControlApprovalRecord(toolId, params);
+  if (!summary) return ["Its details could not be verified, so it will not run. Cancel it and ask again."];
+  return [summary.actionSummary, ...summary.detailLines.map(({ label, value }) => `${label}: ${value}`)];
+}
 
 export interface PendingActionServiceConfig {
   approvalRepo: {
@@ -530,11 +547,19 @@ export class PendingActionService {
     lines.push("");
 
     const p = pending.params;
-    if (p.name) lines.push(`Name: ${p.name}`);
-    if (p.objective) lines.push(`Objective: ${String(p.objective).replace("OUTCOME_", "")}`);
-    if (p.dailyBudget) lines.push(`Budget: ₹${p.dailyBudget}/day`);
-    if (p.status) lines.push(`Status: ${p.status}`);
-    if (p.campaignId) lines.push(`Campaign ID: ${p.campaignId}`);
+    if (isComputerControlAction(pending.toolId)) {
+      // Phase 19.5 (F4) — a browser or desktop action is described by its
+      // value-free summary: the action, the site, field names and counts.
+      // This message is stored with the conversation and shown again, so
+      // nothing typed, selected or submitted, and no path or query, is in it.
+      lines.push(...computerControlLines(pending.toolId, p));
+    } else {
+      if (p.name) lines.push(`Name: ${p.name}`);
+      if (p.objective) lines.push(`Objective: ${String(p.objective).replace("OUTCOME_", "")}`);
+      if (p.dailyBudget) lines.push(`Budget: ₹${p.dailyBudget}/day`);
+      if (p.status) lines.push(`Status: ${p.status}`);
+      if (p.campaignId) lines.push(`Campaign ID: ${p.campaignId}`);
+    }
 
     // Phase 15 — what will be posted and where, read from the parameters the
     // approval is bound to. This is the text that runs, not a model's

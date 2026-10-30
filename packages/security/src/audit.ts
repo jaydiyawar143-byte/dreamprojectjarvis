@@ -1,10 +1,5 @@
 import type { AuditEntry, AuditQueryFilters, IAuditRepository } from "@jarvis/core";
-import {
-  computerControlApprovalSummary,
-  isComputerControlAction,
-  parseComputerControlRequest,
-  redactSecrets,
-} from "@jarvis/core";
+import { computerControlValueFreeParams, redactSecrets } from "@jarvis/core";
 
 // ---------------------------------------------------------------------------
 // Sprint 9.8 — redaction happens BEFORE persistence, not after.
@@ -102,25 +97,17 @@ function redactRecord(
  * origin and sanitized field names/counts. The request is parsed first; an
  * invalid one is recorded as refused with only its code, never its payload.
  * The projection is then passed through the generic redaction as a final net.
+ *
+ * Phase 19.5 — the projection is core's `computerControlValueFreeParams`, the
+ * same one an approval record keeps, so the two cannot drift apart.
  */
 function auditParametersForTool(
   toolId: string | undefined,
   params: Record<string, unknown>
 ): Record<string, unknown> {
-  if (!toolId || !isComputerControlAction(toolId)) return redactRecord(params);
-
-  const parsed = parseComputerControlRequest({ ...params, action: toolId });
-  if (!parsed.ok) {
-    return { action: toolId, refused: true, reason: parsed.code };
-  }
-
-  const summary = computerControlApprovalSummary(parsed.value);
-  return redactRecord({
-    action: toolId,
-    summary: summary.actionSummary,
-    ...(summary.targetResource ? { targetResource: summary.targetResource } : {}),
-    details: summary.detailLines.map(({ label, value }) => ({ label, value })),
-  });
+  const projection = toolId ? computerControlValueFreeParams(toolId, params) : null;
+  if (!projection) return redactRecord(params);
+  return "refused" in projection ? projection : redactRecord(projection);
 }
 
 /**
