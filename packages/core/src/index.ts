@@ -68,6 +68,9 @@ export * from "./types/browser.js";
 // Phase 19, Stage 19.1 — Computer & Browser Control contracts and policy.
 // Types, bounds and pure rules only; nothing here starts a browser or an agent.
 export * from "./computer-control.js";
+// Phase 19, Stage 19.6 — the Windows desktop agent protocol: messages, the
+// signed strings both ends derive, pairing codes and the consent wording.
+export * from "./desktop-agent.js";
 export * from "./utils/redact-secrets.js";
 export * from "./utils/untrusted-content.js";
 

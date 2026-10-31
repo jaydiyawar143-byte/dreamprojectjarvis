@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Phase 19.6: the agent's platform-neutral heart. The protocol, signature
+    checks, command verification, the grant lifecycle and the signed HTTPS
+    client. No Windows API, no UI, no listener: anything that touches the
+    operating system is an interface the Windows project implements.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>Jarvis.DesktopAgent.Core</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Jarvis.DesktopAgent.Core.Tests" />
+  </ItemGroup>
+</Project>

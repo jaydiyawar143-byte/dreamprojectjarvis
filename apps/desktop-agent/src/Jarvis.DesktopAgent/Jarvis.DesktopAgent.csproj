@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Phase 19.6: the Windows desktop agent. A per-user tray application — no
+    service, no SYSTEM, no administrator rights, no listener. It talks to the
+    server only through Jarvis.DesktopAgent.Core's outbound HTTPS client; this
+    project adds only what needs Windows: the device key in Windows' key
+    storage (TPM when present), Windows Hello, SendInput, window and integrity
+    checks, session events, the kill switch and the local screens.
+    Windows 11 x64 only (U6a); packaged as a per-user, signed MSIX (U6b).
+  -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.22621.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.22000.0</SupportedOSPlatformVersion>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <PlatformTarget>x64</PlatformTarget>
+    <UseWindowsForms>true</UseWindowsForms>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>Jarvis.DesktopAgent</RootNamespace>
+    <AssemblyName>Jarvis.DesktopAgent</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <!-- Self-contained for the MSIX: no machine-wide runtime to install, no admin rights. -->
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>false</PublishSingleFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Jarvis.DesktopAgent.Core\Jarvis.DesktopAgent.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Jarvis.DesktopAgent.Windows.Tests" />
+  </ItemGroup>
+</Project>

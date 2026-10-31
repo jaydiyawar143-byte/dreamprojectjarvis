@@ -3235,3 +3235,110 @@ export async function downloadMarketingReport(
     return { ok: false, message: "The report could not be downloaded." };
   }
 }
+
+// ---------------------------------------------------------------------------
+// Phase 19.6 — Computer Control: the Windows desktop agent.
+//
+// Every call is the signed-in person's; the server decides who may pair,
+// confirm, revoke and command, and which Organization a device belongs to.
+// When the server has desktop control switched off, these routes do not exist
+// and every call answers 404 — the page says so.
+// ---------------------------------------------------------------------------
+
+export interface DesktopDevice {
+  id: string;
+  displayName: string;
+  userLabel: string;
+  organizationLabel: string;
+  status: "pending" | "active" | "revoked";
+  agentVersion: string;
+  windowsBuild: number;
+  /** The first 96 bits of the device key's fingerprint, as shown on the computer. */
+  fingerprint: string;
+  createdAt: string;
+  confirmedAt: string | null;
+  lastSeenAt: string | null;
+  mine: boolean;
+  canRevoke: boolean;
+  grant: { scope: string[]; durationMinutes: number; expiresAt: string } | null;
+}
+
+/** An Organization the signed-in person may pair a computer with. */
+export interface DesktopOrganization {
+  id: string;
+  name: string;
+}
+
+export interface DesktopPairingCode {
+  code: string;
+  expiresAt: string;
+  organizationId: string;
+  /** The server key the computer pins at pairing; it shows the same id. */
+  serverKeyId: string;
+}
+
+export type DesktopCommandAction = "desktop.input.click" | "desktop.input.key" | "desktop.input.type";
+
+export type DesktopCommandInput =
+  | { action: "desktop.input.click"; x: number; y: number; button?: "left" | "right" | "middle" }
+  | { action: "desktop.input.key"; key: string }
+  | { action: "desktop.input.type"; text: string };
+
+export interface DesktopCommandRequestResult {
+  approvalId: string;
+  action: DesktopCommandAction;
+  summary: string;
+  detailLines: Array<{ label: string; value: string }>;
+  requiresHello: boolean;
+  expiresAt: string;
+}
+
+export interface DesktopCommand {
+  id: string;
+  action: string;
+  status: "issued" | "delivered" | "succeeded" | "not_executed" | "unknown" | "expired";
+  requiresHello: boolean;
+  issuedAt: string;
+  expiresAt: string;
+  completedAt: string | null;
+  resultCode: string | null;
+}
+
+const desktopPost = <T>(path: string, body: unknown = {}) =>
+  request<T>(`/desktop${path}`, { method: "POST", body: JSON.stringify(body) });
+
+export function listDesktopOrganizations(): Promise<ApiResponse<DesktopOrganization[]>> {
+  return request("/desktop/organizations");
+}
+
+export function createDesktopPairingCode(organizationId: string): Promise<ApiResponse<DesktopPairingCode>> {
+  return desktopPost("/pairings", { organizationId });
+}
+
+export function listDesktopDevices(): Promise<ApiResponse<DesktopDevice[]>> {
+  return request("/desktop/devices");
+}
+
+export function confirmDesktopDevice(deviceId: string, fingerprint: string): Promise<ApiResponse<DesktopDevice>> {
+  return desktopPost(`/devices/${encodeURIComponent(deviceId)}/confirm`, { fingerprint });
+}
+
+export function revokeDesktopDevice(deviceId: string): Promise<ApiResponse<null>> {
+  return desktopPost(`/devices/${encodeURIComponent(deviceId)}/revoke`);
+}
+
+export function endDesktopSession(deviceId: string): Promise<ApiResponse<null>> {
+  return desktopPost(`/devices/${encodeURIComponent(deviceId)}/session/end`);
+}
+
+export function requestDesktopCommand(deviceId: string, input: DesktopCommandInput): Promise<ApiResponse<DesktopCommandRequestResult>> {
+  return desktopPost(`/devices/${encodeURIComponent(deviceId)}/commands`, input);
+}
+
+export function confirmDesktopCommand(deviceId: string, approvalId: string): Promise<ApiResponse<DesktopCommand>> {
+  return desktopPost(`/devices/${encodeURIComponent(deviceId)}/approvals/${encodeURIComponent(approvalId)}/confirm`);
+}
+
+export function listDesktopCommands(deviceId: string): Promise<ApiResponse<DesktopCommand[]>> {
+  return request(`/desktop/devices/${encodeURIComponent(deviceId)}/commands`);
+}

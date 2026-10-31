@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Phase 19.6: the agent's update source (U6b). Published next to the signed
+  MSIX on an https:// origin the operator controls. Windows installs an update
+  only when it is signed by the same publisher as the installed package, and
+  checks on every launch; UpdateBlocksActivation makes the person take a
+  required update before the agent starts. The server's
+  DESKTOP_AGENT_MIN_VERSION refuses older agents independently of this file.
+  build-msix.ps1 writes the real file from this template; never point Uri at
+  http://.
+-->
+<AppInstaller
+  xmlns="http://schemas.microsoft.com/appx/appinstaller/2021"
+  Version="__VERSION__"
+  Uri="__BASE_URI__/JARVIS.DesktopAgent.appinstaller">
+  <MainPackage
+    Name="JARVIS.DesktopAgent"
+    Publisher="__PUBLISHER__"
+    Version="__VERSION__"
+    ProcessorArchitecture="x64"
+    Uri="__BASE_URI__/JARVIS.DesktopAgent.msix" />
+  <UpdateSettings>
+    <OnLaunch HoursBetweenUpdateChecks="0" ShowPrompt="true" UpdateBlocksActivation="true" />
+    <ForceUpdateFromAnyVersion>false</ForceUpdateFromAnyVersion>
+  </UpdateSettings>
+</AppInstaller>

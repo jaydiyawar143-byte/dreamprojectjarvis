@@ -302,9 +302,17 @@ const DesktopScreenReadRequestSchema = z
   })
   .strict();
 
+/**
+ * Phase 19.6 — the paired device a desktop command is for. An approval is bound
+ * to its parameters' hash, so naming the device here binds the approval to it:
+ * an approval for one device can never be spent on another.
+ */
+const DesktopDeviceIdSchema = z.string().uuid("device id must be an opaque id").optional();
+
 const DesktopClickRequestSchema = z
   .object({
     action: z.literal("desktop.input.click"),
+    deviceId: DesktopDeviceIdSchema,
     x: z.number().int().min(0).max(DESKTOP_COORDINATE_MAX),
     y: z.number().int().min(0).max(DESKTOP_COORDINATE_MAX),
     button: z.enum(["left", "right", "middle"]).optional(),
@@ -314,6 +322,7 @@ const DesktopClickRequestSchema = z
 const DesktopTypeRequestSchema = z
   .object({
     action: z.literal("desktop.input.type"),
+    deviceId: DesktopDeviceIdSchema,
     text: BrowserInputTextSchema,
   })
   .strict();
@@ -321,6 +330,7 @@ const DesktopTypeRequestSchema = z
 const DesktopKeyRequestSchema = z
   .object({
     action: z.literal("desktop.input.key"),
+    deviceId: DesktopDeviceIdSchema,
     key: z.enum(DESKTOP_KEY_NAMES),
   })
   .strict();

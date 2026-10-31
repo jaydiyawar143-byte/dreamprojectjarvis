@@ -29,6 +29,10 @@ const workspaces = (root: "packages" | "apps"): string[] =>
     .map((d) => `${root}/${d.name}`);
 
 const ALL = [...workspaces("packages"), ...workspaces("apps")];
+// A .NET solution outside the pnpm workspaces (Phase 19.6): no package.json, so
+// it can declare no npm dependency. Named, so a real workspace that lost its
+// manifest still fails here. Its src/ is still scanned.
+const NOT_NPM = ["apps/desktop-agent"];
 const SDK = /["']@modelcontextprotocol\//;
 const THIS_PACKAGE = /["']@jarvis\/mcp["']/;
 
@@ -41,7 +45,7 @@ describe("the MCP SDK lives only in packages/mcp", () => {
   });
 
   it("is declared by packages/mcp alone, pinned to an exact version", () => {
-    for (const workspace of ALL) {
+    for (const workspace of ALL.filter((w) => !NOT_NPM.includes(w))) {
       const pkg = JSON.parse(read(`${workspace}/package.json`)) as Record<string, Record<string, string> | undefined>;
       const deps = { ...pkg.dependencies, ...pkg.devDependencies, ...pkg.peerDependencies };
       const declared = Object.keys(deps).filter((d) => d.startsWith("@modelcontextprotocol/"));
@@ -72,7 +76,7 @@ describe("the MCP SDK lives only in packages/mcp", () => {
 describe("only the composition root depends on packages/mcp", () => {
   it("is imported by apps/api's container alone (S8.4) — no other package or app", () => {
     const users = ALL.filter((w) => w !== "packages/mcp")
-      .flatMap((w) => [`${w}/package.json`, ...sources(`${w}/src`)])
+      .flatMap((w) => [...(NOT_NPM.includes(w) ? [] : [`${w}/package.json`]), ...sources(`${w}/src`)])
       .filter((file) => THIS_PACKAGE.test(read(file)));
     expect(users.sort()).toEqual(["apps/api/package.json", "apps/api/src/services/container.ts"]);
   });

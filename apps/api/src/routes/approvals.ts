@@ -32,7 +32,14 @@ import {
   APPROVAL_RATE_LIMITS,
   DbBackedRateLimiter,
 } from "../services/rate-limiter.js";
-import { computeParamsHash, needsIndependentApproval, type Approval, type ApprovalStatus } from "@jarvis/core";
+import {
+  computeParamsHash,
+  isDesktopCommandAction,
+  needsIndependentApproval,
+  parseComputerControlRequest,
+  type Approval,
+  type ApprovalStatus,
+} from "@jarvis/core";
 import { rolesHoldingSharedPermission } from "@jarvis/security";
 import {
   validateBudgetAmount,
@@ -360,8 +367,14 @@ export function createApprovalsRouter(container: Container): Router {
     }
 
     // Tool must still exist and still accept exactly these parameters.
-    const tool = container.toolRegistry.get(approval.toolId);
-    if (!tool || !tool.validate(approval.params)) {
+    // Phase 19.6 — a desktop command has no tool to validate it (D5: no model
+    // drives the desktop), so its approval is held to the desktop contract.
+    const desktop = isDesktopCommandAction(approval.toolId);
+    const tool = desktop ? undefined : container.toolRegistry.get(approval.toolId);
+    const valid = desktop
+      ? parseComputerControlRequest({ ...approval.params, action: approval.toolId }).ok
+      : !!tool && tool.validate(approval.params);
+    if (!valid) {
       await auditAttempt("rejected", {
         toolId: approval.toolId,
         paramsHash: approval.paramsHash,
@@ -442,7 +455,7 @@ export function createApprovalsRouter(container: Container): Router {
     // ("approved action is never silently lost").
     if (
       container.lifecycle?.isShuttingDown() &&
-      tool.risk !== "READ_ONLY"
+      (desktop || tool?.risk !== "READ_ONLY")
     ) {
       await auditAttempt("rejected", {
         toolId: approval.toolId,

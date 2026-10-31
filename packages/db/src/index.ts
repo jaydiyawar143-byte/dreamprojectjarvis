@@ -23,6 +23,18 @@ export {
   type ApprovalForDecision,
 } from "./repositories/approval-repository.js";
 export { PrismaAuditRepository } from "./repositories/audit-repository.js";
+// Phase 19.6 — the Windows desktop agent: devices, grants, commands, nonces.
+export {
+  PrismaDesktopRepository,
+  type DesktopCommandRecord,
+  type DesktopCommandState,
+  type DesktopCommandTransition,
+  type DesktopDeviceRecord,
+  type DesktopDeviceState,
+  type DesktopGrantRecord,
+  type DesktopGrantState,
+  type NewDesktopDevice,
+} from "./repositories/desktop-repository.js";
 export { PrismaUserRepository } from "./repositories/user-repository.js";
 export { PrismaRefreshTokenRepository } from "./repositories/refresh-token-repository.js";
 export { PrismaConversationRepository } from "./repositories/conversation-repository.js";

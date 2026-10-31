@@ -306,8 +306,10 @@ decisions below. Nothing was staged or committed.
   account or tenant cannot pass for another), the two read ports, and
   `SHARED_CONNECTOR_KEYS` — the only connections whose owner may be recorded.
 - **Reads** (`PrismaTenantRepository`): `findMembership(userId, tenantId)` by
-  the unique key — there is no read by user alone — and `findConnectorOwner`,
-  which reports `invalid` when the record's tenant cannot be resolved. No cache.
+  the unique key — there is no read by user alone (since Phase 19.6 there is one
+  narrow exception, which decides nothing: `phase-19.md`, §18.9) — and
+  `findConnectorOwner`, which reports `invalid` when the record's tenant cannot
+  be resolved. No cache.
 - **The only writer** (`packages/db/src/maintenance/tenant-admin.ts`) and its
   operator command (`apps/api/scripts/tenant-admin/`): create a tenant WITH its
   first owner, add/re-role/remove a member, assign/unassign the connection,

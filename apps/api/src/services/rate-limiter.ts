@@ -60,6 +60,9 @@ export const RATE_LIMIT_NAMESPACES = {
   // n8n page after page on the shared credential, so starting one takes a slot
   // here — per account and per Organization's catalog — before n8n is called.
   automation_library: "automation_library",
+  // Phase 19.6 — the desktop agent: pairing codes a person may create. Agent
+  // redemption attempts are limited apart, by source, in the desktop store.
+  desktop: "desktop",
 } as const;
 
 export type RateLimitNamespace =

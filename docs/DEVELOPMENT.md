@@ -130,7 +130,7 @@ The rest of the marketing tests need no database: `pnpm --filter @jarvis/api exe
 
 ## Continuous integration
 
-[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs on pushes to `main`, on pull requests, and on demand. It is one job on Ubuntu with Node 24 — the same major the production image runs since R-19, so CI now exercises the production runtime. Node 20 could not run the web tests at all: the test toolchain (jsdom 30) requires Node `^22.22.2` or `^24.15.0`.
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs on pushes to `main`, on pull requests, and on demand. It is one job on Ubuntu with Node 24 (and, since Phase 19.6, a second job on Windows for the desktop agent — see the table) — the same major the production image runs since R-19, so CI now exercises the production runtime. Node 20 could not run the web tests at all: the test toolchain (jsdom 30) requires Node `^22.22.2` or `^24.15.0`.
 
 | Step | Command |
 |---|---|
@@ -149,6 +149,8 @@ The rest of the marketing tests need no database: `pnpm --filter @jarvis/api exe
 | Meta Ads write contracts (Phase 19.1) | `vitest run meta-ads write-tools-timeout-classification phase102-concurrency-tools execution-journal` in `@jarvis/tools` — the nine writes run only with the executor's grant; by file name, for the same reason |
 | Tool-execution boundary pins (Phase 19.1) | `vitest run mcp-boundaries-s8` in `@jarvis/core`, `vitest run mcp-tools-boundaries-s8` in `@jarvis/tools` — the executor and the registry, byte for byte |
 | Browser-service contracts (Phase 19.2) | `vitest run browser-service` in `@jarvis/browser-protocol` and in `@jarvis/browser-service` — the protocol, the signing and replay rules, the size and deadline bounds, the API's client, the service's own refusals, the write outcomes (an uncertain write is never a plain failure), the mutual-TLS-only configuration, the loopback health listener, Chromium's sandbox launch option and the compose file's isolation of the browser container — over real mutual TLS on loopback with run-made certificates and a fake engine (no Chromium, no external site); by file name, for the same reason. The real-browser sandbox check (S10, `apps/browser-service/scripts/s10-sandbox-check.mjs`) is not in CI: it starts a browser |
+| Desktop agent protocol (Phase 19.6) | `computer-control-desktop-protocol-p19` in `@jarvis/core`, inside the computer-control selection above — also fails when `apps/desktop-agent/contract` drifts from the TypeScript protocol, and reads `packaging/check-no-listener.ps1`. On Windows it also runs that script against real processes and sockets; those tests are skipped on this job's Ubuntu runner; the service's configuration (`desktop-agent-config-p19`), its Organization rules (`desktop-agent-organizations-p19`) and the Approvals route run in `Test @jarvis/api`, the Computer Control page in `Test @jarvis/web` |
+| Windows desktop agent (Phase 19.6) | A second job, `desktop-agent`, on `windows-latest` with the .NET 10 SDK: restore; build both projects with warnings as errors; `dotnet test` the Core tests (the C# protocol against the shared contract, verification, consent, execution with fakes, the signed client, the source boundary scan) and the Windows tests (the CNG device key cannot be exported, the compiled agent references no listening, process, screen, clipboard or registry API, the platform checks); `packaging/build-msix.ps1 -TestCertificate -TrustTestCertificate` (the manifest guard, makeappx, signtool sign and verify, signer = Publisher); a start-up check of the published agent; and that `packaging/check-no-listener.ps1` refuses when no agent is running. No step sends input. The runner is Windows Server, where the agent stops at its Windows 11 check, so this job shows only that start-up opens no port. That a paired agent opens none is proven by `check-no-listener.ps1` on a Windows 11 test machine. The test-signed package is not uploaded |
 | Migrations | `pnpm --filter @jarvis/db exec prisma migrate deploy`, against the CI database |
 | PostgreSQL tests | `vitest run` for all of `@jarvis/db`; `vitest run pg.integration` for `@jarvis/memory`; `vitest run pg.integration sprint-1.1d-memory-e2e` for `@jarvis/api` |
 | Memory quality evaluation (Phase 14) | `vitest run memory-quality-eval-p14-pg` in `@jarvis/memory`, against the CI database — its own gate, with the report in the log and a JSON report for the skip check |
@@ -353,6 +355,43 @@ node .claude/skills/run-jarvis/dashboard-acceptance.mjs
 ```
 
 The full guide is `.claude/skills/run-jarvis/SKILL.md`.
+
+## The Windows desktop agent (Phase 19.6)
+
+`apps/desktop-agent` is a .NET 10 solution outside the pnpm workspaces:
+`src/Jarvis.DesktopAgent.Core` (platform-neutral: protocol, verification,
+consent, execution, the signed client), `src/Jarvis.DesktopAgent` (the Windows
+app), and a test project for each. It needs the .NET 10 SDK (`global.json`);
+packaging needs the Windows SDK and PowerShell 7.
+
+```bash
+cd apps/desktop-agent
+dotnet build tests/Jarvis.DesktopAgent.Core.Tests/Jarvis.DesktopAgent.Core.Tests.csproj -c Release
+dotnet test  tests/Jarvis.DesktopAgent.Core.Tests/Jarvis.DesktopAgent.Core.Tests.csproj -c Release
+dotnet test  tests/Jarvis.DesktopAgent.Windows.Tests/Jarvis.DesktopAgent.Windows.Tests.csproj -c Release   # Windows only
+pwsh ./packaging/build-msix.ps1 -TestCertificate                                                               # Windows SDK
+```
+
+- **The protocol is written twice and held equal.** `packages/core/src/desktop-agent.ts`
+  generates `contract/{constants,schemas,vectors}.json` from its test
+  (`UPDATE_DESKTOP_CONTRACT=1 pnpm --filter @jarvis/core exec vitest run computer-control-desktop-protocol`);
+  without the flag that test fails on any drift, and the .NET `ContractTests`
+  fail unless C# derives the same strings and signatures. A protocol change
+  touches both sides and regenerates the contract in the same change. The
+  vectors' keys are test keys and are labelled so.
+- **Windows Smart App Control** (or another application-control policy) blocks
+  loading freshly built, unsigned DLLs, so `dotnet test` cannot run on such a
+  machine. Do not turn the policy off for this. The Core tests are
+  platform-neutral: run them in a throwaway container instead —
+  `docker run --rm -v "<repo>/apps/desktop-agent:/src:ro" mcr.microsoft.com/dotnet/sdk:10.0 sh -c 'mkdir /work && cd /src && tar --exclude=bin --exclude=obj -cf - . | tar -xf - -C /work && cd /work && dotnet test tests/Jarvis.DesktopAgent.Core.Tests/Jarvis.DesktopAgent.Core.Tests.csproj'`.
+  The Windows tests run in CI.
+- **No test sends input.** Nothing calls `SendInput` in a test; never add one
+  that does, and never pair a real person's computer from a test.
+- **What the agent may never contain** is listed in `SourceBoundaryTests` (the
+  source) and `AssemblyBoundaryTests` (the compiled assemblies): listeners,
+  processes, shells, screen capture, the clipboard, the registry, weakened TLS,
+  dynamic code, exportable keys. Adding to the agent's abilities is a change to
+  those lists, reviewed — and a decision for the owner.
 
 ## Never commit
 
