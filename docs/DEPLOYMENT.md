@@ -559,6 +559,117 @@ code.
 | `artifact_integrity_failed` | Both | An artifact's bytes no longer match its record | It is refused, and swept at expiry. Find out what changed the directory |
 | `artifact_record_unsupported`, or `preserved` above zero in `artifact_sweep` | Both | Records written by a newer release, after a rollback or beside a newer instance on the same directory | Expected. They are kept, and served again once the newer release runs |
 
+### The Windows desktop agent (Phase 19.6, optional)
+
+A per-user Windows app (`apps/desktop-agent`) that lets a person allow JARVIS
+to click, press a few named keys and type on their own Windows 11 computer, for
+a time they choose. It is **off**: with `DESKTOP_AGENT_ENABLED` unset no
+desktop route is mounted, the Computer Control page says desktop control is
+switched off, and nothing can pair. The record is
+[`phases/phase-19.md`](phases/phase-19.md), §18.
+
+What it is not: there are no model-facing desktop tools — only a person on the
+Computer Control page asks for an action and approves it. It cannot see the
+screen, run programs or scripts, open or read files, use the clipboard, change
+settings or act in windows that run as administrator. The agent opens no port:
+it polls the API over HTTPS.
+
+**1. The migration.** `20261031120000_phase19_desktop_agent` adds the desktop
+tables (pairing codes and attempts, devices, grants, commands, command
+payloads, request nonces). It is additive; a previous release ignores them.
+`prisma migrate deploy` as in §4.
+
+**2. The command-signing key.** One per deployment, never committed or logged:
+
+```bash
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -outform DER | base64 -w0
+```
+
+Put the output in `DESKTOP_AGENT_COMMAND_SIGNING_KEY`. Every computer pins the
+matching public key when it pairs; replacing the key means every computer pairs
+again (revoke them first).
+
+**3. Switch it on.** In `.env`: `DESKTOP_AGENT_ENABLED="true"`, the key,
+`DESKTOP_AGENT_MIN_WINDOWS_BUILD` (the oldest Windows 11 build Microsoft still
+services — there is no default), and optionally `DESKTOP_AGENT_MIN_VERSION`.
+`JARVIS_ENCRYPTION_KEY` must be set too: a command's parameters are sealed until
+the computer collects them. Restart the API. The log says
+`desktop_agent_enabled` with the key id and the two minimums, or
+`desktop_agent_disabled` with the one thing that is missing.
+
+**4. Build and sign the agent** — on Windows, with the .NET 10 SDK, PowerShell 7
+and the Windows SDK:
+
+```powershell
+cd apps/desktop-agent
+./packaging/build-msix.ps1 -Publisher "CN=<your code-signing subject>" `
+  -CertificatePath <code-signing.pfx> -CertificatePassword (Read-Host -AsSecureString) `
+  -BaseUri https://<where you host the agent>
+```
+
+It refuses a manifest that is not exactly the approved one (per-user, Windows 11
+x64, capabilities `internetClient` and `runFullTrust` only, no extensions),
+signs, verifies the signature and that the signer is the Publisher, and writes
+`JARVIS.DesktopAgent.appinstaller`. Host the `.msix` and the `.appinstaller` on
+that `https://` origin. Windows installs an update only when it is signed by
+the same publisher, checks on every launch and makes the person take it before
+the agent starts. `-TestCertificate` exists for CI and local checks only; never
+distribute a package signed with it.
+
+**5. Pair a computer.** An Owner or Admin of the Organization opens Computer
+Control, chooses the Organization if they administer more than one (a computer
+stays with the Organization it is paired to) and generates a code (it works
+once, for ten minutes). On the computer:
+install the agent (no administrator rights), choose **Pair this computer…**,
+enter the server's `https://` address and the code. The agent shows the
+computer's fingerprint and the server key id; the page shows the same server
+key id. The device's own user types the fingerprint into the page to confirm
+it. Until then the device is pending and can do nothing.
+
+**6. Control.** On the computer, **Allow control…** shows the consent screen:
+the duration (15 minutes by default, up to 60), what JARVIS may do, and the
+exact versioned text whose hash the server records. Allow acts only on a real
+click or key press. While control is allowed a red bar stays at the top of the
+screen with **Stop**; `Ctrl+Alt+Shift+F12`, typed on a real keyboard, ends it
+too, as do locking the computer, signing out, restarting, and 30 seconds
+without the server. Extending is fresh consent. On the page, each click, key or
+typing is its own approval. Typing also needs **Windows Hello on the computer,
+every time**; where Hello is not set up, typing is refused.
+
+**7. Revoke.** The device's user, or an Owner or Admin of its Organization,
+revokes it on the page. Its next request is refused, control ends, and the
+agent deletes its pairing and its key.
+
+**Check it.**
+
+| Check | How | Expected |
+|---|---|---|
+| Off by default | `curl -s -o /dev/null -w '%{http_code}' -X POST -H 'x-jarvis-desktop-version: jarvis-desktop/1' https://<api>/api/v1/desktop-agent/poll` with the flag unset | `404` |
+| On | the same request with the flag on | `401` (`UNAUTHENTICATED`: unsigned) |
+| No inbound port | on a Windows 11 test computer, with the agent started from the Start menu, paired and with control allowed: `./packaging/check-no-listener.ps1`. It reads the agent already running and never starts one; run it again while Windows Hello is open | `PASS`, naming the agent's pid and its connection to the server. It fails if no agent is running, if more than one is, if the agent stops, if it is not paired and polling, or if the sockets cannot be read |
+| Audit | `AuditLog` rows `desktop.pairing.create`, `desktop.device.pair`, `desktop.device.confirm`, `desktop.grant.start`, `desktop.command.request`, `desktop.command.issue`, `desktop.command.result`, `desktop.session.end`, `desktop.device.revoke` | Ids, actions, codes and counts — never typed text |
+
+**When something is wrong.**
+
+| Symptom | Cause | Do |
+|---|---|---|
+| `desktop_agent_disabled` with a reason | That setting is missing or malformed | Fix it and restart |
+| The page says only an owner or admin can pair | That account is not an Owner or Admin of any Organization; a platform role does not count | Add the membership with the operator command ("Organizations") |
+| The agent says the code was not accepted | Used, expired, mistyped, or too many attempts from that address | Generate a new code |
+| The agent says it is not supported | Windows older than `DESKTOP_AGENT_MIN_WINDOWS_BUILD`, or an agent older than `DESKTOP_AGENT_MIN_VERSION` | Update Windows or the agent |
+| Allow fails with "The consent text no longer matches" | The agent and server render different consent text (versions differ), or a label changed since pairing | Update the agent; pair again if a name changed |
+| Typing is `not_executed` with `HELLO_UNAVAILABLE` | Windows Hello is not set up for that person | Set up Hello (PIN, face or fingerprint); there is no other way to type |
+| A command is `unknown` | It reached the computer and no answer came back, or the computer was interrupted while acting | Check the computer. It is never sent again |
+
+**Turn it off / roll back.** Set `DESKTOP_AGENT_ENABLED="false"` (or unset it)
+and restart the API: the routes disappear, every agent's poll gets `404`, and
+no command can be asked for or delivered. Grants already started end on the
+computer within 30 seconds, when the agent stops hearing from the server. The
+migration stays (rolling back never undoes one); its tables are inert. To
+remove the agent from a computer: `Get-AppxPackage JARVIS.DesktopAgent |
+Remove-AppxPackage`, as that person. Revoke the device first so its key is
+deleted too.
+
 ## 7. Check the confirmation store
 
 Since Phase 13, a confirmation of an external write is a row in PostgreSQL rather than memory in one process. After a deploy, check that its table arrived with the migrations:

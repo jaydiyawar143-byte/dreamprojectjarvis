@@ -935,3 +935,37 @@ describe("Phase 19.1 — approval responses never carry raw parameters", () => {
     expect(JSON.stringify(res.body)).not.toContain(secret);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 19.6 — a desktop command's approval is decided on the Approvals page
+// too. There are no desktop tools to validate it (D5: the web UI drives the
+// desktop, a model never does), so it is validated against the desktop
+// contract itself — and still never approved with parameters that do not fit.
+// ---------------------------------------------------------------------------
+describe("Phase 19.6 — desktop approvals on the Approvals page", () => {
+  const deviceId = "8f14e45f-ceea-467a-9ad1-0e9a5b0b7d2c";
+
+  it("approves a well-formed desktop command's approval", async () => {
+    const a = seedPending(ctx.store, { toolId: "desktop.input.type", params: { deviceId, text: "hunter2-typed" } });
+    const r = await call(ctx.router, "POST", `/${a.id}/approve`, tokenA);
+    expect(r.status).toBe(200);
+    expect(r.body.data.status).toBe("approved");
+  });
+
+  it("refuses one whose parameters do not fit the desktop contract", async () => {
+    const a = seedPending(ctx.store, { toolId: "desktop.input.click", params: { deviceId, x: -5, y: 1 } });
+    const r = await call(ctx.router, "POST", `/${a.id}/approve`, tokenA);
+    expect(r.status).toBe(409);
+    expect(r.body.error.code).toBe("APPROVAL_PARAMS_MISMATCH");
+    expect(ctx.store.rows.get(a.id)!.status).toBe("pending");
+  });
+
+  it("refuses it while draining, without consuming it", async () => {
+    const draining = makeContainer({ shuttingDown: true });
+    const tok = draining.tokens.generateAccessToken({ userId: "user-a", role: "owner", email: "a@t" });
+    const a = seedPending(draining.store, { toolId: "desktop.input.key", params: { deviceId, key: "enter" } });
+    const r = await call(draining.router, "POST", `/${a.id}/approve`, tok);
+    expect(r.status).toBe(503);
+    expect(draining.store.rows.get(a.id)!.status).toBe("pending");
+  });
+});

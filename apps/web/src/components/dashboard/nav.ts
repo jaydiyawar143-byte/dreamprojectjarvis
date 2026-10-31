@@ -21,6 +21,7 @@ import {
   Mail,
   Megaphone,
   MessageSquare,
+  Monitor,
   Plug,
   Settings,
   ShieldCheck,
@@ -85,6 +86,9 @@ export const NAV_GROUPS: NavGroup[] = [
     title: "Control",
     items: [
       { href: "/approvals", label: "Approvals", icon: CheckSquare, available: true },
+      // Phase 19.6 — pairing and controlling a Windows computer. The page says
+      // when the server has desktop control switched off, and draws nothing then.
+      { href: "/computer-control", label: "Computer Control", icon: Monitor, available: true },
       { href: "/activity", label: "Activity", icon: Activity, available: true },
     ],
   },

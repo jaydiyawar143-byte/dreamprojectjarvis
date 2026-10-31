@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Phase 19.6: the JARVIS desktop agent as a per-user MSIX (U6b).
+
+  Installed for the signed-in person only, with no administrator rights. Its
+  only capabilities: internetClient (outbound connections — it opens no port,
+  and does not ask for internetClientServer or privateNetworkClientServer)
+  and runFullTrust (a desktop app; needed for SendInput and Windows Hello).
+  No services, no startup task, no elevation, no extensions. Windows 11 x64
+  only. build-msix.ps1 fills in __PUBLISHER__ and __VERSION__ and checks all of
+  the above before it packs.
+-->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap rescap">
+
+  <Identity Name="JARVIS.DesktopAgent" Publisher="__PUBLISHER__" Version="__VERSION__" ProcessorArchitecture="x64" />
+
+  <Properties>
+    <DisplayName>JARVIS Desktop Agent</DisplayName>
+    <PublisherDisplayName>JARVIS</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+  </Properties>
+
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.22000.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+
+  <Applications>
+    <Application Id="Agent" Executable="Jarvis.DesktopAgent.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+        DisplayName="JARVIS Desktop Agent"
+        Description="Lets you allow JARVIS to click, press keys and type on this computer, for a time you choose."
+        BackgroundColor="transparent"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png" />
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <Capability Name="internetClient" />
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+</Package>

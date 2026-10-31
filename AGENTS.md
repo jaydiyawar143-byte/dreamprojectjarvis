@@ -450,6 +450,62 @@ parts a change must not break.
 - **A recommendation is advice.** Each carries `executed: false`. Never add a
   tool, a route or a button that carries one out.
 
+### Desktop agent
+
+The record is `docs/phases/phase-19.md`, §18; these are the parts a change
+must not break.
+
+- **Off unless switched on.** `DESKTOP_AGENT_ENABLED` must be exactly `true`,
+  with the command-signing key, a minimum Windows build and the sealer; any
+  one missing and no desktop route is mounted. Never add a default that turns
+  it on.
+- **A person drives it, never a model (D5).** There are no model-facing desktop
+  tools; the Computer Control page is the only way to ask for an action. Never
+  add a desktop tool to the registry or an agent's allowlist.
+- **Three actions, nothing else.** `desktop.input.click`, `desktop.input.key`
+  (nine named keys) and `desktop.input.type`. No screen reading (D4), no
+  process, shell, script, file, clipboard, registry or elevation. Adding an
+  action is an owner decision and a change to both protocols, the contract and
+  the boundary tests (`SourceBoundaryTests`, `AssemblyBoundaryTests`).
+- **The agent opens no port.** Outbound HTTPS long-poll only (D3). Never add a
+  listener, a callback endpoint or an `http://` origin to the agent.
+- **One protocol, written twice, held equal.** `packages/core/src/desktop-agent.ts`
+  and `apps/desktop-agent/src/Jarvis.DesktopAgent.Core` must derive the same
+  canonical strings, consent text and signatures; the generated
+  `apps/desktop-agent/contract` and both sides' contract tests enforce it.
+  Change both in the same change.
+- **Everything signed, everything once.** Every agent request is signed by the
+  device key over the exact route path and body bytes; its nonce is spent LAST,
+  in PostgreSQL. Every answer and every command is signed by the server's
+  command key. A pairing code is redeemed, a command claimed, an answer
+  recorded, each by ONE conditional `UPDATE`. Never check in memory and then
+  write.
+- **Consent happens on the computer.** A grant starts only from the agent's
+  consent screen, on physical input, with the exact versioned text whose hash
+  the server checks. 15 minutes by default, 60 at most; extending is fresh
+  consent. Lock, sign-out, restart and 30 seconds without the server end it.
+  Never add a way to start or extend a grant from the web, a model or a
+  schedule.
+- **Typing needs Windows Hello, every time (D1).** On top of the in-app
+  approval. No Hello, no typing — never a fallback. The agent never sends input
+  to its own windows or to the system's credential and consent prompts.
+- **Unknown is never retried.** A delivered command is never sent again; an
+  interrupted one is `UNKNOWN`.
+- **The device key never leaves Windows' key storage.** Non-exportable, TPM
+  when present; the server stores the public key only. Tests may use software
+  keys; the agent may not.
+- **No test sends input** to a desktop, and none pairs a real computer.
+- **Seeing your Organizations decides nothing.** `listMemberships` is the one
+  read of memberships by user alone, an owner-approved exception to Phase 17
+  (`phase-19.md`, §18.9). It stays off `TenantMembershipReader`, and only
+  `DesktopControlService` calls it, to offer a person the Organizations they
+  own or administer and to narrow a list of devices. A pairing names its
+  Organization, never inferred; that and every later check read both ids, at
+  that moment. Stopping is the one exception: a device's own user, and a signed
+  `session/end` from the agent, need no membership, because ending control must
+  never be refused. Never add a second caller, widen what it selects, or decide
+  anything from it (`tenant-admin-cli-p17` pins this).
+
 ### Operational logs and errors
 
 - An operational event — start-up, shutdown, a failed request, anything a
@@ -552,6 +608,15 @@ migration and no repository). The 4 failures are the same timing-sensitive
 ones named in §15: the three MCP timeout tests, each failing alone on this
 machine too, and the `auth-session` web test ("/approvals loads its data…"),
 which passes alone. CI's database steps were not run in that pass.
+After Stage 19.6 (2026-10-31, on Windows from the working tree, not committed):
+`pnpm typecheck` 40/40, `pnpm lint` 22/22, `pnpm build` 22/22. Without a database,
+across 22 workspaces, the full suite gave 11,205 passed, 3 failed and 51 skipped:
+the three MCP timeout tests, each failing the same way on a clean export of
+`cc7b7f9`; `evidence-builder` failed in other runs that day and passed in this one.
+CI's database steps all passed on a fresh database, 0
+skipped: `@jarvis/db` 472/472 (33 files, 38 migrations), `@jarvis/memory` 93/93,
+`@jarvis/api` 288/288, the quality evaluation 13/13. The Windows job has not run
+(`docs/phases/phase-19.md`, §18.10).
 
 The two memory end-to-end tests (`sprint-1.1d-memory-e2e`, and
 `phase14-memory-e2e-pg.integration`, which has no in-memory fallback at all)
@@ -577,7 +642,11 @@ the tool-execution boundary pins (`mcp-boundaries-s8`, `mcp-tools-boundaries-s8`
 and since Phase 19.2 the browser-service contracts (`browser-service*` in
 `browser-protocol` and `browser-service`, since Phase 19.3 `ip-rules`,
 `host-rules` and `navigation-policy` in `browser`, and since Phase 19.4 the
-artifact store's `artifact-store`, `download` and `session`). A new contract test for any
+artifact store's `artifact-store`, `download` and `session`). Since Phase 19.6 the
+desktop agent's TypeScript protocol contract is in the computer-control slice
+(`computer-control-desktop-protocol-p19` in `core`), and the .NET agent has its own
+CI job (`desktop-agent`, `windows-latest`), which runs every test of both .NET test
+projects. A new contract test for any
 of them must match the names its step selects (`.github/workflows/ci.yml`), or
 CI never runs it.
 
@@ -626,6 +695,7 @@ Every capability has one home. Before creating a file, find that home.
 | `packages/ai-openai`, `ai-elevenlabs` | Model and voice providers |
 | `packages/ai-anthropic` | Claude adapter — built, not wired |
 | `packages/meta-graph`, `google-ads`, `google-workspace`, `whatsapp`, `n8n`, `omniroute`, `browser` | Provider clients |
+| `apps/desktop-agent` | The Windows desktop agent (.NET 10, outside the pnpm workspaces): per-user MSIX, outbound HTTPS only, off unless `DESKTOP_AGENT_ENABLED=true` on the API |
 | `packages/mcp` | MCP runtime (the only home of the MCP SDK) and the reviewed stdio servers in `pilot/`; reviewed in core's `MCP_MANIFEST`, read-only, off unless `JARVIS_MCP_ENABLED=true` |
 
 ## Documentation precedence

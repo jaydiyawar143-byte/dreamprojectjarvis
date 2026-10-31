@@ -59,6 +59,16 @@
 #   journal, timeout and concurrency suites of the same tools), and the
 #   byte-for-byte pins of the executor and the registry, which until then ran
 #   only locally. No step reaches Meta: the provider is the in-memory mock.
+#   Phase 19.6 — the Windows desktop agent. Its TypeScript protocol contract
+#   (`computer-control-desktop-protocol-p19` in @jarvis/core, which also fails
+#   when the generated apps/desktop-agent/contract files drift) runs in the
+#   computer-control slice; the service, routes and approvals in "Test
+#   @jarvis/api"; the Computer Control page in "Test @jarvis/web"; the pairing,
+#   consent, revocation and command suites against PostgreSQL in the database
+#   steps (`desktop-agent-p19-pg` in @jarvis/db and @jarvis/api), where a skip
+#   fails. The .NET agent itself is built, tested, packaged, signed with a
+#   throwaway test certificate and verified in the `desktop-agent` job on
+#   windows-latest. No step sends input to a desktop or pairs a real device.
 #
 # Deliberately not gated yet (docs/DEVELOPMENT.md, "Continuous integration"):
 #   - Most test files OUTSIDE @jarvis/api. `typecheck:tests` runs in
@@ -388,3 +398,85 @@ jobs:
       - name: No PostgreSQL test was skipped
         if: ${{ !cancelled() && steps.migrate.outcome == 'success' }}
         run: node .github/scripts/assert-no-skipped-tests.mjs "$RUNNER_TEMP/vitest-db.json" "$RUNNER_TEMP/vitest-memory.json" "$RUNNER_TEMP/vitest-api.json" "$RUNNER_TEMP/vitest-eval.json"
+
+  # Phase 19.6 — the Windows desktop agent (.NET 10, apps/desktop-agent).
+  # Restores and builds both projects with warnings as errors; runs the
+  # platform-neutral tests (the C# protocol held to the TypeScript one through
+  # apps/desktop-agent/contract, verification, consent, execution with fakes,
+  # the signed client, the source boundary scan) and the Windows tests (the
+  # CNG device key is non-exportable, the compiled agent references no
+  # listening, process, screen, clipboard or registry API); then packs the
+  # per-user MSIX, refuses a manifest that is not exactly the approved one,
+  # signs it with a throwaway TEST certificate, and verifies the signature and
+  # that the signer is the Publisher. The runner is Windows Server, where the
+  # agent stops at its Windows 11 check: so the job shows only that start-up
+  # opens no port, never that a paired agent opens none. That proof is
+  # packaging/check-no-listener.ps1 on a Windows 11 test machine; here the job
+  # proves that script refuses when no agent is running. Nothing here sends
+  # input, and no test calls SendInput. The test-signed package is not uploaded.
+  desktop-agent:
+    name: Windows desktop agent (.NET, MSIX)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: apps/desktop-agent
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+      DOTNET_NOLOGO: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          global-json-file: apps/desktop-agent/global.json
+
+      - name: Runner and Windows version
+        run: |
+          $os = Get-CimInstance Win32_OperatingSystem
+          Write-Host "Runner: $($os.Caption) build $($os.BuildNumber), $env:PROCESSOR_ARCHITECTURE"
+          dotnet --version
+
+      - name: Restore
+        run: |
+          dotnet restore tests/Jarvis.DesktopAgent.Core.Tests/Jarvis.DesktopAgent.Core.Tests.csproj
+          dotnet restore tests/Jarvis.DesktopAgent.Windows.Tests/Jarvis.DesktopAgent.Windows.Tests.csproj
+
+      - name: Build (warnings are errors)
+        run: |
+          dotnet build tests/Jarvis.DesktopAgent.Core.Tests/Jarvis.DesktopAgent.Core.Tests.csproj -c Release --no-restore
+          dotnet build tests/Jarvis.DesktopAgent.Windows.Tests/Jarvis.DesktopAgent.Windows.Tests.csproj -c Release --no-restore
+
+      - name: Test the agent core (protocol contract, verification, consent, execution, client)
+        run: dotnet test tests/Jarvis.DesktopAgent.Core.Tests/Jarvis.DesktopAgent.Core.Tests.csproj -c Release --no-build
+
+      - name: Test the Windows parts (device key, compiled boundaries, platform checks)
+        run: dotnet test tests/Jarvis.DesktopAgent.Windows.Tests/Jarvis.DesktopAgent.Windows.Tests.csproj -c Release --no-build
+
+      - name: Pack, sign (test certificate) and verify the MSIX
+        run: ./packaging/build-msix.ps1 -Publisher "CN=JARVIS Test Signing" -TestCertificate -TrustTestCertificate
+
+      # Start-up only: this runner stops the agent at its platform check, and
+      # this step starts the runner's only copy. It is not the exit criterion's
+      # proof, and packaging/check-no-listener.ps1 never starts an agent.
+      - name: Start-up opens no port
+        run: |
+          $agent = Start-Process -FilePath (Resolve-Path artifacts/publish/Jarvis.DesktopAgent.exe) -PassThru
+          try {
+            Start-Sleep -Seconds 10
+            $listening = @(Get-NetTCPConnection -ErrorAction Stop | Where-Object { $_.OwningProcess -eq $agent.Id -and $_.State -eq "Listen" })
+            $udp = @(Get-NetUDPEndpoint -ErrorAction Stop | Where-Object { $_.OwningProcess -eq $agent.Id })
+            if ($listening.Count -gt 0 -or $udp.Count -gt 0) { throw "the agent opened a port at start-up." }
+            Write-Host "Start-up opened no TCP listener and no UDP endpoint (pid $($agent.Id)). This says nothing about a paired agent."
+          } finally {
+            if (-not $agent.HasExited) { Stop-Process -Id $agent.Id -Force }
+          }
+
+      - name: The port check refuses when no agent is running
+        run: |
+          pwsh -NoProfile -File ./packaging/check-no-listener.ps1 -Seconds 1
+          if ($LASTEXITCODE -ne 1) { throw "check-no-listener did not refuse with no agent running (exit $LASTEXITCODE)." }
+          exit 0

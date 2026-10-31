@@ -133,6 +133,7 @@ import {
   PrismaProjectRepository,
   PrismaMarketingRepository,
   PrismaTenantRepository,
+  PrismaDesktopRepository,
   PrismaAutomationLibraryRepository,
   PrismaAutomationDraftRepository,
 } from "@jarvis/db";
@@ -211,6 +212,8 @@ import {
 import { createOrganizationMetaAuthorizer, metaAccountFor } from "./tenancy/meta-ads-access.js";
 import { errorMonitor, operationalLog } from "./observability/index.js";
 import { createApprovalParamsSealer } from "./approval-sealer.js";
+import { loadDesktopAgentConfig } from "./desktop/config.js";
+import { DesktopControlService } from "./desktop/desktop-control-service.js";
 import { mcpToolUnavailable } from "./integration-registry.js";
 import { libraryInstanceKey, type LibraryPageSource, type LibraryTriggerTargetSource } from "@jarvis/core";
 import { AutomationLibraryService, LIBRARY_SYNC_BUDGETS } from "./automation-library/library-service.js";
@@ -322,6 +325,13 @@ export interface Container {
   analysisService: AnalysisGenerator | null;
   /** Lifecycle gate consulted before approving side-effecting actions. */
   lifecycle?: ShutdownLifecycle;
+  /**
+   * Phase 19.6 — the Windows desktop agent's one authority. Null unless
+   * DESKTOP_AGENT_ENABLED=true and everything it needs is configured; then no
+   * desktop route is mounted at all. There are no model-facing desktop tools
+   * (D5): only the web UI's routes reach it.
+   */
+  desktopControl: DesktopControlService | null;
   /** PHASE 11.9 — pending action service for write-tool confirmation flow. */
   pendingActionService?: import("@jarvis/agents").PendingActionService;
   /**
@@ -1274,6 +1284,39 @@ export function getContainer(options?: {
   // service, the Meta tools, the executor and the orchestrator all ask the
   // SAME object, so no surface can let through what another refuses.
   const tenantRepo = new PrismaTenantRepository(prisma);
+
+  // Phase 19.6 — the Windows desktop agent. OFF unless DESKTOP_AGENT_ENABLED
+  // is exactly "true"; on, it needs its command-signing key, the oldest
+  // serviced Windows build (no default) and the sealer — or it stays off, and
+  // says which is missing. Undelivered commands expire and unanswered ones
+  // become UNKNOWN on the sweep below; nothing is ever sent twice.
+  const desktopAgent = loadDesktopAgentConfig();
+  let desktopControl: DesktopControlService | null = null;
+  if (desktopAgent.enabled && approvalSealer) {
+    const service = new DesktopControlService({
+      store: new PrismaDesktopRepository(prisma),
+      memberships: tenantRepo,
+      approvals: approvalRepo,
+      journal: executionJournal,
+      sealer: approvalSealer,
+      audit: auditLogger,
+      slots: new AtomicRateLimiter(auditRepo, RATE_LIMIT_NAMESPACES.desktop),
+      config: desktopAgent.config,
+      isShuttingDown: () => options?.lifecycle?.isShuttingDown() ?? false,
+    });
+    desktopControl = service;
+    const desktopLog = operationalLog.child("desktop-agent");
+    setInterval(() => void service.sweep().catch(() => desktopLog.warn("desktop_agent_sweep_failed")), 10_000).unref();
+    desktopLog.info("desktop_agent_enabled", {
+      minWindowsBuild: desktopAgent.config.minWindowsBuild,
+      minAgentVersion: desktopAgent.config.minAgentVersion,
+      serverKeyId: desktopAgent.config.serverKeyId,
+    });
+  } else {
+    operationalLog.child("desktop-agent").info("desktop_agent_disabled", {
+      reason: desktopAgent.enabled ? "JARVIS_ENCRYPTION_KEY is not set or not valid; command parameters are sealed" : desktopAgent.reason,
+    });
+  }
   const sharedAccess = new SharedConnectionAccess(tenantRepo);
   const sharedToolGate = createSharedConnectionToolGate(sharedAccess);
 
@@ -2369,6 +2412,7 @@ export function getContainer(options?: {
     recommendationRepo,
     analysisService,
     lifecycle: options?.lifecycle,
+    desktopControl,
     pendingActionService,
     // Sprint 1.1A — expose memory stack for diagnostics and tests
     memoryStore,

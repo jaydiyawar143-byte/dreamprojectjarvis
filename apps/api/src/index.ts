@@ -12,6 +12,8 @@ import { createConversationsRouter } from "./routes/conversations.js";
 import { createTasksRouter } from "./routes/tasks.js";
 import { createApprovalsRouter } from "./routes/approvals.js";
 import { createPendingActionsRouter } from "./routes/pending-actions.js";
+import { createDesktopRouter } from "./routes/desktop.js";
+import { createDesktopAgentRouter } from "./routes/desktop-agent.js";
 import { createRecommendationsRouter } from "./routes/recommendations.js";
 import { createOutcomesRouter } from "./routes/outcomes.js";
 import { createOpportunitiesRouter } from "./routes/opportunities.js";
@@ -211,6 +213,15 @@ if (isN8nConfigured()) {
   }));
 }
 
+// Phase 19.6 — the desktop agent's routes, mounted here for the reason the
+// WhatsApp and n8n webhooks are: each request is signed over its exact bytes,
+// so the router reads the raw body before the JSON parser below consumes it.
+// Mounted only when the desktop agent is enabled; otherwise these paths do
+// not exist (404), and no agent can reach anything.
+if (container.desktopControl) {
+  app.use("/api/v1/desktop-agent", createDesktopAgentRouter(container.desktopControl));
+}
+
 app.use(express.json({ limit: "10mb" }));
 
 app.use(
@@ -257,6 +268,10 @@ app.use("/api/v1/conversations", createConversationsRouter(container));
 app.use("/api/v1/tasks", createTasksRouter(container));
 app.use("/api/v1/approvals", createApprovalsRouter(container));
 app.use("/api/v1/pending-actions", createPendingActionsRouter(container));
+// Phase 19.6 — the Computer Control page. Absent unless the desktop agent is enabled.
+if (container.desktopControl) {
+  app.use("/api/v1/desktop", createDesktopRouter(container, container.desktopControl));
+}
 app.use("/api/v1/recommendations", createRecommendationsRouter(container));
 app.use("/api/v1", createOutcomesRouter(container));
 app.use("/api/v1/opportunities", createOpportunitiesRouter(container));

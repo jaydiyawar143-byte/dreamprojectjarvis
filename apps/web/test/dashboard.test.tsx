@@ -434,9 +434,11 @@ describe("navigation model", () => {
     ]);
 
     // Approvals and Activity are the two places a human is in the loop, so
-    // they are grouped together rather than filed under "System".
+    // they are grouped together rather than filed under "System". Phase 19.6
+    // adds Computer Control: a person driving a paired computer, approval by
+    // approval, is a human in the loop too.
     const control = NAV_GROUPS.find((g) => g.title === "Control")!;
-    expect(control.items.map((i) => i.label)).toEqual(["Approvals", "Activity"]);
+    expect(control.items.map((i) => i.label)).toEqual(["Approvals", "Computer Control", "Activity"]);
 
     const system = NAV_GROUPS.find((g) => g.title === "System")!;
     expect(system.items.map((i) => i.label)).toEqual(["Health", "Settings"]);

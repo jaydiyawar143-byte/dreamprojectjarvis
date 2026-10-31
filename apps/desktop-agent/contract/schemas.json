@@ -1,0 +1,963 @@
+{
+  "PairRequest": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "version": {
+        "type": "string",
+        "const": "jarvis-desktop/1"
+      },
+      "pairingCode": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64
+      },
+      "publicKey": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 200,
+        "pattern": "^[A-Za-z0-9+/]+={0,2}$"
+      },
+      "deviceName": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+      },
+      "agentVersion": {
+        "type": "string",
+        "pattern": "^(0|[1-9][0-9]{0,4})\\.(0|[1-9][0-9]{0,4})\\.(0|[1-9][0-9]{0,4})$"
+      },
+      "windowsBuild": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 1000000
+      },
+      "architecture": {
+        "type": "string",
+        "enum": [
+          "x64",
+          "arm64",
+          "x86"
+        ]
+      }
+    },
+    "required": [
+      "version",
+      "pairingCode",
+      "publicKey",
+      "deviceName",
+      "agentVersion",
+      "windowsBuild",
+      "architecture"
+    ],
+    "additionalProperties": false
+  },
+  "PairResponse": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "version": {
+        "type": "string",
+        "const": "jarvis-desktop/1"
+      },
+      "deviceId": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+      },
+      "fingerprint": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$"
+      },
+      "status": {
+        "type": "string",
+        "const": "pending"
+      },
+      "serverKeyId": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{16}$"
+      },
+      "serverPublicKey": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 200,
+        "pattern": "^[A-Za-z0-9+/]+={0,2}$"
+      },
+      "userLabel": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 80
+      },
+      "organizationLabel": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 80
+      }
+    },
+    "required": [
+      "version",
+      "deviceId",
+      "fingerprint",
+      "status",
+      "serverKeyId",
+      "serverPublicKey",
+      "userLabel",
+      "organizationLabel"
+    ],
+    "additionalProperties": false
+  },
+  "PollRequest": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "version": {
+        "type": "string",
+        "const": "jarvis-desktop/1"
+      },
+      "agentInstanceId": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+      },
+      "agentVersion": {
+        "type": "string",
+        "pattern": "^(0|[1-9][0-9]{0,4})\\.(0|[1-9][0-9]{0,4})\\.(0|[1-9][0-9]{0,4})$"
+      },
+      "windowsBuild": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 1000000
+      },
+      "grantId": {
+        "anyOf": [
+          {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "required": [
+      "version",
+      "agentInstanceId",
+      "agentVersion",
+      "windowsBuild",
+      "grantId"
+    ],
+    "additionalProperties": false
+  },
+  "PollResponse": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "version": {
+        "type": "string",
+        "const": "jarvis-desktop/1"
+      },
+      "device": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "active"
+            ]
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "additionalProperties": false
+      },
+      "grant": {
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "grantId": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "active",
+                  "ended"
+                ]
+              },
+              "expiresAt": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "grantId",
+              "status",
+              "expiresAt"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "command": {
+        "anyOf": [
+          {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "commandId": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                  },
+                  "deviceId": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                  },
+                  "grantId": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                  },
+                  "issuedAt": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "expiresAt": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "requiresHello": {
+                    "type": "boolean"
+                  },
+                  "signature": {
+                    "type": "string",
+                    "minLength": 86,
+                    "maxLength": 86,
+                    "pattern": "^[A-Za-z0-9_-]+$"
+                  },
+                  "action": {
+                    "type": "string",
+                    "const": "desktop.input.click"
+                  },
+                  "params": {
+                    "type": "object",
+                    "properties": {
+                      "x": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 100000
+                      },
+                      "y": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 100000
+                      },
+                      "button": {
+                        "type": "string",
+                        "enum": [
+                          "left",
+                          "right",
+                          "middle"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "x",
+                      "y",
+                      "button"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "commandId",
+                  "deviceId",
+                  "grantId",
+                  "issuedAt",
+                  "expiresAt",
+                  "requiresHello",
+                  "signature",
+                  "action",
+                  "params"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "commandId": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                  },
+                  "deviceId": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                  },
+                  "grantId": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                  },
+                  "issuedAt": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "expiresAt": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "requiresHello": {
+                    "type": "boolean"
+                  },
+                  "signature": {
+                    "type": "string",
+                    "minLength": 86,
+                    "maxLength": 86,
+                    "pattern": "^[A-Za-z0-9_-]+$"
+                  },
+                  "action": {
+                    "type": "string",
+                    "const": "desktop.input.key"
+                  },
+                  "params": {
+                    "type": "object",
+                    "properties": {
+                      "key": {
+                        "type": "string",
+                        "enum": [
+                          "enter",
+                          "tab",
+                          "escape",
+                          "backspace",
+                          "delete",
+                          "arrowup",
+                          "arrowdown",
+                          "arrowleft",
+                          "arrowright"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "key"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "commandId",
+                  "deviceId",
+                  "grantId",
+                  "issuedAt",
+                  "expiresAt",
+                  "requiresHello",
+                  "signature",
+                  "action",
+                  "params"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "commandId": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                  },
+                  "deviceId": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                  },
+                  "grantId": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                  },
+                  "issuedAt": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "expiresAt": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "requiresHello": {
+                    "type": "boolean"
+                  },
+                  "signature": {
+                    "type": "string",
+                    "minLength": 86,
+                    "maxLength": 86,
+                    "pattern": "^[A-Za-z0-9_-]+$"
+                  },
+                  "action": {
+                    "type": "string",
+                    "const": "desktop.input.type"
+                  },
+                  "params": {
+                    "type": "object",
+                    "properties": {
+                      "text": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 10000
+                      }
+                    },
+                    "required": [
+                      "text"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "commandId",
+                  "deviceId",
+                  "grantId",
+                  "issuedAt",
+                  "expiresAt",
+                  "requiresHello",
+                  "signature",
+                  "action",
+                  "params"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "required": [
+      "version",
+      "device",
+      "grant",
+      "command"
+    ],
+    "additionalProperties": false
+  },
+  "CommandEnvelope": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "anyOf": [
+      {
+        "type": "object",
+        "properties": {
+          "commandId": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          },
+          "deviceId": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          },
+          "grantId": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          },
+          "issuedAt": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "expiresAt": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "requiresHello": {
+            "type": "boolean"
+          },
+          "signature": {
+            "type": "string",
+            "minLength": 86,
+            "maxLength": 86,
+            "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "action": {
+            "type": "string",
+            "const": "desktop.input.click"
+          },
+          "params": {
+            "type": "object",
+            "properties": {
+              "x": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 100000
+              },
+              "y": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 100000
+              },
+              "button": {
+                "type": "string",
+                "enum": [
+                  "left",
+                  "right",
+                  "middle"
+                ]
+              }
+            },
+            "required": [
+              "x",
+              "y",
+              "button"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "commandId",
+          "deviceId",
+          "grantId",
+          "issuedAt",
+          "expiresAt",
+          "requiresHello",
+          "signature",
+          "action",
+          "params"
+        ],
+        "additionalProperties": false
+      },
+      {
+        "type": "object",
+        "properties": {
+          "commandId": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          },
+          "deviceId": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          },
+          "grantId": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          },
+          "issuedAt": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "expiresAt": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "requiresHello": {
+            "type": "boolean"
+          },
+          "signature": {
+            "type": "string",
+            "minLength": 86,
+            "maxLength": 86,
+            "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "action": {
+            "type": "string",
+            "const": "desktop.input.key"
+          },
+          "params": {
+            "type": "object",
+            "properties": {
+              "key": {
+                "type": "string",
+                "enum": [
+                  "enter",
+                  "tab",
+                  "escape",
+                  "backspace",
+                  "delete",
+                  "arrowup",
+                  "arrowdown",
+                  "arrowleft",
+                  "arrowright"
+                ]
+              }
+            },
+            "required": [
+              "key"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "commandId",
+          "deviceId",
+          "grantId",
+          "issuedAt",
+          "expiresAt",
+          "requiresHello",
+          "signature",
+          "action",
+          "params"
+        ],
+        "additionalProperties": false
+      },
+      {
+        "type": "object",
+        "properties": {
+          "commandId": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          },
+          "deviceId": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          },
+          "grantId": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          },
+          "issuedAt": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "expiresAt": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "requiresHello": {
+            "type": "boolean"
+          },
+          "signature": {
+            "type": "string",
+            "minLength": 86,
+            "maxLength": 86,
+            "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "action": {
+            "type": "string",
+            "const": "desktop.input.type"
+          },
+          "params": {
+            "type": "object",
+            "properties": {
+              "text": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 10000
+              }
+            },
+            "required": [
+              "text"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "commandId",
+          "deviceId",
+          "grantId",
+          "issuedAt",
+          "expiresAt",
+          "requiresHello",
+          "signature",
+          "action",
+          "params"
+        ],
+        "additionalProperties": false
+      }
+    ]
+  },
+  "GrantRequest": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "version": {
+        "type": "string",
+        "const": "jarvis-desktop/1"
+      },
+      "agentInstanceId": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+      },
+      "grantId": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+      },
+      "durationMinutes": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 60
+      },
+      "scope": {
+        "minItems": 1,
+        "maxItems": 3,
+        "type": "array",
+        "items": {
+          "type": "string",
+          "enum": [
+            "desktop.input.click",
+            "desktop.input.key",
+            "desktop.input.type"
+          ]
+        }
+      },
+      "consentTextVersion": {
+        "type": "string",
+        "const": "desktop-consent/1"
+      },
+      "consentTextSha256": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$"
+      },
+      "replacesGrantId": {
+        "anyOf": [
+          {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "required": [
+      "version",
+      "agentInstanceId",
+      "grantId",
+      "durationMinutes",
+      "scope",
+      "consentTextVersion",
+      "consentTextSha256",
+      "replacesGrantId"
+    ],
+    "additionalProperties": false
+  },
+  "GrantResponse": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "version": {
+        "type": "string",
+        "const": "jarvis-desktop/1"
+      },
+      "grant": {
+        "type": "object",
+        "properties": {
+          "grantId": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "ended"
+            ]
+          },
+          "expiresAt": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "grantId",
+          "status",
+          "expiresAt"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "required": [
+      "version",
+      "grant"
+    ],
+    "additionalProperties": false
+  },
+  "SessionEndRequest": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "version": {
+        "type": "string",
+        "const": "jarvis-desktop/1"
+      },
+      "agentInstanceId": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+      },
+      "grantId": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+      },
+      "reason": {
+        "type": "string",
+        "enum": [
+          "user",
+          "kill-switch",
+          "lock",
+          "sign-out",
+          "shutdown",
+          "expired",
+          "disconnected"
+        ]
+      }
+    },
+    "required": [
+      "version",
+      "agentInstanceId",
+      "grantId",
+      "reason"
+    ],
+    "additionalProperties": false
+  },
+  "CommandResult": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "anyOf": [
+      {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "string",
+            "const": "jarvis-desktop/1"
+          },
+          "outcome": {
+            "type": "string",
+            "const": "succeeded"
+          }
+        },
+        "required": [
+          "version",
+          "outcome"
+        ],
+        "additionalProperties": false
+      },
+      {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "string",
+            "const": "jarvis-desktop/1"
+          },
+          "outcome": {
+            "type": "string",
+            "const": "not-executed"
+          },
+          "code": {
+            "type": "string",
+            "enum": [
+              "HELLO_UNAVAILABLE",
+              "HELLO_FAILED",
+              "ELEVATED_TARGET",
+              "NO_TARGET",
+              "OUT_OF_BOUNDS",
+              "SESSION_LOCKED",
+              "GRANT_INACTIVE",
+              "COMMAND_EXPIRED",
+              "INVALID_COMMAND",
+              "BUSY"
+            ]
+          }
+        },
+        "required": [
+          "version",
+          "outcome",
+          "code"
+        ],
+        "additionalProperties": false
+      },
+      {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "string",
+            "const": "jarvis-desktop/1"
+          },
+          "outcome": {
+            "type": "string",
+            "const": "uncertain"
+          }
+        },
+        "required": [
+          "version",
+          "outcome"
+        ],
+        "additionalProperties": false
+      }
+    ]
+  },
+  "AckResponse": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "version": {
+        "type": "string",
+        "const": "jarvis-desktop/1"
+      },
+      "ok": {
+        "type": "boolean",
+        "const": true
+      }
+    },
+    "required": [
+      "version",
+      "ok"
+    ],
+    "additionalProperties": false
+  },
+  "ErrorResponse": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "version": {
+        "type": "string",
+        "const": "jarvis-desktop/1"
+      },
+      "error": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string",
+            "enum": [
+              "INVALID_REQUEST",
+              "UNSUPPORTED_VERSION",
+              "UNAUTHENTICATED",
+              "REQUEST_EXPIRED",
+              "REPLAY_DETECTED",
+              "PAIRING_CODE_INVALID",
+              "RATE_LIMITED",
+              "DEVICE_PENDING",
+              "DEVICE_REVOKED",
+              "NOT_AUTHORIZED",
+              "AGENT_VERSION_UNSUPPORTED",
+              "WINDOWS_VERSION_UNSUPPORTED",
+              "GRANT_INVALID",
+              "GRANT_CONFLICT",
+              "CONSENT_MISMATCH",
+              "NOT_FOUND",
+              "CONFLICT",
+              "UNAVAILABLE"
+            ]
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "required": [
+      "version",
+      "error"
+    ],
+    "additionalProperties": false
+  }
+}

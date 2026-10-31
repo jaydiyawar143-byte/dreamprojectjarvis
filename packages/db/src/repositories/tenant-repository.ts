@@ -11,9 +11,16 @@
 // only by the operator command (`maintenance/tenant-admin.ts`), each change in
 // one transaction with its audit row.
 //
-// BOTH IDS, ALWAYS. A membership is found by its unique key (tenant, user).
-// There is no read by user alone, so no caller can ask "some membership of
-// this account" and be handed one for the wrong tenant.
+// BOTH IDS, ALWAYS. A membership is found by its unique key (tenant, user), so
+// no caller can ask "some membership of this account" and be handed one for
+// the wrong tenant.
+//
+// ONE EXCEPTION, AND IT DECIDES NOTHING. `listMemberships` reads by user alone,
+// so the desktop service can show a person the Organizations they administer
+// (Phase 19.6; docs/phases/phase-19.md, §18.9). It is not on the
+// `TenantMembershipReader` port every other boundary reads, the desktop service
+// is its only caller, and that service decides about any one Organization with
+// `findMembership`. apps/api/test/tenant-admin-cli-p17.test.ts pins all of it.
 // ---------------------------------------------------------------------------
 
 import type { PrismaClient } from "@prisma/client";
@@ -61,6 +68,25 @@ export class PrismaTenantRepository implements TenantMembershipReader, Automatio
     if (!row) return null;
     const role = ROLE_FROM_DB[row.role];
     return role ? { role } : null;
+  }
+
+  /**
+   * Phase 19.6 — every tenant this account is a member of, with its name and
+   * role, read now. An unknown role is left out, as `findMembership` reports it
+   * as none. For showing a person their Organizations and narrowing a list:
+   * the one exception above, never a way to decide about a tenant.
+   */
+  async listMemberships(userId: string): Promise<Array<{ tenantId: string; tenantName: string; role: TenantRole }>> {
+    if (!ID_PATTERN.test(userId)) return [];
+    const rows = await this.prisma.tenantMembership.findMany({
+      where: { userId },
+      select: { tenantId: true, role: true, tenant: { select: { name: true } } },
+      orderBy: { createdAt: "asc" },
+    });
+    return rows.flatMap((row) => {
+      const role = ROLE_FROM_DB[row.role];
+      return role ? [{ tenantId: row.tenantId, tenantName: row.tenant.name, role }] : [];
+    });
   }
 
   /**

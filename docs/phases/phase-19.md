@@ -4,8 +4,8 @@
 
 | | |
 |---|---|
-| Status | Owner-approved architecture. **Stage 19.1 implemented and merged** (PR #14, merge commit `473bda0`, 2026-10-28). **Stage 19.2 merged** (PR #15, `863e4d3`) — see §14. **Stage 19.3 (browser egress) merged** (PR #16, `1592764`, merge `b4d3209`), **not verified in a container** — see §15. **Stage 19.4 (durable, scoped artifact storage) merged** (PR #17, merge `3707e09`), verified in a container on 2026-10-30 — see §16. **Stage 19.5 (value-free approval records, meaningful approval summaries, `UNKNOWN` answers) implemented in the working tree on `feat/browser-audit-phase-19-5`, not committed** — see §17. The headings of §14, §15 and §16 record each stage's state when it was written. |
-| Date | 2026-10-23 (architecture); §13 added 2026-10-28; §14 added 2026-10-28; §14.11 (audit remediation) added 2026-10-28; §15 added 2026-10-29; §16 added 2026-10-29; §17 added 2026-10-30 |
+| Status | Owner-approved architecture. **Stage 19.1 implemented and merged** (PR #14, merge commit `473bda0`, 2026-10-28). **Stage 19.2 merged** (PR #15, `863e4d3`) — see §14. **Stage 19.3 (browser egress) merged** (PR #16, `1592764`, merge `b4d3209`), **not verified in a container** — see §15. **Stage 19.4 (durable, scoped artifact storage) merged** (PR #17, merge `3707e09`), verified in a container on 2026-10-30 — see §16. **Stage 19.5 (value-free approval records, meaningful approval summaries, `UNKNOWN` answers) merged** (PR #18, merge `cc7b7f9`) — see §17. **Stage 19.6 (the Windows desktop agent) implemented in the working tree on `feat/desktop-agent-phase-19-6`, not committed and not complete: the Windows-only proofs are outstanding** — see §18.10. The headings of §14, §15 and §16 record each stage's state when it was written. |
+| Date | 2026-10-23 (architecture); §13 added 2026-10-28; §14 added 2026-10-28; §14.11 (audit remediation) added 2026-10-28; §15 added 2026-10-29; §16 added 2026-10-29; §17 added 2026-10-30; §18 added 2026-10-31 |
 | Branch inspected | `feat/automation-engine-phase-18` @ `435c39f8` |
 | Phase 18 merge state | **Not merged** at the time of writing (`main` was `1fd1bb0e`, the Phase 17 merge). **Merged since:** PR #12 (2026-10-21) and PR #13 (2026-10-22), read from GitHub on 2026-10-28. |
 | Scope of this stage | Documentation and validation only |
@@ -537,8 +537,8 @@ architecture; each is resolved before the stage that needs it.
 | U2 | Certificate lifetime, rotation cadence and revocation distribution for ADR-19-002 | Stage 19.2 — **still open**; 19.2 implements the interface and refuses to start without TLS material, and automates none of the rotation (§14.7) |
 | U3 | Exact voice denylist for browser and desktop tools | Stage 19.1 |
 | U4 | Artifact retention duration and storage backend | Stage 19.4 |
-| U5 | Desktop grant duration, reconnect grace window and consent-screen wording | Stage 19.6 |
-| U6 | Supported Windows versions and agent packaging | Stage 19.6 |
+| U5 | Desktop grant duration, reconnect grace window and consent-screen wording | Stage 19.6 — **decided by the owner** (§18.1) |
+| U6 | Supported Windows versions and agent packaging | Stage 19.6 — **decided by the owner** (§18.1) |
 | U7 | Organization allowlist administration screen and review flow | Stage 19.7 |
 | U8 | Whether the missing prior Phase 19 inspection report exists outside the repository | Informational |
 
@@ -1611,3 +1611,316 @@ Risks that remain, none introduced by this stage:
 | An in-process write whose navigation timed out before the action | Classified `UNKNOWN` since 19.1: a timeout cannot be told apart from one after the action. Since 19.5 the person is told the outcome is unknown, which matches the journal, but the same request stays blocked |
 | No way to settle an `UNKNOWN` write | §17.7 — an owner decision |
 | The container's gating of the write tools | Pinned in source, as the rest of the container's wiring is; not run as a container |
+
+---
+
+## 18. Stage 19.6 implementation record — the Windows desktop agent (working tree, not committed)
+
+**Status: implemented in the working tree on `feat/desktop-agent-phase-19-6`,
+branched from `main` at `cc7b7f9` (the PR #18 merge); NOT committed, and NOT
+complete.** One additive migration. Off unless `DESKTOP_AGENT_ENABLED=true`. The
+Windows-only proofs (the MSIX, its signature, the CNG key, Windows Hello, the
+running agent's sockets) need the `windows-latest` CI job and a Windows 11 test
+machine, never a person's computer. §18.6 says what has run, and §18.10
+assesses the exit criteria.
+
+### 18.1 The owner's decisions, and where each is held
+
+| Decision | Held by |
+|---|---|
+| U5a — a grant lasts 15 minutes by default, at most 60; extending is fresh consent | `DESKTOP_GRANT_DEFAULT_MINUTES` / `_MAX_MINUTES` (core); the grant schema (1–60, refused, never clamped); `GrantManager.Prepare` (agent); `startGrant` with `replacesGrantId` (db: only the grant it names) |
+| U5b — 30 s reconnect grace, the grant's clock keeps running, the same device key, no replay | `pollGrant` (db) ends a grant silent for more than 30 s (`disconnected`) or polled by another agent process (`restart`); commands issued before a gap longer than hold + 5 s expire, never delivered; the agent ends its own grant after 30 s without a verified answer. Contact is counted when a held poll answers and when a command's result arrives, not only when a poll begins (§18.5, F1) |
+| U5c — structured consent, versioned text, exact hash recorded | `renderDesktopConsentText` / `ConsentText.Render`, byte-identical (shared vectors), version `desktop-consent/1`; the server re-renders and refuses any other hash (`CONSENT_MISMATCH`) and stores the hash on the grant |
+| U6a — Windows 11 x64, serviced builds only | `DESKTOP_AGENT_MIN_WINDOWS_BUILD` (no default, ≥ 22000), checked at pairing and on every poll; the agent itself refuses non-x64, Windows Server and pre-22000 Windows (`Platform.Unsupported`, from `RtlGetVersion`); the MSIX requires 10.0.22000.0 and x64 |
+| U6b — .NET 10, per-user signed MSIX, no admin rights, signed update source, minimum agent version | `apps/desktop-agent` (net10.0, self-contained); `packaging/build-msix.ps1` refuses any other manifest, signs, verifies that the signer is the Publisher; the App Installer template (https only, `UpdateBlocksActivation`); `DESKTOP_AGENT_MIN_VERSION`, refused at pairing and on every poll |
+| D1 — typing needs the in-app approval AND Windows Hello per action; no Hello, no typing | The server sets `requiresHello` on every `desktop.input.type` it signs; the agent refuses a typing command that does not require it, asks Hello for each one, and answers `HELLO_UNAVAILABLE` or `HELLO_FAILED` otherwise |
+| D2 — a device belongs to a user and an Organization | `DesktopDevice.userId` and `tenantId`, from the pairing code, never from the agent |
+| D3 — outbound HTTPS long-poll, single-use PostgreSQL command records | `POST /api/v1/desktop-agent/poll`, held up to 20 s; `claimNextCommand` is ONE conditional `UPDATE … RETURNING` joined to the active grant, and deletes the sealed payload in the same transaction |
+| D4 — no screen reading in v1 | No such action, route or code: the command set is click, key, type; the agent's source and its compiled assemblies are scanned for screen APIs |
+| D5 — only a person on the web page controls a desktop | No model-facing desktop tool exists; the person routes (`/api/v1/desktop/*`) are the only way to ask for a command |
+| D6 — pairing code 10 min, command 30 s, clock skew 60 s | Core constants, pinned on both sides by the contract tests |
+| D7 — pairing by Owner/Admin; revocation by the device's user or an Owner/Admin | `createPairingCode`, which reads the named Organization's membership by both ids, at that moment (§18.9); `revokeDevice`; an owner who loses Owner/Admin loses control at the device's next request. A device's own user can always stop it |
+
+### 18.2 What was built, and where
+
+| Part | Where |
+|---|---|
+| Protocol: canonical strings, signatures, consent text, pairing codes, strict schemas, JSON Schema export | `packages/core/src/desktop-agent.ts`; the shared contract `apps/desktop-agent/contract/{constants,schemas,vectors}.json`, generated by `computer-control-desktop-protocol-p19`, which fails on drift (regenerate with `UPDATE_DESKTOP_CONTRACT=1`) |
+| Storage | `packages/db`: `DesktopPairingCode`, `DesktopPairingAttempt`, `DesktopDevice`, `DesktopGrant`, `DesktopCommand`, `DesktopCommandPayload`, `DesktopRequestNonce`; migration `20261031120000_phase19_desktop_agent`; `PrismaDesktopRepository` |
+| The one authority | `apps/api/src/services/desktop/desktop-control-service.ts` and `config.ts`; built by the container only when enabled and the sealer exists |
+| Routes | Person: `apps/api/src/routes/desktop.ts` — `GET /api/v1/desktop/organizations`, `POST /pairings`, `GET /devices`, `POST /devices/:id/confirm`, `/revoke`, `/session/end`, `/commands`, `/approvals/:approvalId/confirm`, `GET /devices/:id/commands`, `GET /commands/:id`. Agent: `apps/api/src/routes/desktop-agent.ts` — `POST /api/v1/desktop-agent/pair`, `/poll`, `/grants`, `/session/end`, `/commands/:id/result`, read as raw bytes, answered with signed bytes |
+| Approvals page | `apps/api/src/routes/approvals.ts` validates a desktop approval by its own schema (no tool is registered for one) |
+| Web | `apps/web/src/app/computer-control/` — pairing (an Organization chooser, and the server key id), devices, fingerprint confirmation, grant status, end session, two-step revoke, one action at a time, the Windows Hello notice; nav entry; `lib/api.ts` |
+| Agent core (.NET, platform-neutral) | `apps/desktop-agent/src/Jarvis.DesktopAgent.Core`: protocol, strict parser, signatures, `CommandVerifier`, `GrantManager`, `CommandRunner`, value-free `AgentLog`, signed `AgentClient`, `AgentLoop` |
+| Agent (Windows) | `apps/desktop-agent/src/Jarvis.DesktopAgent`: CNG device key (TPM first, export policy None), Windows Hello, `SendInput`, window and integrity inspection, session monitor, low-level hooks (kill switch, physical-input check), tray app, pairing, consent and indicator screens |
+| Packaging | `apps/desktop-agent/packaging`: `AppxManifest.xml`, `build-msix.ps1`, `JARVIS.DesktopAgent.appinstaller.template`, `check-no-listener.ps1` |
+| CI | `.github/workflows/ci.yml`: the `desktop-agent` job on `windows-latest`; the TypeScript and PostgreSQL parts in the existing job's steps |
+
+### 18.3 How the security invariants are met
+
+| Invariant | How |
+|---|---|
+| No inbound listener; outbound HTTPS only | No listening code: the source scan (`SourceBoundaryTests`) and the compiled-reference scan (`AssemblyBoundaryTests`); `AgentClient` accepts only an `https://` origin and follows no redirect; the MSIX asks only `internetClient`; `check-no-listener.ps1` samples the sockets of the agent already running, and has no way to start one (§18.5, F10) |
+| Device keys non-exportable, in Windows key storage, TPM when present; the server keeps public keys only | `CngDeviceKey` (Platform Crypto Provider, then the Software KSP; `CngExportPolicies.None`); `DeviceKeyTests` prove export fails; `DesktopDevice.publicKey` is SPKI |
+| Pairing codes ≥ 128 bits, hashed, single-use, 10 min, rate-limited | 160-bit Crockford codes; SHA-256 with a domain prefix; one conditional `UPDATE` redeems (two instances race, one wins); 5 codes per person per 10 min; 10 redemption attempts per source per 10 min, reserved in PostgreSQL |
+| Inactive until the fingerprint is confirmed in the web UI | A `PENDING` device gets no grant and no command; only its user confirms it, by typing the fingerprint the computer shows. The page and the agent also show the server key id the agent pinned |
+| Every agent request signed and replay-protected; every command server-signed, 30 s | The request signature covers method, the exact route path, timestamp (±60 s), nonce, device and body hash; the nonce is spent LAST, in PostgreSQL, so a forged request spends nothing and a replay on any instance is refused; every answer is signed over the request's nonce, status and body; every command over all its fields |
+| Every command checks device, membership, grant, scope, expiry, authorization | `issueCommand` under a lock on the device row; `confirmCommand` consumes the approval once, bound to the device (`deviceId` is in its parameters); the agent re-checks signature, device, grant, scope, expiry on both clocks, and replay |
+| Revoked devices cannot poll, execute or submit results | `DEVICE_REVOKED`, signed, before anything else; revocation ends the grant and expires undelivered commands with their payloads; the agent deletes its pairing and its key |
+| Consent only from the local desktop UI | A grant starts only from `POST /desktop-agent/grants`, signed by the device; the page has no "start" control (tested); Allow acts only on physical input (`InputHooks`) |
+| Lock, sign-out, restart end the grant; 30 s grace; no replay | `SessionMonitor` (WTS notifications, `SessionEnding`, and a secure-desktop check before every command); `agentInstanceId`; `pollGrant` and the agent's own grace check |
+| Sensitive typing needs approval AND Hello per action; refused without Hello | §18.1 D1; `ExecutionTests`: Hello unavailable, failed, slower than the command, the window changed during Hello, the kill switch during Hello |
+| The agent never approves its own sensitive action | Typing needs Hello at the device, and injected input cannot answer it: the agent never sends input to its own windows or to `CredentialUIBroker.exe`, `consent.exe`, `LogonUI.exe`, `LockApp.exe`, `UserAccountBroker.exe`, and runs one command at a time |
+| No shell, process, script, file, clipboard, registry, elevation | The fixed command set; the source and compiled-reference scans; `asInvoker`, `uiAccess="false"`; an elevated window is refused (`ELEVATED_TARGET`), and one whose integrity cannot be read counts as elevated |
+| `UNKNOWN` never retried | A command is claimed once; a partial injection is `uncertain`, recorded `UNKNOWN`; delivered and unanswered is `UNKNOWN` on the sweep; nothing is re-sent. The agent retries only its *report*, which the server takes once |
+| Value-free audit and local logs | Audit rows hold ids, actions, codes and counts; typed text is sealed until delivery and its payload deleted when claimed; `AgentLog` writes only listed fields, and only identifier-shaped values |
+| A person's Organizations are shown, never trusted | §18.9: the one read by user alone narrows what is shown, and every decision reads both ids |
+| Off by default | `DESKTOP_AGENT_ENABLED` exactly `"true"` (`desktop-agent-config-p19`); otherwise no route is mounted |
+
+### 18.4 Files
+
+Modified: `.env.example`, `.github/workflows/ci.yml`, `AGENTS.md`,
+`apps/api/src/index.ts`, `apps/api/src/routes/approvals.ts`,
+`apps/api/src/services/container.ts`, `apps/api/src/services/rate-limiter.ts`,
+`apps/api/test/approvals.test.ts`, `apps/api/test/tenant-admin-cli-p17.test.ts`,
+`apps/web/src/components/dashboard/nav.ts`, `apps/web/src/lib/api.ts`,
+`apps/web/test/dashboard.test.tsx`, `docs/DEPLOYMENT.md`, `docs/DEVELOPMENT.md`,
+`docs/phases/phase-17.md`, `docs/phases/phase-19.md`,
+`packages/core/src/computer-control.ts`, `packages/core/src/index.ts`,
+`packages/db/prisma/schema.prisma`, `packages/db/src/index.ts`,
+`packages/db/src/repositories/tenant-repository.ts`,
+`packages/db/test/tenant-foundation-p17-pg.integration.test.ts`,
+`packages/mcp/test/boundaries-s8.test.ts`.
+
+New: `packages/core/src/desktop-agent.ts`,
+`packages/core/test/computer-control-desktop-protocol-p19.test.ts`,
+`packages/db/prisma/migrations/20261031120000_phase19_desktop_agent/`,
+`packages/db/src/repositories/desktop-repository.ts`,
+`packages/db/test/desktop-agent-p19-pg.integration.test.ts`,
+`apps/api/src/services/desktop/` (`config.ts`, `desktop-control-service.ts`),
+`apps/api/src/routes/desktop.ts`, `apps/api/src/routes/desktop-agent.ts`,
+`apps/api/test/desktop-agent-p19-pg.integration.test.ts`,
+`apps/api/test/desktop-agent-config-p19.test.ts`,
+`apps/api/test/desktop-agent-organizations-p19.test.ts`,
+`apps/web/src/app/computer-control/` (`layout.tsx`, `page.tsx`),
+`apps/web/test/computer-control-page.test.tsx`, and `apps/desktop-agent/`
+(the contract, two projects, two test projects and the packaging).
+
+Not part of this stage, and to be kept out of its commit: the local QA watcher
+(`scripts/`, `docs/QA_WATCHER.md`, and its lines in `package.json` and
+`.gitignore`), which is separate work.
+
+### 18.5 Found and fixed while building
+
+| # | Found | Fixed |
+|---|---|---|
+| F1 | The reconnect grace counted from when a poll **began**. A command delivered at the end of a 20-second hold, then held up by Windows Hello for most of its 30 seconds, would have cost the grant its grace and ended it as "disconnected" | `touchGrant` (db) — contact is recorded when a held poll answers and when a command's result arrives, only on the device's own active, unexpired grant; never revives an ended one. Two API tests and one db test, each seen to fail first |
+| F2 | A signature made for one agent route was accepted by another: the signed path was checked for shape, not against the route answering it | The service checks the signed path is the answering route's exact path; tested |
+| F3 | Windows Hello could have stayed open past the command's life | The prompt is cancelled when the command expires or the grant ends, whichever is first (`COMMAND_EXPIRED` / `GRANT_INACTIVE`); tested with a prompt that never answers |
+| F4 | At pairing the agent pins the server's key over TLS alone; nothing let a person check it | The pairing code is shown with the server key id, and the agent shows the id it pinned (tested on the page and the service) |
+| F5 | `listMemberships` broke Phase 17's "no read by user alone", and the full run caught it (`tenant-admin-cli-p17`) | An owner decision: §18.9. The pin was tightened, not removed |
+| F6 | Someone who administers two Organizations could not pair: the page never named one and no route listed them, so the answer was "Choose the Organization" with nothing to choose from | `GET /organizations` and the page's chooser. No chooser is drawn for one Organization, and no pairing control for none |
+| F7 | Pairing inferred the Organization when a person had exactly one | Removed: a pairing names its Organization, and is decided by reading both ids |
+| F8 | Someone who lost Owner/Admin could still read their computer's command history: `getCommand` and `listCommands` checked only that the device was theirs | Both re-read the membership. Seen to fail first |
+| F9 | `packages/mcp/test/boundaries-s8` assumed every folder in `apps/` has a `package.json`; `apps/desktop-agent` is .NET | Named as an exception, so a real workspace that loses its manifest still fails, and its `src/` stays in the source scans. Proved by three mutations in a scratch copy |
+| F10 | `check-no-listener.ps1` started its own copy of the agent. The agent is single-instance, so beside a paired agent the copy exited at once and the script reported a pass without inspecting anything. A failed socket read looked like no sockets, too | It reads the agent already running and has no way to start one. It fails with no agent, with more than one, if the agent stops, if the agent holds no connection to a server (not paired and polling), or if the sockets cannot be read. CI's start-up check is now CI's own step, and CI proves the script refuses with no agent running. Regression tests run the script against real processes holding real sockets; seen to fail first |
+
+### 18.6 Evidence
+
+Each result below says what it ran on. §18.10 turns this into the exit criteria.
+
+**On the final tree (2026-10-31, Windows, working tree, no database).** Every
+child process had provider keys and `DATABASE_URL` blanked.
+
+| Gate | Result |
+|---|---|
+| `build` | 22/22 |
+| `typecheck` | 40/40 |
+| `typecheck:tests` | 23/23 |
+| `lint` | 22/22 |
+| The full suite, 22 workspaces, PostgreSQL suites excluded | **11,205 passed, 3 failed, 51 skipped** |
+
+The 3 failures are not this stage's. They are the three MCP timeout tests
+(`verify-s8`, `mcp-integration-s8`, `mcp-pilot-failures-s8`), named in AGENTS.md's
+test record, which failed 3 runs of 3 on a clean export of `cc7b7f9` too. Two
+flaky tests named there passed in this run and can fail in another:
+`evidence-builder` failed 2 of 3 on that export, and `auth-session` failed once
+under load on 2026-10-30 and passed 3 of 3 alone on both trees.
+
+| Suite | Result |
+|---|---|
+| `boundaries-s8` (`@jarvis/mcp`) | 7/7 |
+| `tenant-admin-cli-p17` | 35/35 |
+| `desktop-agent-organizations-p19` | 26/26 |
+| `desktop-agent-config-p19` | 11/11 |
+| `approvals` | 34/34 |
+| `computer-control-desktop-protocol-p19`, including 13 on the no-inbound-port check | 66/66 |
+| `computer-control-page` | 13/13 |
+| `dashboard` | 31/31 |
+
+**Proving the two regressions and the tests that now hold them.** Same day, in a
+scratch copy, never the working tree:
+
+- On a clean `cc7b7f9`, `boundaries-s8` passed 7/7 and `tenant-admin-cli-p17`
+  31/31. Adding only an `apps/desktop-agent` folder, or only `listMemberships`,
+  reproduced each failure exactly.
+- 18 deliberate breaches of §18.9, all caught, with both control runs green: a
+  second by-user read, a wider select, a second caller, the read on the shared
+  port, a read in another repository, pairing or stopping decided from the list,
+  the Organization inferred, command history without the re-read, the list
+  unfiltered, the role in the answer, an uncleaned name, and five on the page.
+- 13 deliberate breaks of the no-inbound-port check, all caught, with the control
+  run green: passing with no agent, starting a copy, taking an executable, hiding
+  a failed read of either table, dropping the self-check on the table, ignoring
+  TCP listeners or UDP endpoints, passing an agent with no connection, missing an
+  agent that stopped, choosing between two agents, looking only once, and CI
+  calling the script as it used to.
+- Those tests run the real script against a copy of `node.exe` named as the agent,
+  on loopback, with Windows PowerShell 5.1: no agent, no pairing and no input. Nine
+  of the 13 need Windows, so CI's Ubuntu job skips them. They passed 8 runs of 8,
+  four with every core busy, after a race in two of them was removed: they had
+  acted on a timer, and now act only once the script reports a finished look.
+- CI's two new steps were run here from their exact text in the workflow, against
+  the same stand-in, on 5.1: `pwsh` is not installed on this machine. Both
+  PowerShell scripts parse with no errors, and the workflow is valid YAML.
+
+**The CI database steps (2026-10-31), all passed.** Run in CI's order, on the
+code this stage ends with: since then only the migration's header comment (one
+word; the statements are byte-identical), the no-inbound-port check, one test
+file and documents have changed, and no database step reads any but the
+migration, whose SQL did not change. On a throwaway
+`pgvector/pgvector:pg16` container bound to `127.0.0.1:55435`, with its
+own volume, on no Compose project or network, and removed afterwards. No other
+database was connected to. The image is the local `pg16` tag, not the exact
+digest CI pins.
+
+| Step | Result |
+|---|---|
+| `prisma migrate deploy` on an empty database | 38 applied, none unfinished or rolled back. A second run: no pending migrations |
+| `@jarvis/db` | 472/472 (33 files) |
+| `@jarvis/memory`, `pg.integration` | 93/93 (9 files) |
+| `@jarvis/api`, `pg.integration sprint-1.1d-memory-e2e` | 288/288 (13 files) |
+| Memory quality evaluation | 13/13 |
+| `assert-no-skipped-tests` over all four reports | 0 not run |
+
+Inside those: `desktop-agent-p19-pg` 22/22 in `@jarvis/db` and 47/47 in
+`@jarvis/api`, `tenant-foundation-p17-pg` 25/25,
+`shared-connection-approvals-p17-pg` 23/23,
+`shared-connection-hardening-p17-pg` 8/8 and `approval-sealed-params-p19-pg`
+13/13. The five tests added for §18.9 each ran and passed, by name.
+
+Integrity of that database, after the tests: no invalid index, no unvalidated
+constraint, no disabled trigger, and `amcheck` passed on all 165 btree indexes.
+`prisma migrate status` says it is up to date. `migrate diff` gives 18 statements,
+all on `OutcomeRecord`, `OutcomeRevision`, `PerformanceRecommendation` and
+`_Memory_v1_backup`, none on a desktop, tenant or approval table: the drift
+recorded before this stage. `_Memory_v1_backup`, from an August migration, is
+also the only table with no primary key.
+
+**Before the Organization changes (2026-10-30), not re-run since.**
+
+| Check | Result | Does it still stand? |
+|---|---|---|
+| .NET Core tests, in a throwaway container | 105/105 | Yes: no file in the Core project, its tests or the contract has changed since |
+| .NET mutation pass | 21 of 21 caught | Yes, for the same reason |
+| Both Windows projects, with warnings as errors | Built | Yes: last built after the last edit to them |
+| The MSIX manifest guard | Accepted the approved manifest, refused 5 tampered ones | Yes: the guard and the manifest are unchanged |
+
+**Not run on any tree:** the `desktop-agent` CI job, the Windows test project, the
+MSIX build and signature, `check-no-listener.ps1` against a real agent (only
+against the stand-in above), and real Windows Hello.
+
+### 18.7 Not done, and why
+
+| Not done | Why |
+|---|---|
+| Windows Hello proof the server can verify | The server trusts the agent's report that Hello verified. A per-device Windows Hello key (`KeyCredentialManager`) signing each typing command would make it cryptographic; it is a separate key lifecycle (enrolment, loss, re-pair), so it is a follow-up for the owner to decide |
+| Rotating the command-signing key without re-pairing | One key per deployment; changing it means every computer pairs again (documented). Rotation with overlap needs a key-id list in the protocol |
+| Settling an `UNKNOWN` desktop command | As for browser writes (§17.7): a person checks the computer; nothing re-sends |
+| Moving desktop control under the shared-connection rules | A desktop is not a shared connection: it belongs to one person and one Organization (D2) |
+| The Windows-only proofs | They need the `windows-latest` job, which runs on a push, and a Windows 11 test machine (§18.10) |
+| Running `@jarvis/mcp`'s tests in CI | No CI step runs that workspace, which predates this stage, so `boundaries-s8` is checked only by `pnpm test`. Left for the owner |
+
+### 18.8 Risks that remain
+
+| Risk | Note |
+|---|---|
+| Hello is attested by the agent, not proven to the server | §18.7. A compromised agent process (running as the person) could skip Hello; it could also inject input directly, so the agent is already inside that boundary |
+| Lock detection is the agent's | The server cannot see a lock; it relies on the agent's session events and its secure-desktop check |
+| Server key at pairing rests on TLS and the person comparing the key id | F4 makes it checkable; it is not enforced |
+| `paramsHash` is an unsalted SHA-256 (since Phase 10) | As §17.8. A desktop approval's sealed parameters are deleted once delivered |
+| A label renamed after pairing makes consent fail (`CONSENT_MISMATCH`) | Fails closed. Pair again |
+| Windows-only behaviour (Hello prompts, SendInput, hooks, session events, the MSIX install) | Exercised by tests only where Windows CI can do so without sending input; the rest needs a Windows 11 test machine (`docs/DEPLOYMENT.md`) |
+
+### 18.9 The one read of memberships by user alone (owner decision, 2026-10-31)
+
+Phase 17 allowed no read of a membership by user alone, so that no caller could
+ask for "some membership of this account" and be handed one for the wrong
+tenant. 19.6 needs one. A person has to be shown the Organizations they can pair
+a computer with, and an Owner or Admin has to see an Organization's computers to
+revoke them (D7). A device has no owner record to take its Organization from, as
+a shared connection does.
+
+The alternative that kept the rule whole was to type an Organization id into the
+page, and to type it again to see a computer. No route lists those ids, so people
+would have had to get them from the operator. The owner chose a narrow exception
+instead (Option A), on these terms:
+
+| Boundary | Held by |
+|---|---|
+| One read | `PrismaTenantRepository.listMemberships`, the only `tenantMembership.findMany` or `findFirst` in runtime code |
+| Three fields | The tenant's id and name, and the role. Nothing about any other member can be selected |
+| One caller | `DesktopControlService`, through its private `adminMemberships`: one `.listMemberships(` call in all runtime code |
+| Not on the shared port | `TenantMembershipReader`, which `SharedConnectionAccess` and every other boundary read, does not offer it |
+| It shows and narrows | Only `listOrganizations` (what the page offers) and `listDevices` (whose computers to show) use it |
+| It never decides | `createPairingCode`, `confirmDevice`, every command, command history, and the agent's `pair`, `poll`, `grants` and result requests read `findMembership` by both ids, at that moment. A list that has gone out of date can pair nothing and reach no device |
+| Stopping is the one exception | Deliberate: ending control must never be refused. `POST /desktop-agent/session/end` reads no membership. It still needs the device's signature and an unspent nonce, and a revoked device is refused before it runs. On the page, a device's own user may revoke it or end its session with no membership; anyone else is held to `findMembership` |
+| Never inferred | A pairing names its Organization or is refused (`ORGANIZATION_REQUIRED`). A person with exactly one is not assumed to mean it: a computer stays with its Organization |
+| An id and a name, of your own | `GET /api/v1/desktop/organizations` answers those two fields, for Organizations the caller owns or administers, cleaned as a device label is |
+| Nothing to learn from outside | A real Organization and an invented one get the same `403` |
+| Fails closed | A read that fails is `503 UNAVAILABLE`, says nothing of why, and spends nothing |
+| No cache | Read from the database for every request |
+
+What did not change: the shared-connection rules, `auth.role` deciding nothing,
+and the Organization owning a connection coming from its owner record. A
+different query, in `approval-repository`, has long filtered approvals by the
+caller's membership; it returns approvals, reads no membership out, and is
+unaffected.
+
+A person can still stop their own computer after losing their role or leaving
+the Organization, and so can the agent itself: `revokeDevice` and `endSession`
+allow a device's own user first, and the agent's `session/end` reads no
+membership. Stopping only ever takes control away. Everything else they could
+do with it ends.
+
+The boundary is pinned by source tests in `tenant-admin-cli-p17`, behaviour tests
+in `desktop-agent-organizations-p19` and `desktop-agent-p19-pg`, and the read
+itself in `tenant-foundation-p17-pg`. The page's side is in
+`computer-control-page`. Moving the query to another file, or adding a second
+caller, fails a test; §18.6 records the mutation pass that proved it.
+
+### 18.10 Exit criteria, assessed
+
+**Stage 19.6 is not complete.** These are the criteria in §8, with what stands
+behind each today.
+
+| Criterion | State | What is missing |
+|---|---|---|
+| Pairing tests pass | Pass on the final tree: no-database, PostgreSQL and .NET Core suites | The non-exportable device key test (CI job), and a real pairing (test machine) |
+| Consent tests pass | Pass on the final tree, as above | The consent screen on physical input (test machine) |
+| Revocation tests pass | Pass on the final tree, as above | Revoking a running agent (test machine) |
+| No inbound port | **Not proven on a running agent.** The source scan passed | The compiled-reference scan (CI job), and `check-no-listener.ps1` on a paired agent, polling under a grant (test machine) |
+| Sensitive input needs independent approval | Server and agent logic pass with a fake Hello, and the approval and sealed parameters pass on PostgreSQL | Real Windows Hello (test machine) |
+
+Two different things are still needed, and neither replaces the other:
+
+- **The `desktop-agent` CI job**, which runs on a push: the build on Windows, the
+  Windows test project (including the non-exportable key and the compiled-reference
+  scan), the MSIX build, its signature and publisher check. `dotnet test` cannot
+  load freshly built DLLs on this machine because of Smart App Control.
+- **A Windows 11 test machine.** The CI runner is Windows Server, where the agent
+  stops at its platform check, so CI's own step shows only that start-up opens
+  nothing, and `check-no-listener.ps1` cannot pass there: it needs a running,
+  paired agent. Pairing, consent, Windows Hello, input, the kill switch,
+  lock and sign-out, and the installed MSIX need a real Windows 11 session
+  (`docs/DEPLOYMENT.md`). It must not be a person's working computer.
