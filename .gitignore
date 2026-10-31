@@ -45,6 +45,9 @@ docker-compose.override.yml
 # Coverage
 coverage/
 
+# Local QA watcher state and logs
+.qa-watch/
+
 # Misc
 *.tgz
 .cache/
