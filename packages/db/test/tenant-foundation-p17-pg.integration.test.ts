@@ -207,6 +207,37 @@ describe.skipIf(!dbUp)("Phase 17 Stage 3A — the tenant foundation on PostgreSQ
     });
   });
 
+  // Phase 19.6: the one read by user alone (docs/phases/phase-19.md, §18.9).
+  describe("PrismaTenantRepository — listMemberships shows one account's memberships, and nobody else's", () => {
+    it("gives each of this account's tenants with its name and role, and no other account's", async () => {
+      const tenantA = await newTenant("alice", "List A");
+      const tenantB = await newTenant("bob", "List B");
+      expect((await run({ verb: "add-member", tenantId: tenantB, userId: ids.alice, role: "viewer" })).ok).toBe(true);
+
+      const mine = await repo().listMemberships(ids.alice);
+      expect(mine.find((m) => m.tenantId === tenantA)).toMatchObject({ role: "owner" });
+      expect(mine.find((m) => m.tenantId === tenantB)).toMatchObject({ role: "viewer" });
+      const named = await prisma!.tenant.findUnique({ where: { id: tenantA }, select: { name: true } });
+      expect(mine.find((m) => m.tenantId === tenantA)?.tenantName).toBe(named?.name);
+      expect((await repo().listMemberships(ids.bob)).map((m) => m.tenantId)).not.toContain(tenantA);
+    });
+
+    it("refuses to look up a malformed id at all", async () => {
+      expect(await repo().listMemberships(`' OR 1=1 --`)).toEqual([]);
+      expect(await repo().listMemberships("")).toEqual([]);
+    });
+
+    it("sees a removed membership on the very next read — nothing is cached", async () => {
+      const tenantId = await newTenant("alice");
+      expect((await run({ verb: "add-member", tenantId, userId: ids.bob, role: "admin" })).ok).toBe(true);
+      const reader = repo();
+      expect((await reader.listMemberships(ids.bob)).map((m) => m.tenantId)).toContain(tenantId);
+
+      expect((await run({ verb: "remove-member", tenantId, userId: ids.bob })).ok).toBe(true);
+      expect((await reader.listMemberships(ids.bob)).map((m) => m.tenantId)).not.toContain(tenantId);
+    });
+  });
+
   describe("operator changes — each with its audit row, in one transaction", () => {
     it("creates a tenant together with its first owner and the audit row", async () => {
       const before = (await auditRows("tenant.create")).length;

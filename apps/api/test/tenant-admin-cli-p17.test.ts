@@ -12,10 +12,11 @@
 //   • only connections a route enforces can be assigned an owner;
 //   • refusal and failure exit codes, and output that carries no credential;
 //   • the boundary: nothing in the runtime imports the writer, and the
-//     runtime's tenant repository can only read.
+//     runtime's tenant repository can only read — by both ids, but for the one
+//     narrow read by user that Phase 19.6 added for the desktop service.
 // ---------------------------------------------------------------------------
 
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { describe, it, expect, vi } from "vitest";
 import {
   parseTenantAdminArgs,
@@ -180,6 +181,26 @@ function sources(dir: string): string[] {
   return out;
 }
 
+/** Every workspace's src/ — all the code that runs, on either side of the wire. */
+const RUNTIME = ["apps", "packages"].flatMap((root) =>
+  readdirSync(new URL(root, REPO), { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && existsSync(new URL(`${root}/${entry.name}/src`, REPO)))
+    .map((entry) => `${root}/${entry.name}/src`)
+);
+
+/** The text of one class method: from its signature to its closing brace at two spaces. */
+function method(source: string, name: string): string {
+  const start = source.search(new RegExp(`^  (?:private )?(?:async )?${name}\\(`, "m"));
+  expect(start, `method ${name}`).toBeGreaterThanOrEqual(0);
+  return source.slice(start, source.indexOf("\n  }\n", start));
+}
+
+/** The name of the class method a source offset falls in. */
+function enclosingMethod(source: string, offset: number): string {
+  const names = [...source.slice(0, offset).matchAll(/^  (?:private )?(?:async )?(\w+)\(/gm)];
+  return names.at(-1)?.[1] ?? "";
+}
+
 describe("the tenant writer is operator-only", () => {
   it("is imported by no route, service, tool, agent or memory code", () => {
     const runtime = ["apps/api/src", "packages/tools/src", "packages/agents/src", "packages/memory/src", "apps/web/src"];
@@ -195,9 +216,54 @@ describe("the tenant writer is operator-only", () => {
     expect(source).not.toMatch(/\$executeRaw|\$queryRaw/);
   });
 
-  it("reads a membership only by both ids — there is no read by user alone", () => {
+  // Phase 17 allowed no read of a membership by user alone. Phase 19.6 added
+  // exactly one, by the owner's decision (docs/phases/phase-19.md, §18.9), so a
+  // person can be shown the Organizations they administer. These pins hold it
+  // to that: one read, three fields, one caller, and it decides nothing.
+  it("reads a membership by both ids, and by user alone only in listMemberships", () => {
     const source = readFileSync(new URL("packages/db/src/repositories/tenant-repository.ts", REPO), "utf8");
     expect(source).toMatch(/tenantId_userId: \{ tenantId, userId \}/);
-    expect(source).not.toMatch(/tenantMembership\.findMany|tenantMembership\.findFirst/);
+    expect(source).not.toMatch(/tenantMembership\.findFirst/);
+    expect(source.match(/tenantMembership\.findMany/g)).toHaveLength(1);
+
+    const read = method(source, "listMemberships");
+    expect(read).toMatch(/tenantMembership\.findMany\(\{\s*where: \{ userId \},/);
+    expect(read.match(/select: \{[\s\S]*?\},\s*orderBy/)?.[0]).toBe(
+      "select: { tenantId: true, role: true, tenant: { select: { name: true } } },\n      orderBy"
+    );
+  });
+
+  it("reads memberships as a list nowhere else in runtime code", () => {
+    const users = RUNTIME.flatMap(sources).filter((file) =>
+      /tenantMembership\.(?:findMany|findFirst)/.test(readFileSync(new URL(file, REPO), "utf8"))
+    );
+    expect(users).toEqual(["packages/db/src/repositories/tenant-repository.ts"]);
+  });
+
+  it("gives that read to the desktop service alone, through one private method", () => {
+    const users = RUNTIME.flatMap(sources)
+      .filter((file) => /\blistMemberships\b/.test(readFileSync(new URL(file, REPO), "utf8")))
+      .sort();
+    expect(users).toEqual(["apps/api/src/services/desktop/desktop-control-service.ts", "packages/db/src/repositories/tenant-repository.ts"]);
+
+    const service = readFileSync(new URL("apps/api/src/services/desktop/desktop-control-service.ts", REPO), "utf8");
+    expect(service.match(/\.listMemberships\(/g)).toHaveLength(1);
+    expect(method(service, "adminMemberships")).toMatch(/\.listMemberships\(userId\)/);
+  });
+
+  it("keeps that read out of the port every other authorization boundary reads", () => {
+    const port = readFileSync(new URL("packages/core/src/types/tenant.ts", REPO), "utf8");
+    expect(port).toMatch(/interface TenantMembershipReader/);
+    expect(port).not.toMatch(/listMemberships/);
+  });
+
+  it("lets that read show and filter, never decide: every check on one Organization reads both ids", () => {
+    const service = readFileSync(new URL("apps/api/src/services/desktop/desktop-control-service.ts", REPO), "utf8");
+    const callers = [...service.matchAll(/this\.adminMemberships\(/g)].map((match) => enclosingMethod(service, match.index));
+    expect(callers.sort()).toEqual(["adminTenantIds", "listOrganizations"]);
+    expect([...service.matchAll(/this\.adminTenantIds\(/g)].map((match) => enclosingMethod(service, match.index))).toEqual(["listDevices"]);
+    expect(method(service, "createPairingCode")).toMatch(/\.findMembership\(userId, organizationId\)/);
+    expect(method(service, "mayStop")).toMatch(/\.findMembership\(userId, device\.tenantId\)/);
+    expect(method(service, "ownerStillAuthorized")).toMatch(/\.findMembership\(device\.userId, device\.tenantId\)/);
   });
 });

@@ -110,6 +110,11 @@ model User {
   // Phase 17 — the tenants (Organizations) this account is a member of. A
   // relation only: no column, and `role` above keeps its meaning.
   tenantMemberships TenantMembership[]
+  // Phase 19.6 — the Windows desktop agent: codes this account issued,
+  // devices paired to it, and devices it revoked.
+  desktopPairingCodes   DesktopPairingCode[]
+  desktopDevices        DesktopDevice[]      @relation("DesktopDeviceOwner")
+  revokedDesktopDevices DesktopDevice[]      @relation("DesktopDeviceRevoker")
 }
 
 model RefreshToken {
@@ -1244,6 +1249,9 @@ model Tenant {
   librarySyncs    AutomationLibrarySync[]
   // Phase 18.4 — workflow drafts: plans in JARVIS, never sent to n8n.
   automationDrafts AutomationDraft[]
+  // Phase 19.6 — desktop agents paired to this Organization's members.
+  desktopPairingCodes DesktopPairingCode[]
+  desktopDevices      DesktopDevice[]
 
   @@map("Tenant")
 }
@@ -1533,4 +1541,182 @@ model AutomationDraftVersion {
 
   @@unique([draftId, version])
   @@map("AutomationDraftVersion")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 19, Stage 19.6 — the Windows desktop agent.
+//
+// A device belongs to one user in one Organization (D2). It is paired with a
+// one-time code, stored only as a hash, and is not active until its user
+// confirms the key's fingerprint. The server holds its PUBLIC key only. A grant
+// is the person's consent at the device, for a bounded time and scope. A
+// command is one approved click, key or typed text, signed by the server, valid
+// for 30 seconds, delivered at most once; its parameters are sealed and deleted
+// on delivery, and a delivered command with no answer is UNKNOWN, never sent
+// again. Every state change is one conditional write.
+// ---------------------------------------------------------------------------
+
+enum DesktopDeviceStatus {
+  PENDING
+  ACTIVE
+  REVOKED
+}
+
+enum DesktopGrantStatus {
+  ACTIVE
+  ENDED
+}
+
+enum DesktopCommandStatus {
+  ISSUED
+  DELIVERED
+  SUCCEEDED
+  NOT_EXECUTED
+  UNKNOWN
+  EXPIRED
+}
+
+/// A pairing code: its SHA-256, never the code. Single use: consumed by ONE
+/// conditional UPDATE, which records the device it paired.
+model DesktopPairingCode {
+  id         String    @id @default(uuid())
+  codeHash   String    @unique @map("code_hash")
+  /// The Owner/Admin who generated it; the device becomes theirs.
+  userId     String    @map("user_id")
+  tenantId   String    @map("tenant_id")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  expiresAt  DateTime  @map("expires_at")
+  consumedAt DateTime? @map("consumed_at")
+  deviceId   String?   @unique @map("device_id")
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+  @@map("DesktopPairingCode")
+}
+
+/// A paired Windows device. Its public key only; the private key never leaves
+/// the device's protected key storage.
+model DesktopDevice {
+  id                String              @id @default(uuid())
+  userId            String              @map("user_id")
+  tenantId          String              @map("tenant_id")
+  /// Base64 SubjectPublicKeyInfo of the device's ECDSA P-256 key.
+  publicKey         String              @map("public_key")
+  /// SHA-256 of the public key. One key, one device, ever.
+  fingerprint       String              @unique
+  displayName       String              @map("display_name")
+  /// The names shown on the device's consent screen, as sent to it at pairing.
+  userLabel         String              @map("user_label")
+  organizationLabel String              @map("organization_label")
+  agentVersion      String              @map("agent_version")
+  windowsBuild      Int                 @map("windows_build")
+  status            DesktopDeviceStatus @default(PENDING)
+  createdAt         DateTime            @default(now()) @map("created_at")
+  confirmedAt       DateTime?           @map("confirmed_at")
+  revokedAt         DateTime?           @map("revoked_at")
+  revokedById       String?             @map("revoked_by_id")
+  lastSeenAt        DateTime?           @map("last_seen_at")
+
+  user      User             @relation("DesktopDeviceOwner", fields: [userId], references: [id], onDelete: Cascade)
+  revokedBy User?            @relation("DesktopDeviceRevoker", fields: [revokedById], references: [id], onDelete: SetNull)
+  tenant    Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  grants    DesktopGrant[]
+  commands  DesktopCommand[]
+
+  @@index([userId])
+  @@index([tenantId, status])
+  @@map("DesktopDevice")
+}
+
+/// Consent given at the device: who may act, on what, until when. At most one
+/// ACTIVE per device, held by a lock on the device row.
+model DesktopGrant {
+  /// Chosen by the agent when the person allows; reported, never reused.
+  id                 String             @id
+  deviceId           String             @map("device_id")
+  /// The agent process that showed the consent. Another process means a restart: the grant ends.
+  agentInstanceId    String             @map("agent_instance_id")
+  scope              String[]
+  durationMinutes    Int                @map("duration_minutes")
+  consentTextVersion String             @map("consent_text_version")
+  /// SHA-256 of the exact text the person was shown.
+  consentTextSha256  String             @map("consent_text_sha256")
+  status             DesktopGrantStatus @default(ACTIVE)
+  grantedAt          DateTime           @default(now()) @map("granted_at")
+  expiresAt          DateTime           @map("expires_at")
+  lastContactAt      DateTime           @map("last_contact_at")
+  endedAt            DateTime?          @map("ended_at")
+  endReason          String?            @map("end_reason")
+
+  device   DesktopDevice    @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  commands DesktopCommand[]
+
+  @@index([deviceId, status])
+  @@map("DesktopGrant")
+}
+
+/// One command: what, for which grant, bound to which approval and journal
+/// execution, and how it ended. Never its values — those are the sealed
+/// payload, deleted when the command is delivered or expires.
+model DesktopCommand {
+  id            String               @id @default(uuid())
+  deviceId      String               @map("device_id")
+  grantId       String               @map("grant_id")
+  action        String
+  paramsHash    String               @map("params_hash")
+  requiresHello Boolean              @map("requires_hello")
+  approvalId    String?              @unique @map("approval_id")
+  executionId   String?              @map("execution_id")
+  status        DesktopCommandStatus @default(ISSUED)
+  issuedAt      DateTime             @default(now()) @map("issued_at")
+  expiresAt     DateTime             @map("expires_at")
+  deliveredAt   DateTime?            @map("delivered_at")
+  completedAt   DateTime?            @map("completed_at")
+  resultCode    String?              @map("result_code")
+
+  device  DesktopDevice          @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  grant   DesktopGrant           @relation(fields: [grantId], references: [id], onDelete: Cascade)
+  payload DesktopCommandPayload?
+
+  @@index([deviceId, status])
+  @@index([status, expiresAt])
+  @@map("DesktopCommand")
+}
+
+/// A command's parameters, sealed (AES-256-GCM) until delivery.
+model DesktopCommandPayload {
+  commandId String   @id @map("command_id")
+  sealed    String
+  expiresAt DateTime @map("expires_at")
+
+  command DesktopCommand @relation(fields: [commandId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+  @@map("DesktopCommandPayload")
+}
+
+/// A request nonce, spent once by an INSERT that only one caller can win —
+/// across API instances and restarts.
+model DesktopRequestNonce {
+  /// The device id, or the key fingerprint of a device still pairing.
+  scope     String
+  nonceHash String   @map("nonce_hash")
+  expiresAt DateTime @map("expires_at")
+
+  @@id([scope, nonceHash])
+  @@index([expiresAt])
+  @@map("DesktopRequestNonce")
+}
+
+/// An attempt to redeem a pairing code, by the hash of where it came from:
+/// the durable window that rate-limits redemption.
+model DesktopPairingAttempt {
+  id         String   @id @default(uuid())
+  sourceHash String   @map("source_hash")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@index([sourceHash, createdAt])
+  @@map("DesktopPairingAttempt")
 }

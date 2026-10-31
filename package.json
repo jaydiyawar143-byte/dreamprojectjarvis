@@ -12,7 +12,10 @@
     "db:generate": "turbo db:generate",
     "db:migrate": "turbo db:migrate",
     "db:seed": "turbo db:seed",
-    "test": "turbo run test --concurrency=1"
+    "test": "turbo run test --concurrency=1",
+    "qa:watch": "node scripts/qa-watch.mjs",
+    "qa:watch:full": "node scripts/qa-watch.mjs --full",
+    "qa:watch:stop": "node scripts/qa-watch-stop.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^9.15.0",

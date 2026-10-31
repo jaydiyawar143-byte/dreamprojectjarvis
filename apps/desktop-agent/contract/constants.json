@@ -1,0 +1,83 @@
+{
+  "protocolVersion": "jarvis-desktop/1",
+  "agentVersion": "1.0.0",
+  "commandActions": [
+    "desktop.input.click",
+    "desktop.input.key",
+    "desktop.input.type"
+  ],
+  "helloActions": [
+    "desktop.input.type"
+  ],
+  "keyNames": [
+    "enter",
+    "tab",
+    "escape",
+    "backspace",
+    "delete",
+    "arrowup",
+    "arrowdown",
+    "arrowleft",
+    "arrowright"
+  ],
+  "mouseButtons": [
+    "left",
+    "right",
+    "middle"
+  ],
+  "errorCodes": [
+    "INVALID_REQUEST",
+    "UNSUPPORTED_VERSION",
+    "UNAUTHENTICATED",
+    "REQUEST_EXPIRED",
+    "REPLAY_DETECTED",
+    "PAIRING_CODE_INVALID",
+    "RATE_LIMITED",
+    "DEVICE_PENDING",
+    "DEVICE_REVOKED",
+    "NOT_AUTHORIZED",
+    "AGENT_VERSION_UNSUPPORTED",
+    "WINDOWS_VERSION_UNSUPPORTED",
+    "GRANT_INVALID",
+    "GRANT_CONFLICT",
+    "CONSENT_MISMATCH",
+    "NOT_FOUND",
+    "CONFLICT",
+    "UNAVAILABLE"
+  ],
+  "notExecutedCodes": [
+    "HELLO_UNAVAILABLE",
+    "HELLO_FAILED",
+    "ELEVATED_TARGET",
+    "NO_TARGET",
+    "OUT_OF_BOUNDS",
+    "SESSION_LOCKED",
+    "GRANT_INACTIVE",
+    "COMMAND_EXPIRED",
+    "INVALID_COMMAND",
+    "BUSY"
+  ],
+  "sessionEndReasons": [
+    "user",
+    "kill-switch",
+    "lock",
+    "sign-out",
+    "shutdown",
+    "expired",
+    "disconnected"
+  ],
+  "consentTextVersion": "desktop-consent/1",
+  "killSwitch": "Ctrl+Alt+Shift+F12",
+  "limits": {
+    "pairingCodeTtlMs": 600000,
+    "commandTtlMs": 30000,
+    "clockSkewMs": 60000,
+    "grantDefaultMinutes": 15,
+    "grantMaxMinutes": 60,
+    "reconnectGraceMs": 30000,
+    "pollHoldMs": 20000,
+    "coordinateMax": 100000,
+    "typeTextMaxLength": 10000,
+    "windows11FirstBuild": 22000
+  }
+}
