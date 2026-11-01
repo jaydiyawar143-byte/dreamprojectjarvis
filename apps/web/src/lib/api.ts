@@ -3277,12 +3277,13 @@ export interface DesktopPairingCode {
   serverKeyId: string;
 }
 
-export type DesktopCommandAction = "desktop.input.click" | "desktop.input.key" | "desktop.input.type";
+export type DesktopCommandAction = "desktop.input.click" | "desktop.input.key" | "desktop.input.type" | "desktop.app.launch";
 
 export type DesktopCommandInput =
   | { action: "desktop.input.click"; x: number; y: number; button?: "left" | "right" | "middle" }
   | { action: "desktop.input.key"; key: string }
-  | { action: "desktop.input.type"; text: string };
+  | { action: "desktop.input.type"; text: string }
+  | { action: "desktop.app.launch"; app: string };
 
 export interface DesktopCommandRequestResult {
   approvalId: string;

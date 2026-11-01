@@ -938,7 +938,7 @@ describe("Phase 19.1 — approval responses never carry raw parameters", () => {
 
 // ---------------------------------------------------------------------------
 // Phase 19.6 — a desktop command's approval is decided on the Approvals page
-// too. There are no desktop tools to validate it (D5: the web UI drives the
+// too. Clicks and keys have no tool to validate them (the web UI drives the
 // desktop, a model never does), so it is validated against the desktop
 // contract itself — and still never approved with parameters that do not fit.
 // ---------------------------------------------------------------------------

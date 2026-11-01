@@ -23,6 +23,7 @@ import {
   AutomationAgent,
   CommunicationAgent,
   ConversationalAssistant,
+  DesktopAgent,
   GoogleAdsAgent,
   BrowserAgent,
   LocationAgent,
@@ -172,6 +173,9 @@ const ALL_REGISTERED_TOOLS = [
   "browser.download",
   "browser.submit",
   "browser.upload",
+  // Phase 19.7 — registered where desktop control is on.
+  "desktop.app.launch",
+  "desktop.input.type",
   // Maps — registered unconditionally by the container, because the geo layer
   // answers from OpenStreetMap when no Google key is set.
   "maps.search",
@@ -438,6 +442,10 @@ describe("Sprint 6 — conditional agent registration", () => {
     // Phase 15 — gated on its own workspace tools, as in the container.
     if (has("marketing.content.list")) {
       registry.register(new MarketingAgent({ provider: stubProvider }));
+    }
+    // Phase 19.7 — gated on its tools, as in the container: no desktop control, no agent.
+    if (has("desktop.app.launch")) {
+      registry.register(new DesktopAgent({ provider: stubProvider }));
     }
     return registry;
   }

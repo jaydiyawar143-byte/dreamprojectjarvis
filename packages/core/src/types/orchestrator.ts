@@ -152,6 +152,12 @@ export interface OrchestratorConfig {
    */
   switchedOffTools?: Readonly<Record<string, string>>;
   /**
+   * Phase 19.7 — holds a proposed desktop action to the owner's own words and
+   * finds the computer it is for, before any approval exists. With none wired,
+   * every desktop action is refused.
+   */
+  desktopChat?: Pick<import("../desktop-chat.js").DesktopChatPort, "propose">;
+  /**
    * Phase 17 — who may use a tool at all (`ToolAccessGate`), asked before a
    * pending action is created for it, exactly as the executor asks before an
    * approval: a write the caller's Organization role could never allow is

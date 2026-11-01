@@ -165,6 +165,9 @@ describe("coverage census — every real tool is accounted for", () => {
   it("pins the intentional orphans exactly", () => {
     // Each is a decision recorded in SKILL_UNLISTED_TOOLS with its reason.
     expect(ALLOWLISTED.filter((id) => !skillOf(id))).toEqual([
+      // Phase 19.7 — reached only by the owner's words; see their reason.
+      "desktop.app.launch",
+      "desktop.input.type",
       // S8.6 / S8.8 — the reviewed MCP servers; see their SKILL_UNLISTED_TOOLS reason.
       "mcp.dates.day_of_week",
       "mcp.dates.days_between",

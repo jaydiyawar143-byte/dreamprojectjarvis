@@ -12,7 +12,7 @@
 // their Organizations and narrows a list of devices; it decides nothing. A
 // person can always stop their own computer, whatever their role has become.
 //
-//   Person (web UI, D5)                 Agent (signed, outbound only)
+//   Person (web UI, or chat for 19.7)   Agent (signed, outbound only)
 //   create a pairing code  (Owner/Admin) redeem it with a fresh key → PENDING
 //   confirm the fingerprint (own device) poll — held up to 20 s, one command
 //   revoke (own device, or Owner/Admin)  report consent at the device → grant
@@ -23,21 +23,30 @@
 // Reused, not rebuilt: the approval store (single-use consumption; a desktop
 // approval's parameters are sealed by 19.5), the execution journal (a lost
 // answer is UNKNOWN and is never sent again), the audit trail (value-free), the
-// atomic rate limiter, the sealer. There are no model-facing desktop tools
-// (D5), so nothing here is reachable from a conversation.
+// atomic rate limiter, the sealer.
+//
+// Stage 19.7 — the owner reversed D5. Chat reaches this service through the one
+// port (`DesktopChatPort`), for two actions only: opening an approved
+// application and typing approved text. A model proposes; `propose` holds the
+// proposal to the owner's own words, finds the device and the grant, and creates
+// nothing; a person approves; `runApproved` spends that approval through the
+// same `confirmCommand` the page uses, and reports what the computer answered.
 // ---------------------------------------------------------------------------
 
 import {
   APPROVAL_TTL_MS,
   BLOCKED_STATUSES,
   DESKTOP_AGENT_HEADERS,
+  DESKTOP_CHAT_REFUSALS,
   DESKTOP_CLOCK_SKEW_MS,
   DESKTOP_COMMAND_TTL_MS,
+  DESKTOP_CONSENT_TEXT_VERSION,
   DESKTOP_PAIRING_CODE_TTL_MS,
   DESKTOP_PAIRING_DEVICE,
   DESKTOP_POLL_HOLD_MS,
   DESKTOP_PROTOCOL_VERSION,
   DESKTOP_RECONNECT_GRACE_MS,
+  DESKTOP_RESULT_WAIT_MS,
   DesktopCommandRequestSchema,
   DesktopCommandResultSchema,
   DesktopGrantRequestSchema,
@@ -50,17 +59,20 @@ import {
   computerControlApprovalSummary,
   desktopActionRequiresHello,
   desktopApprovalParams,
+  desktopChatReport,
   desktopCommandCanonical,
   desktopCommandParams,
   desktopConsentTextSha256,
   desktopFingerprintDisplay,
   desktopKeyFingerprint,
+  desktopOwnerAuthorization,
   desktopRequestCanonical,
   desktopRequestPartsAreWellFormed,
   desktopResponseCanonical,
   generateDesktopPairingCode,
   hashDesktopPairingCode,
   isDesktopCommandAction,
+  isSensitiveDesktopText,
   isDesktopTimestampFresh,
   isP256PublicKey,
   normalizeDesktopPairingCode,
@@ -76,6 +88,12 @@ import {
   type ApprovalConsumptionResult,
   type ApprovalParamsSealer,
   type AuditEntry,
+  type DesktopAppId,
+  type DesktopChatPort,
+  type DesktopChatProposal,
+  type DesktopChatRefusalCode,
+  type DesktopChatReport,
+  type DesktopChatToolId,
   type DesktopCommandAction,
   type DesktopCommandEnvelope,
   type DesktopCommandParams,
@@ -91,6 +109,7 @@ import type {
   PrismaDesktopRepository,
 } from "@jarvis/db";
 
+import type { OperationalLog } from "../observability/index.js";
 import type { DesktopAgentConfig } from "./config.js";
 
 // ---------------------------------------------------------------------------
@@ -166,6 +185,12 @@ export interface DesktopControlServiceDeps {
   isShuttingDown?: () => boolean;
   /** Pairing codes one person may create per window; the default is the policy. */
   pairingCodeLimit?: { limit: number; windowMs: number };
+  /** Where a refusal of an authenticated device is reported. Nothing depends on it. */
+  agentLog?: Pick<OperationalLog, "warn">;
+  /** How long chat waits for a computer's answer; the default is the protocol's. */
+  resultWaitMs?: number;
+  /** How often that wait looks. */
+  resultPollMs?: number;
 }
 
 /** Who may pair, and who besides a device's own user may revoke it (D7). */
@@ -180,6 +205,10 @@ const RESULT_GRACE_MS = DESKTOP_COMMAND_TTL_MS;
 /** Silence longer than a held poll and its margin: a disconnection, after which nothing waiting is delivered. */
 const RECONNECT_GAP_MS = DESKTOP_POLL_HOLD_MS + 5_000;
 const MAX_AGENT_BODY_BYTES = 64 * 1024;
+/** How often chat looks for a command's answer. */
+const RESULT_POLL_MS = 500;
+/** A command's states that no answer can change. */
+const FINAL_COMMAND_STATES: ReadonlySet<string> = new Set(["succeeded", "not_executed", "unknown", "expired"]);
 
 // ---------------------------------------------------------------------------
 // Errors and views
@@ -195,6 +224,8 @@ export type DesktopPersonErrorCode =
   | "FINGERPRINT_MISMATCH"
   | "GRANT_REQUIRED"
   | "APPROVAL_INVALID"
+  | "TEXT_TOO_LONG"
+  | "TEXT_SENSITIVE"
   | "UNAVAILABLE";
 
 const PERSON_STATUS: Readonly<Record<DesktopPersonErrorCode, number>> = {
@@ -207,6 +238,8 @@ const PERSON_STATUS: Readonly<Record<DesktopPersonErrorCode, number>> = {
   FINGERPRINT_MISMATCH: 409,
   GRANT_REQUIRED: 409,
   APPROVAL_INVALID: 409,
+  TEXT_TOO_LONG: 400,
+  TEXT_SENSITIVE: 400,
   UNAVAILABLE: 503,
 };
 
@@ -220,6 +253,8 @@ const PERSON_MESSAGE: Readonly<Record<DesktopPersonErrorCode, string>> = {
   FINGERPRINT_MISMATCH: "The fingerprint does not match this computer's key. Do not confirm it.",
   GRANT_REQUIRED: "Control has not been allowed on that computer, or it has ended. Allow it there first.",
   APPROVAL_INVALID: "That approval cannot be used for this command.",
+  TEXT_TOO_LONG: "That text is longer than this server allows to be typed in one action.",
+  TEXT_SENSITIVE: "That looks like a password, a code or a credential. JARVIS never types those.",
   UNAVAILABLE: "Desktop control is not available right now; nothing was done.",
 };
 
@@ -320,6 +355,8 @@ export interface DesktopAgentResponse {
   body: unknown;
   /** Headers proving the body came from this server, for this request. */
   headers: Record<string, string>;
+  /** On a refusal, its code, for this service's own log. Never sent. */
+  refusal?: DesktopErrorCode;
 }
 
 class AgentRefusal extends Error {
@@ -328,16 +365,24 @@ class AgentRefusal extends Error {
   }
 }
 
+/** The device a request's signature proved, once it has. */
+interface ProvenAgent {
+  deviceId?: string;
+}
+
 const header = (headers: DesktopAgentRequest["headers"], name: string): string => {
   const value = headers[name];
   return typeof value === "string" ? value : "";
 };
 
+/** A device in a log line: the first 16 hex characters of its id's SHA-256, as the agent logs it. */
+const deviceIdHash = (deviceId: string): string => sha256Hex(deviceId).slice(0, 16);
+
 // ---------------------------------------------------------------------------
 // The service
 // ---------------------------------------------------------------------------
 
-export class DesktopControlService {
+export class DesktopControlService implements DesktopChatPort {
   private readonly now: () => Date;
   private readonly pollHoldMs: number;
   private readonly pollIntervalMs: number;
@@ -391,7 +436,7 @@ export class DesktopControlService {
   }
 
   // -------------------------------------------------------------------------
-  // Person-facing — the web UI (D5)
+  // Person-facing — the web UI
   // -------------------------------------------------------------------------
 
   /**
@@ -518,6 +563,8 @@ export class DesktopControlService {
     await this.controllableDevice(userId, deviceId, request.action);
 
     const params = desktopCommandParams(request);
+    const refused = this.textRefusal(params);
+    if (refused) throw new DesktopControlError(refused);
     const approvalParams = desktopApprovalParams(params, deviceId);
     const parsed = parseComputerControlRequest({ ...approvalParams, action: params.action });
     if (!parsed.ok) throw new DesktopControlError("INVALID_REQUEST");
@@ -562,6 +609,9 @@ export class DesktopControlService {
     const params = desktopCommandParams(request);
     const paramsHash = computeParamsHash(desktopApprovalParams(params, deviceId));
     if (approval.paramsHash !== paramsHash) throw new DesktopControlError("APPROVAL_INVALID");
+    // Every way to a command passes here, so the rule holds whichever asked.
+    const refused = this.textRefusal(params);
+    if (refused) throw new DesktopControlError(refused);
 
     if (approval.status === "pending") {
       const decided = await this.deps.approvals.decideApproval(approvalId, userId, "approve", { fromPendingOnly: true });
@@ -614,8 +664,121 @@ export class DesktopControlService {
       action,
       commandId: issued.command.id,
       requiresHello: issued.command.requiresHello,
+      origin: approval.conversationId ? "chat" : "page",
+      ...(params.action === "desktop.app.launch" ? { app: params.app } : {}),
     });
     return commandView(issued.command);
+  }
+
+  /** Why this text may not be typed here, or null. The same answer for the page and for chat. */
+  private textRefusal(params: DesktopCommandParams): "TEXT_TOO_LONG" | "TEXT_SENSITIVE" | null {
+    if (params.action !== "desktop.input.type") return null;
+    if (params.text.length > this.deps.config.typeMaxLength) return "TEXT_TOO_LONG";
+    return isSensitiveDesktopText(params.text) ? "TEXT_SENSITIVE" : null;
+  }
+
+  // -------------------------------------------------------------------------
+  // Chat (Stage 19.7) — a model proposes, the owner's words and a person decide
+  // -------------------------------------------------------------------------
+
+  /**
+   * Everything that must hold before a person is asked, and the exact
+   * parameters their approval will be bound to. The device comes from the
+   * account, never from a model. Creates nothing and sends nothing.
+   */
+  async propose(input: {
+    userId: string;
+    action: DesktopChatToolId;
+    params: Record<string, unknown>;
+    ownerMessage: string;
+  }): Promise<DesktopChatProposal> {
+    const refuse = (code: DesktopChatRefusalCode): DesktopChatProposal => ({ ok: false, code, message: DESKTOP_CHAT_REFUSALS[code] });
+    // Only the field this action has: anything else a model sent, a device id
+    // among them, is not carried forward.
+    const field = input.action === "desktop.app.launch" ? { app: input.params.app } : { text: input.params.text };
+    const request = parseDesktopMessage(DesktopCommandRequestSchema, { action: input.action, ...field });
+    if (!request) return refuse(input.action === "desktop.app.launch" ? "UNKNOWN_APP" : "INVALID_TEXT");
+
+    const owner = desktopOwnerAuthorization(input.action, field, input.ownerMessage);
+    if (!owner.ok) return refuse(owner.code);
+
+    const params = desktopCommandParams(request);
+    const refused = this.textRefusal(params);
+    if (refused) return refuse(refused);
+
+    try {
+      const own = (await this.deps.store.listDevices({ userId: input.userId, adminTenantIds: [] })).filter(
+        (device) => device.userId === input.userId && device.status === "active"
+      );
+      if (own.length === 0) return refuse("NO_DEVICE");
+
+      const ready: Array<{ device: DesktopDeviceRecord; grant: DesktopGrantRecord }> = [];
+      for (const device of own) {
+        try {
+          ready.push(await this.controllableDevice(input.userId, device.id, input.action));
+        } catch (error) {
+          if (!(error instanceof DesktopControlError)) throw error;
+        }
+      }
+      if (ready.length === 0) return refuse("NO_GRANT");
+      if (ready.length > 1) return refuse("SEVERAL_DEVICES");
+
+      const { device, grant } = ready[0]!;
+      const approvalParams = desktopApprovalParams(params, device.id);
+      const paramsHash = computeParamsHash(approvalParams);
+      // An uncertain command may have run: the same words do not go out again
+      // under this consent. A person who has looked can still use the page.
+      const earlier = await this.deps.store.listCommands(device.id);
+      if (earlier.some((command) => command.grantId === grant.id && command.paramsHash === paramsHash && command.status === "unknown")) {
+        return refuse("ALREADY_UNKNOWN");
+      }
+      return { ok: true, params: approvalParams };
+    } catch {
+      return refuse("UNAVAILABLE");
+    }
+  }
+
+  /**
+   * Runs an action a person has approved: the same confirmation the page
+   * uses, then a bounded wait for the computer's answer. Nothing is sent twice:
+   * the approval is spent once, and a wait that runs out says so and stops.
+   */
+  async runApproved(input: {
+    userId: string;
+    action: DesktopChatToolId;
+    params: Record<string, unknown>;
+    approvalId: string;
+    signal?: AbortSignal;
+  }): Promise<DesktopChatReport> {
+    const deviceId = input.params.deviceId;
+    if (typeof deviceId !== "string") {
+      return { outcome: "not-sent", code: "INVALID_REQUEST", message: "That action does not name a computer, so nothing was sent." };
+    }
+    let issued: DesktopCommandView;
+    try {
+      issued = await this.confirmCommand(input.userId, deviceId, input.approvalId);
+    } catch (error) {
+      if (!(error instanceof DesktopControlError)) throw error;
+      return { outcome: "not-sent", code: error.code, message: `${error.message} Nothing was sent.` };
+    }
+    const settled = await this.awaitCommand(input.userId, issued, input.signal);
+    const app = input.action === "desktop.app.launch" ? (input.params.app as DesktopAppId) : undefined;
+    return desktopChatReport({ action: input.action, ...(app ? { app } : {}), status: settled.status, resultCode: settled.resultCode });
+  }
+
+  /** The command as it stands when it settles, when the wait runs out, or when the caller stops waiting. */
+  private async awaitCommand(userId: string, issued: DesktopCommandView, signal?: AbortSignal): Promise<DesktopCommandView> {
+    const deadline = Date.now() + (this.deps.resultWaitMs ?? DESKTOP_RESULT_WAIT_MS);
+    let latest = issued;
+    while (!FINAL_COMMAND_STATES.has(latest.status) && Date.now() < deadline && !signal?.aborted) {
+      await new Promise((resolve) => setTimeout(resolve, this.deps.resultPollMs ?? RESULT_POLL_MS));
+      try {
+        latest = await this.getCommand(userId, issued.id);
+      } catch {
+        // A failed read says nothing about the computer; the wait goes on.
+      }
+    }
+    return latest;
   }
 
   async getCommand(userId: string, commandId: string): Promise<DesktopCommandView> {
@@ -666,16 +829,22 @@ export class DesktopControlService {
   }
 
   private refuse(nonce: string, status: number, code: DesktopErrorCode): DesktopAgentResponse {
-    return this.respond(nonce, status, { version: DESKTOP_PROTOCOL_VERSION, error: { code } });
+    return { ...this.respond(nonce, status, { version: DESKTOP_PROTOCOL_VERSION, error: { code } }), refusal: code };
   }
 
   /**
    * Authenticates one agent request. Cheap checks first; the device's key
    * verifies the signature over the exact bytes; the nonce is spent LAST, in
    * PostgreSQL, so a forged request spends nothing and a replay — on any
-   * instance — is refused.
+   * instance — is refused. `proven` names the device from the moment its own
+   * key has verified the signature, so a refusal after that point is that
+   * device's. A pairing's key is the requester's own: it proves no device.
    */
-  private async authenticate(route: DesktopAgentRoute, req: DesktopAgentRequest): Promise<{ device: DesktopDeviceRecord | null; body: unknown; nonce: string }> {
+  private async authenticate(
+    route: DesktopAgentRoute,
+    req: DesktopAgentRequest,
+    proven: ProvenAgent
+  ): Promise<{ device: DesktopDeviceRecord | null; body: unknown; nonce: string }> {
     const nonce = header(req.headers, DESKTOP_AGENT_HEADERS.nonce);
     if (header(req.headers, DESKTOP_AGENT_HEADERS.version) !== DESKTOP_PROTOCOL_VERSION) throw new AgentRefusal(400, "UNSUPPORTED_VERSION");
     const parts = {
@@ -722,6 +891,7 @@ export class DesktopControlService {
     }
     const signature = header(req.headers, DESKTOP_AGENT_HEADERS.signature);
     if (!verifyDesktopCanonical(publicKey, desktopRequestCanonical(parts), signature)) throw new AgentRefusal(401, "UNAUTHENTICATED");
+    if (device) proven.deviceId = device.id;
 
     const spent = await this.deps.store.consumeNonce({
       scope,
@@ -742,10 +912,20 @@ export class DesktopControlService {
     return null;
   }
 
+  /** The one way in, so one request reports at most one refusal, however it was refused. */
   async handleAgent(route: DesktopAgentRoute, req: DesktopAgentRequest): Promise<DesktopAgentResponse> {
+    const proven: ProvenAgent = {};
+    const response = await this.answerAgent(route, req, proven);
+    if (response.refusal && proven.deviceId) {
+      this.deps.agentLog?.warn("desktop.agent.refused", { route, status: response.status, code: response.refusal, deviceIdHash: deviceIdHash(proven.deviceId) });
+    }
+    return response;
+  }
+
+  private async answerAgent(route: DesktopAgentRoute, req: DesktopAgentRequest, proven: ProvenAgent): Promise<DesktopAgentResponse> {
     const nonce = header(req.headers, DESKTOP_AGENT_HEADERS.nonce);
     try {
-      const { device, body } = await this.authenticate(route, req);
+      const { device, body } = await this.authenticate(route, req, proven);
       switch (route) {
         case "pair":
           return await this.pair(nonce, body, req.source);
@@ -922,6 +1102,12 @@ export class DesktopControlService {
     if (!(await this.ownerStillAuthorized(device))) return this.refuse(nonce, 403, "NOT_AUTHORIZED");
     const scope = canonicalDesktopScope(request.scope);
     if (!scope) return this.refuse(nonce, 400, "GRANT_INVALID");
+    // Older wording promised less than this release can do, so it is not
+    // consent to it. The agent tells the person to update.
+    if (request.consentTextVersion !== DESKTOP_CONSENT_TEXT_VERSION) {
+      await this.audit(device.userId, "desktop.grant.start", "rejected", { deviceId: device.id, reason: "CONSENT_VERSION" });
+      return this.refuse(nonce, 400, "CONSENT_MISMATCH");
+    }
     // The text the person saw, rendered here from the same version and the
     // same labels: a hash that differs means they saw something else.
     const expected = desktopConsentTextSha256(

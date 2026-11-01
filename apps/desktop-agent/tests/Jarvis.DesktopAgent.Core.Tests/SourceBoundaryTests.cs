@@ -1,12 +1,14 @@
 // ---------------------------------------------------------------------------
 // Phase 19.6 — what the agent's source may never contain.
 //
-// v1 is click, key and type, over outbound HTTPS, nothing else (D3, D4, D5).
-// These checks read every C# file under apps/desktop-agent/src and fail on
-// any way to listen for connections, start a process or a shell, read the
-// screen, use the clipboard or the registry, weaken TLS, or read files other
-// than the agent's own two. A new capability is a deliberate change to this
-// list, reviewed — never a quiet addition.
+// The agent is click, key, type and opening a fixed list of applications, over
+// outbound HTTPS, nothing else (D3, D4; 19.7 added the launch by the owner's
+// decision). These checks read every C# file under apps/desktop-agent/src and
+// fail on any way to listen for connections, start a shell, read the screen,
+// use the clipboard or the registry, weaken TLS, or read files other than the
+// agent's own two. One file may start a process, and only without a shell. A
+// new capability is a deliberate change to this list, reviewed — never a quiet
+// addition.
 // ---------------------------------------------------------------------------
 
 using System.Runtime.CompilerServices;
@@ -59,15 +61,57 @@ public partial class SourceBoundaryTests
     public void The_agent_source_has_no(string what, string pattern)
     {
         var regex = new Regex(pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
-        var found = CodeLines().Where(l => regex.IsMatch(l.Code)).Select(l => $"{l.File}:{l.Line}: {l.Code}").ToList();
+        var found = CodeLines().Where(l => regex.IsMatch(l.Code) && !(what == "a process or a shell" && l.File == Launcher))
+            .Select(l => $"{l.File}:{l.Line}: {l.Code}").ToList();
         Assert.True(found.Count == 0, $"{what}:\n{string.Join('\n', found)}");
+    }
+
+    private const string Launcher = "Jarvis.DesktopAgent/Windows/AppLauncher.cs";
+
+    [Fact]
+    public void One_file_starts_a_process_and_never_through_a_shell()
+    {
+        var starts = CodeLines().Where(l => l.Code.Contains("ProcessStartInfo", StringComparison.Ordinal) || l.Code.Contains("Process.Start", StringComparison.Ordinal))
+            .Select(l => l.File).Distinct().ToList();
+        Assert.Equal([Launcher], starts);
+
+        var launcher = CodeLines().Where(l => l.File == Launcher).Select(l => l.Code).ToList();
+        Assert.Contains(launcher, l => l.Contains("UseShellExecute = false", StringComparison.Ordinal));
+        Assert.DoesNotContain(launcher, l => l.Contains("UseShellExecute = true", StringComparison.Ordinal));
+        var forbidden = new Regex(@"\b(Arguments|ArgumentList|cmd|powershell|pwsh|wscript|cscript|Verb|Environment\.GetEnvironmentVariable|ExpandEnvironmentVariables|Registry)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        var found = launcher.Where(l => forbidden.IsMatch(l)).ToList();
+        Assert.True(found.Count == 0, string.Join('\n', found));
+    }
+
+    [Fact]
+    public void A_launch_never_types_and_the_runner_starts_no_process_itself()
+    {
+        var core = CodeLines().Where(l => l.File == "Jarvis.DesktopAgent.Core/Execution.cs").Select(l => l.Code).ToList();
+        Assert.DoesNotContain(core, l => l.Contains("Process", StringComparison.Ordinal) && !l.Contains("ProcessId", StringComparison.Ordinal) && !l.Contains("ProcessName", StringComparison.Ordinal));
+        var launcher = CodeLines().Where(l => l.File == Launcher).Select(l => l.Code).ToList();
+        Assert.DoesNotContain(launcher, l => l.Contains("injector", StringComparison.OrdinalIgnoreCase) || l.Contains("SendInput", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Typing_and_opening_applications_are_off_until_the_person_ticks_them()
+    {
+        var form = CodeLines().Where(l => l.File == "Jarvis.DesktopAgent/UI/ConsentForm.cs").Select(l => l.Code).ToList();
+        Assert.Contains(form, l => l.Contains("\"Open approved applications\", Checked = false", StringComparison.Ordinal));
+        Assert.Contains(form, l => l.Contains("\"Type approved text (Windows Hello every time)\", Checked = false", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void The_tray_gives_the_person_their_moment_before_typing()
+    {
+        var tray = CodeLines().Where(l => l.File == "Jarvis.DesktopAgent/UI/TrayApp.cs").Select(l => l.Code).ToList();
+        Assert.Contains(tray, l => l.Contains("new WindowsAppLauncher(), TimeSpan.FromMilliseconds(ProtocolConstants.TypeFocusWaitMs))", StringComparison.Ordinal));
     }
 
     [Fact]
     public void Only_the_agents_own_stores_touch_files()
     {
         var regex = FileAccess();
-        string[] allowed = ["Jarvis.DesktopAgent/Windows/FileStores.cs", "Jarvis.DesktopAgent/Windows/Platform.cs"];
+        string[] allowed = ["Jarvis.DesktopAgent/Windows/FileStores.cs", "Jarvis.DesktopAgent/Windows/Platform.cs", Launcher];
         var found = CodeLines().Where(l => regex.IsMatch(l.Code) && !allowed.Contains(l.File)).Select(l => $"{l.File}:{l.Line}: {l.Code}").ToList();
         Assert.True(found.Count == 0, string.Join('\n', found));
     }
@@ -88,6 +132,22 @@ public partial class SourceBoundaryTests
         Assert.NotEmpty(core);
         Assert.DoesNotContain(core, l => l.Code.Contains("DllImport", StringComparison.Ordinal) || l.Code.Contains("LibraryImport", StringComparison.Ordinal));
         Assert.DoesNotContain(core, l => FileAccess().IsMatch(l.Code));
+    }
+
+    [Fact]
+    public void A_pairing_is_saved_in_one_place_and_never_by_a_window()
+    {
+        // The person confirms with the window open: saving once it closes loses the pairing to a crash or a quit.
+        var saves = CodeLines().Where(l => l.Code.Contains("store.Save(", StringComparison.Ordinal)).Select(l => l.File).Distinct().ToList();
+        Assert.Equal(["Jarvis.DesktopAgent.Core/PairingState.cs"], saves);
+    }
+
+    [Fact]
+    public void No_log_line_names_a_device_by_its_full_id()
+    {
+        // AgentLog would drop the field; this catches the call that loses its line.
+        var found = CodeLines().Where(l => l.Code.Contains("(\"deviceId\",", StringComparison.Ordinal)).Select(l => $"{l.File}:{l.Line}: {l.Code}").ToList();
+        Assert.True(found.Count == 0, string.Join('\n', found));
     }
 
     [GeneratedRegex(@"\b(File|Directory|FileStream|StreamReader|StreamWriter|FileInfo|DirectoryInfo)\s*[\.(]")]

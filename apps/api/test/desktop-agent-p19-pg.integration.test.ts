@@ -23,6 +23,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import {
   DESKTOP_AGENT_CURRENT_VERSION,
   DESKTOP_AGENT_HEADERS,
+  DESKTOP_CONSENT_TEXT_VERSION,
   DESKTOP_PROTOCOL_VERSION,
   DesktopCommandEnvelopeSchema,
   desktopCommandCanonical,
@@ -45,10 +46,21 @@ import {
   DesktopControlService,
   type DesktopAgentRoute,
 } from "../src/services/desktop/desktop-control-service.js";
+import { createOperationalLog } from "../src/services/observability/index.js";
 import { AtomicRateLimiter } from "../src/services/rate-limiter.js";
+import { holdSharedConnection, type SharedConnectionLease } from "./helpers/shared-connection-lock.js";
 
-const EXPLICIT_DATABASE_URL = process.env.DATABASE_URL;
-const SAFE_TARGET = !!EXPLICIT_DATABASE_URL && !/:(?:5432|5433)\//.test(EXPLICIT_DATABASE_URL);
+/** A URL that names a port, and not development's or deployment's. No port at all means 5432. */
+function isSeparateDatabase(url: string | undefined): boolean {
+  try {
+    const { port } = new URL(url ?? "");
+    return port !== "" && port !== "5432" && port !== "5433";
+  } catch {
+    return false;
+  }
+}
+
+const SAFE_TARGET = isSeparateDatabase(process.env.DATABASE_URL);
 const REQUIRED = process.env.JARVIS_REQUIRE_POSTGRES === "1";
 
 type Db = typeof import("@jarvis/db");
@@ -74,7 +86,9 @@ if (SAFE_TARGET) {
 // ---------------------------------------------------------------------------
 
 const STAMP = `${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
-const SECRET = `hunter2-TYPED-${STAMP}`;
+// Words, not a token: since Stage 19.7 a token-shaped text is refused before it
+// is ever stored, and this is what must not be stored even when it is typed.
+const SECRET = `Typed words ${STAMP.replace(/[0-9-]/g, (d) => "abcdefghijk"[Number(d) || 10]!)}`;
 const signing = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
 const ENV = {
   DESKTOP_AGENT_ENABLED: "true",
@@ -85,6 +99,10 @@ const ENCRYPTION_KEY = generateKey();
 
 let offsetMs = 0;
 const clock = () => new Date(Date.now() + offsetMs);
+// `sweep` closes every command in the table, with this file's clock moved on, so
+// the two desktop suites take turns: vitest runs files in parallel, and one's sweep
+// would expire the other's waiting command.
+let lease: SharedConnectionLease | null = null;
 
 const userIds: string[] = [];
 const tenantIds: string[] = [];
@@ -93,6 +111,10 @@ let ORG = "";
 let OTHER_ORG = "";
 
 const SERVER_PUBLIC_KEY = signing.publicKey.export({ format: "der", type: "spki" }).toString("base64");
+
+/** What the service tells operators, through the real log. */
+const agentLines: string[] = [];
+const agentLog = createOperationalLog({ service: "jarvis-api", component: "desktop-agent", write: (line) => agentLines.push(line) });
 
 /** The service as the container builds it; `pairingCodeLimit` is lifted except where the limit is what is tested. */
 function service(client = prisma!, opts: { policyLimit?: boolean; holdMs?: number } = {}) {
@@ -112,6 +134,7 @@ function service(client = prisma!, opts: { policyLimit?: boolean; holdMs?: numbe
     now: clock,
     pollHoldMs: opts.holdMs ?? 0,
     pollIntervalMs: 20,
+    agentLog,
     ...(opts.policyLimit ? {} : { pairingCodeLimit: { limit: 10_000, windowMs: 60_000 } }),
   });
 }
@@ -216,7 +239,7 @@ class TestAgent {
       grantId,
       durationMinutes,
       scope,
-      consentTextVersion: "desktop-consent/1",
+      consentTextVersion: DESKTOP_CONSENT_TEXT_VERSION,
       consentTextSha256: desktopConsentTextSha256(text),
       replacesGrantId: opts.replaces ?? null,
     });
@@ -283,6 +306,7 @@ const adminRun = async (command: Parameters<Db["runTenantAdminCommand"]>[1]) => 
 beforeAll(async () => {
   if (!SAFE_TARGET && !REQUIRED) return;
   if (!dbUp) throw new Error("These security tests need a separate PostgreSQL test database, and none could be reached.");
+  lease = await holdSharedConnection("desktop/commands");
   for (const name of Object.keys(ids) as Array<keyof typeof ids>) {
     const user = await prisma!.user.create({
       data: { email: `p196-api-${name}-${STAMP}@jarvis-test.local`, name: `User ${name}`, password: "x", role: "VIEWER" },
@@ -312,6 +336,7 @@ afterAll(async () => {
     await prisma.$disconnect();
   }
   if (second) await second.$disconnect();
+  await lease?.release();
 });
 
 // ---------------------------------------------------------------------------
@@ -504,6 +529,27 @@ describe.skipIf(!SAFE_TARGET && !REQUIRED)("Phase 19.6 — consent (PostgreSQL)"
     expect((await prisma!.desktopGrant.findUnique({ where: { id: agent.grantId! } }))?.endReason).toBe("disconnected");
   });
 
+  it("refuses a new command 30 seconds after the last contact, with no poll needed to end the grant", async () => {
+    const svc = service();
+    const agent = await controlledAgent(svc);
+    offsetMs = 29_000;
+    const asked = await svc.requestCommand(ids.owner, agent.deviceId, { action: "desktop.input.key", key: "enter" });
+    offsetMs = 31_000;
+    expect(await errorOf(svc.requestCommand(ids.owner, agent.deviceId, { action: "desktop.input.key", key: "enter" }))).toBe("GRANT_REQUIRED");
+    // Nor can one asked for in time be sent now: what the person approved stays unsent.
+    expect(await errorOf(svc.confirmCommand(ids.owner, agent.deviceId, asked.approvalId))).toBe("GRANT_REQUIRED");
+  });
+
+  it("ends a grant the agent's poll does not name: the two sides must agree", async () => {
+    const svc = service();
+    const agent = await controlledAgent(svc);
+    const started = agent.grantId;
+    agent.grantId = null;
+    expect((await agent.poll(svc)).body.grant).toBeNull();
+    expect((await prisma!.desktopGrant.findUnique({ where: { id: started! } }))?.endReason).toBe("mismatch");
+    expect(await errorOf(svc.requestCommand(ids.owner, agent.deviceId, { action: "desktop.input.key", key: "enter" }))).toBe("GRANT_REQUIRED");
+  });
+
   it("counts the answer to a command as contact: a command that takes most of its 30 seconds keeps the grant", async () => {
     const svc = service();
     const agent = await controlledAgent(svc);
@@ -562,6 +608,25 @@ describe.skipIf(!SAFE_TARGET && !REQUIRED)("Phase 19.6 — revocation (PostgreSQ
     offsetMs = 61_000;
     await svc.sweep();
     expect((await svc.getCommand(ids.owner, command.id)).status).toBe("unknown");
+  });
+
+  it("reports a revoked device's refused request once, by its hash, and writes nothing for a forged one", async () => {
+    const svc = service();
+    const agent = await controlledAgent(svc);
+    await svc.revokeDevice(ids.owner, agent.deviceId);
+
+    const before = agentLines.length;
+    expect((await agent.poll(svc)).body.error.code).toBe("DEVICE_REVOKED");
+    const written = agentLines.slice(before);
+    expect(written.map((line) => JSON.parse(line))).toEqual([
+      expect.objectContaining({ event: "desktop.agent.refused", route: "poll", status: 403, code: "DEVICE_REVOKED", deviceIdHash: sha256Hex(agent.deviceId).slice(0, 16) }),
+    ]);
+    expect(written.join("\n")).not.toContain(agent.deviceId);
+
+    const afterRefusal = agentLines.length;
+    const stranger = generateKeyPairSync("ec", { namedCurve: "prime256v1" }).privateKey;
+    expect((await agent.send(svc, "poll", {}, { signWith: stranger })).status).toBe(401);
+    expect(agentLines).toHaveLength(afterRefusal);
   });
 
   it("is for the device's user or an Owner/Admin of its Organization — no one else", async () => {

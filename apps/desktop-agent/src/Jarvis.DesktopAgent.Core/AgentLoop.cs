@@ -18,7 +18,12 @@ public sealed record Pairing(string DeviceId, string ServerPublicKey, string Ser
 
 public interface IPairingStore
 {
+    /// <summary>The server's address, known once a pairing is loaded or remembered.</summary>
+    Uri? Server { get; }
+
     Pairing? Load();
+
+    void Remember(Uri server);
 
     void Save(Pairing pairing);
 
@@ -40,6 +45,18 @@ public interface IAgentEvents
 public sealed class AgentLoop : IDisposable
 {
     internal static readonly TimeSpan IdleInterval = TimeSpan.FromSeconds(3);
+    private const int ResultAttempts = 3;
+
+    /// <summary>Unknown failures in a row before polling stops: with the backoff, about 15 seconds.</summary>
+    internal const int UnknownFailureLimit = 5;
+
+    /// <summary>
+    /// The least time a poll gets while a grant is active: the server's hold and a
+    /// margin. The server counts a poll's arrival as contact and the agent only an
+    /// answer, so a poll begun late in the grace is healthy until a hold has passed.
+    /// Only an answer renews the grace; this never does.
+    /// </summary>
+    internal TimeSpan MinPollWindow { get; init; } = TimeSpan.FromMilliseconds(ProtocolConstants.PollHoldMs + 2_000);
 
     private readonly AgentClient client;
     private readonly Pairing pairing;
@@ -85,25 +102,68 @@ public sealed class AgentLoop : IDisposable
     /// <summary>A new one each time the agent starts: the server ends any grant held by an earlier process (U5b).</summary>
     public string AgentInstanceId { get; } = Guid.NewGuid().ToString("D");
 
+    /// <summary>Polls until stopped. Whatever ends polling for its own reasons is logged and reaches the tray.</summary>
     public async Task RunAsync(CancellationToken cancellationToken)
     {
+        try
+        {
+            await PollUntilStoppedAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception e) when (e is not OperationCanceledException && !cancellationToken.IsCancellationRequested)
+        {
+            // Out of retries, or something no step expected. The exchange is released by
+            // now, so the tray may dispose this loop the moment it hears.
+            log.Write("poll.stopped", ("code", AgentFailure.UnknownError));
+            GiveUp();
+        }
+    }
+
+    private void GiveUp()
+    {
+        if (Interlocked.Exchange(ref stopped, 1) == 1) return;
+        grants.End("disconnected");
+        events.Stopped("failed");
+    }
+
+    private async Task PollUntilStoppedAsync(CancellationToken cancellationToken)
+    {
         var failures = 0;
+        var unknownFailures = 0;
         while (!cancellationToken.IsCancellationRequested && Volatile.Read(ref stopped) == 0)
         {
             grants.CheckReconnectGrace();
-            var sent = grants.Active?.GrantId;
+            string? sent;
             AgentAnswer answer;
             await exchange.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
-                answer = await client.PollAsync(pairing, AgentInstanceId, windowsBuild, sent, cancellationToken).ConfigureAwait(false);
+                // Read with the exchange held: consent may have been starting a grant
+                // while this waited, and a poll that names none would end it.
+                sent = grants.Active?.GrantId;
+                answer = await PollWithinGraceAsync(sent, cancellationToken).ConfigureAwait(false);
             }
-            catch (AgentTransportException)
+            catch (AgentTransportException e)
             {
                 failures++;
-                events.ConnectionChanged(false);
-                log.Write("poll.failed", ("attempt", failures));
-                await delay(Backoff(failures), cancellationToken).ConfigureAwait(false);
+                await BackOffAsync(failures, e.Code, e.HttpStatus, cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                // The agent is still running, so this was the poll's deadline:
+                // control ends now, not whenever the poll would have returned.
+                grants.CheckReconnectGrace();
+                failures++;
+                await BackOffAsync(failures, AgentFailure.TransportError, null, cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+            catch (Exception e) when (e is not OperationCanceledException && !cancellationToken.IsCancellationRequested)
+            {
+                // A failed signature sends nothing and a retry is a new signed request, so no
+                // command can run twice. The type cannot say whether this lasts: a few tries decide.
+                if (++unknownFailures >= UnknownFailureLimit) throw;
+                failures++;
+                await BackOffAsync(failures, AgentFailure.UnknownError, null, cancellationToken).ConfigureAwait(false);
                 continue;
             }
             finally
@@ -112,11 +172,12 @@ public sealed class AgentLoop : IDisposable
             }
 
             failures = 0;
+            unknownFailures = 0;
             grants.ServerContact();
             events.ConnectionChanged(true);
             if (!answer.Ok)
             {
-                if (Refused(answer.ErrorCode!)) return;
+                if (Refused(answer)) return;
                 await delay(IdleInterval, cancellationToken).ConfigureAwait(false);
                 continue;
             }
@@ -128,7 +189,7 @@ public sealed class AgentLoop : IDisposable
             }
             catch (Exception e) when (e is ProtocolViolationException or KeyNotFoundException or InvalidOperationException)
             {
-                log.Write("poll.malformed");
+                log.Write("poll.malformed", ("code", AgentFailure.ResponseInvalid), ("httpStatus", answer.Status), ("retryInMs", Milliseconds(IdleInterval)));
                 await delay(IdleInterval, cancellationToken).ConfigureAwait(false);
                 continue;
             }
@@ -144,6 +205,29 @@ public sealed class AgentLoop : IDisposable
                 await delay(IdleInterval, cancellationToken).ConfigureAwait(false);
             }
         }
+    }
+
+    /// <summary>
+    /// One poll. While a grant is active it may not outlive the grant's grace, or
+    /// <see cref="MinPollWindow"/> if that is longer. The deadline ends with the
+    /// poll, so a command that follows, however long Windows Hello takes, runs
+    /// under no deadline of this one's.
+    /// </summary>
+    private async Task<AgentAnswer> PollWithinGraceAsync(string? sent, CancellationToken cancellationToken)
+    {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        if (grants.GraceLeft is { } left) deadline.CancelAfter(left > MinPollWindow ? left : MinPollWindow);
+        return await client.PollAsync(pairing, AgentInstanceId, windowsBuild, sent, deadline.Token).ConfigureAwait(false);
+    }
+
+    /// <summary>Says the poll failed and why, then waits before the next one, never past the grace.</summary>
+    private async Task BackOffAsync(int attempt, string code, int? httpStatus, CancellationToken cancellationToken)
+    {
+        events.ConnectionChanged(false);
+        var wait = Backoff(attempt);
+        if (grants.GraceLeft is { } left && left < wait) wait = left;
+        log.Write("poll.failed", ("attempt", attempt), ("code", code), ("httpStatus", httpStatus), ("retryInMs", Milliseconds(wait)));
+        await delay(wait, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -170,7 +254,16 @@ public sealed class AgentLoop : IDisposable
         }
         else
         {
-            outcome = await runner.RunAsync(command, receivedAt, grants.TokenFor(command.GrantId)).ConfigureAwait(false);
+            try
+            {
+                outcome = await runner.RunAsync(command, receivedAt, grants.TokenFor(command.GrantId)).ConfigureAwait(false);
+            }
+            catch (Exception e) when (e is not OperationCanceledException)
+            {
+                // Whether input was sent is unknown, so that is the answer. It is never run again.
+                log.Write("command.failed", ("commandId", command.CommandId), ("code", AgentFailure.UnknownError));
+                outcome = CommandOutcome.Uncertain;
+            }
         }
         await ReportAsync(command.CommandId, outcome, cancellationToken).ConfigureAwait(false);
     }
@@ -182,7 +275,7 @@ public sealed class AgentLoop : IDisposable
     /// </summary>
     private async Task ReportAsync(string commandId, CommandOutcome outcome, CancellationToken cancellationToken)
     {
-        for (var attempt = 1; attempt <= 3; attempt++)
+        for (var attempt = 1; attempt <= ResultAttempts; attempt++)
         {
             try
             {
@@ -190,13 +283,14 @@ public sealed class AgentLoop : IDisposable
                 grants.ServerContact();
                 // CONFLICT means it was already answered, or recorded UNKNOWN; a
                 // refusal that stops the agent is acted on by the next poll.
-                if (!answer.Ok) log.Write("result.refused", ("commandId", commandId), ("code", answer.ErrorCode));
+                if (!answer.Ok) log.Write("result.refused", ("commandId", commandId), ("code", AgentFailure.ServerRefusal), ("reason", answer.ErrorCode), ("httpStatus", answer.Status));
                 return;
             }
-            catch (AgentTransportException)
+            catch (AgentTransportException e)
             {
-                log.Write("result.failed", ("commandId", commandId), ("attempt", attempt));
-                await delay(TimeSpan.FromSeconds(attempt), cancellationToken).ConfigureAwait(false);
+                var wait = TimeSpan.FromSeconds(attempt);
+                log.Write("result.failed", ("commandId", commandId), ("attempt", attempt), ("code", e.Code), ("httpStatus", e.HttpStatus), ("retryInMs", attempt < ResultAttempts ? Milliseconds(wait) : (long?)null));
+                await delay(wait, cancellationToken).ConfigureAwait(false);
             }
         }
     }
@@ -223,7 +317,7 @@ public sealed class AgentLoop : IDisposable
             grants.ServerContact();
             if (!answer.Ok)
             {
-                Refused(answer.ErrorCode!);
+                Refused(answer);
                 return answer.ErrorCode;
             }
             var state = MessageParser.ParseGrantResponse(answer.Body);
@@ -232,12 +326,14 @@ public sealed class AgentLoop : IDisposable
             log.Write("grant.started", ("grantId", grant.GrantId), ("durationMinutes", durationMinutes), ("scopeCount", grant.Scope.Count));
             return null;
         }
-        catch (AgentTransportException)
+        catch (AgentTransportException e)
         {
+            log.Write("grant.failed", ("code", e.Code), ("httpStatus", e.HttpStatus));
             return "UNAVAILABLE";
         }
         catch (Exception e) when (e is ProtocolViolationException or KeyNotFoundException or InvalidOperationException)
         {
+            log.Write("grant.failed", ("code", AgentFailure.ResponseInvalid));
             return "INVALID_REQUEST";
         }
         finally
@@ -260,22 +356,33 @@ public sealed class AgentLoop : IDisposable
             }
             catch (Exception e) when (e is AgentTransportException or OperationCanceledException)
             {
-                log.Write("session.end.unsent", ("grantId", grant.GrantId));
+                // A cancellation here is this request's own ten seconds running out.
+                var failure = e as AgentTransportException;
+                log.Write("session.end.unsent", ("grantId", grant.GrantId), ("code", failure?.Code ?? AgentFailure.TransportError), ("httpStatus", failure?.HttpStatus));
             }
         });
     }
 
     /// <summary>True when the refusal stops the agent for good.</summary>
-    private bool Refused(string code)
+    private bool Refused(AgentAnswer answer)
     {
-        log.Write("server.refused", ("code", code));
+        var code = answer.ErrorCode!;
+        log.Write("server.refused", ("code", AgentFailure.ServerRefusal), ("reason", code), ("httpStatus", answer.Status));
         if (code is not ("DEVICE_REVOKED" or "AGENT_VERSION_UNSUPPORTED" or "WINDOWS_VERSION_UNSUPPORTED" or "NOT_AUTHORIZED")) return false;
         if (Interlocked.Exchange(ref stopped, 1) == 1) return true;
         switch (code)
         {
             case "DEVICE_REVOKED":
                 grants.End(LocalEndReasons.Revoked);
-                store.Clear();
+                try
+                {
+                    store.Clear();
+                }
+                catch (Exception e) when (e is not OperationCanceledException)
+                {
+                    // Revoked, and something may be left behind: the runbook's checks exist for this.
+                    log.Write("pairing.clear.failed", ("code", AgentFailure.UnknownError));
+                }
                 events.Stopped("revoked");
                 return true;
             case "AGENT_VERSION_UNSUPPORTED":
@@ -300,4 +407,6 @@ public sealed class AgentLoop : IDisposable
 
     internal static TimeSpan Backoff(int failures) =>
         TimeSpan.FromSeconds(Math.Min(15, 1 << Math.Min(4, failures - 1)));
+
+    private static long Milliseconds(TimeSpan wait) => (long)wait.TotalMilliseconds;
 }

@@ -175,6 +175,7 @@ export {
   BrowserUploadTool,
   createBrowserTools,
 } from "./tools/browser-tools.js";
+export { DesktopAppLaunchTool, DesktopTypeTextTool, createDesktopTools } from "./tools/desktop-tools.js";
 
 // Google Maps — all READ_ONLY. See tools/maps-tools.ts for why location is
 // never a model-supplied parameter.

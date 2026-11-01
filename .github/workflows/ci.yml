@@ -411,9 +411,10 @@ jobs:
   # that the signer is the Publisher. The runner is Windows Server, where the
   # agent stops at its Windows 11 check: so the job shows only that start-up
   # opens no port, never that a paired agent opens none. That proof is
-  # packaging/check-no-listener.ps1 on a Windows 11 test machine; here the job
-  # proves that script refuses when no agent is running. Nothing here sends
-  # input, and no test calls SendInput. The test-signed package is not uploaded.
+  # packaging/check-no-listener.ps1 on a Windows 11 test machine. Here the job
+  # pins the parser and the decision that script uses, and proves that script
+  # refuses when no agent is running. Nothing here sends input, and no test
+  # calls SendInput. The test-signed package is not uploaded.
   desktop-agent:
     name: Windows desktop agent (.NET, MSIX)
     runs-on: windows-latest
@@ -459,19 +460,42 @@ jobs:
       - name: Pack, sign (test certificate) and verify the MSIX
         run: ./packaging/build-msix.ps1 -Publisher "CN=JARVIS Test Signing" -TestCertificate -TrustTestCertificate
 
+      # The parser, the decision and the positive control, pinned on Windows:
+      # a loopback listener, a wildcard listener, a clean process, an
+      # unobservable control, PID 0 rows and parser edges. It also proves this
+      # runner's table reports a real loopback socket the check opened itself.
+      - name: No-listener evidence (parser, positive control, PID 0)
+        run: pwsh -NoProfile -File ./packaging/no-listener-evidence.tests.ps1
+
       # Start-up only: this runner stops the agent at its platform check, and
-      # this step starts the runner's only copy. It is not the exit criterion's
-      # proof, and packaging/check-no-listener.ps1 never starts an agent.
+      # this step starts the runner's only copy. It uses the same reader and
+      # the same decision as packaging/check-no-listener.ps1, and refuses to
+      # claim a clean start-up unless it can see its own loopback control. It
+      # is not the exit criterion's proof, and check-no-listener.ps1 never
+      # starts an agent.
       - name: Start-up opens no port
         run: |
+          . ./packaging/NoListenerEvidence.ps1
           $agent = Start-Process -FilePath (Resolve-Path artifacts/publish/Jarvis.DesktopAgent.exe) -PassThru
+          $control = New-NoListenerControl
           try {
-            Start-Sleep -Seconds 10
-            $listening = @(Get-NetTCPConnection -ErrorAction Stop | Where-Object { $_.OwningProcess -eq $agent.Id -and $_.State -eq "Listen" })
-            $udp = @(Get-NetUDPEndpoint -ErrorAction Stop | Where-Object { $_.OwningProcess -eq $agent.Id })
-            if ($listening.Count -gt 0 -or $udp.Count -gt 0) { throw "the agent opened a port at start-up." }
-            Write-Host "Start-up opened no TCP listener and no UDP endpoint (pid $($agent.Id)). This says nothing about a paired agent."
+            $samples = 0
+            $deadline = (Get-Date).AddSeconds(10)
+            while ($true) {
+              $observation = Get-NoListenerObservation -ProcessId $agent.Id -ControlProcessId $control.ProcessId -ControlTcpPort $control.TcpPort -ControlUdpPort $control.UdpPort
+              if ($observation.Status -eq "CONTROL_UNOBSERVED") { throw "the socket table could not show the check's own loopback control, so this runner can prove nothing." }
+              if ($observation.Status -eq "LISTENER") { throw "the agent opened a port at start-up." }
+              $samples += 1
+              if ($agent.HasExited -or (Get-Date) -ge $deadline) { break }
+              Start-Sleep -Seconds 1
+            }
+            if ($agent.HasExited) {
+              Write-Host "The agent exited before start-up could be sampled (this runner stops it at its platform check). The socket table was readable here and no listener was seen while it ran. This says nothing about a paired agent."
+            } else {
+              Write-Host "Start-up opened no TCP listener and no UDP endpoint (pid $($agent.Id), $samples samples). This says nothing about a paired agent."
+            }
           } finally {
+            Close-NoListenerControl $control
             if (-not $agent.HasExited) { Stop-Process -Id $agent.Id -Force }
           }
 

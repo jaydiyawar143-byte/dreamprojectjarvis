@@ -23,6 +23,7 @@ internal sealed class TrayApp : ApplicationContext, IAgentEvents
     private readonly IndicatorForm indicator;
     private readonly AgentLog log;
     private readonly FilePairingStore store;
+    private readonly PairingState state;
     private readonly NotifyIcon tray;
     private readonly ToolStripMenuItem status = new("Not paired") { Enabled = false };
     private readonly ToolStripMenuItem pairItem = new("Pair this computer…");
@@ -33,18 +34,18 @@ internal sealed class TrayApp : ApplicationContext, IAgentEvents
     private readonly nint helloOwner;
 
     private CngDeviceKey? key;
-    private Pairing? pairing;
     private AgentLoop? loop;
     private CancellationTokenSource? running;
-    private string deviceStatus = "pending";
-    private bool connected;
+    private bool halted;
+    private bool pairingOpen;
 
     public TrayApp()
     {
         ui = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
         grants = new GrantManager(clock);
         log = new AgentLog(new FileLogSink(Platform.DataDirectory), clock);
-        store = new FilePairingStore(Platform.DataDirectory);
+        store = new FilePairingStore(Platform.DataDirectory, () => CngDeviceKey.Delete());
+        state = new PairingState(store, log, Start);
         // Off the hook thread at once: a low-level hook must return quickly, and
         // ending the grant cancels any command in progress immediately.
         hooks = new InputHooks(() => ThreadPool.QueueUserWorkItem(_ => grants.End("kill-switch")));
@@ -73,21 +74,7 @@ internal sealed class TrayApp : ApplicationContext, IAgentEvents
         tray = new NotifyIcon { Icon = SystemIcons.Shield, Text = "JARVIS desktop agent", ContextMenuStrip = menu, Visible = true };
 
         log.Write("agent.started", ("agentVersion", ProtocolConstants.AgentVersion), ("windowsBuild", Platform.WindowsBuild));
-        pairing = store.Load();
-        if (pairing is not null && store.Server is not null)
-        {
-            // A pairing without its key is no pairing: the key never comes back.
-            key = CngDeviceKey.TryOpen();
-            if (key is null)
-            {
-                store.Clear();
-                pairing = null;
-            }
-            else
-            {
-                Start(store.Server, pairing);
-            }
-        }
+        state.Restore(() => (key = CngDeviceKey.TryOpen()) is not null);
         Refresh();
     }
 
@@ -95,39 +82,34 @@ internal sealed class TrayApp : ApplicationContext, IAgentEvents
 
     private void ShowPairing()
     {
-        if (pairing is not null)
+        if (state.Current is not null)
         {
             var answer = MessageBox.Show("This computer is already paired. Pair it again? The current pairing stops working.", "JARVIS", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
             if (answer != DialogResult.Yes) return;
             StopLoop();
             grants.End("user");
             store.Clear();
-            pairing = null;
+            state.Forget();
             key?.Dispose();
             key = null;
         }
         key ??= CngDeviceKey.OpenOrCreate();
         using var form = new PairingForm(async (origin, code) =>
         {
-            var client = new AgentClient(http, origin, key, clock);
-            try
+            var answer = await state.PairAsync(new AgentClient(http, origin, key, clock), code, new DeviceFacts(Environment.MachineName, Platform.WindowsBuild, "x64"), CancellationToken.None).ConfigureAwait(true);
+            if (answer.Error == PairingState.NotSaved)
             {
-                return await client.PairAsync(code, new DeviceFacts(Environment.MachineName, Platform.WindowsBuild, "x64"), CancellationToken.None).ConfigureAwait(true);
+                key.Dispose();
+                key = CngDeviceKey.OpenOrCreate();
             }
-            catch (AgentTransportException)
-            {
-                return (null, null);
-            }
+            Refresh();
+            return answer;
         });
+        // The tray stays reachable behind the window, and a second pairing would replace this one.
+        pairingOpen = true;
+        Refresh();
         form.ShowDialog();
-        if (form.Paired is { } paired && form.Server is { } origin)
-        {
-            pairing = new Pairing(paired.DeviceId, paired.ServerPublicKey, paired.ServerKeyId, paired.UserLabel, paired.OrganizationLabel);
-            store.Remember(origin);
-            store.Save(pairing);
-            log.Write("device.paired", ("deviceId", paired.DeviceId));
-            Start(origin, pairing);
-        }
+        pairingOpen = false;
         Refresh();
     }
 
@@ -135,7 +117,7 @@ internal sealed class TrayApp : ApplicationContext, IAgentEvents
 
     private async Task ConsentAsync(bool extend)
     {
-        if (pairing is null || loop is null || deviceStatus != "active") return;
+        if (state.Current is not { } pairing || loop is null || state.DeviceStatus != "active") return;
         using var form = new ConsentForm(pairing, hooks, extend);
         if (form.ShowDialog() != DialogResult.OK) return;
         var error = await loop.StartGrantAsync(form.Scope, form.Minutes, form.ShownText, extend, CancellationToken.None).ConfigureAwait(true);
@@ -157,9 +139,10 @@ internal sealed class TrayApp : ApplicationContext, IAgentEvents
     private void Start(Uri origin, Pairing paired)
     {
         StopLoop();
+        halted = false;
         var client = new AgentClient(http, origin, key!, clock);
         var verifier = new CommandVerifier(paired.ServerPublicKey, paired.DeviceId, grants, clock);
-        var runner = new CommandRunner(verifier, grants, new DesktopInspector(), new SendInputInjector(), new WindowsHelloVerifier(() => helloOwner), session, log);
+        var runner = new CommandRunner(verifier, grants, new DesktopInspector(), new SendInputInjector(), new WindowsHelloVerifier(() => helloOwner), session, log, new WindowsAppLauncher(), TimeSpan.FromMilliseconds(ProtocolConstants.TypeFocusWaitMs));
         loop = new AgentLoop(client, paired, grants, verifier, runner, store, this, log, clock, Platform.WindowsBuild);
         running = new CancellationTokenSource();
         var token = running.Token;
@@ -172,6 +155,12 @@ internal sealed class TrayApp : ApplicationContext, IAgentEvents
             }
             catch (OperationCanceledException)
             {
+            }
+            catch (Exception) when (!token.IsCancellationRequested)
+            {
+                // RunAsync reports its own failures. This is the last net, so polling never ends unseen.
+                log.Write("poll.stopped", ("code", AgentFailure.UnknownError));
+                Stopped("failed");
             }
         });
     }
@@ -187,13 +176,13 @@ internal sealed class TrayApp : ApplicationContext, IAgentEvents
 
     public void DeviceStatusChanged(string value) => ui.Post(_ =>
     {
-        deviceStatus = value;
+        state.Heard(value);
         Refresh();
     }, null);
 
     public void ConnectionChanged(bool value) => ui.Post(_ =>
     {
-        connected = value;
+        state.Reached(value);
         Refresh();
     }, null);
 
@@ -202,16 +191,12 @@ internal sealed class TrayApp : ApplicationContext, IAgentEvents
         StopLoop();
         if (reason == "revoked")
         {
-            pairing = null;
+            state.Forget();
             key?.Dispose();
             key = null;
         }
-        tray.ShowBalloonTip(8000, "JARVIS", reason switch
-        {
-            "revoked" => "This computer was removed from JARVIS. Pair it again to use it.",
-            "unsupported" => "This agent or this version of Windows is no longer supported. Update to continue.",
-            _ => "This computer's owner can no longer use it with JARVIS.",
-        }, ToolTipIcon.Warning);
+        if (reason == "failed") halted = true;
+        tray.ShowBalloonTip(8000, "JARVIS", TrayView.StoppedMessage(reason), ToolTipIcon.Warning);
         Refresh();
     }, null);
 
@@ -219,15 +204,12 @@ internal sealed class TrayApp : ApplicationContext, IAgentEvents
     {
         var grant = grants.Active;
         indicator.ShowGrant(grant);
-        status.Text = pairing is null ? "Not paired"
-            : deviceStatus == "pending" ? "Waiting for confirmation in JARVIS"
-            : !connected ? "Not connected"
-            : grant is null ? "Paired — control not allowed"
-            : "Control allowed";
-        pairItem.Enabled = grant is null;
-        allowItem.Enabled = pairing is not null && deviceStatus == "active" && connected && grant is null;
-        extendItem.Enabled = grant is not null;
-        stopItem.Enabled = grant is not null;
+        var view = TrayView.Of(state.Current is not null, state.DeviceStatus, state.Connected, halted, grant is not null, pairingOpen);
+        status.Text = view.Status;
+        pairItem.Enabled = view.CanPair;
+        allowItem.Enabled = view.CanAllow;
+        extendItem.Enabled = view.CanExtend;
+        stopItem.Enabled = view.CanStop;
     }
 
     private void Quit()

@@ -7,11 +7,13 @@ import type {
 } from "@jarvis/core";
 import {
   APPROVAL_TTL_MS,
+  DESKTOP_TYPE_FOCUS_WAIT_MS,
   MARKETING_TOOL_IDS,
   MEMORY_CORRECT_TOOL_ID,
   computeParamsHash,
   computerControlApprovalSummary,
   isComputerControlAction,
+  isDesktopChatTool,
   isDestructiveMemoryTool,
   needsIndependentApproval,
   parseComputerControlRequest,
@@ -420,6 +422,12 @@ export class PendingActionService {
       );
     }
 
+    // Phase 19.7 — a desktop action was held to the owner's own words and bound
+    // to one computer before it was shown. A change would skip all of that.
+    if (isDesktopChatTool(pending.toolId)) {
+      throw new PendingActionConflictError("NOT_MODIFIABLE", "A desktop action cannot be changed once it is waiting for you. Cancel it and ask again.");
+    }
+
     // Merge params: old params + new overrides
     const mergedParams = { ...pending.params, ...newParams };
 
@@ -553,6 +561,18 @@ export class PendingActionService {
       // This message is stored with the conversation and shown again, so
       // nothing typed, selected or submitted, and no path or query, is in it.
       lines.push(...computerControlLines(pending.toolId, p));
+      // Phase 19.7 — the one exception, by the owner's decision: the exact text
+      // a desktop action will type is shown before it is approved. It adds
+      // nothing to what is stored: the proposal held it to appear word for word
+      // in the owner's own message in this conversation, and refused it if it
+      // looked like a secret. The approval and the audit row stay value-free,
+      // so a message rebuilt from them says "not shown".
+      if (pending.toolId === "desktop.input.type" && typeof p.text === "string") {
+        lines.push("Text to be typed:");
+        lines.push(p.text);
+        lines.push("");
+        lines.push(`After you confirm, click into the window where the text should go: JARVIS waits ${DESKTOP_TYPE_FOCUS_WAIT_MS / 1000} seconds. Windows Hello then names that window. Verify only if it is the right one. Without it, nothing is typed.`);
+      }
     } else {
       if (p.name) lines.push(`Name: ${p.name}`);
       if (p.objective) lines.push(`Objective: ${String(p.objective).replace("OUTCOME_", "")}`);

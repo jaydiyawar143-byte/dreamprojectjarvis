@@ -16,8 +16,8 @@
 //   GET  /devices/:id/commands, /commands/:id   what happened
 //
 // The three command routes are beyond the brief's five: they are how a person
-// drives a device from the web UI (D5), and there is no other way to. So is
-// /organizations: pairing names its Organization, and it is how the page knows
+// drives a device from the web UI. Chat reaches the same service through its own
+// port (Stage 19.7) and never these routes. So is /organizations: pairing names its Organization, and it is how the page knows
 // what to offer.
 // ---------------------------------------------------------------------------
 

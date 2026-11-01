@@ -17,8 +17,41 @@ using System.Text.Json;
 
 namespace Jarvis.DesktopAgent.Core;
 
+/// <summary>Why an exchange with the server came to nothing. Stable: the log and the runbook match on these exact words.</summary>
+public static class AgentFailure
+{
+    /// <summary>No answer arrived: unreachable, out of time, or the connection broke.</summary>
+    public const string TransportError = "TRANSPORT_ERROR";
+
+    /// <summary>A redirect, or a failure status with no signature: something in front of the server answered, or its routes are off.</summary>
+    public const string HttpStatusError = "HTTP_STATUS_ERROR";
+
+    /// <summary>The answer was not signed by the key that had to sign it.</summary>
+    public const string ResponseNotSigned = "RESPONSE_NOT_SIGNED";
+
+    public const string ResponseNotJson = "RESPONSE_NOT_JSON";
+
+    /// <summary>JSON, and not the declared shape.</summary>
+    public const string ResponseInvalid = "RESPONSE_INVALID";
+
+    public const string ResponseTooLarge = "RESPONSE_TOO_LARGE";
+
+    /// <summary>The server's own signed refusal. It is an answer, not an <see cref="AgentTransportException"/>.</summary>
+    public const string ServerRefusal = "SERVER_REFUSAL";
+
+    /// <summary>Nothing above: the exchange failed in a way the agent does not expect.</summary>
+    public const string UnknownError = "UNKNOWN_ERROR";
+}
+
 /// <summary>The transport failed, or the answer could not be proven to be the server's: treat as no contact.</summary>
-public sealed class AgentTransportException(string message, Exception? inner = null) : Exception(message, inner);
+public sealed class AgentTransportException(string code, string message, int? httpStatus = null, Exception? inner = null) : Exception(message, inner)
+{
+    /// <summary>One of <see cref="AgentFailure"/>. This, never the message, is what gets logged.</summary>
+    public string Code { get; } = code;
+
+    /// <summary>The status of the answer, when one arrived.</summary>
+    public int? HttpStatus { get; } = httpStatus;
+}
 
 /// <summary>A verified answer. Either a body to parse, or a stable error code.</summary>
 public sealed record AgentAnswer(int Status, JsonElement Body, string? ErrorCode)
@@ -32,6 +65,14 @@ public sealed class AgentClient
 {
     internal const int MaxResponseBytes = 64 * 1024;
     private const string Prefix = "/api/v1/desktop-agent/";
+
+    /// <summary>
+    /// HttpClient.Timeout ends when the headers arrive, and the server writes the
+    /// body with them. This is one deadline over all of the rest, so a body that
+    /// stalls cannot hold the exchange and one that drips cannot push it back.
+    /// Eight seconds keeps a held poll and its first retry inside the 30-second grace.
+    /// </summary>
+    internal TimeSpan MaxBodyRead { get; init; } = TimeSpan.FromSeconds(8);
 
     private readonly HttpClient http;
     private readonly Uri server;
@@ -73,7 +114,7 @@ public sealed class AgentClient
         JsonElement root;
         try
         {
-            root = Parse(bytes);
+            root = Parse(bytes, status);
         }
         catch (AgentTransportException)
         {
@@ -92,12 +133,12 @@ public sealed class AgentClient
         }
         catch (Exception e) when (e is ProtocolViolationException or KeyNotFoundException or InvalidOperationException)
         {
-            throw new AgentTransportException("The pairing answer did not have the declared shape.", e);
+            throw new AgentTransportException(AgentFailure.ResponseInvalid, "The pairing answer did not have the declared shape.", status, e);
         }
         if (headers.KeyId != paired.ServerKeyId || !Signatures.Verify(paired.ServerPublicKey, Canonical.Response(nonce, status, Canonical.Sha256Hex(bytes)), headers.Signature))
-            throw new AgentTransportException("The pairing answer was not signed by the key it named.");
+            throw new AgentTransportException(AgentFailure.ResponseNotSigned, "The pairing answer was not signed by the key it named.", status);
         if (paired.Fingerprint != Fingerprint.Of(key.PublicKeySpki))
-            throw new AgentTransportException("The server recorded a different key for this computer.");
+            throw new AgentTransportException(AgentFailure.ResponseInvalid, "The server recorded a different key for this computer.", status);
         return (paired, null);
     }
 
@@ -159,11 +200,21 @@ public sealed class AgentClient
     {
         var (status, bytes, headers, nonce) = await SendAsync(route, pairing.DeviceId, body, cancellationToken).ConfigureAwait(false);
         if (headers.KeyId != pairing.ServerKeyId || !Signatures.Verify(pairing.ServerPublicKey, Canonical.Response(nonce, status, Canonical.Sha256Hex(bytes)), headers.Signature))
-            throw new AgentTransportException("The answer was not signed by the pinned server key.");
-        var root = Parse(bytes);
+            throw Unproven(status, headers);
+        var root = Parse(bytes, status);
         if (status is >= 200 and < 300) return new AgentAnswer(status, root, null);
         return new AgentAnswer(status, root, MessageParser.ParseErrorCode(root) ?? "INVALID_REQUEST");
     }
+
+    /// <summary>
+    /// Either way it is discarded. A failure status with no signature at all
+    /// was never the server's to sign — a proxy, or the routes switched off.
+    /// Anything else claimed to be the server's and could not prove it.
+    /// </summary>
+    private static AgentTransportException Unproven(int status, ResponseHeaders headers) =>
+        status is < 200 or >= 300 && headers.Signature is null && headers.KeyId is null
+            ? new AgentTransportException(AgentFailure.HttpStatusError, "The answer was a failure status with no signature.", status)
+            : new AgentTransportException(AgentFailure.ResponseNotSigned, "The answer was not signed by the pinned server key.", status);
 
     private sealed record ResponseHeaders(string? Signature, string? KeyId);
 
@@ -189,39 +240,47 @@ public sealed class AgentClient
         {
             using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
             var status = (int)response.StatusCode;
-            if (status is >= 300 and < 400) throw new AgentTransportException("Redirects are not followed.");
-            var bytes = await ReadBoundedAsync(response, cancellationToken).ConfigureAwait(false);
+            if (status is >= 300 and < 400) throw new AgentTransportException(AgentFailure.HttpStatusError, "Redirects are not followed.", status);
+            using var bodyDeadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            bodyDeadline.CancelAfter(http.Timeout > TimeSpan.Zero && http.Timeout < MaxBodyRead ? http.Timeout : MaxBodyRead);
+            var bytes = await ReadBoundedAsync(response, status, bodyDeadline.Token).ConfigureAwait(false);
             return (status, bytes, new ResponseHeaders(Single(response, "x-jarvis-response-signature"), Single(response, "x-jarvis-response-key")), nonce);
         }
         catch (HttpRequestException e)
         {
-            throw new AgentTransportException("The server could not be reached.", e);
+            throw new AgentTransportException(AgentFailure.TransportError, "The server could not be reached.", null, e);
         }
-        catch (TaskCanceledException e) when (!cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException e) when (!cancellationToken.IsCancellationRequested)
         {
-            throw new AgentTransportException("The server did not answer in time.", e);
+            // HttpClient's timeout, or the body's deadline. The caller's own cancellation passes through.
+            throw new AgentTransportException(AgentFailure.TransportError, "The server did not answer in time.", null, e);
+        }
+        catch (IOException e)
+        {
+            // Only the headers are in hand when SendAsync returns; the rest is read from the wire.
+            throw new AgentTransportException(AgentFailure.TransportError, "The connection broke during the answer.", null, e);
         }
     }
 
     private static string? Single(HttpResponseMessage response, string name) =>
         response.Headers.TryGetValues(name, out var values) && values.Count() == 1 ? values.First() : null;
 
-    private static async Task<byte[]> ReadBoundedAsync(HttpResponseMessage response, CancellationToken cancellationToken)
+    private static async Task<byte[]> ReadBoundedAsync(HttpResponseMessage response, int status, CancellationToken cancellationToken)
     {
-        if (response.Content.Headers.ContentLength > MaxResponseBytes) throw new AgentTransportException("The answer is too large.");
+        if (response.Content.Headers.ContentLength > MaxResponseBytes) throw new AgentTransportException(AgentFailure.ResponseTooLarge, "The answer is too large.", status);
         using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
         using var buffer = new MemoryStream();
         var chunk = new byte[8192];
         int read;
         while ((read = await stream.ReadAsync(chunk, cancellationToken).ConfigureAwait(false)) > 0)
         {
-            if (buffer.Length + read > MaxResponseBytes) throw new AgentTransportException("The answer is too large.");
+            if (buffer.Length + read > MaxResponseBytes) throw new AgentTransportException(AgentFailure.ResponseTooLarge, "The answer is too large.", status);
             buffer.Write(chunk, 0, read);
         }
         return buffer.ToArray();
     }
 
-    private static JsonElement Parse(byte[] bytes)
+    private static JsonElement Parse(byte[] bytes, int status)
     {
         try
         {
@@ -230,7 +289,7 @@ public sealed class AgentClient
         }
         catch (JsonException e)
         {
-            throw new AgentTransportException("The answer was not JSON.", e);
+            throw new AgentTransportException(AgentFailure.ResponseNotJson, "The answer was not JSON.", status, e);
         }
     }
 
