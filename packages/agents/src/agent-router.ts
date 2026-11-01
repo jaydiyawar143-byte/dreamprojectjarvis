@@ -18,6 +18,7 @@
 // ---------------------------------------------------------------------------
 
 import type { AgentDomain, ConversationMessage } from "@jarvis/core";
+import { looksLikeDesktopRequest } from "@jarvis/core";
 import { AGENT_IDS } from "./agent-policy.js";
 
 export interface RouteCandidate {
@@ -423,6 +424,18 @@ export function rankAgentCandidates(
       domain: "browser",
       confidence: 0.95,
       reason: "message contains an explicit web URL",
+    });
+  }
+
+  // Phase 19.7 — a request for the owner's own computer. Below a pasted link,
+  // which names a page, and above every keyword heuristic: "open Chrome" names
+  // an application, not a web search. Reaching this agent authorizes nothing.
+  if (looksLikeDesktopRequest(text)) {
+    candidates.push({
+      agentId: AGENT_IDS.desktop,
+      domain: "desktop",
+      confidence: 0.92,
+      reason: "message asks to open an application or type on the paired computer",
     });
   }
 

@@ -21,12 +21,13 @@
 //   • every message, as a strict schema: an unknown field, an unknown action,
 //     an oversized value or another protocol version is refused.
 //
-// The v1 command set is the 19.1 vocabulary (`computer-control.ts`) without
+// The command set is the 19.1 vocabulary (`computer-control.ts`) without
 // screen reading, which the owner excluded (D4): click, key, and typing, which
 // needs an in-app approval AND Windows Hello on the device for each command
-// (D1). Ending a session is a state change, not a command. There is no shell,
-// script, process, file, clipboard, registry or elevation command, and no way
-// to express one.
+// (D1). Stage 19.7 adds one action by the owner's decision: opening one
+// application from a fixed list, by id. Ending a session is a state change,
+// not a command. There is no shell, script, file, clipboard, registry or
+// elevation command, no way to name a program, and no way to express one.
 //
 // Written with `zod/v4` (bundled with the repo's zod 3.25) because it exports
 // JSON Schema, which the .NET agent's contract tests read.
@@ -35,7 +36,7 @@
 import { KeyObject, createHash, createPrivateKey, createPublicKey, randomBytes, sign, verify } from "node:crypto";
 import { z } from "zod/v4";
 
-import { DESKTOP_COORDINATE_MAX, DESKTOP_KEY_NAMES, type DesktopKeyName } from "./computer-control.js";
+import { DESKTOP_APP_IDS, DESKTOP_APP_LABELS, DESKTOP_COORDINATE_MAX, DESKTOP_KEY_NAMES, type DesktopAppId, type DesktopKeyName } from "./computer-control.js";
 import { BROWSER_INPUT_TEXT_MAX_LENGTH } from "./types/browser.js";
 
 // ---------------------------------------------------------------------------
@@ -44,7 +45,7 @@ import { BROWSER_INPUT_TEXT_MAX_LENGTH } from "./types/browser.js";
 
 export const DESKTOP_PROTOCOL_VERSION = "jarvis-desktop/1" as const;
 /** The agent release this server was built with; the default minimum it accepts. */
-export const DESKTOP_AGENT_CURRENT_VERSION = "1.0.0";
+export const DESKTOP_AGENT_CURRENT_VERSION = "1.1.0";
 
 export const DESKTOP_PAIRING_CODE_TTL_MS = 10 * 60_000;
 export const DESKTOP_COMMAND_TTL_MS = 30_000;
@@ -54,17 +55,26 @@ export const DESKTOP_GRANT_MAX_MINUTES = 60;
 export const DESKTOP_RECONNECT_GRACE_MS = 30_000;
 /** How long the server holds a poll open. Below the grace, so a held poll is never a disconnect. */
 export const DESKTOP_POLL_HOLD_MS = 20_000;
+/**
+ * How long the agent waits, once a typing command arrives, before it fixes the
+ * window it will type into. The person usually approves in a browser on the same
+ * computer, so at that moment the browser has the focus. This is their moment to
+ * click where the text should go; Windows Hello then names that window. Well
+ * inside a command's life, which is what Windows Hello has left to run in.
+ */
+export const DESKTOP_TYPE_FOCUS_WAIT_MS = 6_000;
 /** Windows 11's first build. A deployment's minimum (`DESKTOP_AGENT_MIN_WINDOWS_BUILD`) is never below it. */
 export const DESKTOP_WINDOWS_11_FIRST_BUILD = 22_000;
 
 // ---------------------------------------------------------------------------
-// The v1 command set (D1, D4, D5)
+// The command set (D1, D4; Stage 19.7 added the launch)
 // ---------------------------------------------------------------------------
 
 export const DESKTOP_COMMAND_ACTIONS = Object.freeze([
   "desktop.input.click",
   "desktop.input.key",
   "desktop.input.type",
+  "desktop.app.launch",
 ] as const);
 export type DesktopCommandAction = (typeof DESKTOP_COMMAND_ACTIONS)[number];
 
@@ -82,8 +92,10 @@ export function desktopActionRequiresHello(action: DesktopCommandAction): boolea
 export const DESKTOP_GRANT_SCOPES = DESKTOP_COMMAND_ACTIONS;
 export type DesktopGrantScope = DesktopCommandAction;
 
-/** The longest text one command may type. */
+/** The longest text one command may ever type: the protocol's bound, on both sides. */
 export const DESKTOP_TYPE_TEXT_MAX_LENGTH = BROWSER_INPUT_TEXT_MAX_LENGTH;
+/** A deployment's own limit, below that bound, unless `DESKTOP_TYPE_MAX_LENGTH` says otherwise. */
+export const DESKTOP_TYPE_TEXT_DEFAULT_MAX_LENGTH = 1_000;
 
 /** No lone surrogate: text that UTF-8 can carry exactly, as typing and hashing need. */
 function isWellFormedUtf16(value: string): boolean {
@@ -103,7 +115,9 @@ function isWellFormedUtf16(value: string): boolean {
 /**
  * Text a command may type: not empty, within the bound, and no control
  * characters. A newline or a tab would press Enter or Tab inside "typing";
- * those are keys, and a key is its own command with its own approval.
+ * those are keys, and a key is its own command with its own approval. Nor any
+ * format character (Stage 19.7): a direction override or a zero-width space
+ * would make what the person approved differ from what they read.
  */
 export function isTypeableText(value: unknown): value is string {
   if (typeof value !== "string" || value.length === 0 || value.length > DESKTOP_TYPE_TEXT_MAX_LENGTH) return false;
@@ -111,6 +125,7 @@ export function isTypeableText(value: unknown): value is string {
   for (const character of value) {
     const code = character.codePointAt(0)!;
     if (code < 0x20 || (code >= 0x7f && code <= 0x9f) || code === 0x2028 || code === 0x2029) return false;
+    if (/\p{Cf}/u.test(character)) return false;
   }
   return true;
 }
@@ -308,7 +323,8 @@ export type DesktopMouseButton = (typeof DESKTOP_MOUSE_BUTTONS)[number];
 export type DesktopCommandParams =
   | { action: "desktop.input.click"; x: number; y: number; button: DesktopMouseButton }
   | { action: "desktop.input.key"; key: DesktopKeyName }
-  | { action: "desktop.input.type"; text: string };
+  | { action: "desktop.input.type"; text: string }
+  | { action: "desktop.app.launch"; app: DesktopAppId };
 
 /**
  * One command's parameters, as one ASCII line: integers in decimal, names as
@@ -323,6 +339,8 @@ export function desktopParamsCanonical(params: DesktopCommandParams): string {
       return `key=${params.key}`;
     case "desktop.input.type":
       return `text=${Buffer.from(params.text, "utf8").toString("base64url")}`;
+    case "desktop.app.launch":
+      return `app=${params.app}`;
   }
 }
 
@@ -336,9 +354,16 @@ export interface DesktopCommandParts {
   requiresHello: boolean;
 }
 
+/**
+ * The version of the signed command string. Version 2 (Stage 19.7) is the one
+ * with a launch in it: an agent of version 1 cannot verify such a command, and
+ * a command signed for version 1 is refused here.
+ */
+export const DESKTOP_COMMAND_FORMAT_VERSION = "jarvis-desktop-command/2" as const;
+
 export function desktopCommandCanonical(parts: DesktopCommandParts): string {
   return [
-    "jarvis-desktop-command/1",
+    DESKTOP_COMMAND_FORMAT_VERSION,
     parts.commandId,
     parts.deviceId,
     parts.grantId,
@@ -354,14 +379,15 @@ export function desktopCommandCanonical(parts: DesktopCommandParts): string {
 // Consent (U5c) — versioned wording, rendered identically on both sides
 // ---------------------------------------------------------------------------
 
-export const DESKTOP_CONSENT_TEXT_VERSION = "desktop-consent/1" as const;
+export const DESKTOP_CONSENT_TEXT_VERSION = "desktop-consent/2" as const;
 /** The kill switch. The agent honours it only from a physical keyboard. */
 export const DESKTOP_KILL_SWITCH = "Ctrl+Alt+Shift+F12";
 
 const SCOPE_LINES: Readonly<Record<DesktopGrantScope, string>> = Object.freeze({
   "desktop.input.click": "- click at positions on this screen",
   "desktop.input.key": "- press Enter, Tab, Escape, Backspace, Delete and the arrow keys",
-  "desktop.input.type": "- type text, only after you verify each time with Windows Hello",
+  "desktop.input.type": "- type approved text, only after you verify each time with Windows Hello",
+  "desktop.app.launch": `- open approved applications: ${DESKTOP_APP_IDS.map((id) => DESKTOP_APP_LABELS[id]).join(", ")}`,
 });
 
 /** A grant's scope in the one order it is shown and signed in; null when it is not a valid scope. */
@@ -393,7 +419,9 @@ export function renderDesktopConsentText(input: {
     "JARVIS may:",
     ...DESKTOP_GRANT_SCOPES.filter((s) => input.scope.includes(s)).map((s) => SCOPE_LINES[s]),
     "",
-    "JARVIS cannot see your screen, run programs or scripts, open, read or change files, use the clipboard, change settings, or act in windows that run as administrator.",
+    "You approve every action in JARVIS before it runs, and every typing action also needs Windows Hello.",
+    "",
+    "JARVIS cannot see your screen. It cannot run any other program, shell command or script, open, read or change files, use the clipboard, change settings, or act in windows that run as administrator.",
     "",
     `Control ends after ${minutes}, when you lock this computer, sign out or restart, or when you press ${DESKTOP_KILL_SWITCH}.`,
   ].join("\n");
@@ -457,7 +485,7 @@ export const DESKTOP_ERROR_CODES = Object.freeze([
 ] as const);
 export type DesktopErrorCode = (typeof DESKTOP_ERROR_CODES)[number];
 
-/** Why an agent did not act. Each means: nothing was typed, clicked or pressed. */
+/** Why an agent did not act. Each means: nothing was typed, clicked, pressed or started. */
 export const DESKTOP_NOT_EXECUTED_CODES = Object.freeze([
   "HELLO_UNAVAILABLE",
   "HELLO_FAILED",
@@ -469,6 +497,8 @@ export const DESKTOP_NOT_EXECUTED_CODES = Object.freeze([
   "COMMAND_EXPIRED",
   "INVALID_COMMAND",
   "BUSY",
+  "APP_NOT_INSTALLED",
+  "LAUNCH_FAILED",
 ] as const);
 export type DesktopNotExecutedCode = (typeof DESKTOP_NOT_EXECUTED_CODES)[number];
 
@@ -525,6 +555,7 @@ export const DesktopPollRequestSchema = z.strictObject({
 const ClickParams = z.strictObject({ x: Coordinate, y: Coordinate, button: z.enum(DESKTOP_MOUSE_BUTTONS) });
 const KeyParams = z.strictObject({ key: z.enum(DESKTOP_KEY_NAMES) });
 const TypeParams = z.strictObject({ text: z.string().min(1).max(DESKTOP_TYPE_TEXT_MAX_LENGTH) });
+const LaunchParams = z.strictObject({ app: z.enum(DESKTOP_APP_IDS) });
 
 const commandFields = {
   commandId: Uuid,
@@ -541,6 +572,7 @@ export const DesktopCommandEnvelopeSchema = z.discriminatedUnion("action", [
   z.strictObject({ ...commandFields, action: z.literal("desktop.input.click"), params: ClickParams }),
   z.strictObject({ ...commandFields, action: z.literal("desktop.input.key"), params: KeyParams }),
   z.strictObject({ ...commandFields, action: z.literal("desktop.input.type"), params: TypeParams }),
+  z.strictObject({ ...commandFields, action: z.literal("desktop.app.launch"), params: LaunchParams }),
 ]);
 
 const DeviceState = z.strictObject({ status: z.enum(["pending", "active"]) });
@@ -563,7 +595,8 @@ export const DesktopGrantRequestSchema = z.strictObject({
   grantId: Uuid,
   durationMinutes: DurationMinutes,
   scope: z.array(z.enum(DESKTOP_GRANT_SCOPES)).min(1).max(DESKTOP_GRANT_SCOPES.length),
-  consentTextVersion: z.literal(DESKTOP_CONSENT_TEXT_VERSION),
+  /** Any version may arrive, so an older agent is told CONSENT_MISMATCH and to update, not INVALID_REQUEST. */
+  consentTextVersion: z.string().regex(/^desktop-consent\/[0-9]{1,4}$/),
   consentTextSha256: Sha256Hex,
   /** Set when this consent extends a grant that is still active: fresh consent ends it and starts this one. */
   replacesGrantId: Uuid.nullable(),
@@ -635,13 +668,15 @@ export function parseDesktopMessage<S extends z.ZodType>(schema: S, value: unkno
 }
 
 // ---------------------------------------------------------------------------
-// What a person may ask for (D5) — through the web UI only
+// What may be asked for — by a person on the web page, or (for a launch and
+// typing, Stage 19.7) by the owner in chat through the same service
 // ---------------------------------------------------------------------------
 
 export const DesktopCommandRequestSchema = z.discriminatedUnion("action", [
   z.strictObject({ action: z.literal("desktop.input.click"), x: Coordinate, y: Coordinate, button: z.enum(DESKTOP_MOUSE_BUTTONS).optional() }),
   z.strictObject({ action: z.literal("desktop.input.key"), key: z.enum(DESKTOP_KEY_NAMES) }),
   z.strictObject({ action: z.literal("desktop.input.type"), text: z.string().refine(isTypeableText) }),
+  z.strictObject({ action: z.literal("desktop.app.launch"), app: z.enum(DESKTOP_APP_IDS) }),
 ]);
 export type DesktopCommandRequest = z.infer<typeof DesktopCommandRequestSchema>;
 
@@ -654,6 +689,8 @@ export function desktopCommandParams(request: DesktopCommandRequest): DesktopCom
       return { action: request.action, key: request.key };
     case "desktop.input.type":
       return { action: request.action, text: request.text };
+    case "desktop.app.launch":
+      return { action: request.action, app: request.app };
   }
 }
 

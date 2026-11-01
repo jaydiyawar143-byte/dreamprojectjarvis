@@ -5,8 +5,10 @@
 // start control (consent happens on the computer), never implies it can see
 // the screen (D4), never lets a fingerprint be confirmed without the person
 // typing what the computer shows, and says Windows Hello will be asked before
-// anything is typed. When the server has desktop control off, it says so and
-// draws no control. lib/api is mocked — no network.
+// anything is typed. Since Stage 19.7 it shows the exact text before it is
+// approved, and opens an application by the owner's list. When the server has
+// desktop control off, it says so and draws no control. lib/api is mocked — no
+// network.
 // ---------------------------------------------------------------------------
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -93,7 +95,7 @@ describe("Phase 19.6 — Computer Control page", () => {
     expect(screen.queryByRole("button", { name: /allow|start/i })).toBeNull();
   });
 
-  it("asks for typing as an approval, says Windows Hello comes next, and never shows the text back", async () => {
+  it("asks for typing as an approval, shows the exact text, and says Windows Hello comes next", async () => {
     mocked.listDesktopDevices.mockResolvedValue(
       ok([device({ grant: { scope: ["desktop.input.type", "desktop.input.click"], durationMinutes: 15, expiresAt: new Date(Date.now() + 900_000).toISOString() } })])
     );
@@ -112,11 +114,12 @@ describe("Phase 19.6 — Computer Control page", () => {
     );
     render(<ComputerControlPage />);
     const field = (await screen.findByLabelText("Text to type")) as HTMLInputElement;
-    expect(field.type).toBe("password");
-    fireEvent.change(field, { target: { value: "hunter2-TYPED" } });
+    expect(field.type).toBe("text");
+    fireEvent.change(field, { target: { value: "Hello Sirish" } });
     fireEvent.click(screen.getByTestId("request-command"));
     expect(await screen.findByTestId("hello-notice")).toHaveTextContent("Windows Hello");
-    expect(document.body.textContent).not.toContain("hunter2-TYPED");
+    expect(screen.getByTestId("exact-text")).toHaveTextContent("Hello Sirish");
+    expect(field.value).toBe("");
     fireEvent.click(screen.getByTestId("approve-command"));
     await waitFor(() => expect(mocked.confirmDesktopCommand).toHaveBeenCalledWith(device().id, "apr-00000001"));
   });
@@ -183,6 +186,65 @@ describe("Phase 19.6 — Computer Control page", () => {
     expect(await screen.findByText("You are not allowed to do this.")).toBeInTheDocument();
     await waitFor(() => expect(screen.queryByTestId("generate-pairing-code")).toBeNull());
     expect(screen.getByText("You are not allowed to do this.")).toBeInTheDocument();
+  });
+
+  describe("Phase 19.7 — opening an application", () => {
+    const allowing = (scope: string[]) =>
+      mocked.listDesktopDevices.mockResolvedValue(ok([device({ grant: { scope, durationMinutes: 15, expiresAt: new Date(Date.now() + 900_000).toISOString() } })]));
+    const askedFor = (action: "desktop.app.launch" | "desktop.input.type", summary: string, requiresHello = false) =>
+      mocked.requestDesktopCommand.mockResolvedValue(ok({ approvalId: "apr-00000002", action, summary, detailLines: [], requiresHello, expiresAt: new Date(Date.now() + 600_000).toISOString() }));
+
+    it("offers exactly the owner's list, by id, and asks no Windows Hello", async () => {
+      allowing(["desktop.app.launch"]);
+      askedFor("desktop.app.launch", "Open Google Chrome on the paired Windows desktop.");
+      render(<ComputerControlPage />);
+      const select = (await screen.findByLabelText("Application")) as HTMLSelectElement;
+      expect([...select.options].map((o) => o.value)).toEqual(["notepad", "calculator", "edge", "chrome", "explorer"]);
+      fireEvent.change(select, { target: { value: "chrome" } });
+      fireEvent.click(screen.getByTestId("request-command"));
+      await waitFor(() => expect(mocked.requestDesktopCommand).toHaveBeenCalledWith(device().id, { action: "desktop.app.launch", app: "chrome" }));
+      expect(await screen.findByText("Open Google Chrome on the paired Windows desktop.")).toBeInTheDocument();
+      expect(screen.queryByTestId("hello-notice")).toBeNull();
+      expect(screen.queryByTestId("exact-text")).toBeNull();
+    });
+
+    it("does not offer it when the grant does not cover it", async () => {
+      allowing(["desktop.input.click"]);
+      render(<ComputerControlPage />);
+      await screen.findByTestId("command-panel");
+      expect(screen.queryByRole("option", { name: "open an application" })).toBeNull();
+    });
+
+    it("forgets the words when the request is cancelled", async () => {
+      allowing(["desktop.input.type"]);
+      askedFor("desktop.input.type", "Type into the focused window on the paired Windows desktop.", true);
+      render(<ComputerControlPage />);
+      fireEvent.change(await screen.findByLabelText("Text to type"), { target: { value: "Hello Sirish" } });
+      fireEvent.click(screen.getByTestId("request-command"));
+      expect(await screen.findByTestId("exact-text")).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+      expect(screen.queryByTestId("exact-text")).toBeNull();
+      expect(document.body.textContent).not.toContain("Hello Sirish");
+    });
+
+    it("says why the computer did not act", async () => {
+      allowing(["desktop.app.launch"]);
+      mocked.listDesktopCommands.mockResolvedValue(
+        ok([{ id: "c1", action: "desktop.app.launch", status: "not_executed" as const, requiresHello: false, issuedAt: new Date().toISOString(), expiresAt: new Date().toISOString(), completedAt: new Date().toISOString(), resultCode: "APP_NOT_INSTALLED" }])
+      );
+      render(<ComputerControlPage />);
+      expect(await screen.findByText("not installed there")).toBeInTheDocument();
+    });
+
+    it("states what is allowed and what stays prohibited", async () => {
+      allowing(["desktop.app.launch"]);
+      render(<ComputerControlPage />);
+      await screen.findByTestId("command-panel");
+      expect(document.body.textContent).toContain("open approved applications");
+      expect(document.body.textContent).toContain("You approve every action before it runs");
+      expect(document.body.textContent).toContain("cannot see the screen");
+      expect(document.body.textContent).toContain("any other program, shell command or script");
+    });
   });
 
   it("says click positions count from the top-left corner of the whole desktop", async () => {

@@ -18,6 +18,7 @@ export {
 } from "./agents/communication-agent.js";
 export { GoogleAdsAgent } from "./agents/google-ads-agent.js";
 export { BrowserAgent } from "./agents/browser-agent.js";
+export { DesktopAgent } from "./agents/desktop-agent.js";
 export { LocationAgent } from "./agents/location-agent.js";
 // Phase 15 — the marketing workspace agent.
 export { MarketingAgent, marketingPrompt, publishingOffered, type MarketingAgentConfig } from "./agents/marketing-agent.js";

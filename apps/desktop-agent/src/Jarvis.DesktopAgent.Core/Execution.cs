@@ -8,11 +8,13 @@
 //   the grant is active here and covers the action;
 //   the session is not locked;
 //   there is a window to act in, it is not elevated, and it is not this agent;
-//   for typing, the person verified with Windows Hello, for this command —
-//   and the window did not change while they did.
-// Only click, key and type exist. A command that was refused before input was
-// sent is "not-executed" with a reason; one interrupted after input was sent
-// is "uncertain" — the server records it UNKNOWN and nothing retries it.
+//   for typing, the person had a moment to choose the window, verified with
+//   Windows Hello, for this command and that window, and it is still that window.
+// Only click, key, type and opening an approved application exist. A command
+// that was refused before input was sent is "not-executed" with a reason; one
+// interrupted after input was sent is "uncertain" — the server records it
+// UNKNOWN and nothing retries it. Opening an application never types: typing is
+// a command of its own, with its own approval and its own Windows Hello.
 // ---------------------------------------------------------------------------
 
 namespace Jarvis.DesktopAgent.Core;
@@ -48,7 +50,7 @@ public enum InjectionResult
     Partial,
 }
 
-/// <summary>Sends input. No other capability: nothing here launches, reads or opens anything.</summary>
+/// <summary>Sends input. No other capability: nothing here reads or opens anything.</summary>
 public interface IInputInjector
 {
     InjectionResult Click(int screenX, int screenY, string button);
@@ -56,6 +58,24 @@ public interface IInputInjector
     InjectionResult Key(string key);
 
     InjectionResult Type(string text);
+}
+
+public enum LaunchResult
+{
+    /// <summary>Windows created the process. Whether a window appeared cannot be seen from here.</summary>
+    Started,
+
+    /// <summary>The application is not at any place the agent may open it from. Nothing ran.</summary>
+    NotInstalled,
+
+    /// <summary>Windows refused to create the process. Nothing ran.</summary>
+    Failed,
+}
+
+/// <summary>Opens one application from the fixed list. It takes an id: a path, an argument or a command line cannot be expressed.</summary>
+public interface IAppLauncher
+{
+    LaunchResult Launch(string app);
 }
 
 public enum HelloResult
@@ -151,10 +171,17 @@ public sealed class CommandRunner(
     IInputInjector injector,
     IHelloVerifier hello,
     ISessionState session,
-    AgentLog log)
+    AgentLog log,
+    IAppLauncher launcher,
+    TimeSpan typeFocusWait)
 {
     /// <summary>Text is typed in pieces, and the window is checked between them.</summary>
     internal const int TypeChunkLength = 32;
+
+    /// <summary>How long the window may take to get the focus back when Windows Hello closes.</summary>
+    internal const int FocusReturnMs = 2_000;
+
+    private const int FocusPollMs = 100;
 
     private int busy;
 
@@ -215,9 +242,23 @@ public sealed class CommandRunner(
             case TypeParams type:
                 return await TypeAsync(command, type.Text, receivedAt, cancellationToken).ConfigureAwait(false);
 
+            case LaunchParams launch:
+                return Report(launch);
+
             default:
                 return CommandOutcome.NotExecuted("INVALID_COMMAND");
         }
+    }
+
+    private CommandOutcome Report(LaunchParams launch)
+    {
+        if (!ProtocolConstants.AppIds.Contains(launch.App)) return CommandOutcome.NotExecuted("INVALID_COMMAND");
+        return launcher.Launch(launch.App) switch
+        {
+            LaunchResult.Started => CommandOutcome.Succeeded,
+            LaunchResult.NotInstalled => CommandOutcome.NotExecuted("APP_NOT_INSTALLED"),
+            _ => CommandOutcome.NotExecuted("LAUNCH_FAILED"),
+        };
     }
 
     private static CommandOutcome Report(InjectionResult result) => result switch
@@ -230,6 +271,23 @@ public sealed class CommandRunner(
 
     private async Task<CommandOutcome> TypeAsync(CommandEnvelope command, string text, long receivedAt, CancellationToken cancellationToken)
     {
+        // The person usually approves in a browser on this computer, so right now
+        // the browser has the focus, and typing there would put the text in the
+        // chat. This is their moment to click where it should go. Control ending
+        // cuts it short, and everything is checked again after it.
+        if (typeFocusWait > TimeSpan.Zero)
+        {
+            try
+            {
+                await Task.Delay(typeFocusWait, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                return CommandOutcome.NotExecuted("GRANT_INACTIVE");
+            }
+            if (Recheck(command, receivedAt, cancellationToken) is { } after) return CommandOutcome.NotExecuted(after);
+        }
+
         // D1: never typed on the approval alone. The target is fixed before
         // Hello and named in its prompt; the text itself is never shown.
         var target = inspector.Foreground();
@@ -260,8 +318,8 @@ public sealed class CommandRunner(
         {
             // Again, after Hello and between pieces: the grant, the clock, the
             // lock, and the very same window, still not elevated.
+            var now = sent ? inspector.Foreground() : await FocusAfterHelloAsync(target!, cancellationToken).ConfigureAwait(false);
             var stop = Recheck(command, receivedAt, cancellationToken);
-            var now = inspector.Foreground();
             stop ??= !Same(now, target) ? "NO_TARGET" : Refusal(now);
             if (stop is not null) return sent ? CommandOutcome.Uncertain : CommandOutcome.NotExecuted(stop);
 
@@ -271,6 +329,29 @@ public sealed class CommandRunner(
             sent = true;
         }
         return CommandOutcome.Succeeded;
+    }
+
+    /// <summary>
+    /// The window with the focus just after Windows Hello. Hello's own window held
+    /// it, and it goes back a moment after that closes. A window that does not get
+    /// it back in time is a window that changed, and nothing is typed.
+    /// </summary>
+    private async Task<WindowTarget?> FocusAfterHelloAsync(WindowTarget target, CancellationToken cancellationToken)
+    {
+        var now = inspector.Foreground();
+        for (var waited = 0; !Same(now, target) && waited < FocusReturnMs; waited += FocusPollMs)
+        {
+            try
+            {
+                await Task.Delay(FocusPollMs, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                return now;
+            }
+            now = inspector.Foreground();
+        }
+        return now;
     }
 
     /// <summary>What Windows Hello shows: which program will receive the typing and how much — never the text.</summary>

@@ -14,6 +14,7 @@ import {
   CommunicationAgent,
   GoogleAdsAgent,
   BrowserAgent,
+  DesktopAgent,
   LocationAgent,
   MarketingAgent,
   PendingActionService,
@@ -58,6 +59,7 @@ import {
   RepositoryRecipientAuthorizer,
   N8nTriggerWorkflowTool,
   createBrowserTools,
+  createDesktopTools,
   createMapsTools,
   createAmbientTools,
 } from "@jarvis/tools";
@@ -328,8 +330,8 @@ export interface Container {
   /**
    * Phase 19.6 — the Windows desktop agent's one authority. Null unless
    * DESKTOP_AGENT_ENABLED=true and everything it needs is configured; then no
-   * desktop route is mounted at all. There are no model-facing desktop tools
-   * (D5): only the web UI's routes reach it.
+   * desktop route is mounted at all. The web UI's routes reach it, and chat's
+   * two tools, which propose and never decide (Stage 19.7).
    */
   desktopControl: DesktopControlService | null;
   /** PHASE 11.9 — pending action service for write-tool confirmation flow. */
@@ -1293,6 +1295,7 @@ export function getContainer(options?: {
   const desktopAgent = loadDesktopAgentConfig();
   let desktopControl: DesktopControlService | null = null;
   if (desktopAgent.enabled && approvalSealer) {
+    const desktopLog = operationalLog.child("desktop-agent");
     const service = new DesktopControlService({
       store: new PrismaDesktopRepository(prisma),
       memberships: tenantRepo,
@@ -1303,9 +1306,9 @@ export function getContainer(options?: {
       slots: new AtomicRateLimiter(auditRepo, RATE_LIMIT_NAMESPACES.desktop),
       config: desktopAgent.config,
       isShuttingDown: () => options?.lifecycle?.isShuttingDown() ?? false,
+      agentLog: desktopLog,
     });
     desktopControl = service;
-    const desktopLog = operationalLog.child("desktop-agent");
     setInterval(() => void service.sweep().catch(() => desktopLog.warn("desktop_agent_sweep_failed")), 10_000).unref();
     desktopLog.info("desktop_agent_enabled", {
       minWindowsBuild: desktopAgent.config.minWindowsBuild,
@@ -1456,6 +1459,10 @@ export function getContainer(options?: {
     approvalSealer !== null
   );
   registryRef.current = toolRegistry;
+  // Phase 19.7 — off with the rest of desktop control: no service, no tools.
+  if (desktopControl) {
+    for (const tool of createDesktopTools(desktopControl)) toolRegistry.register(tool);
+  }
 
   // ---------------------------------------------------------------------------
   // S7.2 L5 — memory management.
@@ -2008,6 +2015,17 @@ export function getContainer(options?: {
     );
   }
 
+  // Phase 19.7 — only where desktop control is on, so a deployment without it
+  // never offers an agent that cannot act.
+  if (hasTool("desktop.app.launch")) {
+    agentRegistry.register(
+      new DesktopAgent({
+        provider: adapter,
+        tools: toolDefsFor(AGENT_POLICIES[AGENT_IDS.desktop]!.allowedTools),
+      })
+    );
+  }
+
   // Maps. Gated the same way as the others for consistency, but the guard is
   // effectively always true: the maps tools register unconditionally because
   // the geo layer answers from OpenStreetMap without a Google key. The check
@@ -2322,6 +2340,7 @@ export function getContainer(options?: {
     // Phase 15: the publish tools where publishing is off, and the page reads
     // where page reads are off — each with why.
     switchedOffTools: marketingSwitchedOffTools,
+    ...(desktopControl ? { desktopChat: desktopControl } : {}),
     // Phase 17: the same gate the executor asks, asked before a pending action
     // is created — a write nobody could let this caller make is refused now.
     accessGate: sharedToolGate,

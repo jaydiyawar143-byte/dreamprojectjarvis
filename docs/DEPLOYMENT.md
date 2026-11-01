@@ -559,20 +559,24 @@ code.
 | `artifact_integrity_failed` | Both | An artifact's bytes no longer match its record | It is refused, and swept at expiry. Find out what changed the directory |
 | `artifact_record_unsupported`, or `preserved` above zero in `artifact_sweep` | Both | Records written by a newer release, after a rollback or beside a newer instance on the same directory | Expected. They are kept, and served again once the newer release runs |
 
-### The Windows desktop agent (Phase 19.6, optional)
+### The Windows desktop agent (Phases 19.6 and 19.7, optional)
 
 A per-user Windows app (`apps/desktop-agent`) that lets a person allow JARVIS
-to click, press a few named keys and type on their own Windows 11 computer, for
-a time they choose. It is **off**: with `DESKTOP_AGENT_ENABLED` unset no
-desktop route is mounted, the Computer Control page says desktop control is
-switched off, and nothing can pair. The record is
-[`phases/phase-19.md`](phases/phase-19.md), §18.
+to click, press a few named keys, type approved text and open approved
+applications on their own Windows 11 computer, for a time they choose. It is
+**off**: with `DESKTOP_AGENT_ENABLED` unset no desktop route is mounted, chat has
+no desktop tools, the Computer Control page says desktop control is switched
+off, and nothing can pair. The record is
+[`phases/phase-19.md`](phases/phase-19.md), §18 and §19.
 
-What it is not: there are no model-facing desktop tools — only a person on the
-Computer Control page asks for an action and approves it. It cannot see the
-screen, run programs or scripts, open or read files, use the clipboard, change
+What it is not: it cannot see the screen, run any program outside the approved
+list (Notepad, Calculator, Microsoft Edge, Google Chrome, File Explorer), run a
+shell command or a script, open or read files, use the clipboard, change
 settings or act in windows that run as administrator. The agent opens no port:
-it polls the API over HTTPS.
+it polls the API over HTTPS. Every action waits for a person's approval. In chat
+a model can only propose opening an application or typing, and only what the
+owner asked for in their own message. Clicks and named keys are only ever asked
+for on the Computer Control page.
 
 **1. The migration.** `20261031120000_phase19_desktop_agent` adds the desktop
 tables (pairing codes and attempts, devices, grants, commands, command
@@ -587,12 +591,14 @@ openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -outform DER | ba
 
 Put the output in `DESKTOP_AGENT_COMMAND_SIGNING_KEY`. Every computer pins the
 matching public key when it pairs; replacing the key means every computer pairs
-again (revoke them first).
+again. Revoke them first, and check each one acted on it (step 7): once the key
+is replaced, a computer that has not heard can no longer verify the refusal.
 
 **3. Switch it on.** In `.env`: `DESKTOP_AGENT_ENABLED="true"`, the key,
 `DESKTOP_AGENT_MIN_WINDOWS_BUILD` (the oldest Windows 11 build Microsoft still
-services — there is no default), and optionally `DESKTOP_AGENT_MIN_VERSION`.
-`JARVIS_ENCRYPTION_KEY` must be set too: a command's parameters are sealed until
+services — there is no default), and optionally `DESKTOP_AGENT_MIN_VERSION` and
+`DESKTOP_TYPE_MAX_LENGTH` (the longest text one action may type: 1000 unless
+set, 10000 at most). `JARVIS_ENCRYPTION_KEY` must be set too: a command's parameters are sealed until
 the computer collects them. Restart the API. The log says
 `desktop_agent_enabled` with the key id and the two minimums, or
 `desktop_agent_disabled` with the one thing that is missing.
@@ -624,21 +630,178 @@ install the agent (no administrator rights), choose **Pair this computer…**,
 enter the server's `https://` address and the code. The agent shows the
 computer's fingerprint and the server key id; the page shows the same server
 key id. The device's own user types the fingerprint into the page to confirm
-it. Until then the device is pending and can do nothing.
+it. Until then the device is pending and can do nothing. The agent saves the
+pairing and starts polling as soon as the server answers, so the tray changes
+from "Waiting for confirmation in JARVIS" to "Paired — control not allowed" on
+its own, whether or not the pairing window is still open. After a restart it
+says "Not connected" until the server answers.
 
 **6. Control.** On the computer, **Allow control…** shows the consent screen:
 the duration (15 minutes by default, up to 60), what JARVIS may do, and the
-exact versioned text whose hash the server records. Allow acts only on a real
-click or key press. While control is allowed a red bar stays at the top of the
+exact versioned text whose hash the server records. Clicking and keys are ticked
+by default; typing and opening applications are off unless the person ticks
+them. Allow acts only on a real click or key press. While control is allowed a red bar stays at the top of the
 screen with **Stop**; `Ctrl+Alt+Shift+F12`, typed on a real keyboard, ends it
 too, as do locking the computer, signing out, restarting, and 30 seconds
-without the server. Extending is fresh consent. On the page, each click, key or
-typing is its own approval. Typing also needs **Windows Hello on the computer,
-every time**; where Hello is not set up, typing is refused.
+without the server. The server stops accepting commands for that computer at
+exactly 30 seconds. The agent ends control then too, unless a retry is already
+open, which gets the 22 seconds a held poll needs; at worst that is about 50
+seconds after its last answer. Extending is fresh consent. On the page, each
+click, key, typing or application is its own approval. Typing also needs
+**Windows Hello on the computer, every time**; where Hello is not set up, typing
+is refused.
+
+Chat can ask for two of those. "Open Notepad." proposes one launch, which the
+owner confirms in the chat; the reply is what the computer answered. "Type
+Hello." shows the exact text first, and is always a message of its own: nothing
+is typed because an application opened. After confirming, the person has 6
+seconds to click into the window where the text should go, then Windows Hello
+names that window. **Verify only if it is the right one.** On that computer
+`Started` means Windows created the process. JARVIS cannot see whether a window
+appeared, and it says so.
+
+An agent older than 1.1.0 cannot start control on this release: the consent
+wording changed, so it is told `CONSENT_MISMATCH`, and with
+`DESKTOP_AGENT_MIN_VERSION` at its default it is refused altogether. Update the
+agent in place (the next section). A device stays paired through an update.
 
 **7. Revoke.** The device's user, or an Owner or Admin of its Organization,
-revokes it on the page. Its next request is refused, control ends, and the
-agent deletes its pairing and its key.
+revokes it on the page. On the server this takes effect at once: the device is
+`revoked`, any grant ends and undelivered commands expire. The next request the
+device makes is refused with a signed `DEVICE_REVOKED`, and that answer is what
+makes the agent end control and delete its pairing and its key.
+
+**Revoking a computer that is offline.** Revocation happens on the server;
+deletion happens on the computer, and only after the computer hears about it.
+
+- **What holds at once.** Every operation the device attempts while talking to
+  the server is refused. It cannot collect a command, start a grant or pair
+  again with the same key.
+- **What does not happen at once.** An offline computer cannot receive the
+  refusal. Its `pairing.json` and its device key in Windows' key storage stay
+  where they are until it reconnects or someone deals with it in person.
+- **`revoked` on the page is the server's decision, nothing more.** It does not
+  mean the computer received the refusal or that the key was deleted. The agent
+  sends nothing back after deleting, so the server holds no record of it and the
+  page cannot show an acknowledgment. `lastSeenAt` does not help: only an
+  accepted poll moves it.
+
+So after revoking, check for the acknowledgment yourself, once the computer is
+back on the network:
+
+1. **In the API log, find the refusal.** It proves the computer reconnected and
+   was answered, not that it deleted anything. The device id is on the
+   `desktop.device.revoke` audit row; the log carries the first 16 hex
+   characters of its SHA-256.
+
+   ```bash
+   printf %s '<device id>' | sha256sum | cut -c1-16
+   docker compose logs api --since 24h | grep desktop.agent.refused | grep DEVICE_REVOKED | grep '<that hash>'
+   ```
+
+   A few lines are normal, and they then stop. Lines that keep coming mean the
+   agent is answered and is not acting on it: see step 4.
+2. **On the computer, as the person who paired it, confirm the agent acted.**
+   Everything is under the package's folder, because Windows redirects a
+   packaged app's `%LOCALAPPDATA%`. That includes a TPM-backed key's file.
+
+   ```powershell
+   $pkg = (Get-Item "$env:LOCALAPPDATA\Packages\JARVIS.DesktopAgent_*").FullName
+   $dir = "$pkg\LocalCache\Local\JARVIS\DesktopAgent"
+   Select-String -Path "$dir\agent.log*" -Pattern 'reason=DEVICE_REVOKED'   # the refusal it accepted
+   Test-Path "$dir\pairing.json"                                            # False
+   # Both of these must print nothing:
+   Get-ChildItem "$pkg\LocalCache" -Recurse -File -Force -ErrorAction SilentlyContinue | Where-Object FullName -Match '\\Crypto\\'
+   certutil -user -csp "Microsoft Software Key Storage Provider" -key | Select-String JARVIS-DesktopAgent-DeviceKey-v1
+   ```
+
+   **Do not use `certutil` to check the TPM key.** Key tools see the agent's
+   TPM-backed key only from inside its package, so `certutil -csp "Microsoft
+   Platform Crypto Provider" -key` lists nothing even while the key exists. Look
+   for its file, as above. `certutil` covers only the software provider, which
+   the agent falls back to on a computer with no usable TPM.
+3. **Only then treat the key as gone.** The agent logs the refusal before it
+   deletes anything, always tries the key even if the pairing file will not go,
+   and reports only an unexpected failure (`pairing.clear.failed`), so the line
+   in `agent.log` alone proves neither.
+4. **If the computer cannot reconnect, or the checks fail, deal with it in
+   person.** That includes a computer that was lost or decommissioned, one whose
+   agent will not start, and one whose log shows `poll.failed
+   code=RESPONSE_NOT_SIGNED httpStatus=403` because the command-signing key was
+   replaced: it can no longer verify the refusal and will never act on it. As
+   that person, remove the package and, only if step 2 listed the name, the
+   software key, then confirm both are gone. Re-image the computer instead if you
+   cannot trust its state. A computer you cannot reach keeps the key on its disk,
+   even though the server refuses everything it signs.
+
+   ```powershell
+   Get-AppxPackage JARVIS.DesktopAgent | Remove-AppxPackage
+   certutil -user -csp "Microsoft Software Key Storage Provider" -delkey JARVIS-DesktopAgent-DeviceKey-v1
+   Test-Path $pkg                                                           # False
+   ```
+
+**Test opening and typing on Windows (Stage 19.7).** No automated test opens an
+application or types anywhere, so this is the only proof that either works on a
+real computer. It acts on the real desktop, so it needs the owner's approval each
+time, and a test machine is better than a working computer. Close everything
+that matters first.
+
+*Update.*
+
+1. **Finish anything in the installed agent first.** No pairing window may be
+   open: a build before this one holds a new pairing only in that window.
+   `Test-Path "$dir\pairing.json"` (step 7 sets `$dir`) must print `True`.
+2. Start the API from this release. The log says `desktop_agent_enabled` with
+   `minAgentVersion` 1.1.0.
+3. Build and install over the old one, as the person who paired it. Do **not**
+   remove the package first: that can take the device key and the pairing with it.
+
+   ```powershell
+   cd apps/desktop-agent
+   ./packaging/build-msix.ps1 -Publisher "CN=JARVIS Test Signing" -TestCertificate
+   Add-AppxPackage ./artifacts/JARVIS.DesktopAgent.msix
+   ```
+
+   With `-TestCertificate`, Windows must trust `artifacts/test-signing.cer` first,
+   in `Trusted People` for the local machine. Quit the agent from the tray before
+   installing, and start it from the Start menu afterwards.
+4. Confirm: `agent.log` has `agent.started agentVersion=1.1.0`, and the tray says
+   it is paired without pairing again.
+
+*Then, in order. Stop at the first row that does not match.*
+
+| # | Do | Expected |
+|---|---|---|
+| 1 | **Allow control…** Tick **Open approved applications** and **Type approved text** | The text lists the five applications, says every action is approved, that typing needs Windows Hello, that JARVIS cannot see the screen and cannot run any other program. Allow works |
+| 2 | In chat: `Open Notepad.` | A card: "Open Notepad on the paired Windows desktop." Nothing opens |
+| 3 | Confirm | Notepad opens. The chat says Windows started it, that JARVIS cannot see the screen, and that nothing was typed. Computer Control shows **Done** |
+| 4 | In chat: `Type Hello Sirish, JARVIS is online.` | A card with the exact text, and the 6-second instruction. Nothing is typed |
+| 5 | Confirm, then click into Notepad within 6 seconds | Windows Hello appears and **names Notepad** |
+| 6 | Verify | The exact text appears in Notepad, once. The chat reports it |
+| 7 | Repeat 4–5, and cancel Windows Hello | Nothing is typed. The chat says Windows Hello was not verified |
+| 8 | Repeat 4, confirm, and **do not** click anywhere | Windows Hello names the browser. Cancel it. This is what the prompt is for |
+| 9 | `Open Notepad and type Hello` | Only the opening is proposed. The typing is refused as its own request |
+| 10 | `Open regedit`, `Run cmd.exe` | Nothing is proposed |
+| 11 | `Type my password is hunter2` | Refused. Nothing is proposed |
+| 12 | Calculator, File Explorer, Edge and Chrome, one at a time | Each opens. **Check the browsers open your own profile** (below) |
+| 13 | Start a command, press `Ctrl+Alt+Shift+F12` | Control ends at once; the red bar goes |
+| 14 | Lock the computer, then ask for anything | Refused: control has ended |
+| 15 | Quit the agent during a grant and start it again | Still paired. Control has ended. Nothing runs by itself |
+
+*What only this can prove, because every automated test fakes it.*
+
+- **That the launcher starts each application from inside the MSIX.** A process a
+  packaged app starts may run with the package's file redirection. Notepad and
+  Calculator should not care, but a browser could open a separate, empty profile
+  in the package's folder instead of the person's. Row 12 is the check.
+- **That Windows Hello hands the focus back.** The agent waits up to 2 seconds
+  for the window to get it back, then refuses with `NO_TARGET`, and nothing is
+  typed.
+- **That a new window gets the focus at all.** Windows can open a window started
+  by a background app behind the others, which is one reason the person clicks
+  into it.
+- **What a live model does.** The automated tests script the model's choices, so
+  they prove the gates and not its judgement. Rows 2, 4, 9 and 10 are the check.
 
 **Check it.**
 
@@ -647,7 +810,8 @@ agent deletes its pairing and its key.
 | Off by default | `curl -s -o /dev/null -w '%{http_code}' -X POST -H 'x-jarvis-desktop-version: jarvis-desktop/1' https://<api>/api/v1/desktop-agent/poll` with the flag unset | `404` |
 | On | the same request with the flag on | `401` (`UNAUTHENTICATED`: unsigned) |
 | No inbound port | on a Windows 11 test computer, with the agent started from the Start menu, paired and with control allowed: `./packaging/check-no-listener.ps1`. It reads the agent already running and never starts one; run it again while Windows Hello is open | `PASS`, naming the agent's pid and its connection to the server. It fails if no agent is running, if more than one is, if the agent stops, if it is not paired and polling, or if the sockets cannot be read |
-| Audit | `AuditLog` rows `desktop.pairing.create`, `desktop.device.pair`, `desktop.device.confirm`, `desktop.grant.start`, `desktop.command.request`, `desktop.command.issue`, `desktop.command.result`, `desktop.session.end`, `desktop.device.revoke` | Ids, actions, codes and counts — never typed text |
+| Audit | `AuditLog` rows `desktop.pairing.create`, `desktop.device.pair`, `desktop.device.confirm`, `desktop.grant.start`, `desktop.command.request`, `desktop.command.issue`, `desktop.command.result`, `desktop.session.end`, `desktop.device.revoke`, and `agent.tool_desktop_refused` for a chat proposal refused | Ids, actions, application ids, codes and counts — never typed text. `desktop.command.issue` says `origin`: `page` or `chat` |
+| A refused device | The API log's `desktop.agent.refused` | One line per refused request, with `route`, `status`, `code` and `deviceIdHash`. Only for a request the device's own key signed: an unsigned or forged request, and any pairing attempt, writes none |
 
 **When something is wrong.**
 
@@ -659,7 +823,34 @@ agent deletes its pairing and its key.
 | The agent says it is not supported | Windows older than `DESKTOP_AGENT_MIN_WINDOWS_BUILD`, or an agent older than `DESKTOP_AGENT_MIN_VERSION` | Update Windows or the agent |
 | Allow fails with "The consent text no longer matches" | The agent and server render different consent text (versions differ), or a label changed since pairing | Update the agent; pair again if a name changed |
 | Typing is `not_executed` with `HELLO_UNAVAILABLE` | Windows Hello is not set up for that person | Set up Hello (PIN, face or fingerprint); there is no other way to type |
+| Typing is `not_executed` with `NO_TARGET` | No window had the focus, or the window changed, or Windows Hello did not hand the focus back within 2 seconds | Click into the window and ask again. Nothing was typed |
+| Windows Hello names the browser | The person did not click into the target window within 6 seconds | Cancel Hello and ask again |
+| An application is `not_executed` with `APP_NOT_INSTALLED` | It is not in any place the agent opens it from. A per-user Chrome is not looked for: anything running as that person could replace it | Install it for all users |
+| An application is `not_executed` with `LAUNCH_FAILED` | Windows would not create the process | Check that it starts by hand |
+| Chat says nothing was proposed | The fixed sentence says why: not asked for in the owner's own words, no paired computer, control not allowed or not covering this action, more than one computer allowing control, or text that looks like a credential | Do what it says. `agent.tool_desktop_refused` holds the code |
 | A command is `unknown` | It reached the computer and no answer came back, or the computer was interrupted while acting | Check the computer. It is never sent again |
+| The page says `revoked` and the computer still looks paired | It has not heard yet: it is offline, its agent is not running, or it cannot verify the answer | Follow "Revoking a computer that is offline" (step 7) |
+| Control ended during a network interruption | The agent ends control 30 seconds after its last answer, and its retries back off, so an interruption of about 15 seconds or more can use up that time even though the server is healthy again | Allow control again on the computer. Nothing is wrong: control ends rather than continue on a guess |
+
+**Why a computer is not polling.** Its `agent.log` (step 7 shows where) says
+why, in `poll.failed attempt=<n> code=<code> httpStatus=<n> retryInMs=<n>`;
+`httpStatus` is there when an answer arrived. These lines hold codes and
+numbers only, never an address, a body or the server's words. A device appears
+only as `deviceIdHash`, the same hash the API logs.
+
+| `code` | Means | Do |
+|---|---|---|
+| `TRANSPORT_ERROR` | No usable answer: the server could not be reached, did not answer in time, the connection broke, or the body did not finish within 8 seconds of the headers | Check the network, DNS and TLS path to the API, and anything buffering in front of it |
+| `HTTP_STATUS_ERROR` | A redirect, or a failure status with no signature: a proxy answered, or the desktop routes are off (`404`) | Check the reverse proxy and `DESKTOP_AGENT_ENABLED` |
+| `RESPONSE_NOT_SIGNED` | The answer was not signed by the key pinned at pairing | If the command-signing key was replaced, pair again; otherwise find what is rewriting responses |
+| `RESPONSE_NOT_JSON` | A signed answer that is not JSON | Compare the API's and the agent's versions |
+| `RESPONSE_TOO_LARGE` | An answer over 64 KB | Check what is answering in front of the API |
+| `RESPONSE_INVALID` | Signed JSON of the wrong shape, logged as `poll.malformed` | Compare the API's and the agent's versions |
+| `UNKNOWN_ERROR` | Something no other code covers, such as Windows' key storage failing to sign. The agent retries with the usual backoff. After five in a row with no answer between them it logs `poll.stopped`, ends any control and stops polling, and the tray says so | If `poll.stopped` appears, quit and start the agent again |
+
+`server.refused code=SERVER_REFUSAL reason=<the server's code> httpStatus=<n>`
+is the server's own signed answer, and the same refusal is
+`desktop.agent.refused` in the API log.
 
 **Turn it off / roll back.** Set `DESKTOP_AGENT_ENABLED="false"` (or unset it)
 and restart the API: the routes disappear, every agent's poll gets `404`, and
@@ -667,8 +858,10 @@ no command can be asked for or delivered. Grants already started end on the
 computer within 30 seconds, when the agent stops hearing from the server. The
 migration stays (rolling back never undoes one); its tables are inert. To
 remove the agent from a computer: `Get-AppxPackage JARVIS.DesktopAgent |
-Remove-AppxPackage`, as that person. Revoke the device first so its key is
-deleted too.
+Remove-AppxPackage`, as that person. Revoke the device first, because a removed
+agent never hears the refusal, then run the checks in step 7 to confirm nothing
+was left behind. A computer revoked while the routes are off hears nothing
+either: it gets a `404`, which tells it nothing.
 
 ## 7. Check the confirmation store
 

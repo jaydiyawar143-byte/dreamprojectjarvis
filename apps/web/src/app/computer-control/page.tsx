@@ -3,9 +3,11 @@
 // ---------------------------------------------------------------------------
 // Phase 19.6 — Computer Control.
 //
-// The one place a person drives a paired Windows computer (D5: no model does).
-// Everything the page shows and every control it draws is decided by the
-// server; the page never decides who may pair, confirm, revoke or command.
+// Where a person pairs a Windows computer and drives it by hand. Chat can ask
+// for an approved application or for typing (Stage 19.7); clicks and named keys
+// are only ever asked for here. Everything the page shows and every control it
+// draws is decided by the server; the page never decides who may pair, confirm,
+// revoke or command.
 //
 //   • Pair: an Owner/Admin chooses one of the Organizations the server says they
 //     administer, generates a one-time code and types it into the JARVIS Desktop
@@ -14,9 +16,11 @@
 //     comparing, not clicking through.
 //   • Consent happens on the computer only. This page shows whether control is
 //     allowed, until when, and can end it — it can never start it.
-//   • A command — a click, a key, typed text — becomes an approval the person
-//     approves here; typing is then verified again with Windows Hello on the
-//     computer, for that command, or it does not run.
+//   • A command — a click, a key, typed text, opening an approved application —
+//     becomes an approval the person approves here; typing is then verified
+//     again with Windows Hello on the computer, for that command, or it does not
+//     run. The exact text is shown before it is approved. It comes from this
+//     browser: the server keeps no copy to send back.
 //   • JARVIS cannot see the computer's screen (D4), and the page never implies
 //     it can.
 // ---------------------------------------------------------------------------
@@ -48,10 +52,19 @@ import { EmptyState, ErrorState, LoadingState } from "@/components/dashboard/sta
 import { Badge, Button, StatusDot } from "@/components/ui/primitives";
 
 const KEYS = ["enter", "tab", "escape", "backspace", "delete", "arrowup", "arrowdown", "arrowleft", "arrowright"] as const;
+/** The owner's list. The server refuses any other id, and the agent refuses it again. */
+const APPS = [
+  { id: "notepad", label: "Notepad" },
+  { id: "calculator", label: "Calculator" },
+  { id: "edge", label: "Microsoft Edge" },
+  { id: "chrome", label: "Google Chrome" },
+  { id: "explorer", label: "File Explorer" },
+] as const;
 const SCOPE_LABEL: Record<string, string> = {
   "desktop.input.click": "click",
   "desktop.input.key": "keys",
   "desktop.input.type": "typing (Windows Hello each time)",
+  "desktop.app.launch": "open an application",
 };
 const FINAL: ReadonlySet<DesktopCommand["status"]> = new Set(["succeeded", "not_executed", "unknown", "expired"]);
 const COMMAND_STATUS: Record<DesktopCommand["status"], { label: string; tone: "ok" | "warn" | "danger" | "neutral" }> = {
@@ -61,6 +74,21 @@ const COMMAND_STATUS: Record<DesktopCommand["status"], { label: string; tone: "o
   not_executed: { label: "Not done", tone: "warn" },
   unknown: { label: "Outcome unknown — not retried", tone: "danger" },
   expired: { label: "Expired — never reached the computer", tone: "warn" },
+};
+/** Why a computer did not act. Each means nothing was done. */
+const RESULT_REASON: Record<string, string> = {
+  APP_NOT_INSTALLED: "not installed there",
+  LAUNCH_FAILED: "Windows could not start it",
+  HELLO_FAILED: "Windows Hello was not verified",
+  HELLO_UNAVAILABLE: "Windows Hello is not set up",
+  SESSION_LOCKED: "the computer was locked",
+  GRANT_INACTIVE: "control had ended",
+  COMMAND_EXPIRED: "it took too long",
+  NO_TARGET: "no suitable window had focus",
+  ELEVATED_TARGET: "the window runs as administrator",
+  OUT_OF_BOUNDS: "that position is off the screen",
+  BUSY: "the computer was busy",
+  INVALID_COMMAND: "the computer refused it",
 };
 
 function time(iso: string): string {
@@ -299,7 +327,10 @@ function CommandPanel({ device }: { device: DesktopDevice }) {
   const [y, setY] = useState("");
   const [key, setKey] = useState<string>("enter");
   const [text, setText] = useState("");
+  const [app, setApp] = useState<string>(APPS[0].id);
   const [pending, setPending] = useState<DesktopCommandRequestResult | null>(null);
+  /** The words awaiting approval, shown back exactly. Held here and nowhere else. */
+  const [pendingText, setPendingText] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [commands, setCommands] = useState<DesktopCommand[]>([]);
 
@@ -323,6 +354,7 @@ function CommandPanel({ device }: { device: DesktopDevice }) {
       return Number.isInteger(px) && Number.isInteger(py) && px >= 0 && py >= 0 ? { action, x: px, y: py } : null;
     }
     if (action === "desktop.input.key") return { action, key };
+    if (action === "desktop.app.launch") return { action, app };
     return text.length > 0 ? { action, text } : null;
   };
 
@@ -333,6 +365,7 @@ function CommandPanel({ device }: { device: DesktopDevice }) {
     const res = await requestDesktopCommand(device.id, request);
     if (res.success && res.data) {
       setPending(res.data);
+      setPendingText(request.action === "desktop.input.type" ? request.text : null);
       setText("");
     } else {
       setMessage(res.error?.message ?? "That command could not be requested.");
@@ -343,6 +376,7 @@ function CommandPanel({ device }: { device: DesktopDevice }) {
     if (!pending) return;
     const res = await confirmDesktopCommand(device.id, pending.approvalId);
     setPending(null);
+    setPendingText(null);
     if (!res.success) setMessage(res.error?.message ?? "The command was not sent.");
     await refresh();
   };
@@ -380,10 +414,19 @@ function CommandPanel({ device }: { device: DesktopDevice }) {
             ))}
           </select>
         )}
+        {action === "desktop.app.launch" && (
+          <select aria-label="Application" className="rounded border border-sys-line bg-white/[0.03] px-2 py-1 text-sm" value={app} onChange={(e) => setApp(e.target.value)}>
+            {APPS.map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.label}
+              </option>
+            ))}
+          </select>
+        )}
         {action === "desktop.input.type" && (
           <input
             aria-label="Text to type"
-            type="password"
+            type="text"
             autoComplete="off"
             className="min-w-[14rem] flex-1 rounded border border-sys-line bg-white/[0.03] px-2 py-1 text-sm"
             value={text}
@@ -406,17 +449,29 @@ function CommandPanel({ device }: { device: DesktopDevice }) {
               </li>
             ))}
           </ul>
+          {pendingText !== null && (
+            <div data-testid="exact-text">
+              <p className="text-xs text-sys-dim">Text to be typed, exactly:</p>
+              <p className="whitespace-pre-wrap break-words rounded border border-sys-line bg-white/[0.03] px-2 py-1 font-mono text-sm text-sys-text">{pendingText}</p>
+            </div>
+          )}
           {pending.requiresHello && (
             <p className="flex items-center gap-1 text-xs text-sys-text/85" data-testid="hello-notice">
               <ShieldCheck size={12} aria-hidden="true" />
-              After you approve, the computer asks for Windows Hello. Without it, nothing is typed.
+              After you approve, click into the window where the text should go: JARVIS waits 6 seconds. Windows Hello then names that window. Verify only if it is the right one. Without it, nothing is typed.
             </p>
           )}
           <div className="flex gap-2">
             <Button variant="primary" onClick={() => void approve()} data-testid="approve-command">
               Approve and send
             </Button>
-            <Button variant="ghost" onClick={() => setPending(null)}>
+            <Button
+              variant="ghost"
+              onClick={() => {
+                setPending(null);
+                setPendingText(null);
+              }}
+            >
               Cancel
             </Button>
           </div>
@@ -430,6 +485,7 @@ function CommandPanel({ device }: { device: DesktopDevice }) {
             <li key={c.id} className="flex items-center gap-2 text-xs text-sys-dim">
               <span className="font-mono">{SCOPE_LABEL[c.action] ?? c.action}</span>
               <StatusDot tone={COMMAND_STATUS[c.status].tone} label={COMMAND_STATUS[c.status].label} />
+              {c.status === "not_executed" && c.resultCode && <span>{RESULT_REASON[c.resultCode] ?? "nothing was done"}</span>}
               <span>{time(c.issuedAt)}</span>
             </li>
           ))}
@@ -450,9 +506,9 @@ function SafetyPanel() {
       }
     >
       <ul className="space-y-1 text-xs leading-relaxed text-sys-dim">
-        <li>It can click, press Enter, Tab, Escape, Backspace, Delete and the arrow keys, and type — only while control is allowed on the computer.</li>
-        <li>Typing needs your approval here and Windows Hello on the computer, every time. A computer without Windows Hello cannot be typed into.</li>
-        <li>It cannot see the screen, run programs or scripts, open or change files, use the clipboard, or act in windows that run as administrator.</li>
+        <li>It can click, press Enter, Tab, Escape, Backspace, Delete and the arrow keys, type approved text and open approved applications (Notepad, Calculator, Microsoft Edge, Google Chrome, File Explorer) — only while control is allowed on the computer.</li>
+        <li>You approve every action before it runs. Typing also needs Windows Hello on the computer, every time, and a computer without Windows Hello cannot be typed into. JARVIS never types passwords, codes or credentials.</li>
+        <li>It cannot see the screen, run any other program, shell command or script, open or change files, use the clipboard, or act in windows that run as administrator.</li>
         <li>Control ends when it expires, when the computer locks, signs out or restarts, or when someone presses Ctrl+Alt+Shift+F12 at the keyboard.</li>
         <li>If the computer does not answer, the outcome is recorded as unknown and the command is never sent again.</li>
       </ul>

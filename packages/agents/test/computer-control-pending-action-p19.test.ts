@@ -7,11 +7,12 @@
 // message. For a browser or desktop action it names the action, the site, the
 // field and how many characters — the same value-free summary the Approvals
 // page shows — and never what was typed, selected or submitted, a path, a
-// query or an artifact id.
+// query or an artifact id. Stage 19.7 made one exception, pinned below: desktop
+// typing shows the exact text that will be typed.
 // ---------------------------------------------------------------------------
 
 import { describe, expect, it } from "vitest";
-import type { Approval, ITool } from "@jarvis/core";
+import { computerControlApprovalRecord, type Approval, type ITool } from "@jarvis/core";
 
 import { PendingActionService } from "../src/pending-action-service.js";
 
@@ -80,11 +81,28 @@ describe("Phase 19.5 — a browser or desktop action's chat confirmation", () =>
   it.each([
     ["browser.select", { url: "https://shop.example/login", selector: "#plan", value: "Wish-Option" }],
     ["browser.upload", { url: "https://shop.example/login", selector: "#file", downloadId: "9b2d6a4e-1f3c-4d5e-8a7b-0c1d2e3f4a5b" }],
-    ["desktop.input.type", { text: "hunter2-TYPED" }],
   ])("holds no value for %s", async (toolId, params) => {
     const message = await messageFor(toolId, params);
     expect(message.split("\n").length).toBeGreaterThan(3);
     for (const secret of SECRETS) expect(message).not.toContain(secret);
+  });
+
+  // Phase 19.7 — the one exception, by the owner's decision: "show the exact
+  // text before execution". It holds only for desktop typing, where the proposal
+  // has already required the text to be word for word in the owner's own
+  // message here and refused it if it looked like a secret. The approval and
+  // the audit projection stay value-free (computer-control-desktop-apps-p197).
+  it("shows exactly the text desktop typing will type, and only that action does", async () => {
+    const message = await messageFor("desktop.input.type", { text: "Hello Sirish, JARVIS is online." });
+    expect(message).toContain("Text to be typed:\nHello Sirish, JARVIS is online.");
+    expect(message).toContain("Windows Hello");
+    expect(message).toContain("Text: not shown");
+  });
+
+  it("says nothing of the text when it is rebuilt from the sealed record", async () => {
+    const message = await messageFor("desktop.input.type", computerControlApprovalRecord("desktop.input.type", { text: "Hello Sirish" })!);
+    expect(message).not.toContain("Sirish");
+    expect(message).not.toContain("Text to be typed");
   });
 
   it("says plainly when the request cannot be verified, and echoes nothing", async () => {

@@ -73,6 +73,28 @@ describe("Audit F2 — the card answers its own action, and claims only what the
     expect(message()).toBe("Executed successfully!");
   });
 
+  it("Phase 19.7 — a desktop action says what the computer reported, not that it was executed", async () => {
+    const report = "Windows started Notepad. JARVIS cannot see the screen, so check it on the computer.";
+    mocked.confirmPendingAction.mockResolvedValue(ok({ pendingAction: {}, executionResult: { status: "completed", result: { success: true, data: { outcome: "succeeded", message: report } } } }));
+    render(<PendingActionCard pendingAction={action("desktop.app.launch")} conversationId="conv-1" />);
+
+    fireEvent.click(screen.getByTestId("confirm-button"));
+
+    await waitFor(() => expect(card().getAttribute("data-state")).toBe("EXECUTED"));
+    expect(message()).toBe(report);
+  });
+
+  it("Phase 19.7 — a desktop action the computer did not carry out is not shown as done", async () => {
+    const reason = "Windows Hello was not verified, so nothing was typed.";
+    mocked.confirmPendingAction.mockResolvedValue(ok({ pendingAction: {}, executionResult: { status: "failed", result: { success: false, error: reason, data: { outcome: "not-executed", message: reason } } } }));
+    render(<PendingActionCard pendingAction={action("desktop.input.type")} conversationId="conv-1" />);
+
+    fireEvent.click(screen.getByTestId("confirm-button"));
+
+    await waitFor(() => expect(card().getAttribute("data-state")).toBe("FAILED"));
+    expect(message()).toBe(reason);
+  });
+
   it("a card for an action that is no longer waiting (409) says nothing was changed — never success", async () => {
     mocked.confirmPendingAction.mockResolvedValue(
       refused("PENDING_ACTION_MISMATCH", "That is no longer the action waiting for your confirmation, so nothing was changed. Answer the latest request instead.")

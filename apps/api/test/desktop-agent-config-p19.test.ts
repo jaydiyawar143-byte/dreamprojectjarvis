@@ -9,6 +9,7 @@
 
 import { describe, expect, it } from "vitest";
 import { generateKeyPairSync } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { desktopServerKeyId } from "@jarvis/core";
 import { isDesktopAgentEnabled, loadDesktopAgentConfig } from "../src/services/desktop/config.js";
 
@@ -58,5 +59,12 @@ describe("Phase 19.6 — desktop agent configuration", () => {
     expect(loaded.config.serverPublicKey).toBe(spki);
     expect(loaded.config.serverKeyId).toBe(desktopServerKeyId(spki));
     expect(loaded.config.minWindowsBuild).toBe(26100);
+  });
+
+  it("is built with the operational log, or a refused device would reach no operator", () => {
+    const container = readFileSync(new URL("../src/services/container.ts", import.meta.url), "utf8");
+    const built = container.slice(container.indexOf("new DesktopControlService({"));
+    expect(built.slice(0, built.indexOf("});"))).toMatch(/\bagentLog: desktopLog\b/);
+    expect(container).toMatch(/const desktopLog = operationalLog\.child\("desktop-agent"\);/);
   });
 });

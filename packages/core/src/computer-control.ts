@@ -72,9 +72,11 @@ export const BROWSER_CONTROL_ACTION_IDS = Object.freeze([
 ] as const);
 
 /**
- * The planned Windows desktop actions (Stage 19.6). There is deliberately no
- * "launch application", "run command", "read file" or "write file" action:
- * a capability that has no contract cannot be talked into existence later.
+ * The Windows desktop actions. There is deliberately no "run command", "read
+ * file" or "write file" action: a capability that has no contract cannot be
+ * talked into existence later. `desktop.app.launch` (Stage 19.7, by the owner's
+ * decision) opens one application from a fixed list; it takes an id, never a
+ * path, an argument or a command line.
  *
  * `desktop.session.start` is intentionally absent. A session starts only from
  * the consent surface on the person's own machine, never from a model tool.
@@ -84,6 +86,7 @@ export const DESKTOP_CONTROL_ACTION_IDS = Object.freeze([
   "desktop.input.click",
   "desktop.input.type",
   "desktop.input.key",
+  "desktop.app.launch",
   "desktop.session.end",
 ] as const);
 
@@ -121,6 +124,20 @@ export const DESKTOP_KEY_NAMES = Object.freeze([
   "arrowright",
 ] as const);
 export type DesktopKeyName = (typeof DESKTOP_KEY_NAMES)[number];
+/**
+ * Phase 19.7 — the applications a command may open, by fixed id. The agent
+ * holds the same list and resolves each id to a path it chose itself: nothing
+ * that travels in a command ever names a file.
+ */
+export const DESKTOP_APP_IDS = Object.freeze(["notepad", "calculator", "edge", "chrome", "explorer"] as const);
+export type DesktopAppId = (typeof DESKTOP_APP_IDS)[number];
+export const DESKTOP_APP_LABELS: Readonly<Record<DesktopAppId, string>> = Object.freeze({
+  notepad: "Notepad",
+  calculator: "Calculator",
+  edge: "Microsoft Edge",
+  chrome: "Google Chrome",
+  explorer: "File Explorer",
+});
 /** Coordinates are bounded so a malformed payload cannot carry an absurd int. */
 export const DESKTOP_COORDINATE_MAX = 100_000;
 /** The highest display index a future agent may address. */
@@ -335,6 +352,14 @@ const DesktopKeyRequestSchema = z
   })
   .strict();
 
+const DesktopAppLaunchRequestSchema = z
+  .object({
+    action: z.literal("desktop.app.launch"),
+    deviceId: DesktopDeviceIdSchema,
+    app: z.enum(DESKTOP_APP_IDS),
+  })
+  .strict();
+
 const DesktopSessionEndRequestSchema = z.object({ action: z.literal("desktop.session.end") }).strict();
 
 export const DesktopControlRequestSchema = z.discriminatedUnion("action", [
@@ -342,6 +367,7 @@ export const DesktopControlRequestSchema = z.discriminatedUnion("action", [
   DesktopClickRequestSchema,
   DesktopTypeRequestSchema,
   DesktopKeyRequestSchema,
+  DesktopAppLaunchRequestSchema,
   DesktopSessionEndRequestSchema,
 ]);
 
@@ -508,7 +534,7 @@ const DesktopScreenReadResultSchema = z
 
 const DesktopInputResultSchema = z
   .object({
-    action: z.enum(["desktop.input.click", "desktop.input.type", "desktop.input.key"]),
+    action: z.enum(["desktop.input.click", "desktop.input.type", "desktop.input.key", "desktop.app.launch"]),
     ok: z.literal(true),
   })
   .strict();
@@ -737,6 +763,17 @@ export const COMPUTER_CONTROL_ACTION_POLICY: Readonly<
     organizationMapped: false,
     carriesSensitiveInput: false,
   },
+  "desktop.app.launch": {
+    action: "desktop.app.launch",
+    surface: "desktop",
+    toolId: "desktop.app.launch",
+    access: "write",
+    requiresApproval: true,
+    voice: "refused",
+    connector: DESKTOP_AGENT_CONNECTOR,
+    organizationMapped: false,
+    carriesSensitiveInput: false,
+  },
   "desktop.session.end": {
     action: "desktop.session.end",
     surface: "desktop",
@@ -819,6 +856,8 @@ export const COMPUTER_CONTROL_VOICE_REFUSED_TOOLS: Readonly<Record<string, strin
       "Controlling the desktop cannot be started by voice. Open Computer Control on screen and grant a session there.",
     "desktop.input.key":
       "Controlling the desktop cannot be started by voice. Open Computer Control on screen and grant a session there.",
+    "desktop.app.launch":
+      "Opening an application cannot be started by voice. Ask in the chat on screen, or use Computer Control.",
   });
 
 // ---------------------------------------------------------------------------
@@ -1033,6 +1072,18 @@ export function computerControlApprovalSummary(
           { label: "Key", value: request.key },
         ],
       };
+    case "desktop.app.launch": {
+      const label = DESKTOP_APP_LABELS[request.app];
+      return {
+        actionSummary: `Open ${label} on the paired Windows desktop.`,
+        targetResource: "paired Windows desktop",
+        detailLines: [
+          { label: "Device", value: "paired Windows desktop" },
+          { label: "Application", value: label },
+          { label: "Typing", value: "None. Typing is a separate request." },
+        ],
+      };
+    }
     case "desktop.session.end":
       return {
         actionSummary: "End the desktop control session.",

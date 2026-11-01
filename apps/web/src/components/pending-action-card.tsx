@@ -135,11 +135,13 @@ export function PendingActionCard({
         // Audit F2 — success only when the server ran THIS action and it
         // succeeded. Approved but not run, or run and failed, is not success.
         const execution = res.data?.executionResult as
-          | { status?: string; error?: unknown; result?: { success?: boolean; error?: unknown } }
+          | { status?: string; error?: unknown; result?: { success?: boolean; error?: unknown; data?: { message?: unknown } } }
           | undefined;
         if (execution?.status === "completed" && execution.result?.success !== false) {
           setUi("completed");
-          setMessage("Executed successfully!");
+          // Phase 19.7 — a desktop action says what the computer reported.
+          const report = execution.result?.data?.message;
+          setMessage(typeof report === "string" ? report : "Executed successfully!");
         } else {
           setUi("failed");
           const reason = execution?.result?.error ?? execution?.error;

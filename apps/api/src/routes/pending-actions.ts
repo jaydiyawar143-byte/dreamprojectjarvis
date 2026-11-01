@@ -25,7 +25,7 @@ import { Router } from "express";
 import type { Response } from "express";
 import { randomUUID } from "crypto";
 import { PendingActionConflictError, type PendingActionRefusal } from "@jarvis/agents";
-import { VOICE_TOOL_REFUSED_CODE, voiceConfirmationRefusal } from "@jarvis/core";
+import { DESKTOP_CHAT_EXECUTION_TIMEOUT_MS, VOICE_TOOL_REFUSED_CODE, isDesktopChatTool, voiceConfirmationRefusal } from "@jarvis/core";
 import { createAuthMiddleware, type AuthenticatedRequest } from "../middleware/auth.js";
 import type { Container } from "../services/container.js";
 import {
@@ -232,6 +232,8 @@ export function createPendingActionsRouter(container: Container): Router {
                 conversationId,
                 traceId,
                 approvalId: result.pendingAction.approvalId,
+                // Phase 19.7 — a desktop tool waits for the computer's answer.
+                ...(isDesktopChatTool(result.pendingAction.toolId) ? { timeoutMs: DESKTOP_CHAT_EXECUTION_TIMEOUT_MS } : {}),
               });
 
           res.status(200).json({

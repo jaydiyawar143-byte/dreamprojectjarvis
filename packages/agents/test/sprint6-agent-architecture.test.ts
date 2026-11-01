@@ -20,6 +20,7 @@ import { AutomationAgent } from "../src/agents/automation-agent.js";
 import { CommunicationAgent } from "../src/agents/communication-agent.js";
 import { GoogleAdsAgent } from "../src/agents/google-ads-agent.js";
 import { BrowserAgent } from "../src/agents/browser-agent.js";
+import { DesktopAgent } from "../src/agents/desktop-agent.js";
 import { LocationAgent } from "../src/agents/location-agent.js";
 import { MarketingAgent } from "../src/agents/marketing-agent.js";
 import { ConversationalAssistant } from "../src/agents/conversational-assistant.js";
@@ -62,8 +63,10 @@ describe("Sprint 6.1 — agent architecture", () => {
       registry.register(new LocationAgent({ provider }));
       // Phase 15 added the tenth, the marketing workspace.
       registry.register(new MarketingAgent({ provider }));
+      // Phase 19.7 added the eleventh, the owner's paired computer.
+      registry.register(new DesktopAgent({ provider }));
 
-      expect(registry.getAll()).toHaveLength(10);
+      expect(registry.getAll()).toHaveLength(11);
       for (const id of Object.values(AGENT_IDS)) {
         expect(registry.get(id), `agent ${id}`).toBeDefined();
         expect(registry.getPolicy(id), `policy ${id}`).toBeDefined();

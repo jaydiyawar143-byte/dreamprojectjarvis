@@ -5,6 +5,7 @@
 // key from the shared vectors, and stand-ins for everything Windows does.
 // ---------------------------------------------------------------------------
 
+using System.Diagnostics;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
@@ -56,11 +57,39 @@ internal sealed class TestDeviceKey : IDeviceKey, IDisposable
     public void Dispose() => key.Dispose();
 }
 
+/// <summary>A key that fails on the calls it is told to, counting from one.</summary>
+internal sealed class FlakyDeviceKey(IDeviceKey inner, Func<int, bool> fails) : IDeviceKey
+{
+    private int calls;
+
+    public string PublicKeySpki => inner.PublicKeySpki;
+
+    public byte[] Sign(byte[] data) => fails(Interlocked.Increment(ref calls)) ? throw new CryptographicException("busy") : inner.Sign(data);
+}
+
+/// <summary>A key Windows has stopped answering for.</summary>
+internal sealed class BrokenDeviceKey : IDeviceKey
+{
+    public string PublicKeySpki => "";
+
+    public byte[] Sign(byte[] data) => throw new CryptographicException("the key is gone");
+}
+
 internal sealed class TestClock(long start = 1_767_225_600_000) : IClock
 {
-    public long NowMs { get; set; } = start;
+    private long now = start;
+    private Stopwatch? running;
 
-    public void Advance(long ms) => NowMs += ms;
+    public long NowMs
+    {
+        get => now + (running?.ElapsedMilliseconds ?? 0);
+        set => now = value;
+    }
+
+    public void Advance(long ms) => now += ms;
+
+    /// <summary>From here on real time passes too, for what waits on a real timer.</summary>
+    public void Run() => running = Stopwatch.StartNew();
 }
 
 internal sealed class MemorySink : ILogSink
@@ -116,9 +145,26 @@ internal sealed class FakeServer : HttpMessageHandler
 
     public bool Unreachable { get; set; }
 
+    /// <summary>What the failure says. A real one names the address it tried.</summary>
+    public string UnreachableMessage { get; set; } = "unreachable";
+
+    /// <summary>Answers as something in front of the server would: no signature headers at all.</summary>
+    public bool Unsigned { get; set; }
+
+    /// <summary>Never answers; the client has to give up.</summary>
+    public bool Hang { get; set; }
+
+    /// <summary>Holds each request this long before answering, as the real server holds a poll.</summary>
+    public TimeSpan Hold { get; set; }
+
+    /// <summary>Sends the body as a stream of these bytes instead of a body of known length.</summary>
+    public Func<byte[], Stream>? BodyStream { get; set; }
+
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
-        if (Unreachable) throw new HttpRequestException("unreachable");
+        if (Unreachable) throw new HttpRequestException(UnreachableMessage);
+        if (Hang) await Task.Delay(Timeout.Infinite, cancellationToken);
+        if (Hold > TimeSpan.Zero) await Task.Delay(Hold, cancellationToken);
         var headers = request.Headers.ToDictionary(h => h.Key.ToLowerInvariant(), h => string.Join(",", h.Value));
         var body = await request.Content!.ReadAsByteArrayAsync(cancellationToken);
         var seen = new SeenRequest(request.RequestUri!.AbsolutePath, headers, body);
@@ -127,13 +173,58 @@ internal sealed class FakeServer : HttpMessageHandler
         var nonce = NonceOverride?.Invoke(headers["x-jarvis-nonce"]) ?? headers["x-jarvis-nonce"];
         var signature = SignatureOverride ?? Contract.ServerSign(Canonical.Response(nonce, status, Canonical.Sha256Hex(text)));
         var sent = BodyAfterSigning?.Invoke(text) ?? text;
-        var response = new HttpResponseMessage((HttpStatusCode)status) { Content = new StringContent(sent, Encoding.UTF8, "application/json") };
+        var response = new HttpResponseMessage((HttpStatusCode)status)
+        {
+            Content = BodyStream is { } stream ? new StreamContent(stream(Encoding.UTF8.GetBytes(sent))) : new StringContent(sent, Encoding.UTF8, "application/json"),
+        };
+        if (Unsigned) return response;
         response.Headers.Add("x-jarvis-response-signature", signature);
         response.Headers.Add("x-jarvis-response-key", KeyId);
         return response;
     }
 
     public static string Error(string code) => $$$"""{"version":"jarvis-desktop/1","error":{"code":"{{{code}}}"}}""";
+}
+
+/// <summary>A body of no declared length. When broken, it fails after its bytes, as a dropped connection does.</summary>
+internal sealed class WireStream(byte[] bytes, bool broken) : Stream
+{
+    private int position;
+
+    public override bool CanRead => true;
+
+    public override bool CanSeek => false;
+
+    public override bool CanWrite => false;
+
+    public override long Length => throw new NotSupportedException();
+
+    public override long Position
+    {
+        get => throw new NotSupportedException();
+        set => throw new NotSupportedException();
+    }
+
+    public override int Read(byte[] buffer, int offset, int count)
+    {
+        if (position == bytes.Length)
+        {
+            if (broken) throw new IOException("The connection was reset.");
+            return 0;
+        }
+        var read = Math.Min(count, bytes.Length - position);
+        Array.Copy(bytes, position, buffer, offset, read);
+        position += read;
+        return read;
+    }
+
+    public override void Flush() => throw new NotSupportedException();
+
+    public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+
+    public override void SetLength(long value) => throw new NotSupportedException();
+
+    public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
 }
 
 internal sealed class FakeInspector : IDesktopInspector
@@ -188,6 +279,23 @@ internal sealed class FakeInjector : IInputInjector
     }
 }
 
+internal sealed class FakeLauncher : IAppLauncher
+{
+    public List<string> Opened { get; } = [];
+
+    public LaunchResult Result { get; set; } = LaunchResult.Started;
+
+    /// <summary>Thrown instead of answering, as something no step expected.</summary>
+    public Exception? Throws { get; set; }
+
+    public LaunchResult Launch(string app)
+    {
+        lock (Opened) Opened.Add(app);
+        if (Throws is not null) throw Throws;
+        return Result;
+    }
+}
+
 internal sealed class FakeHello : IHelloVerifier
 {
     public HelloResult Result { get; set; } = HelloResult.Verified;
@@ -217,13 +325,28 @@ internal sealed class MemoryPairingStore : IPairingStore
 
     public bool Cleared { get; private set; }
 
+    public bool ClearThrows { get; set; }
+
+    /// <summary>What saving fails with, when it fails.</summary>
+    public Exception? SaveFails { get; set; }
+
+    public Uri? Server { get; private set; }
+
     public Pairing? Load() => Stored;
 
-    public void Save(Pairing pairing) => Stored = pairing;
+    public void Remember(Uri server) => Server = server;
+
+    public void Save(Pairing pairing)
+    {
+        if (SaveFails is not null) throw SaveFails;
+        Stored = pairing;
+    }
 
     public void Clear()
     {
+        if (ClearThrows) throw new UnauthorizedAccessException("denied");
         Stored = null;
+        Server = null;
         Cleared = true;
     }
 }
@@ -237,6 +360,87 @@ internal sealed class RecordingEvents : IAgentEvents
     public void ConnectionChanged(bool connected) => Seen.Add($"connected:{connected}");
 
     public void Stopped(string reason) => Seen.Add($"stopped:{reason}");
+}
+
+/// <summary>A body that starts and then stops, as a link does when it dies quietly: the read waits until it is cancelled.</summary>
+internal sealed class StalledStream(byte[] bytes) : Stream
+{
+    private int position;
+
+    public override bool CanRead => true;
+
+    public override bool CanSeek => false;
+
+    public override bool CanWrite => false;
+
+    public override long Length => throw new NotSupportedException();
+
+    public override long Position
+    {
+        get => throw new NotSupportedException();
+        set => throw new NotSupportedException();
+    }
+
+    public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+    {
+        if (position < bytes.Length)
+        {
+            var read = Math.Min(buffer.Length, bytes.Length - position);
+            bytes.AsMemory(position, read).CopyTo(buffer);
+            position += read;
+            return read;
+        }
+        await Task.Delay(Timeout.Infinite, cancellationToken);
+        return 0;
+    }
+
+    public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+    public override void Flush() => throw new NotSupportedException();
+
+    public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+
+    public override void SetLength(long value) => throw new NotSupportedException();
+
+    public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+}
+
+/// <summary>A body that arrives one byte at a time, a little later each time. With no bytes given it never finishes.</summary>
+internal sealed class DrippingStream(byte[]? bytes = null) : Stream
+{
+    private int position;
+
+    public override bool CanRead => true;
+
+    public override bool CanSeek => false;
+
+    public override bool CanWrite => false;
+
+    public override long Length => throw new NotSupportedException();
+
+    public override long Position
+    {
+        get => throw new NotSupportedException();
+        set => throw new NotSupportedException();
+    }
+
+    public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+    {
+        await Task.Delay(10, cancellationToken);
+        if (bytes is not null && position == bytes.Length) return 0;
+        buffer.Span[0] = bytes is null ? (byte)'a' : bytes[position++];
+        return 1;
+    }
+
+    public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+    public override void Flush() => throw new NotSupportedException();
+
+    public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+
+    public override void SetLength(long value) => throw new NotSupportedException();
+
+    public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
 }
 
 /// <summary>Builds commands as the server signs them.</summary>
@@ -265,6 +469,7 @@ internal static class Commands
             ClickParams p => new Dictionary<string, object> { ["x"] = p.X, ["y"] = p.Y, ["button"] = p.Button },
             KeyParams p => new Dictionary<string, object> { ["key"] = p.Key },
             TypeParams p => new Dictionary<string, object> { ["text"] = p.Text },
+            LaunchParams p => new Dictionary<string, object> { ["app"] = p.App },
             _ => throw new ArgumentException("params"),
         };
         return JsonSerializer.Serialize(new Dictionary<string, object>

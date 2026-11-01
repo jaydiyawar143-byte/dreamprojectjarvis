@@ -23,7 +23,7 @@
 [CmdletBinding()]
 param(
   [string]$Configuration = "Release",
-  [ValidatePattern('^\d+\.\d+\.\d+\.0$')][string]$Version = "1.0.0.0",
+  [ValidatePattern('^\d+\.\d+\.\d+\.0$')][string]$Version = "1.1.0.0",
   [ValidatePattern('^CN=')][string]$Publisher = "CN=JARVIS Test Signing",
   [string]$CertificatePath,
   [SecureString]$CertificatePassword,

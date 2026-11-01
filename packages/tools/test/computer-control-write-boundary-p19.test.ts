@@ -660,7 +660,7 @@ describe("Phase 19.1 — the grant cannot be reached from outside the package", 
     expect(readFileSync(join(src, "index.ts"), "utf8")).not.toContain("execution-grant");
   });
 
-  it("only the executor issues a grant, and only the browser and Meta Ads writes verify one", () => {
+  it("only the executor issues a grant, and only the browser, desktop and Meta Ads writes verify one", () => {
     expect(using("issueExecutionGrant")).toEqual(["execution-grant.ts", "executor.ts"]);
     // A grant is read only through the full check, never taken bare.
     expect(using("takeExecutionGrant")).toEqual(["execution-grant.ts"]);
@@ -668,6 +668,7 @@ describe("Phase 19.1 — the grant cannot be reached from outside the package", 
     expect(using("verifyExecutionGrant")).toEqual([
       "execution-grant.ts",
       "tools/browser-tools.ts",
+      "tools/desktop-tools.ts",
       "tools/meta-ads-write-tools.ts",
     ]);
   });
