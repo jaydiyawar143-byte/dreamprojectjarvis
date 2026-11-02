@@ -201,6 +201,7 @@ public static partial class MessageParser
             ProtocolConstants.Click => ParseClick(parameters),
             ProtocolConstants.Key => new KeyParams(OneOf(Object(parameters, "key"), "key", ProtocolConstants.KeyNames)),
             ProtocolConstants.Type => ParseType(parameters),
+            ProtocolConstants.AppLaunch => new LaunchParams(OneOf(Object(parameters, "app"), "app", ProtocolConstants.AppIds)),
             _ => throw new ProtocolViolationException("unknown action"),
         };
         var signature = Text(value, "signature", 86);

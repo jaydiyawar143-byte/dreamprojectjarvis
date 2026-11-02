@@ -8,6 +8,18 @@
   (docs/DEPLOYMENT.md). For -Seconds it samples every TCP connection and UDP
   endpoint that one process owns.
 
+  The evidence is `netstat -ano` and, as a cross-check, the Get-NetTCPConnection
+  and Get-NetUDPEndpoint cmdlets (packaging/NoListenerEvidence.ps1). On Windows
+  11 build 26300 netstat omits TCP listeners owned by a user-session process,
+  and Get-NetTCPConnection lists them with a null State - so the old
+  `State -eq "Listen"` filter reported none, and the check passed while a port
+  was open. Both tables are read; a finding from either is a finding.
+
+  Every sample also has to show a loopback TCP listener and a loopback UDP
+  socket that this check opened in its own process. If neither source can show
+  them, the sample is FAILED / INCONCLUSIVE - a clean sample from a table that
+  cannot see a socket opened a moment ago proves nothing.
+
   It never starts the agent, and must not. The agent is single-instance, so a
   copy started beside a paired agent exits at once: a check of that copy
   inspects nothing and passes.
@@ -18,12 +30,13 @@
     - the agent stops during the check;
     - the agent never holds an established connection: it is not paired and
       polling, so nothing has been proven;
-    - the socket tables cannot be read. A failed read is never "no sockets".
+    - the socket table cannot be read, or cannot show the positive control.
 
   This is the proof for the "no inbound port" exit criterion, and it needs a
-  Windows 11 test machine. CI cannot run it: the Windows Server runner stops the
-  agent at its platform check, so CI's own step shows only that start-up opens
-  nothing.
+  Windows 11 test machine. CI runs the same parser and the same decision
+  (packaging/no-listener-evidence.tests.ps1 and the start-up step), but it
+  cannot run this check: the Windows Server runner stops the agent at its
+  platform check, so CI's own step shows only that start-up opens nothing.
 
 .EXAMPLE
   ./check-no-listener.ps1
@@ -36,15 +49,22 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
+. (Join-Path $PSScriptRoot "NoListenerEvidence.ps1")
+
 $agentName = "Jarvis.DesktopAgent"
+$script:control = $null
 
 function Fail([string]$message) {
+  if ($null -ne $script:control) {
+    Close-NoListenerControl $script:control
+    $script:control = $null
+  }
   Write-Host "check-no-listener: FAILED - $message"
   exit 1
 }
 
-foreach ($cmdlet in @("Get-NetTCPConnection", "Get-NetUDPEndpoint")) {
-  if (-not (Get-Command $cmdlet -ErrorAction SilentlyContinue)) { Fail "$cmdlet is not available here, so the sockets cannot be read." }
+if (-not (Get-Command netstat.exe -ErrorAction SilentlyContinue)) {
+  Fail "netstat.exe is not available here, so the socket table cannot be read."
 }
 
 $agents = @(Get-Process -Name $agentName -ErrorAction SilentlyContinue)
@@ -56,33 +76,50 @@ $agentId = $agent.Id
 $startedAt = $agent.StartTime
 Write-Host "check-no-listener: inspecting the running agent, pid $agentId, started $startedAt, for $Seconds seconds."
 
+$script:control = New-NoListenerControl
+$control = $script:control
+Write-Host "check-no-listener: positive control - loopback tcp port $($control.TcpPort) and udp port $($control.UdpPort) opened by this check (pid $($control.ProcessId)); every sample must show both."
+
+# The control may take a moment to appear in the table. Wait for one sample
+# that shows it before the check makes any claim, then keep checking it in
+# every sample.
+$observation = $null
+$controlDeadline = (Get-Date).AddSeconds(5)
+while ($true) {
+  try {
+    $observation = Get-NoListenerObservation -ProcessId $agentId -ControlProcessId $control.ProcessId -ControlTcpPort $control.TcpPort -ControlUdpPort $control.UdpPort
+  } catch {
+    Fail "the socket table could not be read: $($_.Exception.Message)"
+  }
+  if ($observation.Status -ne "CONTROL_UNOBSERVED") { break }
+  if ((Get-Date) -ge $controlDeadline) {
+    Fail "INCONCLUSIVE - $($observation.Detail). A clean sample from a table that cannot see a socket opened a moment ago proves nothing."
+  }
+  Start-Sleep -Milliseconds 250
+}
+Write-Host "check-no-listener: positive control observed (sources: $($observation.Sources))."
+
 $established = @{}
 $samples = 0
 $deadline = (Get-Date).AddSeconds($Seconds)
 while ($true) {
-  try {
-    # The whole table, then this process's rows. Asked for one process, Windows
-    # answers with an error when it owns nothing, and hiding that error would
-    # hide a read that really failed.
-    $tcp = @(Get-NetTCPConnection -ErrorAction Stop)
-    $udp = @(Get-NetUDPEndpoint -ErrorAction Stop)
-  } catch {
-    Fail "the sockets could not be read: $($_.Exception.Message)"
-  }
-  # Windows always has listeners of its own. None at all means this was not a real read.
-  if (@($tcp | Where-Object { $_.State -eq "Listen" }).Count -eq 0) { Fail "no listener anywhere on this computer, so the sockets were not really read." }
-
   $current = Get-Process -Id $agentId -ErrorAction SilentlyContinue
   if (-not $current -or $current.StartTime -ne $startedAt) { Fail "the agent (pid $agentId) stopped during the check." }
 
-  $owned = @($tcp | Where-Object { $_.OwningProcess -eq $agentId })
-  $listening = @($owned | Where-Object { $_.State -eq "Listen" })
-  $endpoints = @($udp | Where-Object { $_.OwningProcess -eq $agentId })
-  foreach ($c in $listening) { Write-Host "LISTENING: $($c.LocalAddress):$($c.LocalPort)" }
-  foreach ($u in $endpoints) { Write-Host "UDP: $($u.LocalAddress):$($u.LocalPort)" }
-  if ($listening.Count -gt 0 -or $endpoints.Count -gt 0) { Fail "the agent (pid $agentId) opened an inbound port." }
+  try {
+    $observation = Get-NoListenerObservation -ProcessId $agentId -ControlProcessId $control.ProcessId -ControlTcpPort $control.TcpPort -ControlUdpPort $control.UdpPort
+  } catch {
+    Fail "the socket table could not be read: $($_.Exception.Message)"
+  }
+  if ($observation.Status -eq "CONTROL_UNOBSERVED") {
+    Fail "INCONCLUSIVE - $($observation.Detail). This sample proves nothing."
+  }
 
-  foreach ($c in @($owned | Where-Object { $_.State -eq "Established" })) { $established["$($c.RemoteAddress):$($c.RemotePort)"] = $true }
+  foreach ($row in $observation.Listening) { Write-Host "LISTENING: $($row.LocalAddress):$($row.LocalPort)" }
+  foreach ($row in $observation.Endpoints) { Write-Host "UDP: $($row.LocalAddress):$($row.LocalPort)" }
+  if ($observation.Status -eq "LISTENER") { Fail "the agent (pid $agentId) opened an inbound port." }
+
+  foreach ($row in $observation.Outbound) { $established["$($row.ForeignAddress):$($row.ForeignPort)"] = $true }
 
   $samples += 1
   Write-Host "check-no-listener: sample $samples clean."
@@ -90,5 +127,9 @@ while ($true) {
   Start-Sleep -Seconds 1
 }
 
-if ($established.Count -eq 0) { Fail "the agent (pid $agentId) held no connection to a server for $Seconds seconds: it is not paired and polling, so nothing is proven." }
-Write-Host "check-no-listener: PASS - the running agent (pid $agentId) owned no TCP listener and no UDP endpoint across $samples samples in $Seconds seconds. Its connections: $(($established.Keys | Sort-Object) -join ', ')."
+if ($established.Count -eq 0) {
+  Fail "the agent (pid $agentId) held no connection to a server for $Seconds seconds: it is not paired and polling, so nothing is proven."
+}
+Close-NoListenerControl $control
+$script:control = $null
+Write-Host "check-no-listener: PASS - the running agent (pid $agentId) owned no TCP listener and no UDP endpoint across $samples samples in $Seconds seconds, and the positive control was seen in every sample. Its connections: $(($established.Keys | Sort-Object) -join ', ')."

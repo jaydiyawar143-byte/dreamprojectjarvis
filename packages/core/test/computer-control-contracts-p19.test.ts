@@ -331,6 +331,7 @@ describe("Phase 19.1 — voice may not start a sensitive computer action", () =>
     "desktop.input.click",
     "desktop.input.type",
     "desktop.input.key",
+    "desktop.app.launch",
   ];
 
   it("lists exactly the sensitive actions, through the one voice policy", () => {

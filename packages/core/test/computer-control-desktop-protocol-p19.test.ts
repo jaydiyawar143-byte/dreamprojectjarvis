@@ -30,6 +30,7 @@ import {
   DESKTOP_AGENT_CURRENT_VERSION,
   DESKTOP_CLOCK_SKEW_MS,
   DESKTOP_COMMAND_ACTIONS,
+  DESKTOP_COMMAND_FORMAT_VERSION,
   DESKTOP_COMMAND_TTL_MS,
   DESKTOP_CONSENT_TEXT_VERSION,
   DESKTOP_ERROR_CODES,
@@ -43,6 +44,7 @@ import {
   DESKTOP_PROTOCOL_VERSION,
   DESKTOP_RECONNECT_GRACE_MS,
   DESKTOP_SESSION_END_REASONS,
+  DESKTOP_TYPE_FOCUS_WAIT_MS,
   DESKTOP_TYPE_TEXT_MAX_LENGTH,
   DESKTOP_WINDOWS_11_FIRST_BUILD,
   DesktopCommandEnvelopeSchema,
@@ -81,7 +83,7 @@ import {
   type DesktopCommandParts,
   type DesktopGrantScope,
 } from "../src/desktop-agent.js";
-import { DESKTOP_CONTROL_ACTION_IDS, DESKTOP_KEY_NAMES, DESKTOP_COORDINATE_MAX } from "../src/computer-control.js";
+import { DESKTOP_APP_IDS, DESKTOP_CONTROL_ACTION_IDS, DESKTOP_KEY_NAMES, DESKTOP_COORDINATE_MAX } from "../src/computer-control.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const CONTRACT_DIR = resolve(here, "../../../apps/desktop-agent/contract");
@@ -97,7 +99,7 @@ function p256() {
 const pkcs8Key = (pkcs8: string) => ({ key: Buffer.from(pkcs8, "base64"), format: "der" as const, type: "pkcs8" as const });
 
 describe("Phase 19.6 — the owner-approved values", () => {
-  it("are the ones decided (U5, D6), and the command set is v1's (D1, D4, D5)", () => {
+  it("are the ones decided (U5, D6), and the command set is the owner's (D1, D4; 19.7 added the launch)", () => {
     expect(DESKTOP_PROTOCOL_VERSION).toBe("jarvis-desktop/1");
     expect(DESKTOP_PAIRING_CODE_TTL_MS).toBe(10 * 60_000);
     expect(DESKTOP_COMMAND_TTL_MS).toBe(30_000);
@@ -106,13 +108,15 @@ describe("Phase 19.6 — the owner-approved values", () => {
     expect(DESKTOP_GRANT_MAX_MINUTES).toBe(60);
     expect(DESKTOP_RECONNECT_GRACE_MS).toBe(30_000);
     expect(DESKTOP_POLL_HOLD_MS).toBeLessThan(DESKTOP_RECONNECT_GRACE_MS);
-    expect([...DESKTOP_COMMAND_ACTIONS]).toEqual(["desktop.input.click", "desktop.input.key", "desktop.input.type"]);
+    expect([...DESKTOP_COMMAND_ACTIONS]).toEqual(["desktop.input.click", "desktop.input.key", "desktop.input.type", "desktop.app.launch"]);
   });
 
-  it("has no screen reading and no command outside the 19.1 vocabulary — nothing that runs, opens or reads", () => {
+  it("has no screen reading and no command outside the vocabulary — nothing that executes, or reads", () => {
     for (const action of DESKTOP_COMMAND_ACTIONS) expect(DESKTOP_CONTROL_ACTION_IDS).toContain(action);
     expect(DESKTOP_COMMAND_ACTIONS).not.toContain("desktop.screen.read");
-    const forbidden = /screen|capture|shell|powershell|exec|launch|process|file|clipboard|registry|script|elevat/i;
+    // "launch" left this list by the owner's decision (Stage 19.7). The one
+    // action it allows takes a fixed id, pinned in computer-control-desktop-apps-p197.
+    const forbidden = /screen|capture|shell|powershell|exec|process|file|clipboard|registry|script|elevat/i;
     for (const action of DESKTOP_COMMAND_ACTIONS) expect(action).not.toMatch(forbidden);
   });
 
@@ -231,7 +235,7 @@ describe("Phase 19.6 — the signed strings", () => {
     };
     expect(desktopCommandCanonical(parts)).toBe(
       [
-        "jarvis-desktop-command/1",
+        "jarvis-desktop-command/2",
         parts.commandId,
         parts.deviceId,
         parts.grantId,
@@ -277,11 +281,11 @@ describe("Phase 19.6 — consent wording (U5c)", () => {
   it("is deterministic, versioned, and names who, which Organization, how long, what, what never, and how to stop", () => {
     const text = renderDesktopConsentText(input);
     expect(renderDesktopConsentText(input)).toBe(text);
-    expect(DESKTOP_CONSENT_TEXT_VERSION).toBe("desktop-consent/1");
-    for (const part of ["Ada Lovelace", "Analytical Engines", "15 minutes", "click at positions", "cannot see your screen", "run programs or scripts", DESKTOP_KILL_SWITCH, "lock this computer"]) {
+    expect(DESKTOP_CONSENT_TEXT_VERSION).toBe("desktop-consent/2");
+    for (const part of ["Ada Lovelace", "Analytical Engines", "15 minutes", "click at positions", "cannot see your screen", "any other program, shell command or script", DESKTOP_KILL_SWITCH, "lock this computer"]) {
       expect(text).toContain(part);
     }
-    expect(text).not.toContain("type text");
+    expect(text).not.toContain("type approved text");
     expect(text).not.toMatch(/\r|\n$/);
     expect(desktopConsentTextSha256(text)).toBe(sha256Hex(Buffer.from(text, "utf8")));
   });
@@ -301,7 +305,7 @@ describe("Phase 19.6 — consent wording (U5c)", () => {
   it("says Windows Hello when typing is in scope, and puts the scope in one order", () => {
     const text = renderDesktopConsentText({ ...input, scope: ["desktop.input.type", "desktop.input.click"] });
     expect(text).toContain("Windows Hello");
-    expect(text.indexOf("click at")).toBeLessThan(text.indexOf("type text"));
+    expect(text.indexOf("click at")).toBeLessThan(text.indexOf("type approved text"));
     expect(canonicalDesktopScope(["desktop.input.type", "desktop.input.click"])).toEqual(["desktop.input.click", "desktop.input.type"]);
     for (const bad of [[], ["desktop.input.click", "desktop.input.click"], ["desktop.screen.read"], ["shell"]]) {
       expect(canonicalDesktopScope(bad)).toBeNull();
@@ -359,7 +363,8 @@ describe("Phase 19.6 — every message is exactly one shape", () => {
     expect(parseDesktopMessage(DesktopGrantRequestSchema, grant)).not.toBeNull();
     for (const durationMinutes of [0, 61, 15.5]) expect(parseDesktopMessage(DesktopGrantRequestSchema, { ...grant, durationMinutes })).toBeNull();
     expect(parseDesktopMessage(DesktopGrantRequestSchema, { ...grant, scope: ["desktop.screen.read"] })).toBeNull();
-    expect(parseDesktopMessage(DesktopGrantRequestSchema, { ...grant, consentTextVersion: "desktop-consent/0" })).toBeNull();
+    // Any well-formed version reaches the service, which says CONSENT_MISMATCH (Stage 19.7).
+    expect(parseDesktopMessage(DesktopGrantRequestSchema, { ...grant, consentTextVersion: "not-a-version" })).toBeNull();
   });
 
   it("keeps a click inside the coordinate bound and a key inside the fixed set", () => {
@@ -409,7 +414,9 @@ function constants() {
   return {
     protocolVersion: DESKTOP_PROTOCOL_VERSION,
     agentVersion: DESKTOP_AGENT_CURRENT_VERSION,
+    commandFormatVersion: DESKTOP_COMMAND_FORMAT_VERSION,
     commandActions: [...DESKTOP_COMMAND_ACTIONS],
+    appIds: [...DESKTOP_APP_IDS],
     helloActions: DESKTOP_COMMAND_ACTIONS.filter(desktopActionRequiresHello),
     keyNames: [...DESKTOP_KEY_NAMES],
     mouseButtons: [...DESKTOP_MOUSE_BUTTONS],
@@ -428,6 +435,7 @@ function constants() {
       pollHoldMs: DESKTOP_POLL_HOLD_MS,
       coordinateMax: DESKTOP_COORDINATE_MAX,
       typeTextMaxLength: DESKTOP_TYPE_TEXT_MAX_LENGTH,
+      typeFocusWaitMs: DESKTOP_TYPE_FOCUS_WAIT_MS,
       windows11FirstBuild: DESKTOP_WINDOWS_11_FIRST_BUILD,
     },
   };
@@ -461,6 +469,7 @@ function freshVectors(): Vectors {
     { action: "desktop.input.click", x: 1920, y: 1080, button: "left" },
     { action: "desktop.input.key", key: "arrowdown" },
     { action: "desktop.input.type", text: "Grüße, 世界 👋 \"quoted\" \\ back" },
+    { action: "desktop.app.launch", app: "notepad" },
   ];
   const commands = paramsList.map((params, i) => {
     const parts: DesktopCommandParts = {
@@ -484,6 +493,7 @@ function freshVectors(): Vectors {
     { userLabel: "Ada Lovelace", organizationLabel: "Analytical Engines", durationMinutes: 15, scope: ["desktop.input.click", "desktop.input.key"] as DesktopGrantScope[] },
     { userLabel: "Zoë Ölander", organizationLabel: "Ünïcode GmbH", durationMinutes: 1, scope: ["desktop.input.type"] as DesktopGrantScope[] },
     { userLabel: "Grace", organizationLabel: "Navy", durationMinutes: 60, scope: [...DESKTOP_COMMAND_ACTIONS] },
+    { userLabel: "Ada Lovelace", organizationLabel: "Analytical Engines", durationMinutes: 15, scope: ["desktop.app.launch"] as DesktopGrantScope[] },
   ];
   return {
     note: "TEST KEYS ONLY. Generated by packages/core/test/computer-control-desktop-protocol-p19.test.ts. Never use these keys anywhere else.",
@@ -589,37 +599,73 @@ describe("Phase 19.6 — an approval is bound to its device", () => {
 // ---------------------------------------------------------------------------
 
 const NO_LISTENER_CHECK = resolve(here, "../../../apps/desktop-agent/packaging/check-no-listener.ps1");
+const NO_LISTENER_EVIDENCE = resolve(here, "../../../apps/desktop-agent/packaging/NoListenerEvidence.ps1");
+const NO_LISTENER_TESTS = resolve(here, "../../../apps/desktop-agent/packaging/no-listener-evidence.tests.ps1");
 const CI_WORKFLOW = resolve(here, "../../../.github/workflows/ci.yml");
 const AGENT_PROCESS = "Jarvis.DesktopAgent";
 
-/** The script without its comments: what it does, not what it says. */
-const noListenerCode = (): string =>
-  readFileSync(NO_LISTENER_CHECK, "utf8")
+/** A script without its comments: what it does, not what it says. */
+const withoutComments = (path: string): string =>
+  readFileSync(path, "utf8")
     .replace(/<#[\s\S]*?#>/g, "")
     .replace(/(^|\s)#.*$/gm, "$1");
 
+const noListenerCode = (): string => withoutComments(NO_LISTENER_CHECK);
+const evidenceCode = (): string => withoutComments(NO_LISTENER_EVIDENCE);
+
 describe("Phase 19.6 — the no-inbound-port check, as written", () => {
-  it("can start nothing: it takes no executable and calls nothing that launches one", () => {
-    expect(noListenerCode()).not.toMatch(
-      /\$Executable\b|Start-Process|Start-Job|Invoke-Item|Invoke-Expression|\biex\b|Diagnostics\.Process|\.Start\(|cmd(?:\.exe)?\s|&\s*["'$]/i
+  it("can start nothing: it runs only netstat by fixed name, and launches no process, job or shell", () => {
+    const code = `${noListenerCode()}\n${evidenceCode()}`;
+    expect(code).not.toMatch(
+      /\$Executable\b|Start-Process|Start-Job|Invoke-Item|Invoke-Expression|\biex\b|Diagnostics\.Process|ProcessStartInfo/i
     );
+    // The one external program it runs is netstat, by its fixed name.
+    expect(evidenceCode()).toMatch(/\$NetstatPath\s*=\s*"netstat\.exe"/);
+    expect(evidenceCode()).toMatch(/&\s*\$NetstatPath\s+-ano/);
+    expect(evidenceCode()).not.toMatch(/&\s*["']/);
   });
 
-  it("reads the whole socket table, and a read that fails is a failure", () => {
-    const code = noListenerCode();
-    expect(code).toMatch(/Get-NetTCPConnection -ErrorAction Stop/);
-    expect(code).toMatch(/Get-NetUDPEndpoint -ErrorAction Stop/);
-    expect(code).not.toMatch(/Get-Net(?:TCPConnection|UDPEndpoint) [^\n]*SilentlyContinue/);
-    // A real computer always has listeners, so no run can reach this refusal.
-    expect(code).toMatch(/\.State -eq "Listen" \}\)\.Count -eq 0\) \{ Fail /);
+  it("reads both socket tables, and a read that fails is a failure", () => {
+    const code = `${noListenerCode()}\n${evidenceCode()}`;
+    expect(evidenceCode()).toMatch(/ConvertFrom-NetstatOutput/);
+    expect(evidenceCode()).toMatch(/GetExtendedTcpTable/);
+    expect(evidenceCode()).toMatch(/GetExtendedUdpTable/);
+    expect(evidenceCode()).toMatch(/Get-NetTCPConnection -State Listen -ErrorAction Stop/);
+    expect(evidenceCode()).toMatch(/Get-NetUDPEndpoint -ErrorAction Stop/);
+    expect(evidenceCode()).not.toMatch(/(?<!Get-Command )Get-NetTCPConnection[^\n]*-ErrorAction SilentlyContinue/);
+    expect(evidenceCode()).not.toMatch(/(?<!Get-Command )Get-NetUDPEndpoint[^\n]*-ErrorAction SilentlyContinue/);
+    expect(evidenceCode()).toMatch(/exit \$LASTEXITCODE/);
+    // The filter that passed while a port was open must not come back.
+    expect(code).not.toMatch(/State -eq "Listen"/);
+    expect(code).toMatch(/Test-NetstatRowIsListener/);
+  });
+
+  it("cannot pass without seeing its own loopback control", () => {
+    const code = `${noListenerCode()}${evidenceCode()}`;
+    expect(code).toMatch(/New-NoListenerControl/);
+    expect(code).toMatch(/ControlTcpPort/);
+    expect(code).toMatch(/CONTROL_UNOBSERVED/);
+    expect(code).toMatch(/INCONCLUSIVE/);
+    // The control is opened by the check, on loopback, and closes in a finally.
+    expect(code).toMatch(/IPAddress\]::Loopback/);
+    expect(code).toMatch(/Close-NoListenerControl/);
+  });
+
+  it("treats PID 0 as the kernel's, never the process under test", () => {
+    expect(evidenceCode()).toMatch(/OwningProcess -ne 0/);
   });
 
   it("is ASCII, so Windows PowerShell 5.1 reads it as written", () => {
-    expect(readFileSync(NO_LISTENER_CHECK, "utf8")).toMatch(/^[\x09\x0a\x20-\x7e]*$/);
+    for (const path of [NO_LISTENER_CHECK, NO_LISTENER_EVIDENCE, NO_LISTENER_TESTS]) {
+      expect(readFileSync(path, "utf8"), path).toMatch(/^[\x09\x0a\x20-\x7e]*$/);
+    }
   });
 
-  it("is not what CI's start-up step runs: CI starts the agent itself, and proves the check refuses without one", () => {
+  it("CI runs the same parser and decision, not the old State filter", () => {
     const ci = readFileSync(CI_WORKFLOW, "utf8");
+    expect(ci).not.toMatch(/State -eq "Listen"/);
+    expect(ci).toMatch(/no-listener-evidence\.tests\.ps1/);
+    expect(ci).toMatch(/\.\s*\.\/packaging\/NoListenerEvidence\.ps1/);
     expect(ci).not.toMatch(/check-no-listener\.ps1 -Executable/);
     expect(ci).toMatch(/- name: Start-up opens no port\n/);
     expect(ci).toMatch(/- name: The port check refuses when no agent is running\n/);
@@ -638,6 +684,7 @@ describe.runIf(process.platform === "win32")("Phase 19.6 — the no-inbound-port
     if (mode === "idle") ready();
     if (mode === "polling") polling(ready);
     if (mode === "listening") polling(() => net.createServer().listen(0, "127.0.0.1", ready));
+    if (mode === "wildcard") polling(() => net.createServer().listen(0, "0.0.0.0", ready));
     if (mode === "udp") polling(() => dgram.createSocket("udp4").bind(0, "127.0.0.1", ready));
     if (mode === "listens-late") polling(() => { ready(); whenTold(() => net.createServer().listen(0, "127.0.0.1")); });
     if (mode === "stops") polling(() => { ready(); whenTold(() => process.exit(0)); });
@@ -743,6 +790,13 @@ describe.runIf(process.platform === "win32")("Phase 19.6 — the no-inbound-port
     expect(await agentProcesses()).toBe(1);
   });
 
+  it("catches a wildcard listener in the running agent", async () => {
+    await start("wildcard");
+    const { status, output } = await check("-Seconds", "2");
+    expect(status).toBe(1);
+    expect(output).toMatch(/LISTENING: 0\.0\.0\.0:\d+/);
+  });
+
   it("catches a UDP endpoint in the running agent", async () => {
     await start("udp");
     const { status, output } = await check("-Seconds", "2");
@@ -784,6 +838,7 @@ describe.runIf(process.platform === "win32")("Phase 19.6 — the no-inbound-port
     const { status, output } = await check("-Seconds", "2");
     expect(status, output).toBe(0);
     expect(output).toContain(`pid ${agent.pid}`);
+    expect(output).toMatch(/positive control observed \(sources: netstat/);
     expect(output).toMatch(/PASS/);
     expect(await agentProcesses()).toBe(1);
   });

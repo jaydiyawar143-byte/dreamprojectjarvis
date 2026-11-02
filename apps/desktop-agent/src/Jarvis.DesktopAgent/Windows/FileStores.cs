@@ -16,7 +16,7 @@ namespace Jarvis.DesktopAgent.Windows;
 
 internal sealed record StoredPairing(string Server, Pairing Pairing);
 
-internal sealed class FilePairingStore(string directory) : IPairingStore
+internal sealed class FilePairingStore(string directory, Action deleteKey) : IPairingStore
 {
     private string FilePath => Path.Combine(directory, "pairing.json");
 
@@ -57,12 +57,12 @@ internal sealed class FilePairingStore(string directory) : IPairingStore
         {
             File.Delete(FilePath);
         }
-        catch (IOException)
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
-            // Gone already, or in use: the key below is what matters.
+            // In use, or refused: the key below is what matters, and it is always tried.
         }
-        CngDeviceKey.Delete();
         Server = null;
+        deleteKey();
     }
 }
 

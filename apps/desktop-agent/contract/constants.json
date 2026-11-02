@@ -1,10 +1,19 @@
 {
   "protocolVersion": "jarvis-desktop/1",
-  "agentVersion": "1.0.0",
+  "agentVersion": "1.1.0",
+  "commandFormatVersion": "jarvis-desktop-command/2",
   "commandActions": [
     "desktop.input.click",
     "desktop.input.key",
-    "desktop.input.type"
+    "desktop.input.type",
+    "desktop.app.launch"
+  ],
+  "appIds": [
+    "notepad",
+    "calculator",
+    "edge",
+    "chrome",
+    "explorer"
   ],
   "helloActions": [
     "desktop.input.type"
@@ -55,7 +64,9 @@
     "GRANT_INACTIVE",
     "COMMAND_EXPIRED",
     "INVALID_COMMAND",
-    "BUSY"
+    "BUSY",
+    "APP_NOT_INSTALLED",
+    "LAUNCH_FAILED"
   ],
   "sessionEndReasons": [
     "user",
@@ -66,7 +77,7 @@
     "expired",
     "disconnected"
   ],
-  "consentTextVersion": "desktop-consent/1",
+  "consentTextVersion": "desktop-consent/2",
   "killSwitch": "Ctrl+Alt+Shift+F12",
   "limits": {
     "pairingCodeTtlMs": 600000,
@@ -78,6 +89,7 @@
     "pollHoldMs": 20000,
     "coordinateMax": 100000,
     "typeTextMaxLength": 10000,
+    "typeFocusWaitMs": 6000,
     "windows11FirstBuild": 22000
   }
 }

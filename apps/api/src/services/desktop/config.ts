@@ -14,6 +14,8 @@
 //                                      Microsoft's lifecycle, not this code's.
 //   DESKTOP_AGENT_MIN_VERSION          optional; the oldest agent accepted.
 //                                      Defaults to this release's agent.
+//   DESKTOP_TYPE_MAX_LENGTH            optional; the longest text one action may
+//                                      type here, up to the protocol's bound.
 //   JARVIS_ENCRYPTION_KEY              checked where the sealer is built: a
 //                                      command's parameters are sealed.
 // ---------------------------------------------------------------------------
@@ -22,6 +24,8 @@ import { createPrivateKey, createPublicKey, type KeyObject } from "node:crypto";
 
 import {
   DESKTOP_AGENT_CURRENT_VERSION,
+  DESKTOP_TYPE_TEXT_DEFAULT_MAX_LENGTH,
+  DESKTOP_TYPE_TEXT_MAX_LENGTH,
   DESKTOP_WINDOWS_11_FIRST_BUILD,
   compareDesktopAgentVersions,
   desktopServerKeyId,
@@ -34,6 +38,8 @@ export interface DesktopAgentConfig {
   serverKeyId: string;
   minWindowsBuild: number;
   minAgentVersion: string;
+  /** The longest text one action may type on this deployment. */
+  typeMaxLength: number;
 }
 
 export type DesktopAgentConfigResult =
@@ -72,6 +78,12 @@ export function loadDesktopAgentConfig(env: NodeJS.ProcessEnv = process.env): De
     return { enabled: false, reason: "DESKTOP_AGENT_MIN_VERSION must be major.minor.patch" };
   }
 
+  const rawLength = env.DESKTOP_TYPE_MAX_LENGTH?.trim();
+  const typeMaxLength = rawLength ? Number(rawLength) : DESKTOP_TYPE_TEXT_DEFAULT_MAX_LENGTH;
+  if (!Number.isInteger(typeMaxLength) || typeMaxLength < 1 || typeMaxLength > DESKTOP_TYPE_TEXT_MAX_LENGTH) {
+    return { enabled: false, reason: `DESKTOP_TYPE_MAX_LENGTH must be a whole number from 1 to ${DESKTOP_TYPE_TEXT_MAX_LENGTH}` };
+  }
+
   const serverPublicKey = createPublicKey(signingKey).export({ format: "der", type: "spki" }).toString("base64");
   return {
     enabled: true,
@@ -81,6 +93,7 @@ export function loadDesktopAgentConfig(env: NodeJS.ProcessEnv = process.env): De
       serverKeyId: desktopServerKeyId(serverPublicKey),
       minWindowsBuild: Number(rawBuild),
       minAgentVersion,
+      typeMaxLength,
     },
   };
 }

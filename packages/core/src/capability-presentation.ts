@@ -304,6 +304,16 @@ export const SKILL_CATALOG: readonly SkillDefinition[] = [
  */
 export const SKILL_UNLISTED_TOOLS: readonly UnlistedTool[] = [
   {
+    id: "desktop.app.launch",
+    reason:
+      "Not a skill any request should be matched to. A desktop action is reached only by the owner's own words, through the Desktop Agent, and is held to those words before any approval exists. Offering it from a catalog would invite a model to propose it.",
+  },
+  {
+    id: "desktop.input.type",
+    reason:
+      "Same as desktop.app.launch: reached only by the owner's own words, which must contain the text exactly, and never from a catalog.",
+  },
+  {
     id: "self.describe",
     reason:
       "Introspection, not an outcome. It answers what JARVIS IS — build, model, environment — where a skill answers what JARVIS can DO for you. Its own description sends 'what can you do' to capabilities.list instead. Granted to all nine agents and unaffected by being unlisted.",

@@ -15,8 +15,17 @@ import { randomUUID } from "node:crypto";
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 
-const EXPLICIT_DATABASE_URL = process.env.DATABASE_URL;
-const SAFE_TARGET = !!EXPLICIT_DATABASE_URL && !/:(?:5432|5433)\//.test(EXPLICIT_DATABASE_URL);
+/** A URL that names a port, and not development's or deployment's. No port at all means 5432. */
+function isSeparateDatabase(url: string | undefined): boolean {
+  try {
+    const { port } = new URL(url ?? "");
+    return port !== "" && port !== "5432" && port !== "5433";
+  } catch {
+    return false;
+  }
+}
+
+const SAFE_TARGET = isSeparateDatabase(process.env.DATABASE_URL);
 const REQUIRED = process.env.JARVIS_REQUIRE_POSTGRES === "1";
 
 type Client = InstanceType<(typeof import("@prisma/client"))["PrismaClient"]>;

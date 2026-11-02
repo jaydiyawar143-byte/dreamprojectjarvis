@@ -28,9 +28,11 @@ public class ContractTests
     {
         Assert.Equal(ProtocolConstants.ProtocolVersion, Constants.GetProperty("protocolVersion").GetString());
         Assert.Equal(ProtocolConstants.AgentVersion, Constants.GetProperty("agentVersion").GetString());
+        Assert.Equal(ProtocolConstants.CommandFormatVersion, Constants.GetProperty("commandFormatVersion").GetString());
         Assert.Equal(ProtocolConstants.ConsentTextVersion, Constants.GetProperty("consentTextVersion").GetString());
         Assert.Equal(ProtocolConstants.KillSwitch, Constants.GetProperty("killSwitch").GetString());
         Assert.Equal(Strings(Constants.GetProperty("commandActions")), ProtocolConstants.CommandActions);
+        Assert.Equal(Strings(Constants.GetProperty("appIds")), ProtocolConstants.AppIds);
         Assert.Equal(Strings(Constants.GetProperty("helloActions")), ProtocolConstants.HelloActions);
         Assert.Equal(Strings(Constants.GetProperty("keyNames")), ProtocolConstants.KeyNames);
         Assert.Equal(Strings(Constants.GetProperty("mouseButtons")), ProtocolConstants.MouseButtons);
@@ -51,6 +53,7 @@ public class ContractTests
         Assert.Equal(ProtocolConstants.PollHoldMs, Limit("pollHoldMs"));
         Assert.Equal(ProtocolConstants.CoordinateMax, Limit("coordinateMax"));
         Assert.Equal(ProtocolConstants.TypeTextMaxLength, Limit("typeTextMaxLength"));
+        Assert.Equal(ProtocolConstants.TypeFocusWaitMs, Limit("typeFocusWaitMs"));
         Assert.Equal(ProtocolConstants.Windows11FirstBuild, Limit("windows11FirstBuild"));
         // D6, U5a, U5b — fixed by the owner, not tunable.
         Assert.Equal(10 * 60_000, ProtocolConstants.PairingCodeTtlMs);
@@ -73,6 +76,8 @@ public class ContractTests
         Assert.Equal(ProtocolConstants.KeyNames, Strings(key.GetProperty("key").GetProperty("enum")));
         var type = envelopes[2].GetProperty("properties").GetProperty("params").GetProperty("properties");
         Assert.Equal(ProtocolConstants.TypeTextMaxLength, type.GetProperty("text").GetProperty("maxLength").GetInt32());
+        var launch = envelopes[3].GetProperty("properties").GetProperty("params").GetProperty("properties");
+        Assert.Equal(ProtocolConstants.AppIds, Strings(launch.GetProperty("app").GetProperty("enum")));
 
         var error = Schemas.GetProperty("ErrorResponse").GetProperty("properties").GetProperty("error").GetProperty("properties");
         Assert.Equal(ProtocolConstants.ErrorCodes, Strings(error.GetProperty("code").GetProperty("enum")));
@@ -120,6 +125,7 @@ public class ContractTests
             {
                 ProtocolConstants.Click => new ClickParams(raw.GetProperty("x").GetInt32(), raw.GetProperty("y").GetInt32(), raw.GetProperty("button").GetString()!),
                 ProtocolConstants.Key => new KeyParams(raw.GetProperty("key").GetString()!),
+                ProtocolConstants.AppLaunch => new LaunchParams(raw.GetProperty("app").GetString()!),
                 _ => new TypeParams(raw.GetProperty("text").GetString()!),
             };
             var envelope = new CommandEnvelope(

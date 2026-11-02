@@ -514,7 +514,7 @@ stays disabled until its own gates pass.
 | **19.4** | Durable, scoped artifact storage with expiry and quotas. | Restart and multi-instance tests pass; a stale or foreign id is not found. |
 | **19.5** | Value-free audit, meaningful approval summaries, and `UNKNOWN` outcome handling. | Redaction and unknown-outcome tests pass; nothing is auto-retried. |
 | **19.6** | Windows desktop agent: secure pairing, consent, revocation and a fixed command allowlist. | Pairing/consent/revocation tests pass; no inbound port; sensitive input needs independent approval. |
-| **19.7** | Network hardening, real-browser security tests, CI gates, operational documentation and rollback validation. | Security review sign-off, CI green, rollback rehearsed and documented. |
+| **19.7** | Network hardening, real-browser security tests, CI gates, operational documentation and rollback validation. **Not started.** The owner's brief of 2026-11-01 used the same number for desktop launch and typing (§19); this row is a different piece of work and is still to do. | Security review sign-off, CI green, rollback rehearsed and documented. |
 
 **Sequencing rules.**
 
@@ -1637,7 +1637,7 @@ assesses the exit criteria.
 | D2 — a device belongs to a user and an Organization | `DesktopDevice.userId` and `tenantId`, from the pairing code, never from the agent |
 | D3 — outbound HTTPS long-poll, single-use PostgreSQL command records | `POST /api/v1/desktop-agent/poll`, held up to 20 s; `claimNextCommand` is ONE conditional `UPDATE … RETURNING` joined to the active grant, and deletes the sealed payload in the same transaction |
 | D4 — no screen reading in v1 | No such action, route or code: the command set is click, key, type; the agent's source and its compiled assemblies are scanned for screen APIs |
-| D5 — only a person on the web page controls a desktop | No model-facing desktop tool exists; the person routes (`/api/v1/desktop/*`) are the only way to ask for a command |
+| D5 — only a person on the web page controls a desktop. **Reversed by the owner for Stage 19.7 (§19)** | Until then no model-facing desktop tool existed. Now chat may propose two actions; clicks and named keys stay on the person routes (`/api/v1/desktop/*`) |
 | D6 — pairing code 10 min, command 30 s, clock skew 60 s | Core constants, pinned on both sides by the contract tests |
 | D7 — pairing by Owner/Admin; revocation by the device's user or an Owner/Admin | `createPairingCode`, which reads the named Organization's membership by both ids, at that moment (§18.9); `revokeDevice`; an owner who loses Owner/Admin loses control at the device's next request. A device's own user can always stop it |
 
@@ -1924,3 +1924,147 @@ Two different things are still needed, and neither replaces the other:
   paired agent. Pairing, consent, Windows Hello, input, the kill switch,
   lock and sign-out, and the installed MSIX need a real Windows 11 session
   (`docs/DEPLOYMENT.md`). It must not be a person's working computer.
+
+---
+
+## 19. Stage 19.7 implementation record — desktop application launch and controlled typing (working tree, not committed)
+
+The owner's brief of 2026-11-01, "Intelligent Desktop Execution". It shares its
+number with the hardening stage in §8, which is a different piece of work and has
+not started.
+
+**Stage 19.7 is not complete.** The code, the automated tests and the runbook are
+done. **No real application has been opened and nothing has been typed**: the brief
+reserves that for a separate approval. §19.6 says what only that can prove.
+
+### 19.1 The owner's decisions
+
+| Decision | Held by |
+|---|---|
+| D5 reversed: a model may propose desktop actions | `DESKTOP_CHAT_TOOL_IDS`: `desktop.app.launch` and `desktop.input.type`. Clicks and named keys have no tool |
+| Five applications, by fixed id | `DESKTOP_APP_IDS`, on both sides, held equal by `constants.json` |
+| No shell, no arbitrary path | `Windows/AppLauncher.cs`: a table the agent owns, known folders only, no arguments, `UseShellExecute = false` |
+| Text is restricted | `isTypeableText` (both sides), `DESKTOP_TYPE_MAX_LENGTH` and `isSensitiveDesktopText` (server, both arms) |
+| Fresh Windows Hello for every typing action | D1, unchanged. No fallback |
+| Launch and typing are approved separately | `desktopOwnerAuthorization` refuses typing in a message that also opens an application |
+| Only the owner's instructions authorize | The same function, over the turn's original message. Nothing a model read reaches it |
+
+### 19.2 What was built, and where
+
+| Part | Where |
+|---|---|
+| Protocol | `packages/core/src/desktop-agent.ts`, `computer-control.ts`; the same in `Jarvis.DesktopAgent.Core`. Signed commands are `jarvis-desktop-command/2`, consent `desktop-consent/2`, the agent 1.1.0. Transport stays `jarvis-desktop/1`, so a device stays paired |
+| Chat's rules | `packages/core/src/desktop-chat.ts`, pure: the owner's words, what is never typed, fixed refusals, what chat reports |
+| One service | `DesktopControlService`: `propose` and `runApproved` beside the page's methods, through `confirmCommand` for both |
+| Tools | `packages/tools/src/tools/desktop-tools.ts`: one port, no provider logic |
+| Agent | `packages/agents/src/agents/desktop-agent.ts`; the only holder of the tools, with nothing that reads the outside world |
+| Gate | `orchestrator.ts`, before any approval exists |
+| Launcher | `apps/desktop-agent/src/Jarvis.DesktopAgent/Windows/AppLauncher.cs` |
+| Page | `apps/web/src/app/computer-control/page.tsx`, and the result on `pending-action-card.tsx` |
+
+No migration: `action` and `scope` are strings. `DESKTOP_TYPE_MAX_LENGTH` is the one new
+setting.
+
+### 19.3 How a request runs
+
+1. The router sends it to the Desktop Agent. That authorizes nothing.
+2. The model proposes a tool. The orchestrator asks `propose` with the owner's
+   original message. It checks the parameters, the owner's words and the text, then
+   finds the device and the grant from the account. Refused, nothing exists.
+3. A pending action is created, its parameters sealed. The card shows what will
+   happen, and for typing the exact text.
+4. The person confirms. `ToolExecutor` grants the call, and the tool calls
+   `runApproved`, which spends the approval through `confirmCommand`.
+5. The agent collects it on a signed poll and verifies it. For typing it waits 6
+   seconds, fixes the window, and asks Windows Hello, naming that window.
+6. The agent answers once. Chat reports what it answered, and says what it does not
+   know. A wait that runs out says so, and nothing is sent again.
+
+**The exception to F4.** The card for desktop typing shows the exact text, by the
+brief's "show the exact text before execution". A pending message is stored with its
+conversation, so this is a change to what is stored there. It adds nothing new: the
+proposal has already held the text to appear word for word in the owner's own
+message in that conversation, and refused it if it looked like a secret. The
+approval, the sealed record and the audit row are unchanged and value-free.
+
+### 19.4 Found while building
+
+| Found | How | Done |
+|---|---|---|
+| "Open Notepad." reads as AMBIGUOUS to the write-intent gate, and "Type Hello" as INFO, so the feature could never run | Running the real classifier | Desktop tools take the stricter gate instead |
+| `modifyPendingAction` would change a parameter after every check | Reading it | Desktop actions cannot be modified |
+| **Typed text would land in the chat.** The person confirms in a browser on the same computer, so the browser has the focus when the command arrives | Walking the first target through by hand: no mock shows it | `DESKTOP_TYPE_FOCUS_WAIT_MS`, then Windows Hello names the window |
+| Windows Hello's own window holds the focus as it closes, so the same-window check could refuse every typing command | The same walk | Up to 2 seconds for the focus to return. Any other window is refused |
+| The gate missed a model's sanitized tool name where no policy translated it | A test that failed | It matches both spellings |
+| A second action in a later round of a turn replaced the one being read | A test that failed | It asks what is waiting in the conversation |
+| `run` is a work-request word: "Run calculator" went to the planner, which has no desktop tools | Reading the detector | Chat skips the detector for a desktop request |
+| The agent lacked the capability tools every agent must have | The full suite | Granted: they describe JARVIS itself, and bring in nobody's words |
+| `sweepCommands` is global, so the two desktop database suites expired each other's commands | The database replay | They take turns on an advisory lock. This would have flaked in CI |
+| A password said in words was not recognised | Probing `containsSecret` | `isSensitiveDesktopText` adds phrases and card numbers |
+
+### 19.5 Evidence (2026-11-01, on Windows from the working tree)
+
+| Gate | Result |
+|---|---|
+| `pnpm typecheck`, `typecheck:tests`, `lint`, `build` | 40/40, 23/23, 22/22, 22/22 |
+| .NET, clean rebuild | 0 warnings. Core 282/282, Windows 54/54, three more runs identical |
+| Full suite, no database, 22 workspaces, cache bypassed | 11,494 passed, 1 failed, 796 skipped |
+| CI's database steps, fresh database, 0 skipped | 38 migrations; `@jarvis/db` 472/472, `@jarvis/memory` 93/93, `@jarvis/api` 319/319 twice, evaluation 13/13 |
+| Chat end to end on PostgreSQL | 28/28, in both of those runs |
+| Mutations on a scratch copy | 79 of 79 caught, after two weak tests were sharpened |
+
+- The one failure is the MCP timeout test in `verify-s8`, failing here since before
+  this work (§15).
+- Among the skipped are the 10 no-inbound-port tests, which refuse to run beside a
+  real agent. One was running, and it was not stopped for them. `@jarvis/core` exits
+  1 for that reason alone.
+- `@jarvis/web`'s 881 are from a run of its own: the computer entered standby during
+  the full run (Windows' power log, 18:38 and 18:42), and 21 of its files timed out
+  starting a worker. No test failed, and alone it took 15 seconds. The same standby
+  explains four `REQUEST_EXPIRED` refusals in the agent's log. The clocks of Windows
+  and the API's container were checked, and they agree.
+
+Everything runs with the launcher, Windows Hello, the input injector and the model
+replaced. One test starts a real process: `hostname.exe`, which has no window, to
+prove the no-shell starter works on Windows. The computer in the end-to-end suite is a
+test agent that signs and verifies as the .NET one does; the two protocols are held
+equal by the shared contract, not by a test that runs them together.
+
+### 19.6 Not proven
+
+Each needs the owner's approval and the steps in `docs/DEPLOYMENT.md`, "Test opening
+and typing on Windows".
+
+- **That any application opens.** No real launch has run. What has run: on
+  2026-11-01 the owner sent a key and a click from the Computer Control page, and
+  both succeeded on the installed 1.0.0 agent. Those were the first real commands,
+  and they prove the page-to-agent path on this computer, not this stage's code.
+- **That the MSIX does not change what a browser does.** A process started by a
+  packaged app may run with its file redirection, so a browser could open a separate,
+  empty profile.
+- **That Windows Hello hands the focus back in time,** and that a window opened by a
+  background app gets the focus at all.
+- **What a live model does.** The tests script its choices. They prove the gates, not
+  its judgement: a model could still fail to call a tool, and then nothing happens.
+- **The installer.** `build-msix.ps1` was not run for this version, and the installed
+  agent is still the build of 2026-10-31. An update in place keeping the pairing is
+  expected of Windows and has not been observed here.
+- **CI.** Nothing here is pushed, so neither CI job has run on it.
+
+The secret check is a heuristic. It recognises shapes and words, and something that
+looks like neither passes it. The person reading the exact text is the real check.
+
+### 19.7 Exit criteria, assessed
+
+| The brief's list | State |
+|---|---|
+| Allowed and rejected application ids; invalid paths | Pass, on both sides |
+| Unauthorized launch requests; expired grants | Pass, on PostgreSQL |
+| Invalid signatures and replays | Pass, on both sides |
+| Typing length and character validation | Pass, on both sides. The configured limit and the secret check are the server's |
+| Missing Windows Hello | Pass, with a fake Hello. **Real Hello not run** |
+| Prompt injection | Pass: the gate, with a scripted model |
+| Chat tool selection and approval | The routing, the gate and the approval pass. **A live model's choice not run** |
+| Actual result reporting | Pass, from a signing test agent. **A real agent not run** |
+| Agent restart and recovery | Pass, on PostgreSQL and in the agent's tests |
+| Windows integration tests with fake launchers | Pass. Real applications are not opened by any test |

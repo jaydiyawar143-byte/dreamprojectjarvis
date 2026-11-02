@@ -1,7 +1,7 @@
 import { Router } from "express";
 import type { Response } from "express";
 import { randomUUID } from "crypto";
-import { JarvisRequestSchema, JarvisError, voiceConfirmationRefusal } from "@jarvis/core";
+import { DESKTOP_CHAT_EXECUTION_TIMEOUT_MS, JarvisRequestSchema, JarvisError, isDesktopChatTool, looksLikeDesktopRequest, voiceConfirmationRefusal } from "@jarvis/core";
 import { maskIdentifiersInText } from "@jarvis/core";
 import type { SessionContext, AuthContext } from "@jarvis/core";
 import { createAuthMiddleware, type AuthenticatedRequest } from "../middleware/auth.js";
@@ -421,10 +421,20 @@ export function createChatRouter(container: ChatRouterDeps): Router {
                 ipAddress: req.ip,
                 approvalId: pendingAction.approvalId,
                 ...(sessionContext.inputMode ? { inputMode: sessionContext.inputMode } : {}),
+                // Phase 19.7 — a desktop tool waits for the computer's answer.
+                ...(isDesktopChatTool(pendingAction.toolId) ? { timeoutMs: DESKTOP_CHAT_EXECUTION_TIMEOUT_MS } : {}),
               });
 
+            // Phase 19.7 — what the computer answered, in its fixed sentence: not
+            // "executed successfully" for an action that may not have happened.
+            const desktopReport = isDesktopChatTool(pendingAction.toolId)
+              ? (executionResult.result?.data as { message?: unknown } | undefined)?.message
+              : undefined;
+
             let assistantMessage: string;
-            if (executionResult.status === "completed" && executionResult.result?.success) {
+            if (typeof desktopReport === "string") {
+              assistantMessage = desktopReport;
+            } else if (executionResult.status === "completed" && executionResult.result?.success) {
               assistantMessage = `Action executed successfully: ${pendingAction.action}.\nResult: ${JSON.stringify(executionResult.result.data, null, 2)}`;
             } else {
               assistantMessage = `Action failed: ${pendingAction.action}.\nError: ${executionResult.error ?? "Unknown error"}`;
@@ -634,7 +644,9 @@ export function createChatRouter(container: ChatRouterDeps): Router {
       // back as null. Both go on to the assistant below, with the full history:
       // the planner is given one sentence, so it cannot answer either.
       // -----------------------------------------------------------------------
-      const workRequest = detectWorkRequest(jarvisRequest.message);
+      // Phase 19.7 — "run calculator" is a word the detector acts on, and desktop
+      // tools are not task tools: a person must be present, so it stays in chat.
+      const workRequest = looksLikeDesktopRequest(jarvisRequest.message) ? ({ type: "NONE" } as const) : detectWorkRequest(jarvisRequest.message);
       // Saved by whichever branch reaches it first, and never twice.
       let savedUserMessage: Awaited<ReturnType<typeof saveUserMessage>> | undefined;
 

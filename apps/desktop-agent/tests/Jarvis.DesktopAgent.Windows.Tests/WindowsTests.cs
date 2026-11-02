@@ -2,9 +2,10 @@
 // Phase 19.6 — the Windows parts, on Windows (the CI job runs these).
 //
 // The device key is non-exportable and signs what the server verifies; the
-// compiled agent references nothing that can listen for a connection or start
-// a process; the agent's own windows are never a target and its integrity
-// level is readable. No test here sends input.
+// compiled agent references nothing that can listen for a connection, and only
+// its Windows assembly can start a process (the launcher, 19.7); the agent's
+// own windows are never a target and its integrity level is readable. No test
+// here sends input.
 // ---------------------------------------------------------------------------
 
 using System.Reflection.Metadata;
@@ -61,11 +62,10 @@ public sealed class DeviceKeyTests : IDisposable
 
 public class AssemblyBoundaryTests
 {
-    /// <summary>Types the compiled agent must never reference: listening, processes, the screen, the clipboard, the registry.</summary>
+    /// <summary>Types the compiled agent must never reference: listening, the screen, the clipboard, the registry.</summary>
     private static readonly string[] ForbiddenTypes =
     [
         "System.Net.HttpListener", "System.Net.Sockets.TcpListener", "System.Net.Sockets.UdpClient", "System.Net.Sockets.Socket",
-        "System.Diagnostics.Process", "System.Diagnostics.ProcessStartInfo",
         "System.Windows.Forms.Clipboard", "Microsoft.Win32.Registry", "Microsoft.Win32.RegistryKey",
         "System.Drawing.Graphics", "Windows.Graphics.Capture.GraphicsCaptureItem",
     ];
@@ -86,12 +86,19 @@ public class AssemblyBoundaryTests
 
     [Theory]
     [MemberData(nameof(Assemblies))]
-    public void The_compiled_agent_references_nothing_that_listens_launches_or_reads_the_screen(string assembly)
+    public void The_compiled_agent_references_nothing_that_listens_or_reads_the_screen(string assembly)
     {
         var path = Path.Combine(AppContext.BaseDirectory, assembly);
         Assert.True(File.Exists(path), path);
         var found = ReferencedTypes(path).Where(t => ForbiddenTypes.Contains(t)).ToList();
         Assert.Empty(found);
+    }
+
+    [Fact]
+    public void The_protocol_library_cannot_start_a_process_at_all()
+    {
+        var path = Path.Combine(AppContext.BaseDirectory, "Jarvis.DesktopAgent.Core.dll");
+        Assert.DoesNotContain(ReferencedTypes(path), t => t is "System.Diagnostics.Process" or "System.Diagnostics.ProcessStartInfo");
     }
 
     private static string AgentSource(string relative, [System.Runtime.CompilerServices.CallerFilePath] string here = "") =>

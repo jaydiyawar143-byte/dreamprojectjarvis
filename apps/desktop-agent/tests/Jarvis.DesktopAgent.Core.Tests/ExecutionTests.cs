@@ -20,6 +20,7 @@ public sealed class ExecutionTests : IDisposable
     private readonly FakeInjector injector = new();
     private readonly FakeHello hello = new();
     private readonly FakeSession session = new();
+    private readonly FakeLauncher launcher = new();
     private readonly MemorySink sink = new();
     private readonly CommandRunner runner;
     private readonly LocalGrant grant;
@@ -28,7 +29,7 @@ public sealed class ExecutionTests : IDisposable
     {
         grants = new GrantManager(clock);
         verifier = new CommandVerifier(Contract.ServerSpki, Commands.DeviceId, grants, clock);
-        runner = new CommandRunner(verifier, grants, inspector, injector, hello, session, new AgentLog(sink, clock));
+        runner = new CommandRunner(verifier, grants, inspector, injector, hello, session, new AgentLog(sink, clock), launcher, TimeSpan.Zero);
         grant = grants.Prepare(ProtocolConstants.CommandActions, 15, new string('a', 64));
         Assert.True(grants.Activate(grant, null));
     }
@@ -273,6 +274,21 @@ public class GrantTests
     }
 
     [Fact]
+    public void Says_how_long_an_exchange_may_stay_open_before_the_grace_runs_out()
+    {
+        using var grants = new GrantManager(clock);
+        Assert.Null(grants.GraceLeft);
+        Assert.True(grants.Activate(grants.Prepare([ProtocolConstants.Click], 15, "h"), null));
+        clock.Advance(10_000);
+        // One past the 30 seconds: at exactly 30 the grace has not run out.
+        Assert.Equal(TimeSpan.FromMilliseconds(20_001), grants.GraceLeft);
+        grants.ServerContact();
+        Assert.Equal(TimeSpan.FromMilliseconds(30_001), grants.GraceLeft);
+        clock.Advance(90_000);
+        Assert.Equal(TimeSpan.Zero, grants.GraceLeft);
+    }
+
+    [Fact]
     public void Extends_only_by_replacing_the_grant_it_names()
     {
         using var grants = new GrantManager(clock);
@@ -325,6 +341,85 @@ public class AgentLogTests
         Assert.Contains("attempt=2", line);
         Assert.DoesNotContain("hunter2", line);
         Assert.DoesNotContain("secrets", line);
+    }
+
+    private static string LoggedLine(params (string Field, object? Value)[] fields)
+    {
+        var sink = new MemorySink();
+        new AgentLog(sink, new TestClock()).Write("poll.failed", fields);
+        return Assert.Single(sink.Lines);
+    }
+
+    [Theory]
+    [InlineData("code", "7K3M-Q9X2-ABCD-EFGH-JKMN-PQRS-TVWX-YZ01")]
+    [InlineData("reason", "7K3M-Q9X2-ABCD-EFGH-JKMN-PQRS-TVWX-YZ01")]
+    [InlineData("code", "8f14e45f-ceea-467a-9ad1-0e9a5b0b7d2c")]
+    [InlineData("reason", "8f14e45f-ceea-467a-9ad1-0e9a5b0b7d2c")]
+    [InlineData("deviceIdHash", "8f14e45f-ceea-467a-9ad1-0e9a5b0b7d2c")]
+    [InlineData("deviceIdHash", "8CAEFA6B4FA9A023")]
+    [InlineData("httpStatus", "bad-gateway")]
+    [InlineData("retryInMs", "soon")]
+    [InlineData("code", "SERVER_REFUSAL\n")]
+    [InlineData("reason", "revoked\n")]
+    [InlineData("outcome", "succeeded\n")]
+    [InlineData("deviceIdHash", "8caefa6b4fa9a023\n")]
+    public void Withholds_a_value_that_is_not_the_shape_of_its_field(string field, string value)
+    {
+        var line = LoggedLine((field, value));
+        Assert.Contains($"{field}=[withheld]", line);
+        Assert.DoesNotContain(value, line);
+    }
+
+    [Theory]
+    [InlineData("httpStatus", 99)]
+    [InlineData("httpStatus", 600)]
+    [InlineData("retryInMs", -1)]
+    [InlineData("code", 123456)]
+    [InlineData("reason", 123456)]
+    [InlineData("deviceIdHash", 123456)]
+    public void Withholds_a_number_that_cannot_belong_to_its_field(string field, int value)
+    {
+        Assert.Contains($"{field}=[withheld]", LoggedLine((field, value)));
+    }
+
+    [Theory]
+    [InlineData("code", "TRANSPORT_ERROR")]
+    [InlineData("reason", "DEVICE_REVOKED")]
+    [InlineData("reason", "kill-switch")]
+    [InlineData("deviceIdHash", "8caefa6b4fa9a023")]
+    public void Writes_a_value_of_the_right_shape(string field, string value)
+    {
+        Assert.Contains($"{field}={value}", LoggedLine((field, value)));
+    }
+
+    [Theory]
+    [InlineData("httpStatus", 100)]
+    [InlineData("httpStatus", 599)]
+    [InlineData("retryInMs", 0)]
+    [InlineData("attempt", 3)]
+    public void Writes_a_number_its_field_can_hold(string field, int value)
+    {
+        Assert.Contains($"{field}={value}", LoggedLine((field, value)));
+    }
+
+    [Fact]
+    public void Leaves_out_an_empty_value()
+    {
+        Assert.DoesNotContain("httpStatus", LoggedLine(("code", "TRANSPORT_ERROR"), ("httpStatus", (int?)null)));
+    }
+
+    [Fact]
+    public void Has_no_field_for_a_full_device_id()
+    {
+        Assert.DoesNotContain("deviceId=", LoggedLine(("deviceId", "8f14e45f-ceea-467a-9ad1-0e9a5b0b7d2c")));
+    }
+
+    [Fact]
+    public void Hashes_a_device_id_as_the_server_does()
+    {
+        // The first 16 hex characters of its SHA-256, derived outside this code.
+        // The API's refusal test pins the same value for the same id.
+        Assert.Equal("8caefa6b4fa9a023", AgentLog.DeviceIdHash(Commands.DeviceId));
     }
 
     [Fact]

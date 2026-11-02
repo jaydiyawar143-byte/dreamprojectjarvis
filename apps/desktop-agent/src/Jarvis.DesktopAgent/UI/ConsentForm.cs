@@ -3,8 +3,8 @@
 //
 // The person chooses how long (1–60 minutes, 15 by default) and what JARVIS
 // may do; the screen shows the exact versioned text those choices produce,
-// and that exact text is what is hashed and sent. Typing is off unless they
-// tick it. Allow acts only on physical input: a click or key press injected
+// and that exact text is what is hashed and sent. Typing and opening
+// applications are off unless they tick them. Allow acts only on physical input: a click or key press injected
 // by any program — this agent included — is ignored.
 // ---------------------------------------------------------------------------
 
@@ -20,8 +20,9 @@ internal sealed class ConsentForm : Form
     private readonly NumericUpDown minutes = new() { Minimum = 1, Maximum = ProtocolConstants.GrantMaxMinutes, Value = ProtocolConstants.GrantDefaultMinutes, Width = 70 };
     private readonly CheckBox click = new() { Text = "Click", Checked = true, AutoSize = true };
     private readonly CheckBox keys = new() { Text = "Press keys (Enter, Tab, Escape, Backspace, Delete, arrows)", Checked = true, AutoSize = true };
-    private readonly CheckBox type = new() { Text = "Type text (Windows Hello every time)", Checked = false, AutoSize = true };
-    private readonly TextBox text = new() { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Width = 520, Height = 260, TabStop = false };
+    private readonly CheckBox type = new() { Text = "Type approved text (Windows Hello every time)", Checked = false, AutoSize = true };
+    private readonly CheckBox apps = new() { Text = "Open approved applications", Checked = false, AutoSize = true };
+    private readonly TextBox text = new() { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Width = 520, Height = 300, TabStop = false };
     private readonly Label notice = new() { AutoSize = true, ForeColor = Color.Firebrick };
     private readonly Button allow = new() { Text = "Allow", AutoSize = true };
     private readonly Button deny = new() { Text = "Don't allow", AutoSize = true, DialogResult = DialogResult.Cancel };
@@ -55,6 +56,7 @@ internal sealed class ConsentForm : Form
         layout.Controls.Add(click);
         layout.Controls.Add(keys);
         layout.Controls.Add(type);
+        layout.Controls.Add(apps);
         layout.Controls.Add(text);
         layout.Controls.Add(notice);
         layout.Controls.Add(buttons);
@@ -64,6 +66,7 @@ internal sealed class ConsentForm : Form
         click.CheckedChanged += (_, _) => Render();
         keys.CheckedChanged += (_, _) => Render();
         type.CheckedChanged += (_, _) => Render();
+        apps.CheckedChanged += (_, _) => Render();
         allow.Click += OnAllow;
         Render();
     }
@@ -78,6 +81,7 @@ internal sealed class ConsentForm : Form
             if (click.Checked) scope.Add(ProtocolConstants.Click);
             if (keys.Checked) scope.Add(ProtocolConstants.Key);
             if (type.Checked) scope.Add(ProtocolConstants.Type);
+            if (apps.Checked) scope.Add(ProtocolConstants.AppLaunch);
             return scope;
         }
     }

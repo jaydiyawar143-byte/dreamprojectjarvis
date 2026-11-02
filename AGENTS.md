@@ -93,7 +93,10 @@ collapse `connection` (is it set up?) into `health` (does it work?).
   approval is rejected, consumed or expired. With no key, no such approval is
   created and the browser write tools are not registered. Never store them in
   the clear as a fallback, and never read `ApprovalSealedParams` outside the
-  approval store.
+  approval store. One exception to what a chat shows, by the owner's decision
+  (Stage 19.7): the card for desktop typing shows the exact text, which the
+  proposal has already held to appear word for word in the owner's own message
+  in that conversation. The approval and the audit row stay value-free.
 
 ### External writes
 
@@ -452,21 +455,51 @@ parts a change must not break.
 
 ### Desktop agent
 
-The record is `docs/phases/phase-19.md`, §18; these are the parts a change
-must not break.
+The record is `docs/phases/phase-19.md`, §18 and §19; these are the parts a
+change must not break.
 
 - **Off unless switched on.** `DESKTOP_AGENT_ENABLED` must be exactly `true`,
   with the command-signing key, a minimum Windows build and the sealer; any
   one missing and no desktop route is mounted. Never add a default that turns
   it on.
-- **A person drives it, never a model (D5).** There are no model-facing desktop
-  tools; the Computer Control page is the only way to ask for an action. Never
-  add a desktop tool to the registry or an agent's allowlist.
-- **Three actions, nothing else.** `desktop.input.click`, `desktop.input.key`
-  (nine named keys) and `desktop.input.type`. No screen reading (D4), no
-  process, shell, script, file, clipboard, registry or elevation. Adding an
-  action is an owner decision and a change to both protocols, the contract and
+- **A model proposes; only the owner's own words and a person decide.** The
+  owner reversed D5 for Stage 19.7, for exactly two tools
+  (`DESKTOP_CHAT_TOOL_IDS`): `desktop.app.launch` and `desktop.input.type`.
+  Clicks and named keys have no tool: only the Computer Control page asks for
+  those. Only the Desktop Agent holds the two tools, and it holds nothing that
+  reads the web, a document or a mailbox. Never put either tool on another agent,
+  or a reading tool on that one, and never make a desktop tool a task tool.
+- **Only the owner's words authorize one.** `desktopOwnerAuthorization` reads the
+  turn's original message, never a composed prompt: an application must be asked
+  for by name, and text must appear there word for word. The orchestrator asks,
+  through `propose`, before any approval exists; the device comes from the
+  account, never from a model. Typing is its own request: never in the message
+  that opens an application, and never automatically after one. One action
+  waits at a time, and a waiting desktop action cannot be modified.
+- **One service.** The page and chat are one path: `DesktopControlService`, and
+  `confirmCommand` for both. A rule goes there, so both arms have it.
+- **Four actions, nothing else.** `desktop.input.click`, `desktop.input.key`
+  (nine named keys), `desktop.input.type` and `desktop.app.launch`. No screen
+  reading (D4), no shell, script, file, clipboard, registry or elevation. Adding
+  an action is an owner decision and a change to both protocols, the contract and
   the boundary tests (`SourceBoundaryTests`, `AssemblyBoundaryTests`).
+- **An application is an id, never a path.** `DESKTOP_APP_IDS` is the owner's
+  list, checked by the server and again by the agent. Nothing in a command can
+  name a file, an argument or a working directory. The path comes from the
+  agent's own table (`Windows/AppLauncher.cs`), under folders only an
+  administrator can change, through Windows' known-folder API: never an
+  environment variable, a search path or the registry. That one file starts a
+  process, with no shell and no arguments; the protocol library cannot reference
+  a process at all. Never add a second.
+- **Text is restricted on the server, for both arms.** Within
+  `DESKTOP_TYPE_MAX_LENGTH`, no control or format character, and never anything
+  `isSensitiveDesktopText` recognises. Checked when asked for and again in
+  `confirmCommand`. A check knows shapes and words: it adds to the person reading
+  the exact text, and does not replace them.
+- **Where text goes is the person's choice.** The agent waits
+  `DESKTOP_TYPE_FOCUS_WAIT_MS` before fixing the window, because the person usually
+  approves in a browser on the same computer; Windows Hello then names that
+  window. Never type before that moment, and never into any other window.
 - **The agent opens no port.** Outbound HTTPS long-poll only (D3). Never add a
   listener, a callback endpoint or an `http://` origin to the agent.
 - **One protocol, written twice, held equal.** `packages/core/src/desktop-agent.ts`
@@ -617,6 +650,18 @@ CI's database steps all passed on a fresh database, 0
 skipped: `@jarvis/db` 472/472 (33 files, 38 migrations), `@jarvis/memory` 93/93,
 `@jarvis/api` 288/288, the quality evaluation 13/13. The Windows job has not run
 (`docs/phases/phase-19.md`, §18.10).
+After Stage 19.7, desktop launch and typing (2026-11-01, on Windows from the
+working tree, not committed): `pnpm typecheck` 40/40, `pnpm typecheck:tests` 23/23,
+`pnpm lint` 22/22, `pnpm build` 22/22. Across 22 workspaces, no database, 11,494
+passed, 1 failed and 796 skipped: the failure is the MCP timeout test in
+`verify-s8`. The 10 no-inbound-port tests are among the skipped: they refuse to
+run beside a real agent, and one was running. `@jarvis/web`'s 881 are from a
+run of its own: the computer went into standby during the full run, and its
+workers timed out starting.
+.NET: Core 282/282, Windows 54/54. CI's database steps passed on a fresh database,
+0 skipped: `@jarvis/db` 472/472 (33 files, 38 migrations), `@jarvis/memory` 93/93,
+`@jarvis/api` 319/319 (twice), the quality evaluation 13/13. No real application
+was opened and nothing was typed (`docs/phases/phase-19.md`, §19).
 
 The two memory end-to-end tests (`sprint-1.1d-memory-e2e`, and
 `phase14-memory-e2e-pg.integration`, which has no in-memory fallback at all)

@@ -367,8 +367,8 @@ export function createApprovalsRouter(container: Container): Router {
     }
 
     // Tool must still exist and still accept exactly these parameters.
-    // Phase 19.6 — a desktop command has no tool to validate it (D5: no model
-    // drives the desktop), so its approval is held to the desktop contract.
+    // Phase 19.6 — a click or a key has no tool to validate it (only a person
+    // asks for those), so every desktop approval is held to the desktop contract.
     const desktop = isDesktopCommandAction(approval.toolId);
     const tool = desktop ? undefined : container.toolRegistry.get(approval.toolId);
     const valid = desktop

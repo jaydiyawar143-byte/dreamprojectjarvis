@@ -73,6 +73,9 @@ describe("the MCP grant", () => {
       "browser-agent": 15,
       "location-agent": 20,
       "marketing-agent": 35,
+      // Phase 19.7 — new: the two desktop tools, the 4 capability tools and
+      // self.describe. It holds nothing that reads the outside world.
+      "desktop-agent": 7,
     });
   });
 });

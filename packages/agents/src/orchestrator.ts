@@ -28,13 +28,14 @@ import type {
   ToolAccessGate,
 } from "@jarvis/core";
 import { JarvisError, decideSurface, classifyToolFailures, toClientErrorDetails, rankMemories, scoreMemoryRelevance, MEMORY_SIMILARITY_FLOOR } from "@jarvis/core";
-import { VOICE_TOOL_REFUSED_CODE, voiceToolRefusal } from "@jarvis/core";
+import { DESKTOP_CHAT_REFUSALS, DESKTOP_CHAT_TOOL_IDS, VOICE_TOOL_REFUSED_CODE, voiceToolRefusal } from "@jarvis/core";
+import type { DesktopChatPort, DesktopChatProposal } from "@jarvis/core";
 import type { SurfaceDecision } from "@jarvis/core";
 import type { AgentPolicy, AgentResolution, ISkillContextProvider } from "@jarvis/core";
 import { renderSkillContext } from "@jarvis/core";
 import type { AgentRegistry } from "./registry.js";
 import { rankAgentCandidates, isAmbiguous } from "./agent-router.js";
-import { isToolAllowed, resolveAllowedToolId, scopedToolRegistry } from "./agent-policy.js";
+import { isToolAllowed, resolveAllowedToolId, sanitizeToolName, scopedToolRegistry } from "./agent-policy.js";
 import { ToolDescriptionBuilder, ToolPlanValidator, ToolPlanParser } from "./tool-planner.js";
 import { classifyWriteIntent } from "./write-intent-gate.js";
 import {
@@ -130,6 +131,8 @@ export class Orchestrator implements IOrchestrator {
   private readonly skillContextProvider: ISkillContextProvider | null;
   /** Phase 15 — tools this server switched off, by registry id, with the reason in a person's words. */
   private readonly switchedOffTools: Readonly<Record<string, string>>;
+  /** Phase 19.7 — holds a desktop proposal to the owner's own words. Absent, every one is refused. */
+  private readonly desktopChat: Pick<DesktopChatPort, "propose"> | null;
   private readonly toolDescriptionBuilder: ToolDescriptionBuilder;
   private readonly toolPlanValidator: ToolPlanValidator;
   private readonly toolPlanParser: ToolPlanParser;
@@ -168,6 +171,7 @@ export class Orchestrator implements IOrchestrator {
     this.pendingActionService = (config as unknown as { pendingActionService?: import("./pending-action-service.js").PendingActionService }).pendingActionService ?? null;
     this.skillContextProvider = config.skillContext ?? null;
     this.switchedOffTools = { ...(config.switchedOffTools ?? {}) };
+    this.desktopChat = config.desktopChat ?? null;
     this.toolDescriptionBuilder = new ToolDescriptionBuilder();
     this.toolPlanValidator = new ToolPlanValidator();
     this.toolPlanParser = new ToolPlanParser();
@@ -1241,6 +1245,73 @@ export class Orchestrator implements IOrchestrator {
       }
 
       // ---------------------------------------------------------------------
+      // Phase 19.7 — a desktop action is the owner's, in the owner's own words.
+      //
+      // Between the model deciding a tool and any approval. `userMessage` is
+      // the authenticated person's message as it arrived, never the prompt the
+      // model was given, so a page, a document, a memory or a tool result that
+      // told the model to open or type something has no way to pass. The
+      // proposal also finds the computer: the parameters that go on are the
+      // server's, and whatever else the model sent is gone. One at a time: a
+      // second action would replace the one the person is reading, so whatever
+      // is already waiting in this conversation holds it back, from this turn
+      // or an earlier one.
+      //
+      // Refused here, a desktop action reaches nothing: no approval, no pending
+      // action, no execution. The model is given the fixed sentence and tells
+      // the owner. The general write-intent gate below does not apply: this one
+      // is stricter, and that one reads "Open Notepad." as underspecified.
+      //
+      // Either spelling of the name is the same action: a model sends the
+      // sanitized one, and only a policy turns it into the registry's. This
+      // gate does not depend on there being one.
+      // ---------------------------------------------------------------------
+      const desktopAction = DESKTOP_CHAT_TOOL_IDS.find((id) => id === (tool?.id ?? action.toolId) || sanitizeToolName(id) === action.toolId);
+      if (desktopAction) {
+        const refusal = (code: "ONE_AT_A_TIME" | "UNAVAILABLE"): DesktopChatProposal => ({ ok: false, code, message: DESKTOP_CHAT_REFUSALS[code] });
+        let proposal: DesktopChatProposal;
+        try {
+          const waiting =
+            capturedPendingAction ??
+            (this.pendingActionService && context.conversationId
+              ? await this.pendingActionService.getActivePendingAction(context.conversationId, context.auth.userId)
+              : null);
+          if (waiting) proposal = refusal("ONE_AT_A_TIME");
+          else if (!this.desktopChat) proposal = refusal("UNAVAILABLE");
+          else proposal = await this.desktopChat.propose({ userId: context.auth.userId, action: desktopAction, params: action.params, ownerMessage: userMessage });
+        } catch {
+          proposal = refusal("UNAVAILABLE");
+        }
+
+        if (!proposal.ok) {
+          results.push({
+            executionId,
+            toolId: action.toolId,
+            toolCallId: action.toolCallId,
+            status: "not_requested",
+            error: proposal.message,
+            startedAt: stepStartedAt,
+            completedAt: new Date(),
+            durationMs: Date.now() - stepStartedAt.getTime(),
+          });
+
+          await this.auditLogger.log({
+            userId: context.auth.userId,
+            agentId: policy?.agentId ?? context.agentId,
+            toolId: action.toolId,
+            action: "agent.tool_desktop_refused",
+            result: "rejected",
+            traceId: context.traceId,
+            ipAddress: context.ipAddress,
+            metadata: { code: proposal.code, domain: policy?.domain, executionId, stepIndex: i },
+          });
+
+          continue;
+        }
+        action.params = proposal.params;
+      }
+
+      // ---------------------------------------------------------------------
       // Write-intent gate — BUG-INTENT-001 / BUG-SAFETY-001.
       //
       // Between the model deciding a tool and the pending-action branch. A
@@ -1258,7 +1329,7 @@ export class Orchestrator implements IOrchestrator {
       // is audited, because a refused write is worth explaining later.
       // Nothing executes and no pending action/approval is ever created here.
       // ---------------------------------------------------------------------
-      if (tool && tool.risk !== "READ_ONLY") {
+      if (tool && tool.risk !== "READ_ONLY" && !desktopAction) {
         const verdict = classifyWriteIntent(userMessage);
 
         if (verdict.verdict !== "ACTION") {

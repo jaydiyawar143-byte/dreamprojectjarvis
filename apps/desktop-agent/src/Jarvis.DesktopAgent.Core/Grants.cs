@@ -143,6 +143,23 @@ public sealed class GrantManager(IClock clock) : IDisposable
         lock (gate) lastServerContact = clock.NowMs;
     }
 
+    /// <summary>
+    /// How long an exchange may stay open before <see cref="CheckReconnectGrace"/>
+    /// would end the grant: one past the grace, which ends only once exceeded.
+    /// Null with no grant, when nothing depends on the server answering.
+    /// </summary>
+    public TimeSpan? GraceLeft
+    {
+        get
+        {
+            lock (gate)
+            {
+                if (current is null) return null;
+                return TimeSpan.FromMilliseconds(Math.Max(0, ProtocolConstants.ReconnectGraceMs - (clock.NowMs - lastServerContact) + 1));
+            }
+        }
+    }
+
     /// <summary>U5b: past 30 seconds without the server, control ends; the grant's clock never paused.</summary>
     public void CheckReconnectGrace()
     {

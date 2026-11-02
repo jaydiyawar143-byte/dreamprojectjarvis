@@ -147,6 +147,9 @@ export const AgentDomainSchema = z.enum([
   // research, reports and approval-gated publishing. Separate from `meta-ads`,
   // which owns the ad account itself.
   "marketing",
+  // Phase 19.7 — the owner's paired Windows computer. Separate from `browser`:
+  // the agent that can act on a real computer reads nothing from the outside.
+  "desktop",
 ]);
 
 export type AgentDomain = z.infer<typeof AgentDomainSchema>;

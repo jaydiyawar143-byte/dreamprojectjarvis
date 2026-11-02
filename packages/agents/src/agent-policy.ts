@@ -19,6 +19,7 @@ import {
   VOICE_REFUSED_TOOLS,
   BROWSER_READ_TOOL_IDS,
   BROWSER_ACTION_TOOL_IDS,
+  DESKTOP_CHAT_TOOL_IDS,
   MARKETING_PUBLISH_TOOL_IDS,
   MARKETING_READ_TOOL_IDS,
   MARKETING_RESEARCH_TOOL_IDS,
@@ -43,6 +44,8 @@ export const AGENT_IDS = {
   location: "location-agent",
   // Phase 15 — the marketing workspace.
   marketing: "marketing-agent",
+  // Phase 19.7 — a paired Windows computer.
+  desktop: "desktop-agent",
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -608,6 +611,30 @@ const MARKETING_POLICY = policy({
     "Marketing workspace: campaign planning, the content calendar, page research, reporting, recommendations and approval-gated publishing",
 });
 
+/**
+ * Phase 19.7 — the owner's paired Windows computer.
+ *
+ * Only this agent holds a desktop tool, and it holds nothing that reads the
+ * outside world: no browser, no knowledge, no integration read. The capability
+ * tools every agent has describe JARVIS itself, and bring in nobody's words.
+ * What can act on a real computer and what can read a stranger's words are kept
+ * in different agents, so a page cannot talk the agent that has the tools. No
+ * client may select it: it is reached only by what the owner's message says.
+ *
+ * Both tools are approval-gated, and the orchestrator holds each proposal to
+ * the owner's own message before an approval exists. The Computer Control
+ * page's clicks and named keys have no tool at all.
+ */
+const DESKTOP_POLICY = policy({
+  agentId: AGENT_IDS.desktop,
+  domain: "desktop",
+  allowedTools: [...DESKTOP_CHAT_TOOL_IDS, ...CAPABILITY_TOOLS, ...SELF_TOOLS],
+  requiredPermissions: ["read", "write"],
+  writesRequireApproval: true,
+  clientSelectable: false,
+  description: "Proposes opening approved applications and typing approved text on the owner's paired Windows computer",
+});
+
 /** The complete, immutable policy set. */
 export const AGENT_POLICIES: Readonly<Record<string, AgentPolicy>> = Object.freeze({
   [AGENT_IDS.general]: GENERAL_POLICY,
@@ -620,6 +647,7 @@ export const AGENT_POLICIES: Readonly<Record<string, AgentPolicy>> = Object.free
   [AGENT_IDS.browser]: BROWSER_POLICY,
   [AGENT_IDS.location]: LOCATION_POLICY,
   [AGENT_IDS.marketing]: MARKETING_POLICY,
+  [AGENT_IDS.desktop]: DESKTOP_POLICY,
 });
 
 /**

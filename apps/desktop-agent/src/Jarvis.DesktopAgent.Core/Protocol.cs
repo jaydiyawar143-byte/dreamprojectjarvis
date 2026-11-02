@@ -18,17 +18,25 @@ namespace Jarvis.DesktopAgent.Core;
 public static class ProtocolConstants
 {
     public const string ProtocolVersion = "jarvis-desktop/1";
-    public const string AgentVersion = "1.0.0";
-    public const string ConsentTextVersion = "desktop-consent/1";
+    public const string AgentVersion = "1.1.0";
+    public const string CommandFormatVersion = "jarvis-desktop-command/2";
+    public const string ConsentTextVersion = "desktop-consent/2";
     public const string KillSwitch = "Ctrl+Alt+Shift+F12";
     public const string PairingDevice = "pairing";
 
     public const string Click = "desktop.input.click";
     public const string Key = "desktop.input.key";
     public const string Type = "desktop.input.type";
+    public const string AppLaunch = "desktop.app.launch";
 
-    /// <summary>The v1 command set (D1, D4, D5): no screen reading, nothing that runs, opens or reads.</summary>
-    public static readonly IReadOnlyList<string> CommandActions = [Click, Key, Type];
+    /// <summary>The command set (D1, D4; 19.7 added the launch): no screen reading, nothing that names a program or reads anything.</summary>
+    public static readonly IReadOnlyList<string> CommandActions = [Click, Key, Type, AppLaunch];
+
+    /// <summary>The applications a command may open, by fixed id. The ids are all a command can say.</summary>
+    public static readonly IReadOnlyList<string> AppIds = ["notepad", "calculator", "edge", "chrome", "explorer"];
+
+    /// <summary>The applications' names, as the consent screen lists them.</summary>
+    public static readonly IReadOnlyList<string> AppLabels = ["Notepad", "Calculator", "Microsoft Edge", "Google Chrome", "File Explorer"];
 
     /// <summary>D1: Windows Hello at the device, for each command, on top of the in-app approval.</summary>
     public static readonly IReadOnlyList<string> HelloActions = [Type];
@@ -50,6 +58,7 @@ public static class ProtocolConstants
     [
         "HELLO_UNAVAILABLE", "HELLO_FAILED", "ELEVATED_TARGET", "NO_TARGET", "OUT_OF_BOUNDS",
         "SESSION_LOCKED", "GRANT_INACTIVE", "COMMAND_EXPIRED", "INVALID_COMMAND", "BUSY",
+        "APP_NOT_INSTALLED", "LAUNCH_FAILED",
     ];
 
     public static readonly IReadOnlyList<string> SessionEndReasons =
@@ -62,6 +71,7 @@ public static class ProtocolConstants
     public const int GrantMaxMinutes = 60;
     public const long ReconnectGraceMs = 30_000;
     public const long PollHoldMs = 20_000;
+    public const long TypeFocusWaitMs = 6_000;
     public const int CoordinateMax = 100_000;
     public const int TypeTextMaxLength = 10_000;
     public const int Windows11FirstBuild = 22_000;
@@ -75,6 +85,8 @@ public sealed record ClickParams(int X, int Y, string Button) : CommandParams(Pr
 public sealed record KeyParams(string Key) : CommandParams(ProtocolConstants.Key);
 
 public sealed record TypeParams(string Text) : CommandParams(ProtocolConstants.Type);
+
+public sealed record LaunchParams(string App) : CommandParams(ProtocolConstants.AppLaunch);
 
 /// <summary>A command as the server signed it.</summary>
 public sealed record CommandEnvelope(
@@ -104,13 +116,14 @@ public static class Canonical
         ClickParams c => $"x={c.X.ToString(CultureInfo.InvariantCulture)}&y={c.Y.ToString(CultureInfo.InvariantCulture)}&button={c.Button}",
         KeyParams k => $"key={k.Key}",
         TypeParams t => $"text={Base64Url.EncodeToString(Encoding.UTF8.GetBytes(t.Text))}",
+        LaunchParams l => $"app={l.App}",
         _ => throw new ArgumentException("Unknown command parameters.", nameof(parameters)),
     };
 
     public static string Command(CommandEnvelope e) =>
         string.Join(
             '\n',
-            "jarvis-desktop-command/1",
+            ProtocolConstants.CommandFormatVersion,
             e.CommandId,
             e.DeviceId,
             e.GrantId,
@@ -169,7 +182,8 @@ public static class ConsentText
     {
         [ProtocolConstants.Click] = "- click at positions on this screen",
         [ProtocolConstants.Key] = "- press Enter, Tab, Escape, Backspace, Delete and the arrow keys",
-        [ProtocolConstants.Type] = "- type text, only after you verify each time with Windows Hello",
+        [ProtocolConstants.Type] = "- type approved text, only after you verify each time with Windows Hello",
+        [ProtocolConstants.AppLaunch] = $"- open approved applications: {string.Join(", ", ProtocolConstants.AppLabels)}",
     };
 
     /// <summary>A grant's scope in the one order it is shown and signed in; null when it is not a valid scope.</summary>
@@ -195,7 +209,9 @@ public static class ConsentText
         };
         lines.AddRange(ProtocolConstants.CommandActions.Where(scope.Contains).Select(s => ScopeLines[s]));
         lines.Add("");
-        lines.Add("JARVIS cannot see your screen, run programs or scripts, open, read or change files, use the clipboard, change settings, or act in windows that run as administrator.");
+        lines.Add("You approve every action in JARVIS before it runs, and every typing action also needs Windows Hello.");
+        lines.Add("");
+        lines.Add("JARVIS cannot see your screen. It cannot run any other program, shell command or script, open, read or change files, use the clipboard, change settings, or act in windows that run as administrator.");
         lines.Add("");
         lines.Add($"Control ends after {minutes}, when you lock this computer, sign out or restart, or when you press {ProtocolConstants.KillSwitch}.");
         return string.Join('\n', lines);
@@ -204,7 +220,7 @@ public static class ConsentText
     public static string Sha256(string text) => Canonical.Sha256Hex(text);
 }
 
-/// <summary>Text a command may type: not empty, bounded, no control characters, well-formed.</summary>
+/// <summary>Text a command may type: not empty, bounded, no control or invisible format characters, well-formed.</summary>
 public static class TypeableText
 {
     public static bool IsValid(string? text)
@@ -216,11 +232,13 @@ public static class TypeableText
             if (char.IsHighSurrogate(c))
             {
                 if (i + 1 >= text.Length || !char.IsLowSurrogate(text[i + 1])) return false;
+                if (char.GetUnicodeCategory(text, i) == System.Globalization.UnicodeCategory.Format) return false;
                 i++;
                 continue;
             }
             if (char.IsLowSurrogate(c)) return false;
             if (c < 0x20 || (c >= 0x7f && c <= 0x9f) || c == '\u2028' || c == '\u2029') return false;
+            if (char.GetUnicodeCategory(c) == System.Globalization.UnicodeCategory.Format) return false;
         }
         return true;
     }

@@ -260,6 +260,9 @@ export function productionLikeTools(): ITool[] {
     write("browser.download"),
     write("browser.submit"),
     write("browser.upload"),
+    // Phase 19.7 — registered where desktop control is on.
+    write("desktop.app.launch"),
+    write("desktop.input.type"),
     // Maps. All READ_ONLY — a map query changes nothing anywhere.
     read("maps.search"),
     read("maps.nearby"),

@@ -5,7 +5,8 @@
 // Admin generated on the Computer Control page. After the server answers, the
 // screen shows this computer's key fingerprint and the server's key id: the
 // device stays inactive until its user confirms that same fingerprint in the
-// web page. The code is sent once and never stored.
+// web page. The code is sent once and never stored. This window only shows the
+// answer: the pairing is kept before it does, so closing it changes nothing.
 // ---------------------------------------------------------------------------
 
 using Jarvis.DesktopAgent.Core;
@@ -42,11 +43,6 @@ internal sealed class PairingForm : Form
         pair.Click += async (_, _) => await PairAsync().ConfigureAwait(true);
     }
 
-    public PairResponse? Paired { get; private set; }
-
-    /// <summary>The https:// origin the pairing was made with.</summary>
-    public Uri? Server { get; private set; }
-
     private async Task PairAsync()
     {
         if (!Uri.TryCreate(server.Text.Trim(), UriKind.Absolute, out var origin) || origin.Scheme != Uri.UriSchemeHttps)
@@ -72,18 +68,18 @@ internal sealed class PairingForm : Form
                 "PAIRING_CODE_INVALID" => "The code was not accepted. Codes work once and for ten minutes; ask for a new one.",
                 "RATE_LIMITED" => "Too many attempts. Wait a few minutes.",
                 "WINDOWS_VERSION_UNSUPPORTED" or "AGENT_VERSION_UNSUPPORTED" => "This computer or this agent version is not supported by the server. Update Windows or the agent.",
+                PairingState.NotSaved => "This computer could not save the pairing, so it was dropped. Do not confirm it. Ask for a new code and try again.",
                 null => "The server could not be reached, or its answer could not be verified.",
                 _ => "Pairing was refused.",
             };
             return;
         }
-        Paired = paired;
-        Server = root;
         status.Text =
             $"Paired, and waiting for confirmation.{Environment.NewLine}{Environment.NewLine}" +
             $"On the Computer Control page, confirm this fingerprint:{Environment.NewLine}{Fingerprint.Display(paired.Fingerprint)}{Environment.NewLine}{Environment.NewLine}" +
             $"Server key: {paired.ServerKeyId}{Environment.NewLine}" +
-            $"Requested by {AgentLogText(paired.UserLabel)} for {AgentLogText(paired.OrganizationLabel)}.";
+            $"Requested by {AgentLogText(paired.UserLabel)} for {AgentLogText(paired.OrganizationLabel)}.{Environment.NewLine}{Environment.NewLine}" +
+            "The pairing is saved. You can close this window; the tray shows when JARVIS confirms it.";
     }
 
     private static string AgentLogText(string value) => AgentLog.Printable(value, 80);
