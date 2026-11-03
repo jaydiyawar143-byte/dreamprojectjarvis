@@ -25,7 +25,7 @@
 //     it can.
 // ---------------------------------------------------------------------------
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { KeyRound, Laptop, ShieldAlert, ShieldCheck } from "lucide-react";
 
 import {
@@ -67,6 +67,8 @@ const SCOPE_LABEL: Record<string, string> = {
   "desktop.app.launch": "open an application",
 };
 const FINAL: ReadonlySet<DesktopCommand["status"]> = new Set(["succeeded", "not_executed", "unknown", "expired"]);
+/** How often a command still on its way to the computer is read again. */
+const COMMAND_POLL_MS = 2_000;
 const COMMAND_STATUS: Record<DesktopCommand["status"], { label: string; tone: "ok" | "warn" | "danger" | "neutral" }> = {
   issued: { label: "Waiting for the computer", tone: "neutral" },
   delivered: { label: "On the computer", tone: "neutral" },
@@ -332,20 +334,7 @@ function CommandPanel({ device }: { device: DesktopDevice }) {
   /** The words awaiting approval, shown back exactly. Held here and nowhere else. */
   const [pendingText, setPendingText] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
-  const [commands, setCommands] = useState<DesktopCommand[]>([]);
-
-  const refresh = useCallback(async () => {
-    const res = await listDesktopCommands(device.id);
-    if (res.success && res.data) setCommands(res.data);
-  }, [device.id]);
-
-  useEffect(() => {
-    void refresh();
-    const open = commands.some((c) => !FINAL.has(c.status));
-    if (!open) return undefined;
-    const timer = setInterval(() => void refresh(), 2_000);
-    return () => clearInterval(timer);
-  }, [refresh, commands]);
+  const { commands, refresh } = useDesktopCommands(device.id);
 
   const input = (): DesktopCommandInput | null => {
     if (action === "desktop.input.click") {
@@ -378,7 +367,7 @@ function CommandPanel({ device }: { device: DesktopDevice }) {
     setPending(null);
     setPendingText(null);
     if (!res.success) setMessage(res.error?.message ?? "The command was not sent.");
-    await refresh();
+    refresh();
   };
 
   return (
@@ -493,6 +482,73 @@ function CommandPanel({ device }: { device: DesktopDevice }) {
       )}
     </div>
   );
+}
+
+/**
+ * A computer's commands: read once, then every COMMAND_POLL_MS while one is still
+ * on its way to the computer, and only while this tab is visible. One read at a
+ * time, the next timed from the last answer; a refresh asked for during a read
+ * runs once that read answers, so it is never lost. A refusal — the computer
+ * revoked, control switched off — stops the reading; a dropped connection does
+ * not. Nothing is read or scheduled once the panel is gone.
+ *
+ * It once depended on the list it set, so every answer read again: about 167
+ * requests a second for as long as the page was open.
+ */
+function useDesktopCommands(deviceId: string): { commands: DesktopCommand[]; refresh: () => void } {
+  const [commands, setCommands] = useState<DesktopCommand[]>([]);
+  const refreshRef = useRef<() => void>(() => undefined);
+
+  useEffect(() => {
+    let gone = false;
+    let reading = false;
+    let again = false;
+    let open = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const read = async (): Promise<void> => {
+      if (reading) {
+        again = true;
+        return;
+      }
+      reading = true;
+      clearTimeout(timer);
+      try {
+        do {
+          again = false;
+          const res = await listDesktopCommands(deviceId);
+          if (gone) return;
+          if (res.success && res.data) {
+            setCommands(res.data);
+            open = res.data.some((c) => !FINAL.has(c.status));
+          } else if (res.error?.code !== "NETWORK_ERROR") {
+            open = false;
+          }
+        } while (again);
+      } finally {
+        reading = false;
+      }
+      if (open && document.visibilityState !== "hidden") timer = setTimeout(() => void read(), COMMAND_POLL_MS);
+    };
+
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") clearTimeout(timer);
+      else void read();
+    };
+
+    refreshRef.current = () => void read();
+    document.addEventListener("visibilitychange", onVisibility);
+    void read();
+    return () => {
+      gone = true;
+      clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisibility);
+      refreshRef.current = () => undefined;
+    };
+  }, [deviceId]);
+
+  const refresh = useCallback(() => refreshRef.current(), []);
+  return { commands, refresh };
 }
 
 function SafetyPanel() {
