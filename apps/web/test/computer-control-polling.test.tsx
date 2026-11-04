@@ -167,6 +167,31 @@ describe("Computer Control — reading a computer's commands", () => {
     expect(screen.getByText("Waiting for the computer")).toBeInTheDocument();
   });
 
+  it("cancels the scheduled read when an approval reads at once — one loop goes on, never two", async () => {
+    answering(command("issued"));
+    mocked.requestDesktopCommand.mockResolvedValue(
+      ok({ approvalId: "apr-2", action: "desktop.input.key" as const, summary: "Press Enter.", detailLines: [], requiresHello: false, expiresAt: new Date(Date.now() + 600_000).toISOString() })
+    );
+    mocked.confirmDesktopCommand.mockResolvedValue(ok(command("issued", "c9")));
+    await opened();
+    await elapse(1_000);
+    expect(reads()).toBe(1);
+
+    fireEvent.click(screen.getByTestId("request-command"));
+    fireEvent.click(await screen.findByTestId("approve-command"));
+    await elapse(0);
+    expect(mocked.confirmDesktopCommand).toHaveBeenCalledTimes(1);
+    expect(reads()).toBe(2);
+
+    // A second on is when the read scheduled before the approval was due.
+    await elapse(1_000);
+    expect(reads()).toBe(2);
+    await elapse(1_000);
+    expect(reads()).toBe(3);
+    await elapse(10_000);
+    expect(reads()).toBe(8);
+  });
+
   it("reads nothing after the panel is gone, even when a read answers late", async () => {
     answering(command("issued"));
     const answer = held();
@@ -184,6 +209,31 @@ describe("Computer Control — reading a computer's commands", () => {
     view.unmount();
     await elapse(30_000);
     expect(reads()).toBe(1);
+  });
+
+  it("removes its tab listener when the panel is gone — no tab switch or late answer reads again", async () => {
+    const added = vi.spyOn(document, "addEventListener");
+    const removed = vi.spyOn(document, "removeEventListener");
+    answering(command("issued"));
+    const view = await opened();
+    const listeners = added.mock.calls.filter(([type]) => type === "visibilitychange").map(([, listener]) => listener);
+    expect(listeners).toHaveLength(1);
+
+    const answer = held();
+    await elapse(2_000);
+    expect(reads()).toBe(2);
+    view.unmount();
+    expect(removed).toHaveBeenCalledWith("visibilitychange", listeners[0]);
+
+    // Acting on this answer would schedule the next read.
+    await answer(ok([command("issued")]));
+    show("hidden");
+    show("visible");
+    await elapse(30_000);
+    expect(reads()).toBe(2);
+
+    added.mockRestore();
+    removed.mockRestore();
   });
 
   it("reads nothing while the tab is hidden, and reads at once when it is shown again", async () => {
