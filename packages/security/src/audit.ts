@@ -133,8 +133,34 @@ export function redactAuditParams(
   }
 }
 
+/**
+ * VO-2 — a post-write observer.
+ *
+ * It is handed the durable row only AFTER `repository.create` resolved, so an
+ * observer can never announce a write that did not commit. It is called
+ * synchronously and wrapped: a throwing or rejecting observer is the observer's
+ * problem and must not fail the audit write that produced it. The observer gets
+ * a read-only view; it has no way to change what was stored.
+ */
+export type AuditObserver = (entry: AuditEntry) => void | Promise<void>;
+
+function notifyObserver(observe: AuditObserver | undefined, entry: AuditEntry): void {
+  if (!observe) return;
+  try {
+    const result = observe(entry);
+    if (result && typeof (result as Promise<void>).catch === "function") {
+      void (result as Promise<void>).catch(() => undefined);
+    }
+  } catch {
+    // An observer never gets to fail the audit flow.
+  }
+}
+
 export class AuditLogger {
-  constructor(private repository: IAuditRepository) {}
+  constructor(
+    private repository: IAuditRepository,
+    private readonly observe?: AuditObserver
+  ) {}
 
   async log(entry: Omit<AuditEntry, "id" | "timestamp">): Promise<void> {
     // Redact FIRST. Everything downstream — the durable row and the console
@@ -155,6 +181,10 @@ export class AuditLogger {
     };
 
     const fullEntry = await this.repository.create(safeEntry);
+
+    // VO-2 — publish AFTER the durable write. Never before: the office shows
+    // what happened, not what was about to be attempted.
+    notifyObserver(this.observe, fullEntry);
 
     const structured: Record<string, unknown> = {
       level: "info",

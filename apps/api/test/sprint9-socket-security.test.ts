@@ -528,7 +528,18 @@ describe("Sprint 9 — event authorization", () => {
     // no tool, mutate nothing, and cannot observe another user. The capability
     // they grant ("watch this machine's load") is one the same operator already
     // has over HTTP at GET /api/v1/command-center/system.
-    expect(allowed).toEqual(["ping", "system:subscribe", "system:unsubscribe"]);
+    //
+    // VO-2 added the two Virtual Office events. Also READ_ONLY: subscribing
+    // only asks to receive the caller's own office events, which are already
+    // projected from durable rows and are delivered per-socket after the
+    // server-resolved identity is re-checked. Neither takes a payload.
+    expect(allowed).toEqual([
+      "ping",
+      "system:subscribe",
+      "system:unsubscribe",
+      "office:subscribe",
+      "office:unsubscribe",
+    ]);
   });
 
   it("keeps the system stream free of any parameter a caller could inject", async () => {

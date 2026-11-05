@@ -114,6 +114,10 @@ export * from "./types/google-workspace.js";
 export * from "./types/google-write.js";
 // Core V1 — the task lifecycle (the single definition of legal transitions).
 export * from "./types/task.js";
+// VO-2 — the Virtual Office's live stream: its event names, payload allowlist
+// and the two projections that are the only way an audit row or a task row
+// becomes an office event.
+export * from "./office-stream.js";
 export * from "./capability-catalog.js";
 // Skill System V1 — the outcome layer. Metadata only: a skill names an outcome
 // and the tools behind it, and is executed the way everything else is, through
