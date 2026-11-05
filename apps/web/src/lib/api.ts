@@ -2083,6 +2083,23 @@ export async function listTasks(
   return request(`${CC}/tasks?includeCompleted=${includeCompleted}`);
 }
 
+/**
+ * VO-1 — the task engine's work list.
+ *
+ * Deliberately NOT `listTasks` above: that one is the command centre's todo
+ * list (`/command-center/tasks`) and is a different set of rows. This one is
+ * `GET /api/v1/tasks`, the task engine's own list, which carries the real
+ * PENDING / RUNNING / COMPLETED / FAILED lifecycle the Virtual Office reads.
+ *
+ * The server scopes it to the caller and limits it; no filter is supplied here
+ * because the office needs the current queue and the recent completions.
+ */
+export async function listWorkTasks(): Promise<
+  ApiResponse<{ tasks: TaskRecord[]; count: number }>
+> {
+  return request("/tasks");
+}
+
 export async function createTask(input: {
   title: string;
   description?: string;

@@ -64,6 +64,30 @@ export interface TaskServiceDeps {
     PrismaTaskRepository,
     "create" | "list" | "listByStatus" | "findOwned" | "transitionOwned"
   >;
+  /**
+   * VO-2 — told about a task row AFTER its durable write succeeded.
+   *
+   * Used by the API to publish an office event. It is optional and swallowed:
+   * a listener failure must never turn a completed task move into an error the
+   * caller can see. This service does not build an event here — the caller does,
+   * from the row it is handed.
+   */
+  onTaskChanged?: (task: TaskRecord) => void | Promise<void>;
+}
+
+function notifyTaskChanged(
+  onTaskChanged: TaskServiceDeps["onTaskChanged"],
+  task: TaskRecord
+): void {
+  if (!onTaskChanged) return;
+  try {
+    const result = onTaskChanged(task);
+    if (result && typeof (result as Promise<void>).catch === "function") {
+      void (result as Promise<void>).catch(() => undefined);
+    }
+  } catch {
+    // An observer never gets to fail the task lifecycle.
+  }
 }
 
 const MAX_TITLE = 200;
@@ -88,6 +112,8 @@ export class TaskService {
       description: input.description ? input.description.slice(0, MAX_DESCRIPTION) : null,
       createdBy: input.createdBy ?? null,
     });
+
+    notifyTaskChanged(this.deps.onTaskChanged, task);
 
     return { ok: true, task };
   }
@@ -196,9 +222,11 @@ export class TaskService {
       ...(options.executionId !== undefined ? { executionId: options.executionId } : {}),
     });
 
-    if (result.ok) return { ok: true, task: result.task };
+    if (result.ok) {
+      notifyTaskChanged(this.deps.onTaskChanged, result.task);
+      return { ok: true, task: result.task };
+    }
     if (result.reason === "not_found") return this.notFound();
-
     return {
       ok: false,
       reason: "STATE_CHANGED",

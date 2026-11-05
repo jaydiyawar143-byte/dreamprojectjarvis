@@ -16,6 +16,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { io, type Socket } from "socket.io-client";
 import { getAccessToken, type SystemSnapshot } from "./api";
+import { SOCKET_URL } from "./socket-url";
 
 /** 5 minutes at 1Hz — the longest range the UI offers. */
 const MAX_SAMPLES = 300;
@@ -32,11 +33,6 @@ export interface MetricHistory {
 }
 
 export type StreamStatus = "connecting" | "live" | "offline" | "unauthenticated";
-
-const SOCKET_URL = (process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001/api/v1").replace(
-  /\/api\/v1\/?$/,
-  ""
-);
 
 export function useSystemStream(enabled = true): {
   snapshot: SystemSnapshot | null;

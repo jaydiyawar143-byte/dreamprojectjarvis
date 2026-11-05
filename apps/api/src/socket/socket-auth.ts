@@ -22,6 +22,7 @@
 
 import type { Server, Socket } from "socket.io";
 import type { AuthContext, Role } from "@jarvis/core";
+import { OFFICE_SUBSCRIBE_EVENT, OFFICE_UNSUBSCRIBE_EVENT } from "@jarvis/core";
 import type { TokenService } from "@jarvis/security";
 
 // ---------------------------------------------------------------------------
@@ -119,6 +120,13 @@ export const SOCKET_EVENT_POLICY: Readonly<Record<string, SocketEventClass>> =
     // equivalent HTTP route.
     "system:subscribe": "READ_ONLY",
     "system:unsubscribe": "READ_ONLY",
+
+    // VO-2 — the Virtual Office's live stream. READ_ONLY: subscribing starts no
+    // work and carries no parameters; it asks to be sent the caller's OWN
+    // already-projected office events. There is no way to name another user,
+    // and delivery re-checks the server-resolved identity.
+    [OFFICE_SUBSCRIBE_EVENT]: "READ_ONLY",
+    [OFFICE_UNSUBSCRIBE_EVENT]: "READ_ONLY",
 
     // Never over this transport — see above.
     "tool:execute": "FORBIDDEN",

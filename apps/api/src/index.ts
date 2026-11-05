@@ -77,6 +77,7 @@ import { createGoogleWorkspaceRouter } from "./routes/google-workspace.js";
 import { createGoogleWritesRouter } from "./routes/google-writes.js";
 import { createCommandCenterRouter } from "./routes/command-center.js";
 import { installSystemStream } from "./socket/system-stream.js";
+import { installOfficeStream } from "./socket/office-stream.js";
 import { OpenAIVoiceProvider } from "@jarvis/ai-openai";
 import { CompositeVoiceProvider, ElevenLabsVoiceProvider } from "@jarvis/ai-elevenlabs";
 import {
@@ -674,6 +675,9 @@ secureSocketServer(io, container.tokenService);
 // V3 — realtime host metrics on the SAME authenticated socket. Installed after
 // securing it, so the auth middleware and the event allowlist both apply.
 installSystemStream(io);
+// VO-2 — the Virtual Office's live stream, on the same authenticated socket.
+// Installed after securing it too, and it emits only to sockets that asked.
+installOfficeStream(io, container.officeEvents);
 
 app.set("io", io);
 

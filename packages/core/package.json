@@ -29,6 +29,10 @@
     "./automation-planning": {
       "types": "./dist/automation-planning-view.d.ts",
       "import": "./dist/automation-planning-view.js"
+    },
+    "./office-stream": {
+      "types": "./dist/office-stream.d.ts",
+      "import": "./dist/office-stream.js"
     }
   },
   "scripts": {
