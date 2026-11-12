@@ -1,6 +1,6 @@
 # JARVIS HTTP API
 
-Everything below is served by `apps/api` under `/api/v1`. Verified against the code on 2026-09-17; the memory and project routes were added in Phase 14, on 2026-10-08, and the marketing routes in Phase 15, on 2026-10-12.
+Everything below is served by `apps/api` under `/api/v1`. Verified against the code on 2026-09-17; the memory and project routes were added in Phase 14, on 2026-10-08, the marketing routes in Phase 15, on 2026-10-12, and the task routes on 2026-11-12.
 
 - **Mounts:** `apps/api/src/index.ts` · **Handlers:** `apps/api/src/routes/*.ts`
 - **Authentication:** unless a table says otherwise, send `Authorization: Bearer <access token>`. Data is always scoped to that token's user; a user id in a body or path is ignored.
@@ -69,6 +69,35 @@ Tool parameters, free-text audit fields and the assistant's reply text are never
 `analysis.ts` accepts only `{ dryRun }`. The ad account is ALWAYS the server-configured `META_AD_ACCOUNT_ID`; a client-supplied account id is never read.
 
 `outcomes.ts` is mounted at the `/api/v1` root, so one `/recommendations/*` path is served by a different router from the rest. No path collides.
+
+### Tasks — `/api/v1/tasks` · `tasks.ts`
+
+JARVIS's work: tasks the user asked JARVIS to carry out. The dashboard to-do list is a different set of rows, served by `/api/v1/command-center/tasks`. Every route acts only on the caller's own tasks; another user's task answers `404 NOT_FOUND`, the same as one that does not exist. Verified against the code on 2026-11-12.
+
+| Method | Path | Body | Success |
+|---|---|---|---|
+| POST | `/` | `{ title, description? }` | `201` and the task: always `PENDING`, recorded as JARVIS work (`createdBy: "jarvis"`). The title is required and trimmed, and kept to 200 characters; the description is a string or null, kept to 4,000 |
+| GET | `/` | `?status=` (optional) | `200 { tasks, count, statusCounts }` — see below |
+| GET | `/:id` | — | `200` and the task |
+| PATCH | `/:id/status` | `{ status, error? }` | `200` and the task. `status` is `RUNNING`, `COMPLETED`, `FAILED` or `UNRESOLVED`, in any case; `error` is kept for `FAILED` and `UNRESOLVED`. `PENDING` is refused with `400` |
+| POST | `/:id/plan` | — | `200 { plan }`: the planner's one proposed tool call, or its answer that none fits. Runs nothing and does not move the task |
+| POST | `/:id/execute` | `{ toolId, params? }` | `200 { task, execution: { executionId, toolId, status, error? } }`. Runs once through `ToolExecutor` with the session's role. `200` even when the tool failed: the task's status says how the work went |
+| POST | `/:id/schedule` | `{ scheduledAt, replace? }` | `200 { task, scheduledAt }`. `scheduledAt` must be ISO-8601 with an explicit offset (`Z` or `±hh:mm`). Nothing runs until the scheduler claims the task |
+| DELETE | `/:id/schedule` | — | `200 { task, scheduledAt: null }`. Clears the schedule only; the task stays `PENDING` |
+
+The lifecycle allows `PENDING → RUNNING` and `RUNNING → COMPLETED | FAILED | UNRESOLVED`, and nothing else; the last three are final. A move the lifecycle refuses is `409 INVALID_TRANSITION`, and one that lost a race to another writer is `409 STATE_CHANGED`. `GET /:id` and `PATCH /:id/status` look a task up by its owner only, so they answer for any task the caller owns, a to-do included. Execution refusals: `404 NOT_FOUND`, `409 NOT_EXECUTABLE` (finished or already running), `409 ALREADY_CLAIMED`, `400 TOOL_NOT_ALLOWED`. Scheduling refusals: `404 NOT_SCHEDULABLE` (not the caller's, not work, or not `PENDING` — one answer for all three), `400 INVALID_TIME`, `409 ALREADY_SCHEDULED` unless `replace: true`. A malformed body is `400 INVALID_REQUEST`.
+
+**`GET /api/v1/tasks`** returns the caller's JARVIS work, finished tasks included. There is no pagination: a response holds at most 50 tasks, and there is no parameter for more.
+
+| Field | Meaning |
+|---|---|
+| `tasks` | Without `status`: the first 50 by due date (undated last), then newest first. With `status`: the 50 newest in that state |
+| `count` | How many tasks this response carries, so at most 50. It is not a total |
+| `statusCounts` | Since VO-2.1: `{ PENDING, RUNNING, COMPLETED, FAILED, UNRESOLVED }`, every state always present, counted in the database over all of the caller's work. Neither the 50-task cap nor `status` changes it. Read totals here, never from the length of `tasks` |
+
+`status` is case-insensitive and must name one of the five states; anything else is `400 INVALID_REQUEST`, and nothing is read. The list and the totals are two queries in one request, not one snapshot: a task that moves between them can be counted in its new state and listed in its old one.
+
+A task carries `id`, `userId`, `title`, `description`, `dueAt`, `priority`, `status`, `startedAt`, `completedAt`, `error`, `scheduledAt`, `claimedAt`, `executionId`, `remindedAt`, `createdBy`, `createdAt` and `updatedAt`, with instants as ISO-8601 strings.
 
 ### Knowledge — `/api/v1/knowledge` · `knowledge.ts`
 
@@ -193,7 +222,9 @@ WhatsApp and n8n mount **before** the JSON body parser, because their signatures
 
 ## Realtime
 
-Socket.IO on the API's port. The handshake must carry an access token in `auth.token` or an `Authorization: Bearer` header; it is verified by the same `TokenService` as HTTP. Connections that do not authenticate in time are dropped. The system-telemetry stream lives in `apps/api/src/socket/system-stream.ts`.
+Socket.IO on the API's port. The handshake must carry an access token in `auth.token` or an `Authorization: Bearer` header; it is verified by the same `TokenService` as HTTP. Connections that do not authenticate in time are dropped. The system-telemetry stream lives in `apps/api/src/socket/system-stream.ts`, the Virtual Office stream (`office:subscribe`, `office:unsubscribe`, `office:event`) in `apps/api/src/socket/office-stream.ts`.
+
+A connection lasts as long as the token that opened it: since VO-2.1 the server disconnects it at the token's expiry (`io server disconnect` on the client), and a token already past it is refused (`SOCKET_AUTH_INVALID`). A client signs in again with a fresh token. Client events are default-deny (`SOCKET_EVENT_POLICY`): tool execution and approval decisions are never accepted over the socket. See [VIRTUAL_OFFICE.md](./VIRTUAL_OFFICE.md).
 
 ## Logging
 

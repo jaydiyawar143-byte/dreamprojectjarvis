@@ -38,6 +38,8 @@ import {
   buildOfficeModel,
   findOfficeActor,
   mergeOfficeActivity,
+  overlayTaskCounts,
+  parseTaskStatusCounts,
 } from "@/components/office/office-model";
 import { OfficeScene } from "@/components/office/office-scene";
 import { OfficeSelectionPanel } from "@/components/office/office-selection-panel";
@@ -70,6 +72,13 @@ export default function OfficePage() {
 
   const stream = useOfficeStream({ onReconnect: reloadAll });
 
+  // VO-2.1 — Refresh re-reads everything AND brings back a live feed that gave
+  // up, so "offline" is never a state only a page reload can leave.
+  function refresh(): void {
+    reloadAll();
+    stream.reconnect();
+  }
+
   useEffect(() => {
     const ticker = setInterval(() => setClock(Date.now()), 30_000);
     return () => clearInterval(ticker);
@@ -96,15 +105,23 @@ export default function OfficePage() {
     [tasks.data, stream.taskUpdates]
   );
 
+  // VO-2.1 — the counts are the server's totals, not the length of a capped
+  // list. Live moves of listed tasks adjust them until the next read.
+  const taskCounts = useMemo(() => {
+    const totals = parseTaskStatusCounts(tasks.data?.statusCounts);
+    return totals ? overlayTaskCounts(totals, tasks.data?.tasks ?? [], overlaidTasks) : null;
+  }, [tasks.data, overlaidTasks]);
+
   const model = useMemo(
     () =>
       buildOfficeModel({
         agents: agents.data?.agents ?? [],
         tasks: overlaidTasks,
+        taskCounts,
         activity: mergedActivity,
         now: clock,
       }),
-    [agents.data, overlaidTasks, mergedActivity, clock]
+    [agents.data, overlaidTasks, taskCounts, mergedActivity, clock]
   );
 
   const selection = findOfficeActor(model, selectedActorId);
@@ -122,7 +139,7 @@ export default function OfficePage() {
         title="Virtual Office"
         description="A 2D floor plan of the agents registered on this deployment, the task engine's real queue, and the newest audit records. Live events arrive while this tab is open; Refresh re-reads everything. Movement is decorative; the activity table is the record."
         actions={
-          <Button variant="secondary" size="sm" onClick={reloadAll}>
+          <Button variant="secondary" size="sm" onClick={refresh}>
             Refresh
           </Button>
         }
@@ -157,13 +174,21 @@ export default function OfficePage() {
             <StatPanel
               label="Running tasks"
               value={model.counts.running}
-              hint="Real RUNNING rows in the task engine"
+              hint={
+                model.counts.tasksAreTotals
+                  ? "Every RUNNING task in the task engine"
+                  : "RUNNING among the newest tasks read; this API sent no totals"
+              }
               tone={model.counts.running > 0 ? "success" : "default"}
             />
             <StatPanel
               label="Queued tasks"
               value={model.counts.pending}
-              hint="Real PENDING rows in the task engine"
+              hint={
+                model.counts.tasksAreTotals
+                  ? "Every PENDING task in the task engine"
+                  : "PENDING among the newest tasks read; this API sent no totals"
+              }
               tone={model.counts.pending > 0 ? "warning" : "default"}
             />
           </PanelGrid>

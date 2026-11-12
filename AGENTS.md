@@ -539,6 +539,34 @@ change must not break.
   never be refused. Never add a second caller, widen what it selects, or decide
   anything from it (`tenant-admin-cli-p17` pins this).
 
+### Virtual Office
+
+The contract is in [`docs/VIRTUAL_OFFICE.md`](docs/VIRTUAL_OFFICE.md); these are
+the parts a change must not break.
+
+- **A window, not an authority.** `/office` runs, approves and writes nothing.
+  `office:subscribe` and `office:unsubscribe` stay `READ_ONLY` with no
+  parameters; never add an office socket event that starts work.
+- **Events are built in core, field by field.** `officeActivityEvent`,
+  `officeTaskEvent` and `parseOfficeStreamEvent` are the only way a row becomes
+  an event. Never spread a row into one, and never add a title, description,
+  error, parameter or user id to it.
+- **One owner, after the write.** The bus publishes to the row's owner, only
+  after the durable write, and delivery re-checks the server-resolved identity.
+  The container installs `officeAuditObserver` and `officeTaskObserver`; a new
+  writer goes through them.
+- **Counts are totals.** "N running" and "N queued" come from `statusCounts`
+  (`countByStatus`, one `GROUP BY` in the database), never from the length of a
+  capped list.
+- **A socket ends with its token** (VO-2.1). The handshake records the verified
+  token's `expiresAt` and the server disconnects at that instant;
+  `SOCKET_MAX_SESSION_MS` bounds a token that states none. Never add a socket
+  path that outlives the credential that opened it.
+- **The web opens sockets in one place.** `openAuthenticatedSocket` reads the
+  token per attempt and renews through `refreshAccessToken`, the HTTP client's
+  single-flight refresh. Never capture a token once for a socket, and never add
+  a second refresh.
+
 ### Operational logs and errors
 
 - An operational event — start-up, shutdown, a failed request, anything a
@@ -662,6 +690,20 @@ workers timed out starting.
 0 skipped: `@jarvis/db` 472/472 (33 files, 38 migrations), `@jarvis/memory` 93/93,
 `@jarvis/api` 319/319 (twice), the quality evaluation 13/13. No real application
 was opened and nothing was typed (`docs/phases/phase-19.md`, §19).
+After VO-2.1, Virtual Office hardening (2026-11-12, on Windows from the working
+tree, not committed, every turbo run with `--force`): `pnpm build` 22/22,
+`pnpm typecheck` 40/40, `pnpm typecheck:tests` 23/23, `pnpm lint` 22/22, and the
+web gates again after the last web change (build, typecheck, lint, 991/991).
+Across 22 workspaces, no database, 11,676 passed, 2 failed and 792 skipped. Both
+failures are environment timing, not regressions: the MCP timeout tests in
+`mcp-integration-s8` and `mcp-pilot-failures-s8`, which allow a real child
+process 500 ms. Run alone five times each beside a clean `f004eca` worktree with
+byte-identical MCP code, they failed 4/5 here and 5/5 there, on the same lines
+(`docs/VIRTUAL_OFFICE.md`, "MCP timeout tests"); `verify-s8` failed once under
+load and passed 5/5 alone in both. CI's database steps passed on a throwaway
+database with CI's image digest, 0 skipped: `@jarvis/db` 478/478 (34 files, 38
+migrations), `@jarvis/memory` 93/93, `@jarvis/api` 319/319, the quality
+evaluation 13/13. 13/13 mutations caught.
 
 The two memory end-to-end tests (`sprint-1.1d-memory-e2e`, and
 `phase14-memory-e2e-pg.integration`, which has no in-memory fallback at all)

@@ -2,7 +2,8 @@
 // Core V1 — the task API.
 //
 //   POST   /api/v1/tasks             record a task (always PENDING)
-//   GET    /api/v1/tasks             the caller's tasks, optionally by status
+//   GET    /api/v1/tasks             the caller's tasks, optionally by status,
+//                                    with every state's total (`statusCounts`)
 //   GET    /api/v1/tasks/:id         one task
 //   PATCH  /api/v1/tasks/:id/status  move it through the lifecycle
 //   POST   /api/v1/tasks/:id/plan    propose ONE tool call; runs nothing
@@ -178,11 +179,19 @@ export function createTasksRouter(container: Container): Router {
         return;
       }
 
-      const tasks = await container.taskService.listTasks(userId, {
-        ...(parsed.success ? { status: parsed.data } : {}),
-      });
+      // VO-2.1 — `count` is how many rows THIS response carries, which the
+      // list's cap bounds. `statusCounts` is how many of the caller's work
+      // tasks are in each state, counted in the database and independent of
+      // both the cap and the `status` filter. A page that says "N running"
+      // reads `statusCounts`, never the length of `tasks`.
+      const [tasks, statusCounts] = await Promise.all([
+        container.taskService.listTasks(userId, {
+          ...(parsed.success ? { status: parsed.data } : {}),
+        }),
+        container.taskService.countTasks(userId),
+      ]);
 
-      ok(res, { tasks, count: tasks.length });
+      ok(res, { tasks, count: tasks.length, statusCounts });
     })
   );
 

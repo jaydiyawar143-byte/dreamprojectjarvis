@@ -61,6 +61,7 @@ import { TaskService } from "../src/services/tasks/task-service.js";
 import { TaskPlannerService } from "../src/services/tasks/task-planner-service.js";
 import { TaskExecutionService } from "../src/services/tasks/task-execution-service.js";
 import { TaskConversationService } from "../src/services/tasks/task-conversation-service.js";
+import { countTaskRows } from "./helpers/count-task-rows.js";
 
 const TC035 =
   "What was the exact message I sent immediately before this one? Do not use memory or external tools. If you cannot access the previous message, say so.";
@@ -181,6 +182,9 @@ function taskStore() {
     },
     async listByStatus(userId: string, status: TaskStatus) {
       return [...rows.values()].filter((r) => r.userId === userId && r.status === status);
+    },
+    async countByStatus(userId: string, options: { createdBy?: string } = {}) {
+      return countTaskRows(rows.values(), userId, options);
     },
     async findOwned(userId: string, taskId: string) {
       const row = rows.get(taskId);

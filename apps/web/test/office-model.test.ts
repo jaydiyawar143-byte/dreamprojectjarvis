@@ -19,10 +19,12 @@ import {
   findOfficeActor,
   mergeOfficeActivity,
   OFFICE_DEPARTMENTS,
+  overlayTaskCounts,
+  parseTaskStatusCounts,
   RECENT_WINDOW_MS,
   WAITING_WINDOW_MS,
 } from "../src/components/office/office-model";
-import type { ActivityEntry, AgentSummary, TaskRecord } from "../src/lib/api";
+import type { ActivityEntry, AgentSummary, TaskRecord, TaskStatusCounts } from "../src/lib/api";
 import type { OfficeStreamEvent } from "@jarvis/core/office-stream";
 
 const NOW = Date.parse("2026-11-05T12:00:00.000Z");
@@ -464,5 +466,123 @@ describe("VO-2 office model — live events", () => {
     expect(model.events.some((event) => event.summary === "Running: Analyse the account")).toBe(
       true
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// VO-2.1 (M2) — the counts are the task engine's totals
+// ---------------------------------------------------------------------------
+
+const totals = (over: Partial<TaskStatusCounts> = {}): TaskStatusCounts => ({
+  PENDING: 0,
+  RUNNING: 0,
+  COMPLETED: 0,
+  FAILED: 0,
+  UNRESOLVED: 0,
+  ...over,
+});
+
+describe("VO-2.1 office model — task totals", () => {
+  it("counts the system actor from the server's totals, not the listed rows", () => {
+    const model = buildOfficeModel({
+      agents: [],
+      // One listed RUNNING row; the server counted 75.
+      tasks: [task({ status: "RUNNING", startedAt: at(-5_000) })],
+      taskCounts: totals({ RUNNING: 75, PENDING: 12, COMPLETED: 300 }),
+      activity: [],
+      now: NOW,
+    });
+
+    expect(model.counts.running).toBe(75);
+    expect(model.counts.pending).toBe(12);
+    expect(model.counts.completed).toBe(300);
+    expect(model.counts.tasksAreTotals).toBe(true);
+    expect(model.system.state).toBe("working");
+    expect(model.system.stateLabel).toBe("Working on 75 tasks");
+    expect(model.system.countsAreTotals).toBe(true);
+  });
+
+  it("says work is queued from the totals even when no listed row is pending", () => {
+    const model = buildOfficeModel({
+      agents: [],
+      tasks: [task({ status: "COMPLETED", completedAt: at(-1_000) })],
+      taskCounts: totals({ PENDING: 3 }),
+      activity: [],
+      now: NOW,
+    });
+
+    expect(model.system.state).toBe("queued");
+    expect(model.system.stateLabel).toBe("3 tasks queued");
+  });
+
+  it("falls back to the listed rows, and says so, when the API sent no totals", () => {
+    const model = build({ tasks: [task({ status: "RUNNING", startedAt: at(-5_000) })] });
+
+    expect(model.counts.running).toBe(1);
+    expect(model.counts.tasksAreTotals).toBe(false);
+    expect(model.system.countsAreTotals).toBe(false);
+  });
+
+  it("accepts only a complete set of non-negative whole totals", () => {
+    expect(parseTaskStatusCounts(totals({ RUNNING: 4 }))).toEqual(totals({ RUNNING: 4 }));
+
+    // All or nothing: a missing, negative, fractional or non-number state
+    // refuses the whole value rather than guessing one state.
+    const { FAILED: _omitted, ...missing } = totals();
+    expect(parseTaskStatusCounts(missing)).toBeNull();
+    expect(parseTaskStatusCounts(totals({ RUNNING: -1 }))).toBeNull();
+    expect(parseTaskStatusCounts(totals({ RUNNING: 1.5 }))).toBeNull();
+    expect(parseTaskStatusCounts({ ...totals(), RUNNING: "4" })).toBeNull();
+    expect(parseTaskStatusCounts(totals({ RUNNING: Number.POSITIVE_INFINITY }))).toBeNull();
+    expect(parseTaskStatusCounts(null)).toBeNull();
+    expect(parseTaskStatusCounts([1, 2, 3, 4, 5])).toBeNull();
+  });
+
+  it("drops an unknown key and returns a fresh object", () => {
+    const wire = { ...totals({ PENDING: 2 }), ARCHIVED: 9 };
+    const parsed = parseTaskStatusCounts(wire);
+
+    expect(parsed).toEqual(totals({ PENDING: 2 }));
+    expect(parsed).not.toBe(wire);
+    expect(Object.keys(parsed!)).not.toContain("ARCHIVED");
+  });
+
+  it("moves one total to another for a live transition of a listed task", () => {
+    const before = [task({ id: "t-1", status: "PENDING" }), task({ id: "t-2", status: "PENDING" })];
+    const after = applyTaskOverlay(
+      before,
+      new Map([
+        [
+          "t-1",
+          {
+            kind: "task" as const,
+            id: "task:t-1:RUNNING:live",
+            at: at(0),
+            taskId: "t-1",
+            status: "RUNNING" as const,
+          },
+        ],
+      ])
+    );
+
+    expect(overlayTaskCounts(totals({ PENDING: 40, RUNNING: 7 }), before, after)).toEqual(
+      totals({ PENDING: 39, RUNNING: 8 })
+    );
+  });
+
+  it("leaves the totals alone when the overlay changed no listed state", () => {
+    const before = [task({ id: "t-1", status: "RUNNING", startedAt: at(-1_000) })];
+
+    expect(overlayTaskCounts(totals({ RUNNING: 5 }), before, before)).toEqual(
+      totals({ RUNNING: 5 })
+    );
+  });
+
+  it("never takes a total below zero", () => {
+    const before = [task({ id: "t-1", status: "PENDING" })];
+    const after = [task({ id: "t-1", status: "RUNNING" })];
+
+    // Totals read a moment before the list, so they do not yet hold this row.
+    expect(overlayTaskCounts(totals(), before, after)).toEqual(totals({ RUNNING: 1 }));
   });
 });

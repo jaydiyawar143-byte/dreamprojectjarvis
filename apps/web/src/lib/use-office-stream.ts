@@ -22,10 +22,15 @@
 //
 // UI updates are flushed on a 500ms tick rather than per message, so a burst of
 // audit rows cannot re-render the floor plan once per row.
+//
+// VO-2.1 — the socket is opened by `openAuthenticatedSocket`, which reads the
+// access token for every connection attempt and renews it when the server
+// refuses it or ends the session (as it now does when the token expires). A
+// renewed connection counts as a reconnect: the page re-reads durable state.
+// `reconnect()` lets the page's Refresh button bring back a stream that gave up.
 // ---------------------------------------------------------------------------
 
-import { useEffect, useRef, useState } from "react";
-import { io } from "socket.io-client";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   OFFICE_STREAM_EVENT,
   OFFICE_SUBSCRIBE_EVENT,
@@ -35,8 +40,7 @@ import {
   type OfficeTaskEvent,
 } from "@jarvis/core/office-stream";
 
-import { getAccessToken } from "./api";
-import { SOCKET_URL } from "./socket-url";
+import { openAuthenticatedSocket, type AuthenticatedSocketHandle } from "./authenticated-socket";
 
 export type OfficeStreamStatus =
   | "connecting"
@@ -63,6 +67,12 @@ export interface OfficeStreamState {
    * (which is where titles live) without reloading on every activity row.
    */
   taskRevision: number;
+  /**
+   * VO-2.1 — connect again now, if the stream is neither live nor already
+   * trying. What the page's Refresh button calls, so "offline" is never a
+   * state only a page reload can leave.
+   */
+  reconnect: () => void;
 }
 
 export interface UseOfficeStreamOptions {
@@ -75,7 +85,7 @@ export function useOfficeStream(options: UseOfficeStreamOptions = {}): OfficeStr
   const { enabled = true } = options;
 
   const [status, setStatus] = useState<OfficeStreamStatus>("connecting");
-  const [state, setState] = useState<Omit<OfficeStreamState, "status">>(() => ({
+  const [state, setState] = useState<Omit<OfficeStreamState, "status" | "reconnect">>(() => ({
     events: [],
     taskUpdates: new Map(),
     taskRevision: 0,
@@ -92,45 +102,29 @@ export function useOfficeStream(options: UseOfficeStreamOptions = {}): OfficeStr
   const onReconnectRef = useRef(options.onReconnect);
   onReconnectRef.current = options.onReconnect;
 
+  const handleRef = useRef<AuthenticatedSocketHandle | null>(null);
+
   useEffect(() => {
     if (!enabled) return;
 
-    const token = getAccessToken();
-    if (!token) {
-      // The socket authenticates with the access token. Without one there is
-      // nothing to connect with, and retrying would just fail repeatedly.
-      setStatus("unauthenticated");
-      return;
-    }
-
-    const socket = io(SOCKET_URL, {
-      auth: { token },
-      transports: ["websocket"],
-      reconnection: true,
+    // Reports "unauthenticated" and returns null when there is no token to
+    // connect with: retrying without one would only fail repeatedly.
+    const handle = openAuthenticatedSocket({
       reconnectionAttempts: Infinity,
       reconnectionDelay: 1000,
       reconnectionDelayMax: 5000,
+      onStatus: setStatus,
+      onConnect: (connected, { reconnected }) => {
+        connected.emit(OFFICE_SUBSCRIBE_EVENT);
+        // A reconnect — after a drop, or after the session was renewed — means
+        // events may have been missed. The page re-reads the durable rows;
+        // nothing is replayed here.
+        if (reconnected) onReconnectRef.current?.();
+      },
     });
-
-    let connectedOnce = false;
-
-    socket.on("connect", () => {
-      setStatus("live");
-      socket.emit(OFFICE_SUBSCRIBE_EVENT);
-      // A reconnect means events may have been missed while the socket was
-      // down. The page re-reads the durable rows; nothing is replayed here.
-      if (connectedOnce) onReconnectRef.current?.();
-      connectedOnce = true;
-    });
-
-    socket.on("disconnect", () => {
-      // `active` is true while the client intends to reconnect.
-      setStatus(socket.active ? "reconnecting" : "offline");
-    });
-
-    socket.on("connect_error", () => {
-      setStatus(socket.active ? "reconnecting" : "offline");
-    });
+    if (!handle) return;
+    handleRef.current = handle;
+    const { socket } = handle;
 
     socket.on(OFFICE_STREAM_EVENT, (payload: unknown) => {
       const event = parseOfficeStreamEvent(payload);
@@ -173,13 +167,16 @@ export function useOfficeStream(options: UseOfficeStreamOptions = {}): OfficeStr
 
     return () => {
       clearInterval(flush);
+      handleRef.current = null;
       // Tell the server to stop before dropping the socket, so the subscription
       // ends immediately rather than only on disconnect.
-      if (socket.connected) socket.emit(OFFICE_UNSUBSCRIBE_EVENT);
-      socket.removeAllListeners();
-      socket.disconnect();
+      handle.close((connected) => connected.emit(OFFICE_UNSUBSCRIBE_EVENT));
     };
   }, [enabled]);
 
-  return { status, ...state };
+  const reconnect = useCallback(() => {
+    handleRef.current?.reconnect();
+  }, []);
+
+  return { status, ...state, reconnect };
 }

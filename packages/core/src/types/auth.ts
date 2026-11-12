@@ -44,10 +44,24 @@ export interface IPasswordHasher {
   compare(password: string, hash: string): Promise<boolean>;
 }
 
+/** What a verified access token says. */
+export interface VerifiedAccessToken {
+  userId: string;
+  role: string;
+  email: string;
+  /**
+   * VO-2.1 — when the token stops being valid, in epoch milliseconds (the
+   * JWT's `exp`). A long-lived connection authorized by this token, such as a
+   * socket, ends at this instant. Absent only where a verifier cannot say;
+   * such a connection is then bounded by its own maximum instead.
+   */
+  expiresAt?: number;
+}
+
 export interface ITokenService {
   generateAccessToken(payload: { userId: string; role: string; email: string }): string;
   generateRefreshToken(): string;
-  verifyAccessToken(token: string): { userId: string; role: string; email: string } | null;
+  verifyAccessToken(token: string): VerifiedAccessToken | null;
   hashToken(token: string): string;
   getRefreshTokenExpiry(): Date;
 }

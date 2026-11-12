@@ -28,7 +28,7 @@ import {
   JARVIS_TASK_CREATOR,
   type TaskStatus,
 } from "@jarvis/core";
-import type { PrismaTaskRepository, TaskRecord } from "@jarvis/db";
+import type { PrismaTaskRepository, TaskRecord, TaskStatusCounts } from "@jarvis/db";
 
 /** Why a task operation could not be performed. */
 export type TaskFailureReason =
@@ -62,7 +62,7 @@ export interface ListTasksOptions {
 export interface TaskServiceDeps {
   tasks: Pick<
     PrismaTaskRepository,
-    "create" | "list" | "listByStatus" | "findOwned" | "transitionOwned"
+    "create" | "list" | "listByStatus" | "countByStatus" | "findOwned" | "transitionOwned"
   >;
   /**
    * VO-2 — told about a task row AFTER its durable write succeeded.
@@ -151,6 +151,18 @@ export class TaskService {
       limit: options.limit ?? 50,
       createdBy: JARVIS_TASK_CREATOR,
     });
+  }
+
+  /**
+   * VO-2.1 — how many of the caller's WORK tasks are in each state.
+   *
+   * The same set `listTasks` reads (the caller's rows, JARVIS work only), but
+   * counted in the database rather than over a listed page. `listTasks` is
+   * capped, so "how many are running?" answered from its rows undercounts once
+   * a user has more work than one page holds.
+   */
+  async countTasks(userId: string): Promise<TaskStatusCounts> {
+    return this.deps.tasks.countByStatus(userId, { createdBy: JARVIS_TASK_CREATOR });
   }
 
   /** PENDING -> RUNNING. */

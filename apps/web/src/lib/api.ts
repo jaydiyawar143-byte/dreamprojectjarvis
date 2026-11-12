@@ -282,6 +282,18 @@ export async function bootstrapSession(): Promise<boolean> {
   return refreshTokens();
 }
 
+/**
+ * VO-2.1 — a fresh access token for a long-lived connection (a socket).
+ *
+ * The SAME single-flight refresh the HTTP path uses, deliberately: a socket
+ * whose session ended and a burst of 401s arriving together must rotate the
+ * refresh cookie once between them, or the rotations invalidate one another.
+ * True when a new access token is now held.
+ */
+export async function refreshAccessToken(): Promise<boolean> {
+  return refreshTokens();
+}
+
 // The response no longer carries `refreshToken` for this client — the API
 // withholds it and sets the cookie instead — so the token shape is narrowed
 // rather than lying about what arrives.
@@ -2093,12 +2105,20 @@ export async function listTasks(
  *
  * The server scopes it to the caller and limits it; no filter is supplied here
  * because the office needs the current queue and the recent completions.
+ *
+ * VO-2.1 — `tasks` is capped, so `count` (its length) is not "how many are
+ * running". `statusCounts` is: the server counts every work task by state in
+ * the database. It is optional only because an API older than VO-2.1 does not
+ * send it; a reader validates it before trusting it.
  */
 export async function listWorkTasks(): Promise<
-  ApiResponse<{ tasks: TaskRecord[]; count: number }>
+  ApiResponse<{ tasks: TaskRecord[]; count: number; statusCounts?: TaskStatusCounts }>
 > {
   return request("/tasks");
 }
+
+/** VO-2.1 — how many of the caller's work tasks are in each lifecycle state. */
+export type TaskStatusCounts = Record<TaskLifecycleStatus, number>;
 
 export async function createTask(input: {
   title: string;

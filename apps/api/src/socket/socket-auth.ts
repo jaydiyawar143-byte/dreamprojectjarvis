@@ -21,7 +21,7 @@
 // ---------------------------------------------------------------------------
 
 import type { Server, Socket } from "socket.io";
-import type { AuthContext, Role } from "@jarvis/core";
+import type { AuthContext, Role, VerifiedAccessToken } from "@jarvis/core";
 import { OFFICE_SUBSCRIBE_EVENT, OFFICE_UNSUBSCRIBE_EVENT } from "@jarvis/core";
 import type { TokenService } from "@jarvis/security";
 
@@ -47,6 +47,36 @@ const MAX_TOKEN_LENGTH = 4096;
 /** Failed handshakes tolerated from one address inside the window. */
 export const SOCKET_MAX_AUTH_FAILURES = 10;
 export const SOCKET_AUTH_FAILURE_WINDOW_MS = 60_000;
+
+/**
+ * VO-2.1 — the longest a socket may live on one handshake when its token
+ * states no expiry (a verifier that cannot say).
+ *
+ * A socket is authorized ONCE, at the handshake. Without an end, a connection
+ * opened with a token kept receiving that user's events long after an HTTP
+ * request with the same token would have been refused — through a logout, and
+ * for as long as a stolen token's holder kept the connection open. So every
+ * socket now ends when its token does (`expiresAt`), and this is the bound
+ * when the token does not say: the access token's own lifetime, 15 minutes.
+ *
+ * Ending is a disconnect, not a refusal: the client re-authenticates with a
+ * fresh token and connects again, and the new handshake is checked in full.
+ */
+export const SOCKET_MAX_SESSION_MS = 15 * 60_000;
+
+/**
+ * `setTimeout`'s ceiling. A longer delay overflows to an immediate call, so a
+ * session timer longer than this is re-armed instead.
+ */
+const MAX_TIMER_MS = 2_147_483_647;
+
+/** The instant a socket authorized by `identity` at `now` must end. */
+export function socketSessionExpiry(identity: Pick<VerifiedAccessToken, "expiresAt">, now: number): number {
+  const fromToken = identity.expiresAt;
+  return typeof fromToken === "number" && Number.isFinite(fromToken)
+    ? fromToken
+    : now + SOCKET_MAX_SESSION_MS;
+}
 
 // ---------------------------------------------------------------------------
 // Failure reasons
@@ -346,7 +376,7 @@ export function createSocketAuthMiddleware(
       return;
     }
 
-    let identity: { userId: string; role: string; email: string } | null;
+    let identity: VerifiedAccessToken | null;
     try {
       identity = tokenService.verifyAccessToken(extracted.token);
     } catch {
@@ -362,6 +392,15 @@ export function createSocketAuthMiddleware(
       return;
     }
 
+    // VO-2.1 — the session ends when the token does. A token that is already
+    // past it (a verifier's clock a moment behind ours) gets the same answer
+    // as an expired one, rather than a connection that ends immediately.
+    const expiresAt = socketSessionExpiry(identity, Date.now());
+    if (expiresAt <= Date.now()) {
+      reject("SOCKET_AUTH_INVALID", "Invalid or expired credentials");
+      return;
+    }
+
     const auth: AuthContext = {
       userId: identity.userId,
       role: identity.role as Role,
@@ -369,6 +408,7 @@ export function createSocketAuthMiddleware(
     };
 
     socket.data.auth = auth;
+    socket.data.authExpiresAt = expiresAt;
     throttle.recordSuccess(address);
 
     log({
@@ -431,6 +471,40 @@ export function registerSocketConnection(
     userId: auth.userId,
   });
 
+  // VO-2.1 — the connection ends when the token that opened it does. The
+  // middleware recorded that instant; a socket without one (a namespace that
+  // skipped the middleware cannot reach here, but a future one might set auth
+  // some other way) gets the maximum session rather than no end at all.
+  //
+  // Ending is a server-side disconnect. Every stream on this socket stops on
+  // `disconnect` (its subscriptions are removed there), and the client signs in
+  // again with a fresh token: nothing it was sent survives on this connection.
+  const recorded = socket.data.authExpiresAt;
+  const expiresAt =
+    typeof recorded === "number" && Number.isFinite(recorded)
+      ? recorded
+      : Date.now() + SOCKET_MAX_SESSION_MS;
+
+  let sessionTimer: ReturnType<typeof setTimeout> | undefined;
+  const armSessionEnd = (): void => {
+    const remaining = expiresAt - Date.now();
+    if (remaining <= 0) {
+      log({
+        level: "info",
+        event: "socket_session_expired",
+        socketId: socket.id,
+        userId: auth.userId,
+      });
+      socket.disconnect(true);
+      return;
+    }
+    // Re-armed past setTimeout's ceiling rather than overflowing to "now".
+    sessionTimer = setTimeout(armSessionEnd, Math.min(remaining, MAX_TIMER_MS));
+    // A pending session end never keeps the process alive on shutdown.
+    sessionTimer.unref?.();
+  };
+  armSessionEnd();
+
   socket.onAny((event: string, ...args: unknown[]) => {
     if (RESERVED_EVENTS.has(event)) return;
 
@@ -477,7 +551,9 @@ export function registerSocketConnection(
   socket.on("disconnect", (reason: string) => {
     // Phase 10.4 decision preserved: CLIENT DISCONNECT != EXECUTION
     // CANCELLATION. Executions are journal-backed; nothing is aborted here.
+    if (sessionTimer !== undefined) clearTimeout(sessionTimer);
     socket.data.auth = undefined;
+    socket.data.authExpiresAt = undefined;
     log({
       level: "info",
       event: "socket_disconnected",

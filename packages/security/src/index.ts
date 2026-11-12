@@ -28,7 +28,7 @@ export {
   type SharedConnectionAuthzDecision,
   type SharedConnectionDenyCode,
 } from "./shared-connection-authz.js";
-export { AuditLogger, redactAuditParams } from "./audit.js";
+export { AuditLogger, redactAuditParams, type AuditObserver } from "./audit.js";
 export { ApprovalService } from "./approval.js";
 export { ToolApprovalService } from "./tool-approval.js";
 export type { ToolApprovalConfig } from "./tool-approval.js";

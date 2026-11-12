@@ -68,6 +68,7 @@ export {
   type TaskPriority,
   type CreateTaskInput,
   type UpdateTaskInput,
+  type TaskStatusCounts,
 } from "./repositories/task-repository.js";
 export { PrismaPreferenceRepository } from "./repositories/preference-repository.js";
 // Phase 14 — projects: the scope a memory may belong to.

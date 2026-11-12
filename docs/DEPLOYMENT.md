@@ -18,6 +18,8 @@ There is one operator and one deployment: the Docker stack on the operator's mac
 
 `api` and `web` are the same image, `jarvis-app:latest`, started with different commands. The local development stack uses 5432, 3001 and 3000 and is a separate database; the two can run side by side.
 
+Run **one** `api` container. The dashboard's live streams (the Virtual Office and the system metrics) are delivered inside the API process, with no Socket.IO adapter between instances, so a second API instance would not deliver the first one's events ([VIRTUAL_OFFICE.md](./VIRTUAL_OFFICE.md)).
+
 ## 1. Prerequisites
 
 - Docker Desktop running: `docker info` answers.
@@ -114,6 +116,10 @@ docker compose up -d
 ```
 
 `up -d` recreates the containers whose image changed and leaves the database container and its data alone. The API waits for PostgreSQL to be healthy, and the web app waits for the API.
+
+**Deploy the API and the web app together, and reload every open dashboard afterwards.** Since VO-2.1 the API ends each dashboard socket when the access token that opened it expires, at most 15 minutes after it connected. The current dashboard renews its token and reconnects. A dashboard page loaded from an earlier release cannot: it read its token once, so its live feeds (the Virtual Office and the system metrics) go offline within 15 minutes of the new API starting and stay offline until the page is reloaded. Both services run the same image, so the `up -d` above replaces both; never recreate `api` on its own. The reload is a step in [section 8](#8-after-the-deployment).
+
+The other direction is safe. A current dashboard served against an API from before VO-2.1 keeps its feeds (that API never ends a session) and, with no task totals from it, counts the tasks it listed and says so. If you must roll back only one service, roll back the API, never only the web app.
 
 ## 6. Check that it is healthy
 
@@ -1110,6 +1116,8 @@ docker compose logs api --since 10m
 
 Then use it: sign in at http://localhost:3100, send one chat message, open the Integrations page.
 
+Then reload every dashboard tab that was open before the deployment, on every computer. A page loaded from the previous release cannot renew its socket session after this release, so its live feeds go offline within 15 minutes and stay offline until it is reloaded ([section 5](#5-deploy)). Open the Virtual Office and check that its feed says **Live**.
+
 ---
 
 ## Rolling back
@@ -1307,6 +1315,8 @@ docker compose logs api --since 1h
 | `monitor_exception`, `monitor_message` | A report to the error monitor |
 
 Not every line in the log has this shape yet. The request log is one text line per request, and older components write JSON without a timestamp. The events above are the ones to build checks on.
+
+The socket layer is one of those older components. Since VO-2.1 it also writes `socket_session_expired` when a dashboard socket reaches its access token's expiry and the server ends it. Expect about one every 15 minutes for each open tab showing a live feed (the Virtual Office, or the dashboard's system widget), each followed by a new `socket_authenticated` as the browser renews its token and reconnects. A run of `socket_auth_rejected` with no reconnection after it means a browser could not renew its session.
 
 ## When something is wrong
 

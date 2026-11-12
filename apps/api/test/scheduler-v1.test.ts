@@ -43,6 +43,7 @@ import { TaskExecutionService } from "../src/services/tasks/task-execution-servi
 import { TaskConversationService } from "../src/services/tasks/task-conversation-service.js";
 import { TaskSchedulerService } from "../src/services/tasks/task-scheduler-service.js";
 import { startTaskSchedulerLoop } from "../src/services/task-scheduler-loop.js";
+import { countTaskRows } from "./helpers/count-task-rows.js";
 
 const ALICE = "user-alice";
 const BOB = "user-bob";
@@ -184,6 +185,9 @@ function makeStore() {
 
     async listByStatus(userId: string, status: TaskStatus) {
       return [...rows.values()].filter((r) => r.userId === userId && r.status === status);
+    },
+    async countByStatus(userId: string, options: { createdBy?: string } = {}) {
+      return countTaskRows(rows.values(), userId, options);
     },
 
     async findOwned(userId: string, taskId: string) {

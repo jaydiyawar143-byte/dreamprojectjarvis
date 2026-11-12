@@ -85,6 +85,12 @@ export function OfficeSelectionPanel({
             ))}
           </dl>
 
+          {!selection.countsAreTotals && (
+            <p className="text-xs leading-relaxed text-sys-dim" data-testid="office-system-counts-note">
+              These counts are from the newest tasks read, because this API sent no totals.
+            </p>
+          )}
+
           <p className="text-xs leading-relaxed text-sys-dim" data-testid="office-system-note">
             A task run in the task engine records no agent, so it is shown as JARVIS system
             work. No percentage progress is shown, because the task engine has no progress

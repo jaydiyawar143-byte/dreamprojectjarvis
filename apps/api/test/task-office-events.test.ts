@@ -15,6 +15,7 @@ import type { TaskStatus } from "@jarvis/core";
 import type { TaskRecord } from "@jarvis/db";
 
 import { TaskService } from "../src/services/tasks/task-service.js";
+import { countTaskRows } from "./helpers/count-task-rows.js";
 
 function makeStore() {
   const rows = new Map<string, TaskRecord>();
@@ -55,6 +56,9 @@ function makeStore() {
       return [...rows.values()]
         .filter((r) => r.userId === userId && r.status === status)
         .slice(0, limit);
+    },
+    async countByStatus(userId: string, options: { createdBy?: string } = {}) {
+      return countTaskRows(rows.values(), userId, options);
     },
     async findOwned(userId: string, taskId: string): Promise<TaskRecord | null> {
       const row = rows.get(taskId);

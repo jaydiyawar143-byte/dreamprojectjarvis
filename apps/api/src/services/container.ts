@@ -1,5 +1,4 @@
 import type { IOrchestrator, IToolExecutor, ITool, AIToolDefinition, ShutdownLifecycle, IMemoryStore, IEmbeddingProvider, IKnowledgeRetriever, IAIProvider, BrowserRuntimePort } from "@jarvis/core";
-import { officeActivityEvent, officeTaskEvent } from "@jarvis/core";
 import { ExecutionOutcomeService } from "./execution-outcome-service.js";
 import { ObjectiveEvaluationService } from "./objective-evaluation-service.js";
 import type { TokenService } from "@jarvis/security";
@@ -162,7 +161,7 @@ import {
   type TaskView,
 } from "@jarvis/tools";
 import { TaskService } from "./tasks/task-service.js";
-import { OfficeEventBus } from "./office-events.js";
+import { OfficeEventBus, officeAuditObserver, officeTaskObserver } from "./office-events.js";
 import { TaskExecutionService } from "./tasks/task-execution-service.js";
 import { TaskPlannerService } from "./tasks/task-planner-service.js";
 import { TaskConversationService } from "./tasks/task-conversation-service.js";
@@ -1261,10 +1260,7 @@ export function getContainer(options?: {
   // VO-2 — constructed first so both writers can publish into it: the audit
   // observer below and the task service further down.
   const officeEvents = new OfficeEventBus();
-  const auditLogger = new AuditLogger(auditRepo, (entry) => {
-    const event = officeActivityEvent(entry);
-    if (event) officeEvents.publish(entry.userId, event);
-  });
+  const auditLogger = new AuditLogger(auditRepo, officeAuditObserver(officeEvents));
 
   // Phase 10.6 — durable journal exposed on the container for idempotent
   // startup recovery and shutdown-time state inspection.
@@ -1435,10 +1431,7 @@ export function getContainer(options?: {
   const taskRepository = new PrismaTaskRepository(prisma);
   const taskService = new TaskService({
     tasks: taskRepository,
-    onTaskChanged: (task) => {
-      const event = officeTaskEvent(task);
-      if (event) officeEvents.publish(task.userId, event);
-    },
+    onTaskChanged: officeTaskObserver(officeEvents),
   });
 
   // Core V1 — self-knowledge. The provider is built a few lines below, so its
