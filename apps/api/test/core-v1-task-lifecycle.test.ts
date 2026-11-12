@@ -24,6 +24,7 @@ import { TaskService } from "../src/services/tasks/task-service.js";
 import { SelfKnowledgeService } from "../src/services/self-knowledge/self-knowledge-service.js";
 import { readBuildMetadata } from "../src/services/self-knowledge/build-metadata.js";
 import type { TaskRecord } from "@jarvis/db";
+import { countTaskRows } from "./helpers/count-task-rows.js";
 
 // ---------------------------------------------------------------------------
 // A task store that behaves like the real repository.
@@ -69,6 +70,9 @@ function makeStore() {
       return [...rows.values()]
         .filter((r) => r.userId === userId && r.status === status)
         .slice(0, limit);
+    },
+    async countByStatus(userId: string, options: { createdBy?: string } = {}) {
+      return countTaskRows(rows.values(), userId, options);
     },
     async findOwned(userId: string, taskId: string) {
       const row = rows.get(taskId);

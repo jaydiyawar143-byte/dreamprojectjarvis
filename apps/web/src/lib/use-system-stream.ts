@@ -11,12 +11,20 @@
 // samples; keeping it in state would re-render the whole widget tree every
 // second. The component re-renders on a throttled tick instead, and the graph
 // reads the ref.
+//
+// VO-2.1 (D1) — the socket is opened by `openAuthenticatedSocket`, the same
+// helper the Virtual Office uses. This hook used to read the access token once,
+// so after fifteen minutes any reconnect presented an expired token, the server
+// refused it and the metrics stopped until a reload. The helper reads the token
+// for every attempt and renews it when the server refuses it or ends the
+// session. While it is connecting again the status is "connecting": this
+// widget's vocabulary has no separate "reconnecting".
 // ---------------------------------------------------------------------------
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { io, type Socket } from "socket.io-client";
-import { getAccessToken, type SystemSnapshot } from "./api";
-import { SOCKET_URL } from "./socket-url";
+import type { Socket } from "socket.io-client";
+import type { SystemSnapshot } from "./api";
+import { openAuthenticatedSocket, type AuthenticatedSocketStatus } from "./authenticated-socket";
 
 /** 5 minutes at 1Hz — the longest range the UI offers. */
 const MAX_SAMPLES = 300;
@@ -33,6 +41,11 @@ export interface MetricHistory {
 }
 
 export type StreamStatus = "connecting" | "live" | "offline" | "unauthenticated";
+
+/** The helper's states in this widget's vocabulary. */
+function toStreamStatus(status: AuthenticatedSocketStatus): StreamStatus {
+  return status === "reconnecting" ? "connecting" : status;
+}
 
 export function useSystemStream(enabled = true): {
   snapshot: SystemSnapshot | null;
@@ -56,26 +69,21 @@ export function useSystemStream(enabled = true): {
   useEffect(() => {
     if (!enabled) return;
 
-    const token = getAccessToken();
-    if (!token) {
-      // The socket authenticates with the access token; without one there is
-      // nothing to connect with, and retrying would just fail repeatedly.
-      setStatus("unauthenticated");
-      return;
-    }
-
-    const socket = io(SOCKET_URL, {
-      auth: { token },
-      transports: ["websocket"],
+    // Reports "unauthenticated" and returns null when there is no token to
+    // connect with: retrying without one would only fail repeatedly.
+    const handle = openAuthenticatedSocket({
       reconnectionAttempts: 5,
       reconnectionDelay: 2000,
+      onStatus: (next) => setStatus(toStreamStatus(next)),
+      // Every connection subscribes, including one renewed after the server
+      // ended the session: a new connection has no subscription of its own.
+      onConnect: (connected) => {
+        connected.emit("system:subscribe");
+      },
     });
+    if (!handle) return;
+    const { socket } = handle;
     socketRef.current = socket;
-
-    socket.on("connect", () => {
-      setStatus("live");
-      socket.emit("system:subscribe");
-    });
 
     socket.on("system:metrics", (payload: SystemSnapshot) => {
       latestRef.current = payload;
@@ -91,9 +99,6 @@ export function useSystemStream(enabled = true): {
       }
     });
 
-    socket.on("disconnect", () => setStatus("offline"));
-    socket.on("connect_error", () => setStatus("offline"));
-
     // One throttled re-render, rather than one per message.
     const ticker = setInterval(() => {
       setSnapshot(latestRef.current);
@@ -104,9 +109,7 @@ export function useSystemStream(enabled = true): {
       clearInterval(ticker);
       // Tell the server to stop collecting before dropping the socket, so the
       // interval on that side ends immediately rather than on disconnect.
-      if (socket.connected) socket.emit("system:unsubscribe");
-      socket.removeAllListeners();
-      socket.disconnect();
+      handle.close((connected) => connected.emit("system:unsubscribe"));
       socketRef.current = null;
     };
   }, [enabled, push]);

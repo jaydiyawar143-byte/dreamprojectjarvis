@@ -19,8 +19,11 @@ import { renderHook, act } from "@testing-library/react";
 const socketHarness = vi.hoisted(() => ({ sockets: [] as any[] }));
 
 vi.mock("socket.io-client", () => ({
-  io: vi.fn(() => {
+  io: vi.fn((_url: string, options: any) => {
     const handlers = new Map<string, Function[]>();
+    // Like the real client, every connection attempt asks the `auth` callback
+    // for its credential: once on creation, once per `connect()`.
+    const attempt = () => options?.auth?.(() => undefined);
     const socket: any = {
       connected: false,
       active: true,
@@ -36,6 +39,15 @@ vi.mock("socket.io-client", () => ({
       removeAllListeners() {
         handlers.clear();
       },
+      // VO-2.1 — what the authenticated socket calls to connect again after it
+      // renewed the token.
+      connects: 0,
+      connect() {
+        this.connects += 1;
+        this.active = true;
+        attempt();
+        return this;
+      },
       disconnect() {
         this.connected = false;
         this.active = false;
@@ -49,11 +61,18 @@ vi.mock("socket.io-client", () => ({
       },
     };
     socketHarness.sockets.push(socket);
+    attempt();
     return socket;
   }),
 }));
 
-import { setAccessToken } from "../src/lib/api";
+// VO-2.1 — the shared refresh is the only thing stubbed in the API client.
+vi.mock("../src/lib/api", async () => {
+  const actual = await vi.importActual<typeof import("../src/lib/api")>("../src/lib/api");
+  return { ...actual, refreshAccessToken: vi.fn() };
+});
+
+import { refreshAccessToken, setAccessToken } from "../src/lib/api";
 import {
   OFFICE_STREAM_FLUSH_MS,
   useOfficeStream,
@@ -224,5 +243,75 @@ describe("VO-2 — office stream hook", () => {
 
     expect(socket.emitted).toContainEqual({ event: OFFICE_UNSUBSCRIBE_EVENT, payload: undefined });
     expect(socket.connected).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// VO-2.1 (H1) — an ended or refused session is renewed, and the page told
+// ---------------------------------------------------------------------------
+
+describe("VO-2.1 — office stream renewal", () => {
+  /** Lets the refresh promise and its continuation settle under fake timers. */
+  const settle = () =>
+    act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+  it("renews a session the server ended, subscribes again and asks the page to re-read", async () => {
+    vi.mocked(refreshAccessToken).mockImplementation(async () => {
+      setAccessToken("fresh-token");
+      return true;
+    });
+    const onReconnect = vi.fn();
+    const { result } = renderHook(() => useOfficeStream({ onReconnect }));
+    const socket = lastSocket();
+    act(() => socket.trigger("connect"));
+
+    act(() => {
+      socket.connected = false;
+      socket.active = false;
+      socket.trigger("disconnect", "io server disconnect");
+    });
+    expect(result.current.status).toBe("reconnecting");
+
+    await settle();
+    expect(refreshAccessToken).toHaveBeenCalledTimes(1);
+    expect(socket.connects).toBe(1);
+
+    act(() => socket.trigger("connect"));
+    expect(result.current.status).toBe("live");
+    expect(onReconnect).toHaveBeenCalledTimes(1);
+    expect(socket.emitted.filter((entry: { event: string }) => entry.event === OFFICE_SUBSCRIBE_EVENT)).toHaveLength(2);
+  });
+
+  it("says not signed in when the refused session cannot be refreshed", async () => {
+    vi.mocked(refreshAccessToken).mockResolvedValue(false);
+    const { result } = renderHook(() => useOfficeStream());
+    const socket = lastSocket();
+
+    act(() => {
+      socket.active = false;
+      socket.trigger("connect_error", { message: "refused", data: { code: "SOCKET_AUTH_INVALID" } });
+    });
+    await settle();
+
+    expect(result.current.status).toBe("unauthenticated");
+    expect(socket.connects).toBe(0);
+  });
+
+  it("exposes reconnect(), which brings back a stream that stopped", () => {
+    const { result } = renderHook(() => useOfficeStream());
+    const socket = lastSocket();
+    act(() => {
+      socket.active = false;
+      socket.trigger("connect_error");
+    });
+    expect(result.current.status).toBe("offline");
+
+    act(() => result.current.reconnect());
+
+    expect(socket.connects).toBe(1);
+    expect(result.current.status).toBe("reconnecting");
   });
 });

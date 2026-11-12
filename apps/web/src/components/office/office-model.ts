@@ -25,7 +25,7 @@
 // as working, and only from a real `Task.status === "RUNNING"` row.
 // ---------------------------------------------------------------------------
 
-import type { ActivityEntry, AgentSummary, TaskRecord } from "@/lib/api";
+import type { ActivityEntry, AgentSummary, TaskRecord, TaskStatusCounts } from "@/lib/api";
 import type { OfficeStreamEvent, OfficeTaskEvent } from "@jarvis/core/office-stream";
 
 export type DepartmentId =
@@ -155,6 +155,12 @@ export interface OfficeSystemActor {
   pending: number;
   running: number;
   completed: number;
+  /**
+   * VO-2.1 — true when `pending`, `running` and `completed` are the task
+   * engine's totals; false when only the listed rows could be counted, because
+   * the API sent no totals. The page says which.
+   */
+  countsAreTotals: boolean;
   /** The task engine attributes no agent to these runs. */
   attribution: "system";
   decorative: false;
@@ -193,6 +199,8 @@ export interface OfficeCounts {
   pending: number;
   running: number;
   completed: number;
+  /** VO-2.1 — see `OfficeSystemActor.countsAreTotals`. */
+  tasksAreTotals: boolean;
 }
 
 export interface OfficeModel {
@@ -210,6 +218,13 @@ export interface OfficeModelInput {
   agents: AgentSummary[];
   tasks: TaskRecord[];
   activity: ActivityEntry[];
+  /**
+   * VO-2.1 — the server's per-state totals (already validated by
+   * `parseTaskStatusCounts`, and adjusted by `overlayTaskCounts` for live
+   * moves). Without them the system actor counts the listed rows, which the
+   * list's cap bounds, and says so through `countsAreTotals`.
+   */
+  taskCounts?: TaskStatusCounts | null;
   /** Injectable clock, so the tests are deterministic. */
   now?: number;
 }
@@ -338,10 +353,17 @@ function buildAgentActor(
   };
 }
 
-function buildSystemActor(tasks: TaskRecord[]): OfficeSystemActor {
-  const pending = tasks.filter((task) => statusOf(task) === "PENDING").length;
-  const running = tasks.filter((task) => statusOf(task) === "RUNNING").length;
-  const completed = tasks.filter((task) => statusOf(task) === "COMPLETED").length;
+function buildSystemActor(
+  tasks: TaskRecord[],
+  totals: TaskStatusCounts | null
+): OfficeSystemActor {
+  // VO-2.1 — the server's totals when it sent them. Counting the listed rows
+  // is the fallback for an older API only: the list is capped, so past the cap
+  // that count stops growing.
+  const listed = (status: string) => tasks.filter((task) => statusOf(task) === status).length;
+  const pending = totals ? totals.PENDING : listed("PENDING");
+  const running = totals ? totals.RUNNING : listed("RUNNING");
+  const completed = totals ? totals.COMPLETED : listed("COMPLETED");
 
   const state: OfficeSystemState =
     running > 0 ? "working" : pending > 0 ? "queued" : "idle";
@@ -362,6 +384,7 @@ function buildSystemActor(tasks: TaskRecord[]): OfficeSystemActor {
     pending,
     running,
     completed,
+    countsAreTotals: totals !== null,
     attribution: "system",
     decorative: false,
   };
@@ -439,7 +462,7 @@ export function buildOfficeModel(input: OfficeModelInput): OfficeModel {
   });
 
   const actors = registered.map((agent) => buildAgentActor(agent, activity, now));
-  const system = buildSystemActor(input.tasks);
+  const system = buildSystemActor(input.tasks, input.taskCounts ?? null);
 
   const byDepartment = new Map<DepartmentId, OfficeAgentActor[]>();
   for (const actor of actors) {
@@ -476,6 +499,7 @@ export function buildOfficeModel(input: OfficeModelInput): OfficeModel {
       pending: system.pending,
       running: system.running,
       completed: system.completed,
+      tasksAreTotals: system.countsAreTotals,
     },
     generatedAt: new Date(now).toISOString(),
   };
@@ -560,6 +584,71 @@ export function applyTaskOverlay(
       ...(update.status === "COMPLETED" && !task.completedAt ? { completedAt: update.at } : {}),
     };
   });
+}
+
+// ---------------------------------------------------------------------------
+// VO-2.1 — task totals
+// ---------------------------------------------------------------------------
+
+const LIFECYCLE_STATES = ["PENDING", "RUNNING", "COMPLETED", "FAILED", "UNRESOLVED"] as const;
+
+function isLifecycleState(value: string): value is (typeof LIFECYCLE_STATES)[number] {
+  return (LIFECYCLE_STATES as readonly string[]).includes(value);
+}
+
+/**
+ * Validates the server's `statusCounts` and rebuilds them from the five
+ * lifecycle states.
+ *
+ * All or nothing: every state must be a finite, non-negative integer, or the
+ * whole value is refused (null) and the office falls back to — and says it
+ * is using — the listed rows. A half-valid total is not a total. Unknown keys
+ * are dropped, and the result is always a fresh object.
+ */
+export function parseTaskStatusCounts(value: unknown): TaskStatusCounts | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+
+  const counts = {} as TaskStatusCounts;
+  for (const state of LIFECYCLE_STATES) {
+    const count = record[state];
+    if (typeof count !== "number" || !Number.isInteger(count) || count < 0) return null;
+    counts[state] = count;
+  }
+  return counts;
+}
+
+/**
+ * Moves the server's totals by the live transitions the overlay applied.
+ *
+ * `before` is the list the read returned and `after` is the same list with
+ * `applyTaskOverlay` applied. Each listed task whose state the overlay changed
+ * moves one from its old state's total to its new one, so a live
+ * PENDING -> RUNNING shows at once without waiting for the next read.
+ *
+ * Only listed tasks can move a total: a live event for a task beyond the
+ * list's cap changes nothing here, and the page's debounced re-read brings
+ * the totals up to date. No total goes below zero. The two server reads (list
+ * and totals) are not one snapshot, so this is presentation between reads,
+ * never a replacement for them.
+ */
+export function overlayTaskCounts(
+  totals: TaskStatusCounts,
+  before: readonly TaskRecord[],
+  after: readonly TaskRecord[]
+): TaskStatusCounts {
+  const next: TaskStatusCounts = { ...totals };
+  const previous = new Map(before.map((task) => [task.id, statusOf(task)]));
+
+  for (const task of after) {
+    const from = previous.get(task.id);
+    const to = statusOf(task);
+    if (from === undefined || from === to) continue;
+    if (!isLifecycleState(from) || !isLifecycleState(to)) continue;
+    next[from] = Math.max(0, next[from] - 1);
+    next[to] += 1;
+  }
+  return next;
 }
 
 /** Selection lookup for the details panel. */

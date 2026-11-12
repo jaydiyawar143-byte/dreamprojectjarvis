@@ -36,12 +36,12 @@ const COPY: Record<
     tone: "danger",
     label: "Offline",
     meaning:
-      "The live feed is not connected. What you see is not current — use Refresh to re-read it.",
+      "The live feed is not connected. What you see is not current — Refresh re-reads it and reconnects the feed.",
   },
   unauthenticated: {
     tone: "neutral",
     label: "Not signed in",
-    meaning: "Live updates need an authenticated session.",
+    meaning: "Live updates need an authenticated session. Sign in again to restore them.",
   },
 };
 

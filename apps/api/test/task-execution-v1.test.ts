@@ -27,6 +27,7 @@ import { JARVIS_TASK_CREATOR } from "@jarvis/core";
 import { TaskService } from "../src/services/tasks/task-service.js";
 import { TaskExecutionService } from "../src/services/tasks/task-execution-service.js";
 import type { TaskRecord } from "@jarvis/db";
+import { countTaskRows } from "./helpers/count-task-rows.js";
 
 const ALICE = "user-alice";
 const BOB = "user-bob";
@@ -139,6 +140,9 @@ function makeStore() {
     },
     async listByStatus(userId: string, status: TaskStatus) {
       return [...rows.values()].filter((r) => r.userId === userId && r.status === status);
+    },
+    async countByStatus(userId: string, options: { createdBy?: string } = {}) {
+      return countTaskRows(rows.values(), userId, options);
     },
     async findOwned(userId: string, taskId: string) {
       const row = rows.get(taskId);

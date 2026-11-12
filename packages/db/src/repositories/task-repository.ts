@@ -11,9 +11,12 @@
 // ---------------------------------------------------------------------------
 
 import type { PrismaClient } from "@prisma/client";
-import type { TaskStatus } from "@jarvis/core";
+import { TaskStatusSchema, type TaskStatus } from "@jarvis/core";
 
 export type TaskPriority = "LOW" | "NORMAL" | "HIGH";
+
+/** How many of a user's tasks are in each lifecycle state. Every state is present. */
+export type TaskStatusCounts = Record<TaskStatus, number>;
 
 export interface TaskRecord {
   id: string;
@@ -560,6 +563,47 @@ export class PrismaTaskRepository {
       orderBy: { createdAt: "desc" },
       take: Math.min(limit, 200),
     }) as unknown as Promise<TaskRecord[]>;
+  }
+
+  /**
+   * VO-2.1 — how many of a user's tasks are in each lifecycle state.
+   *
+   * ONE `GROUP BY status` in the database, so the answer covers every row the
+   * user owns. Counting the rows of a list is not the same question: `list()`
+   * and `listByStatus()` are capped, so a count taken over one of them stops
+   * growing at the cap.
+   *
+   * Every lifecycle state is present in the result, at zero when no row holds
+   * it, so a reader never has to tell "none" from "not reported". A stored
+   * status outside the lifecycle (there is none today; `status` is a string
+   * column) is not counted under any state rather than being guessed into one.
+   *
+   * `createdBy` NARROWS, like the other read methods: the userId filter is
+   * unconditional, and a creator filter is ANDed with it.
+   */
+  async countByStatus(
+    userId: string,
+    options: { createdBy?: string } = {}
+  ): Promise<TaskStatusCounts> {
+    const groups = await this.prisma.task.groupBy({
+      by: ["status"],
+      where: {
+        userId,
+        ...(options.createdBy !== undefined ? { createdBy: options.createdBy } : {}),
+      },
+      _count: { _all: true },
+    });
+
+    const counts = Object.fromEntries(
+      TaskStatusSchema.options.map((status) => [status, 0])
+    ) as TaskStatusCounts;
+
+    for (const group of groups) {
+      const parsed = TaskStatusSchema.safeParse(group.status);
+      if (parsed.success) counts[parsed.data] = group._count._all;
+    }
+
+    return counts;
   }
 
   async findOwned(userId: string, taskId: string): Promise<TaskRecord | null> {

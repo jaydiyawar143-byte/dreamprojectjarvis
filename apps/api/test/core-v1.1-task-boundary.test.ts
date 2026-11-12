@@ -21,6 +21,7 @@ import { createTaskTools, createAmbientTools, type TaskPort, type TaskView } fro
 import { TaskService } from "../src/services/tasks/task-service.js";
 import { createTasksPort } from "../src/services/ambient-adapter.js";
 import type { TaskRecord } from "@jarvis/db";
+import { countTaskRows } from "./helpers/count-task-rows.js";
 
 const ALICE = "user-alice";
 const BOB = "user-bob";
@@ -97,6 +98,9 @@ function makeStore() {
         .filter((r) => r.userId === userId && r.status === status)
         .filter((r) => (options.createdBy === undefined ? true : r.createdBy === options.createdBy))
         .slice(0, limit);
+    },
+    async countByStatus(userId: string, options: { createdBy?: string } = {}) {
+      return countTaskRows(rows.values(), userId, options);
     },
     async findOwned(userId: string, taskId: string) {
       const row = rows.get(taskId);

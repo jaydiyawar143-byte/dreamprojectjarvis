@@ -22,7 +22,9 @@
 //      core already constructed field by field. It never sees an audit record.
 // ---------------------------------------------------------------------------
 
-import type { OfficeStreamEvent } from "@jarvis/core";
+import { officeActivityEvent, officeTaskEvent, type OfficeStreamEvent } from "@jarvis/core";
+import type { TaskRecord } from "@jarvis/db";
+import type { AuditObserver } from "@jarvis/security";
 
 export type OfficeEventListener = (userId: string, event: OfficeStreamEvent) => void;
 
@@ -59,4 +61,26 @@ export class OfficeEventBus {
   listenerCount(): number {
     return this.listeners.size;
   }
+}
+
+/**
+ * The `AuditLogger` post-write observer the container installs: project the
+ * durable row through core's allowlist, then publish to the row's owner.
+ *
+ * Named (VO-2.1) rather than written inline in the container, so the
+ * end-to-end test drives exactly the wiring production runs.
+ */
+export function officeAuditObserver(bus: OfficeEventBus): AuditObserver {
+  return (entry) => {
+    const event = officeActivityEvent(entry);
+    if (event) bus.publish(entry.userId, event);
+  };
+}
+
+/** The `TaskService` change observer the container installs. Same reason. */
+export function officeTaskObserver(bus: OfficeEventBus): (task: TaskRecord) => void {
+  return (task) => {
+    const event = officeTaskEvent(task);
+    if (event) bus.publish(task.userId, event);
+  };
 }

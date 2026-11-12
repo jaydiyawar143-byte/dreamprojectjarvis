@@ -179,7 +179,7 @@ the reviewed stdio server — packages/mcp/pilot: `dates` and `units`, read-only
 - Email and password (scrypt), or Google sign-in.
 - A short-lived JWT access token in the `Authorization` header is the only source of identity. A user id in a body or path is never trusted.
 - Refresh tokens rotate on use and are stored hashed. A browser may opt into an HttpOnly, `SameSite=Lax` refresh cookie by sending `X-Auth-Mode: cookie`.
-- HTTP and Socket.IO verify through the same `TokenService.verifyAccessToken`.
+- HTTP and Socket.IO verify through the same `TokenService.verifyAccessToken`. A socket is verified once, at its handshake, and the server ends it when that token expires; the dashboard then renews the token and reconnects (VO-2.1, [VIRTUAL_OFFICE.md](./VIRTUAL_OFFICE.md)).
 
 ## Observability
 
@@ -196,6 +196,7 @@ One Docker image (`node:24-alpine`, runs as the `node` user) serves both the API
 ## Known gaps
 
 - `@jarvis/ai-anthropic` is built and not wired.
+- The live streams (Virtual Office, system metrics) are delivered inside one API process: there is no Socket.IO adapter, so a second API instance would not deliver the first one's events. See [VIRTUAL_OFFICE.md](./VIRTUAL_OFFICE.md).
 - Marketing, after Phase 15: JARVIS can publish only a text post (with an optional link) to a Facebook Page; Instagram, LinkedIn, X and the rest can be planned for and not published to. Google Ads figures are in no report — no Google connection carries the Ads scope and no developer token is configured. SEO research reads what a page says about itself: there is no keyword-volume, ranking, traffic or backlink data, because no provider of them is integrated. A client report is a downloaded HTML or Markdown file; nothing sends it. Nothing publishes on a date: the calendar is a plan. See [MARKETING.md](./MARKETING.md) and [phases/phase-15.md](./phases/phase-15.md).
 - `MemoryEngine` is tested and not used at runtime.
 - Memory, after Phase 14: project *state* is still not learned (only the user's own durable statements are, in whichever project they were made); a reworded restatement replaces a memory instead of adding to its evidence; a contradiction replaces without keeping the old wording; memory content is stored as plain text; there is no vector index; and a project cannot be renamed or deleted. See [MEMORY.md](./MEMORY.md#known-limitations).

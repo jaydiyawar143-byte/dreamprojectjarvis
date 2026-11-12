@@ -44,6 +44,7 @@ const officeStream = vi.hoisted(() => ({
     events: [] as unknown[],
     taskUpdates: new Map<string, unknown>(),
     taskRevision: 0,
+    reconnect: (() => undefined) as () => void,
   },
 }));
 
@@ -152,17 +153,35 @@ const agentsResponse = (agents: api.AgentSummary[]) => ({
   registeredCount: agents.filter((agent) => agent.registered).length,
 });
 
+/** VO-2.1 — what the API's `statusCounts` would say about exactly these rows. */
+const countsOf = (tasks: api.TaskRecord[]): api.TaskStatusCounts => {
+  const counts: api.TaskStatusCounts = { PENDING: 0, RUNNING: 0, COMPLETED: 0, FAILED: 0, UNRESOLVED: 0 };
+  for (const task of tasks) {
+    if (task.status && task.status in counts) counts[task.status as keyof api.TaskStatusCounts] += 1;
+  }
+  return counts;
+};
+
 const resolveAll = ({
   agents = agentsResponse([]),
   tasks = [],
   entries = [],
+  statusCounts = countsOf(tasks),
 }: {
   agents?: ReturnType<typeof agentsResponse>;
   tasks?: api.TaskRecord[];
   entries?: api.ActivityEntry[];
+  /**
+   * VO-2.1 — the server's totals. By default they match the listed rows, as
+   * they do whenever the list is under its cap; `null` is an API older than
+   * VO-2.1, which sends none.
+   */
+  statusCounts?: api.TaskStatusCounts | null;
 } = {}) => {
   mocked.listAgents.mockResolvedValue(ok(agents));
-  mocked.listWorkTasks.mockResolvedValue(ok({ tasks, count: tasks.length }));
+  mocked.listWorkTasks.mockResolvedValue(
+    ok({ tasks, count: tasks.length, ...(statusCounts ? { statusCounts } : {}) })
+  );
   mocked.listActivity.mockResolvedValue(ok({ entries, count: entries.length, limit: 40 }));
 };
 
@@ -173,6 +192,7 @@ beforeEach(() => {
     events: [],
     taskUpdates: new Map(),
     taskRevision: 0,
+    reconnect: vi.fn(),
   };
 });
 
@@ -493,6 +513,23 @@ describe("Virtual Office — live updates", () => {
     expect(screen.getByRole("button", { name: "Refresh" })).toBeTruthy();
   });
 
+  it("re-reads everything and reconnects the feed when Refresh is pressed (VO-2.1)", async () => {
+    officeStream.value = { ...officeStream.value, status: "offline" };
+    resolveAll();
+
+    render(<OfficePage />);
+    await screen.findByTestId("office-page");
+    const readsBefore = mocked.listWorkTasks.mock.calls.length;
+
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+
+    expect(officeStream.value.reconnect).toHaveBeenCalledTimes(1);
+    expect(mocked.listWorkTasks.mock.calls.length).toBe(readsBefore + 1);
+    expect(screen.getByTestId("office-stream-status").textContent).toContain(
+      "reconnects the feed"
+    );
+  });
+
   it("adds a live audit row to the event table without a reload", async () => {
     officeStream.value = {
       ...officeStream.value,
@@ -572,5 +609,120 @@ describe("Virtual Office — live updates", () => {
     // The event carries no title, so the office waits for the read instead of
     // rendering an unnamed task or claiming work it cannot name.
     expect(system.getAttribute("data-state")).toBe("idle");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// VO-2.1 (M2) — the counts are the task engine's totals
+// ---------------------------------------------------------------------------
+
+describe("Virtual Office — task totals (VO-2.1)", () => {
+  const statValue = (label: string): string | null => {
+    const panel = screen
+      .getAllByTestId("stat-panel")
+      .find((candidate) => candidate.textContent?.includes(label));
+    return panel ? within(panel).getByTestId("stat-value").textContent : null;
+  };
+
+  const ZERO: api.TaskStatusCounts = { PENDING: 0, RUNNING: 0, COMPLETED: 0, FAILED: 0, UNRESOLVED: 0 };
+
+  it("shows the task engine's totals, not the length of a capped list", async () => {
+    resolveAll({
+      tasks: [TASK({ status: "RUNNING", startedAt: at(-5_000) })],
+      statusCounts: { ...ZERO, PENDING: 9, RUNNING: 64, COMPLETED: 210 },
+    });
+
+    render(<OfficePage />);
+    await screen.findByTestId("office-page");
+
+    expect(statValue("Running tasks")).toBe("64");
+    expect(statValue("Queued tasks")).toBe("9");
+    expect(screen.getByText("Every RUNNING task in the task engine")).toBeTruthy();
+    expect(screen.getByText("Every PENDING task in the task engine")).toBeTruthy();
+
+    const system = screen.getByTestId("office-system-actor");
+    expect(within(system).getByTestId("office-system-actor-state").textContent).toContain(
+      "Working on 64 tasks"
+    );
+  });
+
+  it("says work is queued when every queued task is past the list's cap", async () => {
+    resolveAll({ tasks: [], statusCounts: { ...ZERO, PENDING: 3 } });
+
+    render(<OfficePage />);
+    await screen.findByTestId("office-page");
+
+    expect(statValue("Queued tasks")).toBe("3");
+    expect(screen.getByTestId("office-system-actor").getAttribute("data-state")).toBe("queued");
+  });
+
+  it("says when the counts are only the listed rows", async () => {
+    resolveAll({ tasks: [TASK({ status: "RUNNING", startedAt: at(-5_000) })], statusCounts: null });
+
+    render(<OfficePage />);
+    await screen.findByTestId("office-page");
+
+    expect(statValue("Running tasks")).toBe("1");
+    expect(
+      screen.getByText("RUNNING among the newest tasks read; this API sent no totals")
+    ).toBeTruthy();
+
+    fireEvent.click(screen.getByTestId("office-system-actor"));
+    expect(screen.getByTestId("office-system-counts-note").textContent).toContain(
+      "this API sent no totals"
+    );
+  });
+
+  it("does not show the counts note when the totals arrived", async () => {
+    resolveAll({ tasks: [TASK({ status: "RUNNING", startedAt: at(-5_000) })] });
+
+    render(<OfficePage />);
+    await screen.findByTestId("office-page");
+
+    fireEvent.click(screen.getByTestId("office-system-actor"));
+    expect(screen.queryByTestId("office-system-counts-note")).toBeNull();
+  });
+
+  it("refuses malformed totals rather than showing them", async () => {
+    resolveAll({
+      tasks: [TASK({ status: "RUNNING", startedAt: at(-5_000) })],
+      statusCounts: { ...ZERO, PENDING: -4, RUNNING: 999 },
+    });
+
+    render(<OfficePage />);
+    await screen.findByTestId("office-page");
+
+    expect(statValue("Running tasks")).toBe("1");
+    expect(
+      screen.getByText("RUNNING among the newest tasks read; this API sent no totals")
+    ).toBeTruthy();
+  });
+
+  it("moves a live transition between the totals at once", async () => {
+    officeStream.value = {
+      ...officeStream.value,
+      taskUpdates: new Map([
+        [
+          "task-1",
+          {
+            kind: "task",
+            id: "task:task-1:RUNNING:live",
+            at: at(0),
+            taskId: "task-1",
+            status: "RUNNING",
+          },
+        ],
+      ]),
+    };
+    resolveAll({
+      tasks: [TASK({ status: "PENDING", createdAt: at(-60_000) })],
+      statusCounts: { ...ZERO, PENDING: 20, RUNNING: 5 },
+    });
+
+    render(<OfficePage />);
+    await screen.findByTestId("office-page");
+
+    expect(statValue("Running tasks")).toBe("6");
+    expect(statValue("Queued tasks")).toBe("19");
   });
 });

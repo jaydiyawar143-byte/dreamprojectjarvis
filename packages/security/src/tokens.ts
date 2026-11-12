@@ -1,6 +1,6 @@
 import jwt from "jsonwebtoken";
 import { randomBytes, createHash } from "crypto";
-import type { ITokenService } from "@jarvis/core";
+import type { ITokenService, VerifiedAccessToken } from "@jarvis/core";
 
 const ACCESS_TOKEN_EXPIRY = "15m";
 const REFRESH_TOKEN_LENGTH = 64;
@@ -36,9 +36,7 @@ export class TokenService implements ITokenService {
     return randomBytes(REFRESH_TOKEN_LENGTH).toString("hex");
   }
 
-  verifyAccessToken(
-    token: string
-  ): { userId: string; role: string; email: string } | null {
+  verifyAccessToken(token: string): VerifiedAccessToken | null {
     try {
       const decoded = jwt.verify(token, this.secret, {
         issuer: this.issuer,
@@ -53,6 +51,11 @@ export class TokenService implements ITokenService {
         userId: decoded.sub,
         role: decoded.role,
         email: decoded.email,
+        // VO-2.1 — read from the VERIFIED payload. Every token this service
+        // signs carries `exp` (`expiresIn`); a socket ends when it does.
+        ...(typeof decoded.exp === "number" && Number.isFinite(decoded.exp)
+          ? { expiresAt: decoded.exp * 1000 }
+          : {}),
       };
     } catch {
       return null;
