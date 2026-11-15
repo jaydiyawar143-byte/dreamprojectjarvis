@@ -27,7 +27,7 @@ packages/
   db/                 Prisma schema, migrations, repositories
   security/           passwords, JWT, encryption, permissions, approvals, audit
   config/             environment schema
-  ai-openai/  ai-elevenlabs/  ai-anthropic/        model and voice providers
+  ai-openai/  ai-elevenlabs/  ai-sarvam/  ai-anthropic/   model and voice providers
   meta-graph/  google-ads/  google-workspace/
   whatsapp/  n8n/  browser/                        provider clients
   mcp/                MCP runtime and the reviewed MCP servers

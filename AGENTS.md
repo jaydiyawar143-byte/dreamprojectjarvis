@@ -779,7 +779,7 @@ Every capability has one home. Before creating a file, find that home.
 | `packages/db` | Prisma schema, migrations, repositories |
 | `packages/security` | Passwords, JWT, encryption, RBAC, approvals, audit |
 | `packages/config` | Environment schema and typed configuration |
-| `packages/ai-openai`, `ai-elevenlabs` | Model and voice providers |
+| `packages/ai-openai`, `ai-elevenlabs`, `ai-sarvam` | Model and voice providers (`ai-elevenlabs` and `ai-sarvam` speak only; listening stays on whisper-1) |
 | `packages/ai-anthropic` | Claude adapter — built, not wired |
 | `packages/meta-graph`, `google-ads`, `google-workspace`, `whatsapp`, `n8n`, `omniroute`, `browser` | Provider clients |
 | `apps/desktop-agent` | The Windows desktop agent (.NET 10, outside the pnpm workspaces): per-user MSIX, outbound HTTPS only, off unless `DESKTOP_AGENT_ENABLED=true` on the API |
