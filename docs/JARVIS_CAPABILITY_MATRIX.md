@@ -149,7 +149,7 @@ Ten write planners exist and no write executors: the tools handed to the model c
 | Capability | Status | Execution Path | Approval | Agent Scope | Tested |
 |---|---|---|---|---|---|
 | Speak to JARVIS (speech to text) | Implemented | `/api/v1/voice/transcribe`, mounted when voice is configured; it turns speech into text and runs no tool itself | — | — | `sprint8-voice-routes`, `voice` |
-| JARVIS speaks back (text to speech) | Implemented | ElevenLabs when configured, otherwise the OpenAI voice | — | — | `elevenlabs-voice-provider`, `voice-provider` |
+| JARVIS speaks back (text to speech) | Implemented | ElevenLabs or Sarvam when configured (`VOICE_TTS_PROVIDER`; auto keeps ElevenLabs, Sarvam falls back to ElevenLabs on an outage), otherwise the OpenAI voice | — | — | `elevenlabs-voice-provider`, `voice-provider` |
 | Voice status report | Implemented | | — | — | `sprint8-voice-foundation` |
 | Approving a write by voice | Planned / not implemented | Deliberate: a voice session cannot confirm a write | — | — | — |
 

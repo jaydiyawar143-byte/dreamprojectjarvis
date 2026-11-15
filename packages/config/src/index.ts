@@ -215,6 +215,21 @@ const serverEnvSchema = baseEnvSchema.extend({
   ELEVENLABS_STYLE: z.string().optional(),
   ELEVENLABS_SPEAKER_BOOST: z.string().optional(),
   ELEVENLABS_SPEED: z.string().optional(),
+
+  // Sarvam speech synthesis (Hindi, Hinglish, Indian English). Strings and
+  // unvalidated here for the same reason as ElevenLabs; the provider validates
+  // and clamps what it uses. SARVAM_API_KEY is read by the provider itself and
+  // never placed in a config object a route could serialise.
+  SARVAM_API_KEY: z.string().optional(),
+  SARVAM_SPEAKER: z.string().optional(),
+  SARVAM_MODEL: z.string().optional(),
+  SARVAM_LANGUAGE_CODE: z.string().optional(),
+  SARVAM_PACE: z.string().optional(),
+  SARVAM_SAMPLE_RATE: z.string().optional(),
+  // auto | sarvam | elevenlabs | openai. Unset means auto: an already
+  // configured ElevenLabs voice is never replaced just because a second key
+  // appeared in the environment.
+  VOICE_TTS_PROVIDER: z.string().optional(),
   VOICE_MAX_AUDIO_BYTES: z.string().optional(),
   VOICE_MAX_TTS_CHARS: z.string().optional(),
 });
@@ -629,6 +644,35 @@ export function describeVoiceConfigStatus(
  */
 export function isElevenLabsConfigured(env: NodeJS.ProcessEnv = process.env): boolean {
   return Boolean(env.ELEVENLABS_API_KEY && env.ELEVENLABS_VOICE_ID);
+}
+
+/**
+ * Whether Sarvam can be the speech-synthesis provider.
+ *
+ * Both a key and a speaker, for the reason ElevenLabs needs a voice id: a key
+ * with no chosen speaker would default to a voice nobody selected.
+ */
+export function isSarvamConfigured(env: NodeJS.ProcessEnv = process.env): boolean {
+  return Boolean(env.SARVAM_API_KEY && env.SARVAM_SPEAKER);
+}
+
+export type TtsProviderChoice = "sarvam" | "elevenlabs" | "openai";
+
+/**
+ * Which vendor speaks.
+ *
+ * `VOICE_TTS_PROVIDER` picks one explicitly; an explicit choice that is not
+ * configured falls through to whatever is, rather than leaving JARVIS silent.
+ * Unset (auto) keeps today's behaviour: ElevenLabs when configured, otherwise
+ * Sarvam when configured, otherwise the OpenAI voice.
+ */
+export function selectTtsProvider(env: NodeJS.ProcessEnv = process.env): TtsProviderChoice {
+  const pref = (env.VOICE_TTS_PROVIDER ?? "auto").trim().toLowerCase();
+  if (pref === "openai") return "openai";
+  if (pref === "sarvam" && isSarvamConfigured(env)) return "sarvam";
+  if (isElevenLabsConfigured(env)) return "elevenlabs";
+  if (isSarvamConfigured(env)) return "sarvam";
+  return "openai";
 }
 
 export function createVoiceConfig(

@@ -66,6 +66,8 @@ import {
   createVoiceConfig,
   describeVoiceConfigStatus,
   isElevenLabsConfigured,
+  isSarvamConfigured,
+  selectTtsProvider,
   isVoiceConfigured,
 } from "@jarvis/config";
 import { createGoogleSignInConfig, describeGoogleSignInStatus } from "@jarvis/config";
@@ -80,6 +82,7 @@ import { installSystemStream } from "./socket/system-stream.js";
 import { installOfficeStream } from "./socket/office-stream.js";
 import { OpenAIVoiceProvider } from "@jarvis/ai-openai";
 import { CompositeVoiceProvider, ElevenLabsVoiceProvider } from "@jarvis/ai-elevenlabs";
+import { FallbackTtsProvider, SarvamVoiceProvider } from "@jarvis/ai-sarvam";
 import {
   ShutdownLifecycle,
   type LifecycleState,
@@ -407,16 +410,33 @@ if (isVoiceConfigured()) {
     // of 18 — and every intent rule downstream matches Latin text. Replacing it
     // to change the voice would silently misroute requests.
     //
-    // Absent an ElevenLabs key or voice id this is skipped entirely and the
-    // OpenAI voice stays. The upgrade is never a hard dependency.
+    // Absent a key or voice, every upgrade is skipped and the OpenAI voice
+    // stays. None of them is a hard dependency.
+    //
+    // Which vendor speaks is `VOICE_TTS_PROVIDER` (default auto: ElevenLabs if
+    // configured, else Sarvam, else OpenAI). When Sarvam speaks and ElevenLabs is
+    // also configured, ElevenLabs is the fallback for an outage, so a Sarvam
+    // bad afternoon does not silence JARVIS. Listening is whisper-1 either way.
     // ---------------------------------------------------------------------
-    const useElevenLabs = isElevenLabsConfigured();
-    const voiceProvider = useElevenLabs
-      ? new CompositeVoiceProvider({
-          tts: new ElevenLabsVoiceProvider(),
-          stt: openAIVoice,
-        })
-      : openAIVoice;
+    const ttsChoice = selectTtsProvider();
+    let ttsProvider: "sarvam" | "elevenlabs" | "openai" = ttsChoice;
+    let voiceProvider: typeof openAIVoice | CompositeVoiceProvider = openAIVoice;
+    if (ttsChoice === "sarvam" && isSarvamConfigured()) {
+      const sarvam = new SarvamVoiceProvider();
+      const tts = isElevenLabsConfigured()
+        ? new FallbackTtsProvider(sarvam, new ElevenLabsVoiceProvider(), (info) =>
+            console.log(JSON.stringify({ level: "warn", event: "tts_fallback", ...info }))
+          )
+        : sarvam;
+      voiceProvider = new CompositeVoiceProvider({ tts, stt: openAIVoice });
+    } else if (ttsChoice === "elevenlabs" && isElevenLabsConfigured()) {
+      voiceProvider = new CompositeVoiceProvider({
+        tts: new ElevenLabsVoiceProvider(),
+        stt: openAIVoice,
+      });
+    } else {
+      ttsProvider = "openai";
+    }
 
     app.use(
       "/api/v1/voice",
@@ -427,7 +447,7 @@ if (isVoiceConfigured()) {
       event: "voice_routes_enabled",
       sttModel: voiceProvider.sttModel,
       ttsModel: voiceProvider.ttsModel,
-      ttsProvider: useElevenLabs ? "elevenlabs" : "openai",
+      ttsProvider,
       // The voice ID is a public identifier, not a secret. The API KEY is never
       // read here at all — the provider takes it straight from the environment.
       voice: voiceProvider.defaultVoice,

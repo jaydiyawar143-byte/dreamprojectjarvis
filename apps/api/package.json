@@ -15,6 +15,7 @@
   "dependencies": {
     "@jarvis/agents": "workspace:*",
     "@jarvis/ai-elevenlabs": "workspace:*",
+    "@jarvis/ai-sarvam": "workspace:*",
     "@jarvis/ai-openai": "workspace:*",
     "@jarvis/browser": "workspace:*",
     "@jarvis/browser-protocol": "workspace:*",
