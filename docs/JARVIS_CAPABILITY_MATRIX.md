@@ -150,6 +150,7 @@ Ten write planners exist and no write executors: the tools handed to the model c
 |---|---|---|---|---|---|
 | Speak to JARVIS (speech to text) | Implemented | `/api/v1/voice/transcribe`, mounted when voice is configured; it turns speech into text and runs no tool itself | — | — | `sprint8-voice-routes`, `voice` |
 | JARVIS speaks back (text to speech) | Implemented | ElevenLabs when configured, otherwise the OpenAI voice | — | — | `elevenlabs-voice-provider`, `voice-provider` |
+| Hands-free conversation mode | Implemented | Opt-in headphones button: the take ends when you stop talking and the microphone reopens after each spoken reply. Turns off on error, silence, a pending approval, Stop/Escape or a hidden tab. Same turn pipeline, so the voice approval rule is unchanged | never approves by voice | — | `end-of-speech`, `voice-conversation-mode` |
 | Voice status report | Implemented | | — | — | `sprint8-voice-foundation` |
 | Approving a write by voice | Planned / not implemented | Deliberate: a voice session cannot confirm a write | — | — | — |
 

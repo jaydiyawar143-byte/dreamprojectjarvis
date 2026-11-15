@@ -38,7 +38,9 @@ import {
   isCaptureSupported,
   type CapturedAudio,
 } from "./audio-capture";
+import { tapStream } from "./audio-analyser";
 import { AudioPlayback, PlaybackError } from "./audio-playback";
+import { EndOfSpeechDetector } from "./end-of-speech";
 import { VoiceTurnTrace, nextVoiceRequestId } from "./voice-trace";
 
 // Module-level singletons: the microphone and the audio element are hardware
@@ -74,6 +76,12 @@ interface VoiceStoreState {
   notice: VoiceNotice | null;
   /** Whether replies are read aloud. Persists across turns. */
   autoSpeak: boolean;
+  /**
+   * Conversation mode: after JARVIS finishes speaking it listens again, and a
+   * take ends when the person stops talking. Opt-in, started by a click, and
+   * switched off by anything unusual — see the block above `startMonitor`.
+   */
+  conversationMode: boolean;
 
   checkAvailability: () => Promise<void>;
   startListening: () => Promise<void>;
@@ -82,6 +90,8 @@ interface VoiceStoreState {
   stopSpeaking: () => void;
   toggleAutoSpeak: () => void;
   dismissNotice: () => void;
+  startConversation: () => Promise<void>;
+  endConversation: (message?: string) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -164,6 +174,104 @@ function hasPendingApproval(): boolean {
 //
 // `sendMessage` now returns the reply it produced, so a turn speaks its own
 // answer and no other. Nothing scans the array any more.
+
+// ---------------------------------------------------------------------------
+// Conversation mode.
+//
+// WHAT IT IS. A way to talk without pressing the microphone for every turn:
+// one click starts it, a take ends when the person stops talking, and once
+// JARVIS has finished speaking the microphone opens again. It is NOT an
+// always-listening mode and has no wake word. The microphone is open only
+// between a deliberate click and the end of that take, the "Listening" state
+// is on screen the whole time, and every state other than a clean, spoken
+// reply switches the mode OFF rather than carrying on:
+//
+//   - an error, a denied or missing microphone, an unsupported browser
+//   - Escape, Stop, or turning the mode off
+//   - a take in which nothing was said (it must not loop on an empty room)
+//   - a reply that is waiting for an on-screen approval (voice cannot approve)
+//   - the tab being hidden
+//   - a reply that was muted, empty, or could not be spoken
+//
+// The mode is a flag on the same state machine, not a new state. Every turn
+// still runs mic -> transcribe -> chat -> speak under the unchanged rules, so
+// `VOICE_APPROVAL_POLICY` and the server's voice-confirmation refusals apply to
+// each spoken turn exactly as they do to a push-to-talk one.
+// ---------------------------------------------------------------------------
+
+/** Pause between the end of a reply and the microphone reopening, so the room's tail of the reply is not heard as speech. */
+const REOPEN_DELAY_MS = 450;
+/** How often the microphone level is sampled while listening in conversation mode. */
+const MONITOR_INTERVAL_MS = 80;
+
+let monitor: { stop: () => void } | null = null;
+let reopenTimer: ReturnType<typeof setTimeout> | null = null;
+
+function stopMonitor(): void {
+  monitor?.stop();
+  monitor = null;
+}
+
+function clearReopen(): void {
+  if (reopenTimer !== null) {
+    clearTimeout(reopenTimer);
+    reopenTimer = null;
+  }
+}
+
+/**
+ * Watches the microphone during a take and ends it when the person stops.
+ * If the level cannot be read there is no way to tell silence from speech, so
+ * the mode ends instead of guessing.
+ */
+function startMonitor(turn: VoiceTurn): void {
+  stopMonitor();
+  const stream = capture.getStream();
+  const tap = stream ? tapStream(stream) : null;
+  if (!tap) {
+    useVoiceStore.getState().endConversation(
+      "Conversation mode needs to hear the microphone level, which this browser does not allow. Use the microphone button instead."
+    );
+    return;
+  }
+  const detector = new EndOfSpeechDetector();
+  const id = setInterval(() => {
+    const store = useVoiceStore.getState();
+    if (!isCurrentTurn(turn) || store.state !== "listening" || !store.conversationMode) {
+      stopMonitor();
+      return;
+    }
+    const verdict = detector.feed(tap.read().level, Date.now());
+    if (verdict === "ended") {
+      stopMonitor();
+      void store.stopListening();
+    } else if (verdict === "no-speech") {
+      stopMonitor();
+      store.endConversation("Conversation ended — I didn't hear anything.");
+    }
+  }, MONITOR_INTERVAL_MS);
+  monitor = {
+    stop: () => {
+      clearInterval(id);
+      tap.stop();
+    },
+  };
+}
+
+/** Opens the microphone again once the reply is over, if the mode is still on and it is safe to. */
+function scheduleReopen(): void {
+  clearReopen();
+  reopenTimer = setTimeout(() => {
+    reopenTimer = null;
+    const store = useVoiceStore.getState();
+    if (!store.conversationMode || store.state !== "idle") return;
+    if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+      store.endConversation();
+      return;
+    }
+    void store.startListening();
+  }, REOPEN_DELAY_MS);
+}
 
 /**
  * Prepares a reply to be spoken.
@@ -284,22 +392,35 @@ export const useVoiceStore = create<VoiceStoreState>((set, get) => {
    */
   const go = (next: VoiceState, patch: Partial<VoiceStoreState> = {}): boolean => {
     const current = get().state;
+    // Conversation mode never survives a failure state.
+    const ends = next === "error" || next === "permission-denied" || next === "unsupported";
+    const merged: Partial<VoiceStoreState> = ends ? { ...patch, conversationMode: false } : patch;
     if (current === next) {
-      set(patch);
+      set(merged);
       return true;
     }
     if (!canTransitionVoiceState(current, next)) return false;
-    set({ state: next, ...patch });
+    set({ state: next, ...merged });
     return true;
   };
 
-  const toIdle = (notice: VoiceNotice | null = null) => {
-    if (!go("idle", { notice })) set({ state: "idle", notice });
+  /**
+   * Back to idle. Conversation mode ends with it UNLESS the caller says this is
+   * the clean end of a spoken reply (`keepConversation`), the only place the
+   * mode is allowed to carry on.
+   */
+  const toIdle = (notice: VoiceNotice | null = null, keepConversation = false) => {
+    stopMonitor();
+    const patch: Partial<VoiceStoreState> = keepConversation ? { notice } : { notice, conversationMode: false };
+    if (!keepConversation) clearReopen();
+    if (!go("idle", patch)) set({ state: "idle", ...patch });
   };
 
   const toError = (message: string) => {
+    stopMonitor();
+    clearReopen();
     if (!go("error", { notice: { message, benign: false } })) {
-      set({ state: "error", notice: { message, benign: false } });
+      set({ state: "error", notice: { message, benign: false }, conversationMode: false });
     }
   };
 
@@ -310,6 +431,7 @@ export const useVoiceStore = create<VoiceStoreState>((set, get) => {
     transcript: "",
     notice: null,
     autoSpeak: true,
+    conversationMode: false,
 
     checkAvailability: async () => {
       if (get().available !== null) return;
@@ -348,12 +470,14 @@ export const useVoiceStore = create<VoiceStoreState>((set, get) => {
       if (state === "speaking" || state === "processing" || state === "transcribing") {
         retireActiveTurn("barge-in");
         playback.stop();
-        toIdle();
+        // Pressing the microphone to interrupt is a deliberate act; it does not end the mode.
+        toIdle(null, true);
       }
 
       if (!isCaptureSupported()) {
         set({
           state: "unsupported",
+          conversationMode: false,
           notice: {
             message:
               "This browser cannot record audio. Voice needs a recent Chrome, Edge or Safari on a secure (https or localhost) connection.",
@@ -400,13 +524,14 @@ export const useVoiceStore = create<VoiceStoreState>((set, get) => {
           return;
         }
         endCapture({ opened: true });
-        go("listening");
+        if (go("listening") && get().conversationMode) startMonitor(turn);
       } catch (err) {
         endCapture({ opened: false });
         if (isCurrentTurn(turn)) retireActiveTurn("capture-failed");
         if (err instanceof CaptureError && err.reason === "permission-denied") {
           set({
             state: "permission-denied",
+            conversationMode: false,
             notice: {
               message:
                 "Microphone access was blocked. Allow it in your browser's address bar, then try again.",
@@ -422,6 +547,7 @@ export const useVoiceStore = create<VoiceStoreState>((set, get) => {
         if (err instanceof CaptureError && err.reason === "unsupported") {
           set({
             state: "unsupported",
+            conversationMode: false,
             notice: { message: "This browser cannot record audio.", benign: false },
           });
           return;
@@ -432,6 +558,7 @@ export const useVoiceStore = create<VoiceStoreState>((set, get) => {
 
     stopListening: async () => {
       if (get().state !== "listening") return;
+      stopMonitor();
 
       const turn = activeTurn;
       if (!turn) {
@@ -720,7 +847,19 @@ export const useVoiceStore = create<VoiceStoreState>((set, get) => {
         );
         return;
       }
-      toIdle();
+      // The one place conversation mode carries on: a reply that was spoken in
+      // full. A reply waiting for an on-screen approval pauses it instead,
+      // because the next thing the person would say cannot approve anything.
+      if (get().conversationMode && hasPendingApproval()) {
+        toIdle({
+          message:
+            "Conversation paused: there's an action waiting for your approval. Confirm or reject it on screen — voice can't approve actions.",
+          benign: true,
+        });
+        return;
+      }
+      toIdle(null, true);
+      if (get().conversationMode) scheduleReopen();
     },
 
     cancel: () => {
@@ -728,6 +867,27 @@ export const useVoiceStore = create<VoiceStoreState>((set, get) => {
       capture.cancel();
       playback.stop();
       toIdle();
+    },
+
+    startConversation: async () => {
+      if (get().state === "unsupported") return;
+      set({ conversationMode: true, notice: null });
+      // Same entry as the microphone button, from the same click.
+      await get().startListening();
+      // If the microphone did not open, the failure path has already ended the mode.
+      if (get().state !== "listening" && get().state !== "requesting-permission") {
+        set({ conversationMode: false });
+      }
+    },
+
+    endConversation: (message) => {
+      const wasListening = get().state === "listening";
+      stopMonitor();
+      clearReopen();
+      set({ conversationMode: false });
+      // Turned off mid-take: abandon the take and release the microphone.
+      if (wasListening) get().cancel();
+      if (message) set({ notice: { message, benign: true } });
     },
 
     stopSpeaking: () => {
@@ -744,3 +904,13 @@ export const useVoiceStore = create<VoiceStoreState>((set, get) => {
     },
   };
 });
+
+// A hidden tab must not keep a microphone cycling: the mode ends when the page
+// is hidden, and nothing reopens it on return — the person starts it again.
+if (typeof document !== "undefined") {
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState !== "hidden") return;
+    const store = useVoiceStore.getState();
+    if (store.conversationMode) store.endConversation("Conversation ended because the tab was hidden.");
+  });
+}

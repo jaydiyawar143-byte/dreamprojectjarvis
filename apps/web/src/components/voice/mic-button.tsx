@@ -13,7 +13,7 @@
 // ---------------------------------------------------------------------------
 
 import { useEffect } from "react";
-import { Loader2, Mic, MicOff, Square } from "lucide-react";
+import { Headphones, Loader2, Mic, MicOff, Square } from "lucide-react";
 import { isVoiceBusy } from "@jarvis/core/voice";
 import { useVoiceStore } from "@/lib/voice/voice-store";
 import { cn } from "@/lib/utils";
@@ -30,6 +30,9 @@ export function MicButton({ disabled = false }: Props) {
   const startListening = useVoiceStore((s) => s.startListening);
   const stopListening = useVoiceStore((s) => s.stopListening);
   const stopSpeaking = useVoiceStore((s) => s.stopSpeaking);
+  const conversationMode = useVoiceStore((s) => s.conversationMode);
+  const startConversation = useVoiceStore((s) => s.startConversation);
+  const endConversation = useVoiceStore((s) => s.endConversation);
 
   useEffect(() => {
     void checkAvailability();
@@ -67,6 +70,18 @@ export function MicButton({ disabled = false }: Props) {
     void startListening();
   }
 
+  function handleConversation() {
+    if (conversationMode) {
+      endConversation();
+      return;
+    }
+    void startConversation();
+  }
+
+  const conversationLabel = conversationMode
+    ? "End conversation mode"
+    : "Start conversation mode — talk without pressing the microphone each time";
+
   const label = listening
     ? "Stop recording"
     : speaking
@@ -76,6 +91,7 @@ export function MicButton({ disabled = false }: Props) {
         : "Start voice input";
 
   return (
+    <>
     <button
       type="button"
       onClick={handleClick}
@@ -114,6 +130,25 @@ export function MicButton({ disabled = false }: Props) {
         />
       )}
     </button>
+    <button
+      type="button"
+      onClick={handleConversation}
+      disabled={disabled || working || unsupported}
+      aria-label={conversationLabel}
+      aria-pressed={conversationMode}
+      title={conversationLabel}
+      data-testid="conversation-button"
+      className={cn(
+        "p-2 rounded-lg transition-colors shrink-0",
+        conversationMode
+          ? "bg-emerald-600 hover:bg-emerald-700 text-white"
+          : "bg-gray-800 hover:bg-gray-700 text-gray-300",
+        (working || unsupported || disabled) && "bg-gray-800 text-gray-600 cursor-not-allowed"
+      )}
+    >
+      <Headphones size={16} />
+    </button>
+    </>
   );
 }
 

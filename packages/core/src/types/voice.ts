@@ -49,9 +49,12 @@ export const VOICE_APPROVAL_POLICY = Object.freeze({
 /**
  * The states a voice turn can occupy on the client.
  *
- * Sprint 8 is push-to-talk only: every transition out of `idle` begins with a
- * deliberate user gesture. There is no wake word and no always-listening mode,
- * so there is no state for "waiting to be addressed".
+ * Every transition out of `idle` begins with a deliberate user gesture. There
+ * is no wake word and no always-listening mode, so there is no state for
+ * "waiting to be addressed". The opt-in conversation mode (web client) is a
+ * flag on this same machine, not a new state: it re-opens the microphone after
+ * a spoken reply, and any error, silence, approval prompt or hidden tab turns it
+ * off.
  */
 export const VoiceStateSchema = z.enum([
   /** Nothing happening. The microphone is released. */

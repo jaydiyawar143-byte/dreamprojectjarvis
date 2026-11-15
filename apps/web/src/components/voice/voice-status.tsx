@@ -26,11 +26,13 @@ export function VoiceStatus() {
   const toggleAutoSpeak = useVoiceStore((s) => s.toggleAutoSpeak);
   const stopSpeaking = useVoiceStore((s) => s.stopSpeaking);
   const dismissNotice = useVoiceStore((s) => s.dismissNotice);
+  const conversationMode = useVoiceStore((s) => s.conversationMode);
+  const endConversation = useVoiceStore((s) => s.endConversation);
 
   if (available === false) return null;
 
   const showsActivity = state !== "idle" && state !== "error" && state !== "permission-denied";
-  if (!showsActivity && !notice && !transcript) return null;
+  if (!showsActivity && !notice && !transcript && !conversationMode) return null;
 
   return (
     <div className="max-w-3xl mx-auto mb-2 space-y-2" data-testid="voice-status">
@@ -63,6 +65,23 @@ export function VoiceStatus() {
         </div>
       )}
 
+      {conversationMode && (
+        <div
+          role="status"
+          data-testid="conversation-indicator"
+          className="flex items-center justify-between gap-3 rounded-lg border border-emerald-800 bg-emerald-900/20 px-3 py-2 text-sm text-emerald-200"
+        >
+          <span>Conversation mode is on — the microphone opens after each reply.</span>
+          <button
+            onClick={() => endConversation()}
+            data-testid="conversation-stop"
+            className="text-xs px-2 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-200"
+          >
+            End
+          </button>
+        </div>
+      )}
+
       {showsActivity && (
         <div
           role="status"
@@ -73,7 +92,7 @@ export function VoiceStatus() {
         >
           <div className="flex items-center gap-2 text-sm text-gray-300 min-w-0">
             <StateIcon state={state} />
-            <span className="shrink-0">{stateLabel(state)}</span>
+            <span className="shrink-0">{stateLabel(state, conversationMode)}</span>
             {transcript && (state === "processing" || state === "speaking") && (
               <span className="truncate text-gray-500 italic">“{transcript}”</span>
             )}
@@ -104,12 +123,14 @@ export function VoiceStatus() {
   );
 }
 
-function stateLabel(state: string): string {
+function stateLabel(state: string, conversationMode = false): string {
   switch (state) {
     case "requesting-permission":
       return "Waiting for microphone permission…";
     case "listening":
-      return "Listening… click the microphone to stop";
+      return conversationMode
+        ? "Listening… just speak, I'll answer when you pause"
+        : "Listening… click the microphone to stop";
     case "transcribing":
       return "Transcribing…";
     case "processing":
