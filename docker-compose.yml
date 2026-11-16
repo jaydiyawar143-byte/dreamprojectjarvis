@@ -100,6 +100,11 @@ services:
       # build locally is the one case where it is correct, and this states that
       # intent explicitly rather than loosening the check for everyone.
       JARVIS_ALLOW_LOCAL_ORIGIN: "true"
+      # Browsing stays OFF in this file, whatever .env says for the local dev
+      # stack: the env_file above would otherwise carry its BROWSER_ENABLED in,
+      # and this image has no Chromium to run one in-process. The opt-in is the
+      # separate docker-compose.browser.yml (Phase 19, P0), which switches this
+      # on together with the remote browser service's URL and TLS material.
       BROWSER_ENABLED: "false"
     command: >
       sh -lc "pnpm --filter @jarvis/db exec prisma migrate deploy &&
@@ -224,7 +229,9 @@ services:
       # retention below passes. Not served by anything; never a response body.
       BROWSER_SERVICE_DOWNLOAD_DIR: /var/lib/jarvis-browser/artifacts
       BROWSER_HEADLESS: "true"
-      CHROME_PATH: /usr/bin/chromium
+      # Phase 19 S10 — Debian's real Chromium binary. /usr/bin/chromium is
+      # Debian's wrapper script, which adds switches of its own to every launch.
+      CHROME_PATH: /usr/lib/chromium/chromium
       # Authentication. The TLS paths name files a docker-compose.override.yml
       # mounts; this file mounts none (docs/DEPLOYMENT.md).
       BROWSER_SERVICE_KEY_ID: ${BROWSER_SERVICE_KEY_ID:-}
@@ -264,8 +271,21 @@ services:
     read_only: true
     tmpfs:
       - /tmp:size=256m,mode=1777
+      # Phase 19 S10 — Chromium needs a writable home (its crash handler's
+      # database, its NSS and config directories). On the read-only root it
+      # crashes at start-up, sandbox or not. Private to the `node` user (uid
+      # and gid 1000), emptied on every restart; the root stays read-only.
+      - /home/node:size=32m,uid=1000,gid=1000,mode=0700
     security_opt:
       - no-new-privileges:true
+      # Phase 19 S10 — Docker's default seccomp profile (moby/profiles seccomp
+      # v0.2.4, the one Docker Engine 29.9.2 compiles in) plus exactly three
+      # rules for Chromium's user-namespace sandbox: clone into new USER, PID
+      # and NET namespaces only, unshare(CLONE_NEWUSER) exactly, and chroot.
+      # Mount, UTS, IPC and cgroup namespaces, setns and mount stay refused.
+      # `no-new-privileges` stays: it is what rules out the setuid sandbox.
+      # Never `seccomp:unconfined`, never `--no-sandbox` (docs/DEPLOYMENT.md).
+      - seccomp=./apps/browser-service/seccomp/browser-service.json
     cap_drop:
       - ALL
     # Chromium's own IPC needs a process table; the ceiling keeps a fork bomb or

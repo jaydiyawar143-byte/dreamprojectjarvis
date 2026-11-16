@@ -1,0 +1,93 @@
+# -----------------------------------------------------------------------------
+# Phase 19, P0 — the isolated real-Chromium E2E project. TEST ONLY.
+#
+# Never used directly: scripts/browser-e2e/run.mjs copies the base compose
+# file, the reviewed seccomp profiles, this file and the fixture scripts into a
+# temporary directory OUTSIDE the repository (with an empty .env, so compose
+# never reads the real one), and runs them as project `jarvis-p19-browser-e2e`.
+#
+# It layers on the base file's REAL browser-service and browser-egress, so the
+# reviewed seccomp profile, the read-only root, `cap_drop: ALL`,
+# `no-new-privileges`, the tmpfs mounts, the limits and the internal `browser`
+# network all come from there, unchanged. This file sets only:
+#
+#   - project-scoped container names, a test-only image tag and labels, so no
+#     existing container, image or volume is reused or overwritten;
+#   - the TLS material, mounted read-only from the run's temporary directory;
+#   - BROWSER_SERVICE_CHROMIUM_ENABLED "true" — in THIS isolated project only;
+#   - the egress container's command: the fixture egress, which runs the real
+#     proxy and policy against a fixture site (fixture/fixture-egress.mjs);
+#   - a relay on 127.0.0.1 only, because a port cannot be published from the
+#     internal network the browser service is on (fixture/relay.mjs).
+#
+# No database, API or web container is part of this project.
+# -----------------------------------------------------------------------------
+
+services:
+  browser-service:
+    image: ${JARVIS_BROWSER_E2E_IMAGE:?set by scripts/browser-e2e/run.mjs}
+    container_name: jarvis-p19-browser-e2e-browser
+    labels:
+      jarvis.test: browser-e2e
+    environment:
+      BROWSER_SERVICE_CHROMIUM_ENABLED: "true"
+      BROWSER_SERVICE_TLS_CERT_PATH: /run/jarvis-browser-tls/server.crt
+      BROWSER_SERVICE_TLS_KEY_PATH: /run/jarvis-browser-tls/server.key
+      BROWSER_SERVICE_TLS_CA_PATH: /run/jarvis-browser-tls/ca.crt
+      BROWSER_DOMAIN_ALLOWLIST: ${JARVIS_BROWSER_E2E_ALLOWLIST:?set by scripts/browser-e2e/run.mjs}
+      BROWSER_ARTIFACT_RETENTION_HOURS: "1"
+      BROWSER_SERVICE_SESSION_TTL_MS: "30000"
+      BROWSER_NAVIGATION_TIMEOUT_MS: "5000"
+    volumes:
+      - "${JARVIS_BROWSER_E2E_TLS_DIR:?set by scripts/browser-e2e/run.mjs}/service:/run/jarvis-browser-tls:ro"
+
+  browser-egress:
+    image: ${JARVIS_BROWSER_E2E_IMAGE:?set by scripts/browser-e2e/run.mjs}
+    container_name: jarvis-p19-browser-e2e-egress
+    labels:
+      jarvis.test: browser-e2e
+    command: ["node", "/e2e/fixture-egress.mjs"]
+    environment:
+      BROWSER_EGRESS_DOMAIN_ALLOWLIST: ${JARVIS_BROWSER_E2E_ALLOWLIST:?set by scripts/browser-e2e/run.mjs}
+      JARVIS_E2E_FIXTURE_HOST: ${JARVIS_BROWSER_E2E_FIXTURE_HOST:?set by scripts/browser-e2e/run.mjs}
+    volumes:
+      - "./fixture:/e2e:ro"
+
+  browser-e2e-relay:
+    profiles: ["browser-service"]
+    image: ${JARVIS_BROWSER_E2E_IMAGE:?set by scripts/browser-e2e/run.mjs}
+    container_name: jarvis-p19-browser-e2e-relay
+    labels:
+      jarvis.test: browser-e2e
+    command: ["node", "/e2e/relay.mjs"]
+    depends_on:
+      browser-service:
+        condition: service_healthy
+    networks:
+      - browser
+      - browser-e2e-access
+    ports:
+      - "127.0.0.1:${JARVIS_BROWSER_E2E_PORT:?set by scripts/browser-e2e/run.mjs}:3443"
+    volumes:
+      - "./fixture:/e2e:ro"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 64
+    mem_limit: 128m
+    cpus: 0.5
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"require('net').connect(3443,'127.0.0.1').on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))\"",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 6
+      start_period: 5s
+
+networks:
+  browser-e2e-access:

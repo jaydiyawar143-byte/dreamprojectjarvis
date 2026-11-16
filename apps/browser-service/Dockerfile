@@ -15,14 +15,28 @@
 # start. Network egress is a separate, later control (Stage 19.3): this image
 # has ordinary outbound access and must not be treated as if it had none.
 #
-# CHROMIUM'S VERSION IS NOT PINNED HERE. Alpine's `chromium` is whatever the
-# base image's repository serves, so a rebuild can change it. The pinning
-# decision (and a signed package source) is open work, recorded in
-# docs/phases/phase-19.md; this file does not pretend otherwise.
+# DEBIAN, NOT ALPINE (Phase 19 S10). On Alpine, Chromium's own seccomp policy
+# killed its GPU process and the browser exited within seconds: musl 1.2.6
+# implements pwrite() with the pwritev2 syscall, which the GPU process's policy
+# does not allow. It allows pwrite64, which glibc's pwrite() uses. The record
+# is docs/phases/phase-19.md §20.9.
+#
+# PINNED. The base image is pinned by digest, and Chromium to one Debian
+# package version from Debian's signed archive. A Chromium security update is a
+# deliberate change to this file: bump the version on the install line (and in
+# the compose test that pins it), rebuild, and run S10 and S11 again
+# (docs/DEPLOYMENT.md). Once Debian supersedes the pinned version it no longer
+# resolves, so a stale pin fails the build instead of changing the browser.
 # ---------------------------------------------------------------------------
 
-FROM node:24-alpine AS base
-RUN apk add --no-cache libc6-compat openssl \
+# Node 24.22.3 on Debian 13 (trixie), by digest. Its `node` user is uid/gid
+# 1000, which the compose tmpfs home and the artifact volume expect.
+FROM node:24.22.3-trixie-slim@sha256:af02d57b57719b9657a45199a79264a9437940cd55b3c7b3fc99615654f124a0 AS base
+# openssl: Prisma's generator reads the OpenSSL version from it to pick its
+# engine (build stage), as it did on Alpine.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends openssl \
+    && rm -rf /var/lib/apt/lists/* \
     && corepack enable \
     && corepack prepare pnpm@9.0.0 --activate
 WORKDIR /workspace
@@ -83,13 +97,27 @@ RUN pnpm --filter @jarvis/browser-service... build
 FROM base AS runtime
 
 ENV NODE_ENV=production
-# Alpine's chromium package; the symlink keeps one executable path regardless
-# of which of the two names the package provides.
-RUN apk add --no-cache chromium \
-    && if [ ! -x /usr/bin/chromium ] && [ -x /usr/bin/chromium-browser ]; then \
-         ln -s /usr/bin/chromium-browser /usr/bin/chromium; \
-       fi
-ENV CHROME_PATH=/usr/bin/chromium
+# Debian's chromium, pinned to one version from trixie-security, with only the
+# dependencies it declares (--no-install-recommends) plus one font package, so
+# that pages render text. The setuid helper, `chromium-sandbox`, is a separate
+# package and is never installed: `no-new-privileges` would stop it working
+# anyway, and S10 requires the namespace sandbox. The build fails if the
+# package or its binary is present, or if the real binary is missing.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+         chromium=156.0.8078.79-1~deb13u1 \
+         chromium-common=156.0.8078.79-1~deb13u1 \
+         fonts-liberation \
+    && rm -rf /var/lib/apt/lists/* \
+    && if dpkg-query -W -f='${Status}' chromium-sandbox 2>/dev/null | grep -q 'ok installed'; then \
+         echo 'chromium-sandbox must not be installed' >&2; exit 1; \
+       fi \
+    && test ! -e /usr/lib/chromium/chrome-sandbox \
+    && test -x /usr/lib/chromium/chromium
+# The real binary, not /usr/bin/chromium. That path is Debian's wrapper script,
+# which adds its own switches (/etc/chromium.d) to every launch, so the
+# service's reviewed launch options would no longer be the only switches.
+ENV CHROME_PATH=/usr/lib/chromium/chromium
 
 COPY --from=build /workspace/node_modules ./node_modules
 COPY --from=build /workspace/package.json ./package.json

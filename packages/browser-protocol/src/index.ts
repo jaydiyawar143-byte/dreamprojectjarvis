@@ -16,3 +16,6 @@ export * from "./config.js";
 export * from "./transport.js";
 export * from "./client.js";
 export * from "./remote-runtime.js";
+// Phase 19, P0 — the API's start-up checks: its TLS material, then the service.
+export * from "./tls-check.js";
+export * from "./probe.js";

@@ -78,8 +78,14 @@ import {
 import {
   BrowserServiceClient,
   RemoteBrowserRuntime,
+  checkBrowserServiceClientTls,
   readBrowserServiceEndpoint,
 } from "@jarvis/browser-protocol";
+import {
+  causeForEndpointProblem,
+  causeForTlsProblem,
+  startBrowserServiceProbe,
+} from "./browser-service-diagnostics.js";
 import { createMetaGraphProvider, createMetaPagePublisher, isPagePublishingEnabled } from "@jarvis/meta-graph";
 import {
   createGoogleAdsProvider,
@@ -888,7 +894,11 @@ function createMetaToolRegistry(
     console.log(JSON.stringify({
       level: "info",
       event: "browser_tools_disabled",
+      cause: "disabled",
       reason: describeBrowserConfigStatus().reason,
+      // A browser-service URL with browsing switched off is ignored. Saying so
+      // tells an operator which of the two switches they forgot.
+      browserServiceConfigured: browserService.state !== "absent",
     }));
   } else if (browserService.state === "invalid") {
     // The operator configured a remote browser and got it wrong. Refusing here
@@ -897,41 +907,72 @@ function createMetaToolRegistry(
     console.log(JSON.stringify({
       level: "warn",
       event: "browser_registration_skipped",
+      cause: causeForEndpointProblem(browserService.problem),
       reason: browserService.reason,
     }));
   } else if (browserService.state === "ready") {
-    try {
-      const client = new BrowserServiceClient({ config: browserService.config });
-      const runtime = new RemoteBrowserRuntime({
-        client,
-        tenant: createBrowserSessionTenantResolver(sharedAccess),
-      });
-      _browserRuntime = runtime;
-
-      const browserJournal = new PrismaToolExecutionRepository(prisma);
-      // Phase 19.5 — the write tools only where their approvals can be sealed.
-      for (const tool of createBrowserTools(runtime, browserJournal, approvalConsumption, browserWriteScope)
-        .filter((tool) => browserWritesSealed || !tool.requiresApproval)) {
-        registry.register(tool);
-      }
-      if (!browserWritesSealed) logBrowserWritesUnavailable();
-
-      console.log(JSON.stringify({
-        level: "info",
-        event: "browser_tools_enabled",
-        // The service's address is not a secret, but it is also not useful to
-        // an operator reading logs; the host and port identify it.
-        mode: "remote",
-        serviceHost: new URL(browserService.config.baseUrl).host,
-        timeoutMs: browserService.config.timeoutMs,
-        mutualTls: browserService.config.tls !== null,
-      }));
-    } catch (err) {
+    // Phase 19, P0 — the client's TLS files, checked BEFORE any tool exists:
+    // readable, parseable, a matching pair, in date, naming the peer identity.
+    // A problem registers nothing — and, as above, never falls back to an
+    // in-process browser. The reason names the variable to fix, never a path
+    // or a file's contents.
+    const tlsCheck = browserService.config.tls
+      ? checkBrowserServiceClientTls(browserService.config.tls, browserService.config.peerIdentity)
+      : null;
+    if (!tlsCheck || !tlsCheck.ok) {
       console.log(JSON.stringify({
         level: "warn",
         event: "browser_registration_skipped",
-        reason: err instanceof Error ? err.message : "unknown",
+        cause: tlsCheck ? causeForTlsProblem(tlsCheck.problem) : "tls_material_unreadable",
+        reason: tlsCheck
+          ? tlsCheck.reason
+          : "BROWSER_SERVICE_CLIENT_CERT_PATH and BROWSER_SERVICE_CLIENT_KEY_PATH are required",
       }));
+    } else {
+      try {
+        const client = new BrowserServiceClient({ config: browserService.config });
+        const runtime = new RemoteBrowserRuntime({
+          client,
+          tenant: createBrowserSessionTenantResolver(sharedAccess),
+        });
+        _browserRuntime = runtime;
+
+        const browserJournal = new PrismaToolExecutionRepository(prisma);
+        // Phase 19.5 — the write tools only where their approvals can be sealed.
+        for (const tool of createBrowserTools(runtime, browserJournal, approvalConsumption, browserWriteScope)
+          .filter((tool) => browserWritesSealed || !tool.requiresApproval)) {
+          registry.register(tool);
+        }
+        if (!browserWritesSealed) logBrowserWritesUnavailable();
+
+        console.log(JSON.stringify({
+          level: "info",
+          event: "browser_tools_enabled",
+          // The service's address is not a secret, but it is also not useful to
+          // an operator reading logs; the host and port identify it.
+          mode: "remote",
+          serviceHost: new URL(browserService.config.baseUrl).host,
+          timeoutMs: browserService.config.timeoutMs,
+          mutualTls: browserService.config.tls !== null,
+          clientCertificateNotAfter: tlsCheck.clientCertificateNotAfter,
+        }));
+
+        // Phase 19, P0 — registered is not reachable. Ask the service, in the
+        // background, whether it accepts this API (network, TLS, identity,
+        // signature, clock, protocol version); the answer is logged as
+        // `browser_service_reachable` or `browser_service_probe_failed`.
+        startBrowserServiceProbe({
+          config: browserService.config,
+          log: operationalLog.child("browser-service"),
+        });
+      } catch (err) {
+        console.log(JSON.stringify({
+          level: "warn",
+          event: "browser_registration_skipped",
+          cause: "construction_failed",
+          reason: err instanceof Error ? err.message : "unknown",
+        }));
+      }
     }
   } else if (isBrowserConfigured()) {
     try {

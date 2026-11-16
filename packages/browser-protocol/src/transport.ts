@@ -56,9 +56,52 @@ export type BrowserServiceTransport = (
 export class BrowserServiceTransportError extends Error {
   override readonly name = "BrowserServiceTransportError";
 
-  constructor(readonly requestSent: boolean) {
+  constructor(
+    readonly requestSent: boolean,
+    /**
+     * Which kind of failure it was (Phase 19, P0), for the API's start-up
+     * diagnosis only. Derived from the underlying error's CODE, never its
+     * message — the message can name a host or a certificate.
+     */
+    readonly failure: BrowserServiceTransportFailure = "unknown"
+  ) {
     super(requestSent ? "The connection failed after the request was sent." : "The request was not sent.");
   }
+}
+
+/**
+ * - `credentials`: the API's own certificate, key or CA file could not be read;
+ * - `network`: no connection — refused, reset, unreachable, or the name did not resolve;
+ * - `tls`: a connection, but the TLS handshake failed (an untrusted or
+ *   mismatched certificate, or the service refusing ours);
+ * - `refused-locally`: not https, or no client certificate configured — never sent;
+ * - `unknown`: anything else.
+ */
+export type BrowserServiceTransportFailure = "credentials" | "network" | "tls" | "refused-locally" | "unknown";
+
+const NETWORK_CODES: ReadonlySet<string> = new Set([
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "ETIMEDOUT",
+  "EPIPE",
+]);
+
+/** A failure's kind, from its `code` alone. */
+export function transportFailureOf(error: unknown): BrowserServiceTransportFailure {
+  const code = (error as { code?: unknown } | null)?.code;
+  if (typeof code !== "string") return "unknown";
+  if (NETWORK_CODES.has(code)) return "network";
+  if (
+    /^(ERR_SSL_|ERR_TLS_|ERR_OSSL_|CERT_|UNABLE_TO_|DEPTH_ZERO_SELF_SIGNED_CERT|SELF_SIGNED_CERT_IN_CHAIN)/.test(code) ||
+    code === "HOSTNAME_MISMATCH"
+  ) {
+    return "tls";
+  }
+  return "unknown";
 }
 
 function stringHeaders(source: NodeJS.Dict<string | string[]>): Record<string, string> {
@@ -83,7 +126,7 @@ export const nodeBrowserServiceTransport: BrowserServiceTransport = async (input
   // https one without the API's client certificate, could never authenticate
   // and would carry typed text and form values unprotected: it is not sent.
   if (input.url.protocol !== "https:" || !input.tls) {
-    throw new BrowserServiceTransportError(false);
+    throw new BrowserServiceTransportError(false, "refused-locally");
   }
 
   const body = Buffer.from(input.body);
@@ -95,7 +138,7 @@ export const nodeBrowserServiceTransport: BrowserServiceTransport = async (input
       ...(input.tls.caPath ? { ca: readFileSync(input.tls.caPath) } : {}),
     };
   } catch {
-    throw new BrowserServiceTransportError(false);
+    throw new BrowserServiceTransportError(false, "credentials");
   }
   const options = {
     method: input.method,
@@ -121,8 +164,8 @@ export const nodeBrowserServiceTransport: BrowserServiceTransport = async (input
       req.on("error", reject);
       req.end(body);
     });
-  } catch {
-    throw new BrowserServiceTransportError(requestSent);
+  } catch (error) {
+    throw new BrowserServiceTransportError(requestSent, transportFailureOf(error));
   }
 
   const chunks: Buffer[] = [];
