@@ -1,0 +1,60 @@
+# -----------------------------------------------------------------------------
+# Phase 19, P0 — the API's opt-in wiring to the isolated browser service.
+#
+# NOT LOADED BY DEFAULT. `docker compose up` reads docker-compose.yml (and a
+# docker-compose.override.yml, which this file deliberately is not). There the
+# API has BROWSER_ENABLED "false" and the browser service sits behind its
+# profile, so nothing browses. Browsing through the service needs this file,
+# named on the command line, together with the profile:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.browser.yml \
+#     --profile browser-service up -d
+#
+# and, in .env or the shell:
+#   - JARVIS_BROWSER_TLS_DIR (below), and
+#   - BROWSER_SERVICE_KEY_ID, BROWSER_SERVICE_SHARED_SECRET and
+#     BROWSER_SERVICE_PEER_IDENTITY, shared by both sides.
+#
+# Chromium itself is a THIRD switch and is not thrown here:
+# BROWSER_SERVICE_CHROMIUM_ENABLED stays "false" unless the operator sets it,
+# and with it off the service refuses every session. See docs/DEPLOYMENT.md,
+# "The isolated browser service".
+#
+# TLS MATERIAL. JARVIS_BROWSER_TLS_DIR is a directory OUTSIDE this repository
+# holding two subdirectories, each mounted read-only into one container only,
+# so neither container holds the other's private key:
+#
+#   api/      client.crt  client.key  ca.crt    -> the API
+#   service/  server.crt  server.key  ca.crt    -> the browser service
+#
+# client.crt must name BROWSER_SERVICE_PEER_IDENTITY (its CN, or else its first
+# subject alternative name); server.crt must name `browser-service`, the host
+# in the URL below. The API checks its own three files at start-up and
+# registers no browser tool if one is unreadable, unparsable, mismatched,
+# expired or names another identity. Nothing here generates, rotates or
+# revokes certificates (docs/phases/phase-19.md §14.7, U2).
+#
+# Nothing below changes a network, a port, a limit or a security option of
+# either service: the API reaches the service over the internal `browser`
+# network it is already on, and the browser service keeps every control the
+# base file gives it.
+# -----------------------------------------------------------------------------
+
+services:
+  api:
+    environment:
+      BROWSER_ENABLED: "true"
+      BROWSER_SERVICE_URL: https://browser-service:3200
+      BROWSER_SERVICE_CLIENT_CERT_PATH: /run/jarvis-browser-tls/client.crt
+      BROWSER_SERVICE_CLIENT_KEY_PATH: /run/jarvis-browser-tls/client.key
+      BROWSER_SERVICE_CA_PATH: /run/jarvis-browser-tls/ca.crt
+    volumes:
+      - "${JARVIS_BROWSER_TLS_DIR:?set JARVIS_BROWSER_TLS_DIR to the browser-service TLS directory}/api:/run/jarvis-browser-tls:ro"
+
+  browser-service:
+    environment:
+      BROWSER_SERVICE_TLS_CERT_PATH: /run/jarvis-browser-tls/server.crt
+      BROWSER_SERVICE_TLS_KEY_PATH: /run/jarvis-browser-tls/server.key
+      BROWSER_SERVICE_TLS_CA_PATH: /run/jarvis-browser-tls/ca.crt
+    volumes:
+      - "${JARVIS_BROWSER_TLS_DIR:?set JARVIS_BROWSER_TLS_DIR to the browser-service TLS directory}/service:/run/jarvis-browser-tls:ro"

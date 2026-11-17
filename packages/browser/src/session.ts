@@ -44,6 +44,7 @@ import type { BrowserConfig } from "./config.js";
 import type { NavigationPolicyConfig } from "./navigation-policy.js";
 import { validateNavigationTarget } from "./navigation-policy.js";
 import type { ArtifactScope, DownloadStore } from "./download.js";
+import { inspectPageElements, pageBodyText, pageFieldValues } from "./page-scripts.js";
 
 /** Minimal shape of the Playwright objects we use, so tests can fake them. */
 export interface PageLike {
@@ -59,7 +60,13 @@ export interface PageLike {
     value: string,
     options?: Record<string, unknown>
   ): Promise<unknown>;
-  evaluate<T>(fn: string, arg?: unknown): Promise<T>;
+  /**
+   * A FUNCTION only (Phase 19, P0). Playwright calls a function in the page
+   * with `arg`; a string it would evaluate and never call. The type refuses a
+   * string, so that mistake cannot be written again.
+   */
+  evaluate<R, A>(pageFunction: (arg: A) => R, arg: A): Promise<R>;
+  evaluate<R>(pageFunction: () => R): Promise<R>;
   waitForTimeout(ms: number): Promise<void>;
   setDefaultTimeout(ms: number): void;
   setDefaultNavigationTimeout(ms: number): void;
@@ -257,7 +264,7 @@ export class BrowserSession implements BrowserSessionPort {
     this.requireNavigated();
 
     const raw = await withAbort(
-      this.page.evaluate<BrowserElementSummary[]>(INSPECT_SCRIPT, {
+      this.page.evaluate(inspectPageElements, {
         limit: MAX_INSPECT_ELEMENTS + 1,
         maxLabel: MAX_LABEL_LENGTH,
       }),
@@ -282,15 +289,11 @@ export class BrowserSession implements BrowserSessionPort {
     const entries = Object.entries(selectors).slice(0, BROWSER_MAX_EXTRACT_FIELDS);
 
     const [bodyText, fieldValues] = await Promise.all([
-      withAbort(
-        this.page.evaluate<string>(BODY_TEXT_SCRIPT),
-        options.signal
-      ).catch(() => ""),
+      withAbort(this.page.evaluate(pageBodyText), options.signal).catch(() => ""),
       entries.length > 0
-        ? withAbort(
-            this.page.evaluate<Record<string, string>>(FIELDS_SCRIPT, entries),
-            options.signal
-          ).catch(() => ({}) as Record<string, string>)
+        ? withAbort(this.page.evaluate(pageFieldValues, entries), options.signal).catch(
+            () => ({}) as Record<string, string>
+          )
         : Promise.resolve({} as Record<string, string>),
     ]);
 
@@ -525,58 +528,6 @@ function safeOrigin(url: string): string {
   }
 }
 
-// ---------------------------------------------------------------------------
-// In-page scripts
-//
-// Passed to `page.evaluate` as SOURCE STRINGS built here, never assembled from
-// model output. Nothing a model says reaches these bodies; the only thing that
-// crosses is the argument, which Playwright serialises as data.
-// ---------------------------------------------------------------------------
-
-const INSPECT_SCRIPT = `(options) => {
-  const out = [];
-  const nodes = document.querySelectorAll('a[href], button, input, select, textarea, form');
-  for (const node of nodes) {
-    if (out.length >= options.limit) break;
-    const tag = node.tagName.toLowerCase();
-    const rect = node.getBoundingClientRect ? node.getBoundingClientRect() : null;
-    if (rect && rect.width === 0 && rect.height === 0) continue;
-
-    let selector = tag;
-    if (node.id) selector = '#' + CSS.escape(node.id);
-    else if (node.getAttribute('name')) selector = tag + '[name="' + node.getAttribute('name') + '"]';
-    else if (node.getAttribute('data-testid')) selector = '[data-testid="' + node.getAttribute('data-testid') + '"]';
-
-    const label = (node.getAttribute('aria-label') || node.getAttribute('placeholder') ||
-      node.innerText || node.value || '').toString().slice(0, options.maxLabel);
-
-    const entry = { selector: selector, tag: tag, label: label };
-    const type = node.getAttribute('type');
-    if (type) entry.type = type;
-    if (tag === 'a' && node.href) entry.href = node.href;
-    out.push(entry);
-  }
-  return out;
-}`;
-
-const BODY_TEXT_SCRIPT = `() => {
-  const clone = document.body ? document.body.cloneNode(true) : null;
-  if (!clone) return '';
-  for (const node of clone.querySelectorAll('script, style, noscript, template')) {
-    node.remove();
-  }
-  return clone.innerText || clone.textContent || '';
-}`;
-
-const FIELDS_SCRIPT = `(entries) => {
-  const out = {};
-  for (const [key, selector] of entries) {
-    try {
-      const node = document.querySelector(selector);
-      out[key] = node ? (node.innerText || node.textContent || node.value || '') : '';
-    } catch (err) {
-      out[key] = '';
-    }
-  }
-  return out;
-}`;
+// The in-page functions live in ./page-scripts.ts (Phase 19, P0): passed to
+// `page.evaluate` as functions, so Playwright runs them. As source strings,
+// which they were, Playwright evaluated them without calling them.

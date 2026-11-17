@@ -18,6 +18,7 @@
 // egress is Stage 19.3.
 // ---------------------------------------------------------------------------
 
+import { createHash } from "node:crypto";
 import { readFileSync, readdirSync } from "node:fs";
 
 import { describe, expect, it } from "vitest";
@@ -84,7 +85,7 @@ const FORBIDDEN = /DATABASE|POSTGRES|JWT|ENCRYPTION|SECRET_KEY|META_|FACEBOOK|OP
 /** Fixed, non-secret values the container needs beside its own variables. */
 const FIXED_LITERALS = new Map([
   ["NODE_ENV", "production"],
-  ["CHROME_PATH", "/usr/bin/chromium"],
+  ["CHROME_PATH", "/usr/lib/chromium/chromium"],
 ]);
 
 describe("the browser container receives only what it names (H3)", () => {
@@ -334,5 +335,214 @@ describe("the browser's artifact store (Phase 19.4)", () => {
     // After the schema arrives with the sources, before the compile needs it.
     expect(generate).toBeGreaterThan(lines.indexOf("COPY . ."));
     expect(generate).toBeLessThan(compile);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 19, S10 — Chromium's own sandbox inside the container.
+//
+// Run in the container (2026-11-15), S10 failed twice over: Chromium crashed at
+// start-up because its home was on the read-only root, and with a writable
+// home its user-namespace sandbox was refused by Docker's default seccomp
+// profile, which allows no namespace-creating clone, no unshare and — with
+// every capability dropped — no chroot. `no-new-privileges` (rightly) keeps the
+// setuid fallback from becoming root. The fix is a private tmpfs home and
+// Docker's default profile plus exactly three rules, for this service alone.
+// These pin both, and that nothing broader ever slips in.
+// ---------------------------------------------------------------------------
+
+describe("Chromium's sandbox in the browser container (Phase 19 S10)", () => {
+  const PROFILE_PATH = "apps/browser-service/seccomp/browser-service.json";
+  const DEFAULT_PATH = "apps/browser-service/seccomp/docker-default-profiles-v0.2.4.json";
+  /**
+   * SHA-256 of github.com/moby/profiles seccomp/default.json at tag
+   * seccomp/v0.2.4 (commit 245180c5), the version Docker Engine 29.9.2
+   * (docker-v29.9.2, 0367cbeb) requires; byte-identical to that release's
+   * vendored copy (git blob 77df9d19).
+   */
+  const DEFAULT_SHA256 = "785b2429264afba4d594320337cb17f144f3c7d51585f9805eef72e28f4f9334";
+
+  const CLONE_NEWNS = 0x00020000;
+  const CLONE_NEWCGROUP = 0x02000000;
+  const CLONE_NEWUTS = 0x04000000;
+  const CLONE_NEWIPC = 0x08000000;
+  const CLONE_NEWUSER = 0x10000000;
+  const CLONE_NEWPID = 0x20000000;
+  const CLONE_NEWNET = 0x40000000;
+
+  type Rule = {
+    names: string[];
+    action: string;
+    args?: Array<{ index: number; value: number; valueTwo?: number; op: string }>;
+    comment?: string;
+    includes?: Record<string, unknown>;
+    excludes?: Record<string, unknown>;
+  };
+  type Profile = { defaultAction: string; defaultErrnoRet?: number; syscalls: Rule[] };
+
+  const upstream = JSON.parse(read(DEFAULT_PATH)) as Profile;
+  const applied = JSON.parse(read(PROFILE_PATH)) as Profile;
+  const added = applied.syscalls.slice(upstream.syscalls.length);
+
+  it("gives the browser a private, writable home on tmpfs, and keeps /tmp as it was", () => {
+    expect(listItems(browser, "tmpfs")).toEqual(["/tmp:size=256m,mode=1777", "/home/node:size=32m,uid=1000,gid=1000,mode=0700"]);
+    expect(code(browser)).toMatch(/^ {4}read_only: true$/m);
+  });
+
+  it("applies the reviewed profile to the browser service, beside no-new-privileges", () => {
+    expect(listItems(browser, "security_opt")).toEqual([
+      "no-new-privileges:true",
+      `seccomp=./${PROFILE_PATH}`,
+    ]);
+    expect(listItems(browser, "cap_drop")).toEqual(["ALL"]);
+  });
+
+  it("leaves the egress proxy on Docker's own default profile", () => {
+    expect(listItems(egress, "security_opt")).toEqual(["no-new-privileges:true"]);
+  });
+
+  it("never runs anything unconfined, privileged, or with a sandbox-disabling switch", () => {
+    const everything = compose
+      .split("\n")
+      .filter((line) => !/^\s*#/.test(line))
+      .join("\n");
+    expect(everything).not.toMatch(/seccomp[:=]unconfined|apparmor[:=]unconfined|privileged: true|SYS_ADMIN|SYS_CHROOT/);
+    for (const flag of ["--no-sandbox", "--disable-setuid-sandbox", "--disable-namespace-sandbox", "--disable-seccomp-filter-sandbox", "--no-zygote-sandbox"]) {
+      expect(everything).not.toContain(flag);
+    }
+  });
+
+  it("vendors Docker's default profile byte for byte", () => {
+    const bytes = readFileSync(new URL(DEFAULT_PATH, REPO));
+    expect(createHash("sha256").update(bytes).digest("hex")).toBe(DEFAULT_SHA256);
+  });
+
+  it("is Docker's default profile, unchanged, plus exactly three rules", () => {
+    expect(applied.defaultAction).toBe(upstream.defaultAction);
+    expect(applied.defaultErrnoRet).toBe(upstream.defaultErrnoRet);
+    expect({ ...applied, syscalls: applied.syscalls.slice(0, upstream.syscalls.length) }).toEqual(upstream);
+    expect(added).toHaveLength(3);
+    for (const rule of added) {
+      expect(rule.comment).toMatch(/^JARVIS browser-service \(Phase 19 S10\): /);
+      expect(rule.action).toBe("SCMP_ACT_ALLOW");
+      expect(rule.includes).toBeUndefined();
+    }
+    expect(added.map((rule) => rule.names)).toEqual([["clone"], ["unshare"], ["chroot"]]);
+  });
+
+  it("lets clone create user, PID and network namespaces, and never mount, UTS, IPC or cgroup ones", () => {
+    const clone = added[0]!;
+    expect(clone.args).toEqual([{ index: 0, value: CLONE_NEWNS | CLONE_NEWCGROUP | CLONE_NEWUTS | CLONE_NEWIPC, op: "SCMP_CMP_MASKED_EQ" }]);
+    expect(clone.excludes).toEqual({ caps: ["CAP_SYS_ADMIN"], arches: ["s390", "s390x"] });
+    // (flags & mask) == 0, as Docker's own clone rule and runc evaluate it.
+    const allowed = (flags: number) => (flags & clone.args![0]!.value) === 0;
+    expect(allowed(CLONE_NEWUSER)).toBe(true);
+    expect(allowed(CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWNET)).toBe(true);
+    expect(allowed(CLONE_NEWPID)).toBe(true);
+    for (const refused of [CLONE_NEWNS, CLONE_NEWUTS, CLONE_NEWIPC, CLONE_NEWCGROUP]) {
+      expect(allowed(CLONE_NEWUSER | refused)).toBe(false);
+    }
+  });
+
+  it("lets unshare create a user namespace and nothing else", () => {
+    expect(added[1]!.args).toEqual([{ index: 0, value: CLONE_NEWUSER, op: "SCMP_CMP_EQ" }]);
+  });
+
+  it("allows chroot with no condition the kernel does not already make", () => {
+    expect(added[2]!.args).toBeUndefined();
+    expect(added[2]!.excludes).toBeUndefined();
+  });
+
+  it("adds no rule for mount, setns, clone3 or any other syscall", () => {
+    const names = added.flatMap((rule) => rule.names);
+    expect(names.sort()).toEqual(["chroot", "clone", "unshare"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 19, S10 — the image (2026-11-16). On Alpine, Chromium's own GPU-process
+// seccomp policy killed the GPU process and the browser exited within seconds:
+// musl 1.2.6 implements pwrite() with pwritev2, which that policy does not
+// allow (docs/phases/phase-19.md §20.9). The image is Debian (glibc) now, and
+// pinned. These hold the base to its digest, Chromium to one Debian package
+// version with nothing recommended alongside, the setuid helper out of the
+// image, and CHROME_PATH to the real binary rather than Debian's wrapper.
+// ---------------------------------------------------------------------------
+
+describe("the browser image: Debian, pinned (Phase 19 S10)", () => {
+  const BASE =
+    "node:24.22.3-trixie-slim@sha256:af02d57b57719b9657a45199a79264a9437940cd55b3c7b3fc99615654f124a0";
+  const CHROMIUM_VERSION = "156.0.8078.79-1~deb13u1";
+  const CHROME_PATH = "/usr/lib/chromium/chromium";
+
+  /** The Dockerfile's instructions, one per entry: comments dropped, continuations joined. */
+  const instructions = read("apps/browser-service/Dockerfile")
+    .split("\n")
+    .filter((line) => !/^\s*#/.test(line))
+    .join("\n")
+    .replace(/\\\n/g, " ")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const runtime = instructions.slice(instructions.indexOf("FROM base AS runtime"));
+  /** Every package an `apt-get install` names in these instructions, as written (`name` or `name=version`). */
+  const packagesInstalled = (lines: string[]) =>
+    lines
+      .filter((line) => line.startsWith("RUN "))
+      .flatMap((line) => [...line.matchAll(/apt-get install ([^&;|]+)/g)].flatMap((match) => match[1]!.trim().split(/\s+/)))
+      .filter((word) => !word.startsWith("-"));
+  const chromiumInstall = runtime.find((line) => line.includes(`chromium=${CHROMIUM_VERSION}`)) ?? "";
+
+  it("builds every stage from one base image, pinned by digest", () => {
+    const froms = instructions.filter((line) => line.startsWith("FROM "));
+    expect(froms[0]).toBe(`FROM ${BASE} AS base`);
+    expect(froms.length).toBeGreaterThan(1);
+    for (const from of froms.slice(1)) expect(from).toMatch(/^FROM base AS [a-z]+$/);
+  });
+
+  it("is Debian throughout: no Alpine package manager or musl shim is left", () => {
+    expect(instructions.join("\n")).not.toMatch(/\bapk\b|alpine|libc6-compat/i);
+  });
+
+  it("installs exactly the pinned Chromium, its common files and one font package — nothing recommended", () => {
+    expect(runtime).toContain("FROM base AS runtime");
+    expect(packagesInstalled(runtime).sort()).toEqual(
+      [`chromium=${CHROMIUM_VERSION}`, `chromium-common=${CHROMIUM_VERSION}`, "fonts-liberation"].sort()
+    );
+    // No other spelling of a Chromium package anywhere in the image, pinned or not.
+    expect(packagesInstalled(instructions).filter((name) => /^chromium/.test(name)).sort()).toEqual(
+      [`chromium=${CHROMIUM_VERSION}`, `chromium-common=${CHROMIUM_VERSION}`].sort()
+    );
+    for (const line of instructions.filter((entry) => entry.includes("apt-get install"))) {
+      expect(line).toContain("--no-install-recommends");
+    }
+  });
+
+  it("never installs the setuid sandbox helper, and fails the build if it is there", () => {
+    expect(packagesInstalled(instructions).some((name) => /^chromium-sandbox(=|$)/.test(name))).toBe(false);
+    // The check runs in the same RUN, after the install: the package, its binary, then the real binary.
+    const install = chromiumInstall.indexOf("apt-get install");
+    const packageCheck = chromiumInstall.search(/dpkg-query -W -f='\$\{Status\}' chromium-sandbox/);
+    const helperCheck = chromiumInstall.indexOf("test ! -e /usr/lib/chromium/chrome-sandbox");
+    const binaryCheck = chromiumInstall.indexOf(`test -x ${CHROME_PATH}`);
+    expect(install).toBeGreaterThan(-1);
+    expect(packageCheck).toBeGreaterThan(install);
+    expect(chromiumInstall).toContain("echo 'chromium-sandbox must not be installed' >&2; exit 1;");
+    expect(helperCheck).toBeGreaterThan(packageCheck);
+    expect(binaryCheck).toBeGreaterThan(helperCheck);
+  });
+
+  it("points CHROME_PATH at the real binary, in the image and in compose, never Debian's wrapper", () => {
+    expect(instructions.filter((line) => line.startsWith("ENV CHROME_PATH="))).toEqual([`ENV CHROME_PATH=${CHROME_PATH}`]);
+    expect(runtime).toContain(`ENV CHROME_PATH=${CHROME_PATH}`);
+    expect(environment.get("CHROME_PATH")).toBe(CHROME_PATH);
+    expect(code(browser)).not.toContain("/usr/bin/chromium");
+  });
+
+  it("installs Chromium as root, then runs everything as the unprivileged node user", () => {
+    expect(instructions.filter((line) => line.startsWith("USER "))).toEqual(["USER node"]);
+    expect(runtime.indexOf("USER node")).toBeGreaterThan(runtime.indexOf(chromiumInstall));
+    expect(runtime.indexOf(chromiumInstall)).toBeGreaterThan(-1);
+    expect(runtime[runtime.length - 1]).toBe('CMD ["node", "apps/browser-service/dist/index.js"]');
   });
 });

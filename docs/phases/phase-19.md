@@ -858,8 +858,8 @@ performs an external write. The service tests use a real HTTP server on
 | **Default-deny network egress** | Owner decision (2026-10-28): the egress proxy is Stage 19.3, not 19.2. The service has ordinary outbound access today, is off by default, and must not be described as egress-filtered. ADR-19-008 remains the requirement; S4 is **not** met. *(2026-10-29: implemented in the working tree by Stage 19.3 — §15. Not yet verified in a container, so S4 is still not claimed.)* |
 | **Certificate lifetime, rotation, revocation (U2)** | **Unresolved.** Not invented and not implemented. The service and the API accept certificate/key/CA paths and refuse to start or send without them; nothing generates, rotates, revokes or distributes a certificate, there is no CRL or OCSP check, and a certificate is read again only when a process restarts (the API's client re-reads its files per request). Lifetimes, a rotation cadence and a revocation path are an owner decision; until it is made, certificates are a manual deployment concern and a compromised client certificate stays valid until its CA is replaced. |
 | **A shared nonce store across instances, and across restarts** | `ProcessNonceStore` is per process. Two browser-service replicas would each accept the same nonce once, and a restarted process forgets the nonces it saw, so a request captured within its clock-skew window (60 s default) could be accepted once more. The compose service runs one replica (`container_name`, no scaling); a shared store is a Stage 19.7 concern with the rest of the network hardening. |
-| **Pinned Chromium** | The image installs Alpine's `chromium`, which a rebuild can change. Version pinning and a signed package source are open. |
-| **Container-as-sandbox claim** | Not claimed. The container is a process boundary with limits. Chromium keeps its own sandbox because the launcher sets `chromiumSandbox: true` (§14.11.1); if the host cannot support it the browser does not run. S10 has been run on a Windows host (§14.11.7); it has **not** been run inside the Linux container. |
+| **Pinned Chromium** | The image installs Alpine's `chromium`, which a rebuild can change. Version pinning and a signed package source are open. *(2026-11-16, source only: the image is Debian now, its base pinned by digest and Debian's `chromium` pinned to `156.0.8078.79-1~deb13u1` from Debian's signed archive — §20.9. Not built or verified yet.)* *(Later on 2026-11-16: built and verified in an isolated run — §20.10.)* |
+| **Container-as-sandbox claim** | Not claimed. The container is a process boundary with limits. Chromium keeps its own sandbox because the launcher sets `chromiumSandbox: true` (§14.11.1); if the host cannot support it the browser does not run. S10 has been run on a Windows host (§14.11.7); it has **not** been run inside the Linux container. *(2026-11-15: run inside the container under a reviewed seccomp profile — §20. Chromium's sandbox comes up whole, but the Alpine build's GPU process is killed by Chromium's own seccomp policy and the browser exits, so S10 is still not met.)* *(2026-11-16: the cause is musl's `pwrite()`, and the image moved to Debian in source — §20.9. S10 has not been run on it.)* *(Later on 2026-11-16: S10 passes on the Debian image in an isolated run on Docker Desktop, not yet on a deployment host — §20.10.)* |
 | **Durable artifacts** | 19.2 returns a screenshot by id from the runtime and stores nothing durably. Artifacts are per user and per process, not per session or per Organization (§14.4). Retention, quotas, Organization scoping and cross-instance lookup are Stage 19.4. |
 | **Desktop control** | Untouched. No desktop operation exists in this protocol. |
 
@@ -892,7 +892,10 @@ marked done. Nothing in this stage is enabled by default or deployed.
    Chromium's Linux sandbox uses, and `no-new-privileges` rules out the setuid
    sandbox. If so, the fix is a reviewed seccomp profile that permits them —
    never `seccomp:unconfined` and never `--no-sandbox`. This is an expectation,
-   not an observation.
+   not an observation. *(2026-11-15: observed, and the profile written and
+   verified — §20. Under Docker's default profile Chromium fails closed as
+   expected. Under the reviewed profile the sandbox works, and a different
+   failure remains, inside Chromium: §20.5.)*
 5. Commit, review and merge; then 19.3 migrates the tools fully and adds the
    egress control.
 
@@ -1079,7 +1082,8 @@ provider credential. It also shared the default network with PostgreSQL.
 container receives: `BROWSER_SERVICE_*` and `BROWSER_*` only, interpolated
 from the shell or the project .env at `docker compose` time under their own
 names, plus two fixed literals (`NODE_ENV=production`,
-`CHROME_PATH=/usr/bin/chromium`). Two tuning variables the runtime would read
+`CHROME_PATH=/usr/bin/chromium`; `/usr/lib/chromium/chromium` since the move
+to Debian, §20.9). Two tuning variables the runtime would read
 (`BROWSER_MAX_EXTRACT_CHARS`, `BROWSER_MAX_DOWNLOAD_BYTES`) are deliberately
 not passed, because an empty interpolation would fail its schema; their
 defaults apply. A `browser` network carries the API and the browser service and
@@ -2068,3 +2072,922 @@ looks like neither passes it. The person reading the exact text is the real chec
 | Actual result reporting | Pass, from a signing test agent. **A real agent not run** |
 | Agent restart and recovery | Pass, on PostgreSQL and in the agent's tests |
 | Windows integration tests with fake launchers | Pass. Real applications are not opened by any test |
+
+---
+
+## 20. S10 — Chromium's sandbox in the browser container (2026-11-15, working tree, not committed)
+
+**Status: Chromium's sandbox now works in the container, but S10 is still not
+met.** A reviewed seccomp profile gives Chromium the user namespaces its sandbox
+needs. Under it, `chrome://sandbox` reports a complete sandbox. On the image's
+Alpine Chromium, however, Chromium's **own** seccomp policy kills the GPU
+process, and the browser exits within seconds (§20.6). The way to fix that is
+an owner decision. `BROWSER_SERVICE_CHROMIUM_ENABLED` stays off.
+
+*(2026-11-16: `--disable-gpu` was tried and did not help. The cause was then
+found in musl's `pwrite()`, and the owner chose a Debian/glibc image. That
+image is written but not yet built or run — §20.9. S10 is still not met.)*
+
+*(Later on 2026-11-16: the Debian image was built and verified in an isolated
+run. S10, the 30 s stability check and S11 all pass — §20.10. The browser
+service stays disabled: deployment-host verification and full integration
+testing are still pending.)*
+
+### 20.1 Before this change
+
+The read-only investigation (same day) found three things that, under the
+shipped compose settings, kept Chromium from starting with its sandbox in the
+container:
+
+- **No user namespaces.** Docker's default seccomp profile allows `clone` only
+  when `(flags & 0x7E020000) == 0` for a process without `CAP_SYS_ADMIN`. It
+  also refuses `unshare` without that capability. Together these take away the
+  user namespaces Chromium's namespace sandbox (Layer 1) is built on.
+- **No setuid fallback.** `no-new-privileges` rules out the setuid helper
+  (`chrome-sandbox`, which Alpine installs mode 4755).
+- **No writable home.** The root filesystem is read-only, and `HOME`
+  (`/home/node`) was not writable.
+
+Chromium therefore failed closed. The launcher sets `chromiumSandbox: true` and
+refuses every switch that would disable the sandbox (§14.11.1).
+
+### 20.2 What changed
+
+All of these apply to the browser service only:
+
+- `apps/browser-service/seccomp/docker-default-profiles-v0.2.4.json`: new.
+  Docker's default profile, byte for byte (§20.3).
+- `apps/browser-service/seccomp/browser-service.json`: new. That profile plus
+  three rules (§20.3).
+- `docker-compose.yml`:
+  - `seccomp=./apps/browser-service/seccomp/browser-service.json` beside
+    `no-new-privileges:true`;
+  - a tmpfs `/home/node:size=32m,uid=1000,gid=1000,mode=0700`;
+  - nothing else. `browser-egress` keeps Docker's default profile. The
+    `cap_drop: ALL`, the `node` user, the read-only root, `/tmp`, the limits
+    and the networks are as they were.
+- `apps/browser-service/scripts/s10-sandbox-check.mjs`: rewritten (§20.4).
+- `apps/browser-service/test/browser-service-compose.test.ts`: ten structural
+  tests (§20.5).
+- `docs/DEPLOYMENT.md`: the browser-service section and its step 5.
+- This section, and the dated notes in §14.7 and §14.9.
+
+There is one other uncommitted change from earlier the same day, approved
+separately. In local mode, `apps/browser-service/scripts/s11-egress-check.mjs`
+now starts Chrome with `--disable-features=HttpsUpgrades,HttpsFirstBalancedMode`.
+Chrome 157 upgrades plain-HTTP navigations to HTTPS, which broke the harness's
+local checks. The change is to the harness only, not to any policy.
+
+### 20.3 The profile
+
+**Where Docker's default comes from.** Docker Desktop runs Engine 29.9.2
+(`docker info`: `name=seccomp,profile=builtin`) on kernel
+`6.18.58.1-microsoft-standard-WSL2`. Its default profile was traced as follows:
+
+- At the engine's tag (`docker-v29.9.2`, commit `0367cbeb`), `go.mod` requires
+  `github.com/moby/profiles/seccomp v0.2.4`, with no `replace`.
+- The engine builds its profile from that module's Go `DefaultProfile()`, from
+  which `default.json` is generated.
+- Two copies of the JSON are byte-identical: the one at the `moby/profiles` tag
+  `seccomp/v0.2.4`, and the one vendored in the moby tree at `0367cbeb`. Both
+  have SHA-256 `785b2429264afba4d594320337cb17f144f3c7d51585f9805eef72e28f4f9334`,
+  are 14,122 bytes, and have git blob `77df9d19e844f4403e41e401aca25ab28861e317`.
+  GitHub's API reports the same blob.
+- The Go rules for `clone`, `clone3`, `unshare`, `setns`, `mount` and `chroot`
+  were compared with the JSON, and they agree.
+- runc 1.5.2 builds each condition with `MakeCondition(index, op, value,
+  valueTwo)`. So `SCMP_CMP_MASKED_EQ` means `(arg & value) == valueTwo`, and
+  `valueTwo` defaults to 0.
+
+**The applied profile.** `browser-service.json`, SHA-256
+`043dcf8be4f77590f68b7017826c014eb2f58f1083658c3aadaeb2a76f3536df`, is that
+object with three rules appended, taking it from 37 rules to 40. Each new rule
+is commented "JARVIS browser-service (Phase 19 S10): …".
+
+| Syscall | Added rule | Default's rule | What it now allows |
+|---|---|---|---|
+| `clone` | Allow when `(flags & 0x0E020000) == 0` (`MASKED_EQ`, value 235012096). Like the default's rule, it excludes holders of `CAP_SYS_ADMIN` and the s390/s390x arches | Allow when `(flags & 0x7E020000) == 0` | `CLONE_NEWUSER`, `CLONE_NEWPID` and `CLONE_NEWNET`. `CLONE_NEWNS`, `NEWUTS`, `NEWIPC` and `NEWCGROUP` stay refused. The kernel still demands `CAP_SYS_ADMIN` over the owning user namespace for a PID or network namespace, so those two work only together with a new user namespace |
+| `unshare` | Allow when flags are exactly `CLONE_NEWUSER` (`EQ` 0x10000000) | Needs `CAP_SYS_ADMIN` | A user namespace and nothing else. This is narrower than the masked rule the investigation proposed |
+| `chroot` | Allow, with no argument condition | Needs `CAP_SYS_CHROOT` | The call passes the filter, but the kernel still demands `CAP_SYS_CHROOT`. The container has none (`cap_drop: ALL`), so it works only inside the caller's own user namespace. That is where Chromium chroots, to `/proc/self/fdinfo/` |
+
+Every other rule is the default's, unchanged. The compose test holds the
+applied file to "the vendored object plus exactly these three rules".
+
+- `clone3` still returns `ENOSYS`, so the C library falls back to `clone`,
+  whose flags the filter can inspect.
+- `setns` and `mount` still need `CAP_SYS_ADMIN`.
+- No capability is added. There is no privileged mode, no `seccomp:unconfined`
+  and no AppArmor change.
+- `no-new-privileges` stays, so the setuid sandbox stays unusable. S10
+  requires Layer 1 to be the namespace sandbox, never SUID.
+
+**Residual risk.** Allowing unprivileged user namespaces exposes kernel code
+that is otherwise reachable only with capabilities. Inside its own user
+namespace a process holds capabilities over the new network namespace it
+created, and that code has a history of privilege-escalation bugs. Refusing
+mount namespaces removes the mount-related part of that surface. This is the
+price of Chromium's own sandbox. The alternative, the setuid helper, needs a
+privilege that `no-new-privileges` forbids. The host's `max_user_namespaces`
+bounds how many can exist; it is 30462 here.
+
+### 20.4 The S10 check
+
+The rewritten check works like this:
+
+- **Preconditions, for information only.** It prints the uid, `NoNewPrivs`,
+  the seccomp mode, the effective and bounding capabilities, whether the root
+  is read-only, whether `HOME` is writable, and `max_user_namespaces`.
+- **Required checks:**
+  - the service's launch options;
+  - Chromium starts with its sandbox;
+  - no switch that disables the sandbox;
+  - `chrome://sandbox` shows Layer 1 as `Namespace` (SUID or None fails), with
+    PID namespaces, network namespaces and Seccomp-BPF, and says the browser is
+    adequately sandboxed;
+  - an offline page renders;
+  - a live renderer runs in a user, PID and network namespace that each differ
+    from the browser process's own (read from `/proc/<pid>/ns/*`);
+  - the browser is still up five seconds later and renders a second page;
+  - a control launch with Playwright's default options shows `--no-sandbox`,
+    and the check sees it.
+- **Exit codes.** 0 when every check passes, 1 when any fails, and 2 when a
+  prerequisite is missing (not Linux, no Chromium, an unbuilt service).
+- **Guarded steps.** Every launch and every step is guarded. A browser that
+  dies mid-check produces FAIL lines carrying Chromium's own error lines,
+  never a hang or an unsettled promise. Each step times out at 30 s.
+- **Finding renderers.** Zombies and the crash handler are skipped. A
+  process's type is read from its whole command line, because Chromium
+  rewrites its children's process titles.
+
+### 20.5 Evidence (2026-11-15, Docker Desktop on Windows, isolated)
+
+**Method.** A `git archive` of `HEAD` (`9b10140`) with only this change's files
+laid over it. The image was built under its own tag. It ran in compose project
+`jarvis-p19-stage1-verify2`, with its own container names, a throwaway env file
+and throwaway test certificates, and only `browser-service` and
+`browser-egress`. Chromium was on, and the checks ran offline. The image holds
+Alpine 3.24.4, `chromium-156.0.8078.79-r0`, `musl-1.2.6-r3` and Node 24.22.3.
+
+| Check | Result |
+|---|---|
+| The container | Runs as uid 1000, with `NoNewPrivs` 1, `Seccomp` 2 (filter), `CapEff` 0 and `CapBnd` 0. The root is read-only. `HOME` `/home/node` is a writable tmpfs (mode 700, owner 1000:1000). The profile inside the container has the same content as the file; compose re-serialises it |
+| S10 under the reviewed profile, three runs | Every sandbox check passed in every run: started with its sandbox (156.0.8078.79); no switch that disables it; `chrome://sandbox` showing Layer 1 `Namespace`, PID Yes, network Yes, Seccomp-BPF Yes and "adequately sandboxed"; and the control saw `--no-sandbox`. Runs 1 and 2: 9 passed, 3 failed. The browser exited before the page rendered, so the namespace check was not reached, and the stay-up check failed. Run 3: 11 passed, 1 failed. The page rendered, and the renderer check passed: browser `user:[4026531837] pid:[4026532693] net:[4026532695]`, renderer `user:[4026532844] pid:[4026532766] net:[4026532774]`, with 3 live renderers. Then the browser exited within 5 s. Every run exited 1 |
+| Negative control | Same image and hardening, under Docker's default profile (`docker run`, `--network none`). Chromium did not start: "Failed to move to new namespace: PID namespaces supported, Network namespace supported, but failed: errno = Operation not permitted". The setuid sandbox was "not running as root", because of `PR_SET_NO_NEW_PRIVS`, and the zygote exited. S10 gave 2 passed, 1 failed, exit 1. **It failed closed: nothing ran unsandboxed** |
+| Containment, as `node`, under the reviewed profile (busybox) | Allowed: a user namespace; `chroot` inside the caller's own user namespace. Refused (EPERM): a mount namespace, alone or inside a new user namespace; UTS and IPC namespaces inside a new user namespace; a network namespace through `unshare`; `chroot` outside a user namespace; `setns` into PID 1's mount namespace. The cgroup probe never ran, because busybox's `unshare` has no `-C` option. `CLONE_NEWCGROUP` is refused by both the clone mask and the exact `unshare` rule, and the compose test holds that |
+| Containment under Docker's default | `unshare(CLONE_NEWUSER)` refused, and so a `chroot` inside one is refused too |
+| S11, container mode, reviewed profile | **12 passed, 0 failed** |
+| S11, local mode (host Chrome 157) | **12 passed, 0 failed** |
+| `@jarvis/browser-service` | **192 passed** (4 files). `browser-service-compose` is 36 of them, 10 new. `typecheck`, `typecheck:tests`, `lint`, and ESLint on both scripts are clean |
+
+### 20.6 What still fails: Chromium kills its own GPU process (open, an owner decision)
+
+This was captured with `DEBUG=pw:browser`, in the same container, under the
+reviewed profile:
+
+1. The GPU process twice fails to initialise ANGLE on Vulkan (SwiftShader):
+   "Internal Vulkan error (-7): A requested extension is not supported". Each
+   time this is followed by "Exiting GPU process due to errors during
+   initialization".
+2. Chromium restarts it three times. Each restart dies in Chromium's own SIGSYS
+   handler — `sigsys_handlers.cc:**CRASHING**:seccomp-bpf failure in syscall
+   nr=0x148` (`pwritev2` on x86-64) — and then "GPU process exited
+   unexpectedly: exit_code=139".
+3. `FATAL:content/browser/gpu/gpu_data_manager_impl_private.cc:389` "GPU process
+   isn't usable. Goodbye." The browser exits 1.3 to 2.8 s after it was
+   launched. A page that renders before then, as in run 3, does not change
+   this.
+
+The filter that trapped the call is Chromium's own Layer 2 (its GPU-process
+policy), not Docker's. Docker's default allows `pwritev2`, and the report comes
+from Chromium's own SIGSYS handler. No change to Docker's profile can fix it,
+and loosening that profile would not help. Why the GPU process makes this call
+on this build was not established. A musl build reaching a syscall that the
+policy does not expect is a plausible guess, not a finding.
+
+There are three ways forward. None was applied, because each is outside this
+change's approval:
+
+- **a. A launch switch** that keeps the GPU process off the failing path
+  (`--disable-gpu`, for example), added in `sandboxedChromiumLaunchOptions`.
+  - It is not known whether that avoids the GPU process on this build:
+    headless Chromium may still start one for software compositing.
+  - It must be proven by S10, including `chrome://sandbox`.
+  - It must never be `--disable-gpu-sandbox`, `--in-process-gpu` (which moves
+    the GPU code into the unsandboxed browser process) or any switch the
+    launcher refuses.
+- **b. A glibc-based image with a pinned Chromium build** (Playwright's, or a
+  Debian package). This also closes the "Pinned Chromium" deferral in §14.7.
+  It is a larger change: the image, its size and its update path.
+- **c. Report it to Alpine's chromium maintainers** and wait for a fixed
+  package. This does not help now.
+
+Until one of these is chosen and S10 passes, `BROWSER_SERVICE_CHROMIUM_ENABLED`
+stays off.
+
+*(2026-11-16: (a) was tried and ruled out; (b) was chosen, as a Debian
+package. The cause is now established — §20.9.)*
+
+### 20.7 Also found, not changed
+
+- **No init process in the browser container.** Chromium children that die are
+  re-parented to PID 1, the Node service, which does not reap them. The
+  zombies count against `pids_limit: 512`. `init: true` would add a reaper, but
+  that is outside this change.
+- **Profile upkeep.** An Engine upgrade can change Docker's default profile,
+  and the vendored copy then lags behind. `docs/DEPLOYMENT.md` says what to do,
+  and the compose test pins the vendored copy's hash.
+- **Chromium is not pinned** (§14.7). These results are for
+  `chromium-156.0.8078.79-r0`; a rebuild can change them.
+- **Docker Desktop on WSL2 only.** A Linux server host's own policy on user
+  namespaces can refuse them as well (Ubuntu's AppArmor restriction on
+  unprivileged user namespaces, for example). Run S10 on the deployment host.
+
+### 20.8 Exit criteria, assessed
+
+| The brief's criterion | State |
+|---|---|
+| Docker's exact default, with its source and checksum verified | Met (§20.3) |
+| Only the reviewed rules, for the browser service only; the egress proxy on Docker's default | Met; the compose tests hold it |
+| No `seccomp:unconfined`, `--no-sandbox`, `CAP_SYS_ADMIN` or privileged mode; `no-new-privileges`, `cap_drop: ALL`, non-root and the limits kept | Met; the compose tests hold it |
+| A tmpfs home for the browser service | Met |
+| The S10 script: guarded launches, preconditions for information only, required checks, exit codes 0/1/2 | Met |
+| `chrome://sandbox` evidence | Met: Layer 1 `Namespace`, PID, network, Seccomp-BPF, adequate, in every run |
+| A renderer's separate user, PID and network namespaces | Met in the one run that reached it (run 3). Runs 1 and 2 did not reach it: the browser exited first |
+| Offline rendering | Intermittent: a race with the GPU process's FATAL exit |
+| The browser stays up | **Not met** (§20.6) |
+| Negative control fails closed | Met |
+| Containment | Met. The cgroup probe could not run under busybox; the rule refuses it, and the test holds that |
+| S11, container mode 12/12 and local mode 12/12 | Met |
+| **S10 overall** | **Not met** |
+
+### 20.9 `--disable-gpu`, the cause, and the move to Debian (2026-11-16, working tree, not committed)
+
+**Status: the Debian image is written but not built or run. S10 is not met,
+and `BROWSER_SERVICE_CHROMIUM_ENABLED` stays off.**
+
+*(Later the same day: built and verified in isolation, with every acceptance
+criterion in §20.9.4 met — §20.10.)*
+
+#### 20.9.1 `--disable-gpu` (isolated experiment, ruled out)
+
+The method was as in §20.5, in compose project `jarvis-p19-gpu-verify`:
+
+- a `git archive` of `9c17dd4` with this stage's uncommitted files laid over it;
+- one line added to `sandboxedChromiumLaunchOptions` in that snapshot only
+  (`"--disable-gpu"`); `engine.ts` in the working tree was not changed;
+- the same image contents otherwise (`chromium-156.0.8078.79-r0`,
+  `musl-1.2.6-r3`).
+
+| Check | Result |
+|---|---|
+| The flag reached Chromium | Yes, on the browser's real command line |
+| S10, three runs | Each 9 passed, 3 failed, exit 1. Every `chrome://sandbox` check passed; the browser exited before the page rendered |
+| The browser stays up | 0.9 s and 1.0 s in a 30 s diagnostic; 1.18 s in S10's debug run |
+| Chromium's log | A GPU process still starts and fails ANGLE/Vulkan initialisation. Three restarts each die with `seccomp-bpf failure in syscall nr=0x148` (exit 139), then `GPU process isn't usable. Goodbye.` and SIGABRT. The counts and arguments are the same as without the flag |
+| S11, container and local mode | 12/12 and 12/12 |
+| `@jarvis/browser-service`, in the snapshot | 192 passed; typecheck and lint clean |
+
+Cleanup removed only that project's resources. Afterwards the Docker
+inventory, the database counts and the working tree were as before.
+
+#### 20.9.2 The cause (read-only audit, from source)
+
+1. **musl 1.2.6 changed `pwrite()` and `pwritev()`.** Each now calls
+   `pwritev2(fd, iov, count, offset, RWF_NOAPPEND)` first. It falls back to the
+   older call only when that returns `ENOSYS` or `EOPNOTSUPP`. The change is
+   musl commit `5370070fde` ("fix pwrite/pwritev handling of O_APPEND files");
+   the 1.2.6 release notes say "pwrite now handles O_APPEND correctly". musl
+   1.2.5 called `pwrite64` directly. The crash's arguments (a file descriptor,
+   one iovec, offset 0) are that call's.
+2. **Chromium's GPU-process policy allows `pwrite64` and not `pwritev2`**
+   (`sandbox/policy/linux/bpf_gpu_policy_linux.cc` at 156.0.8078.79). The
+   baseline policy answers any syscall it does not list with `CrashSIGSYS()`,
+   so the process dies before musl's fallback can run.
+3. **Alpine's `musl-sandbox.patch` adds `pwritev2` to the renderer policy
+   only.** None of its chromium patches touches the GPU policy, on 3.24-stable
+   (156) or on master (157.0.8103.50). An Alpine upgrade would not fix it.
+4. **glibc does not make the call.** glibc 2.36 and 2.41 implement `pwrite()`
+   with `pwrite64` and `pwritev()` with `pwritev`, both of which the GPU
+   policy allows.
+
+Not established:
+
+- which Chromium code calls `pwrite` in the GPU process (no stack trace was
+  taken);
+- whether a glibc Chromium has some other GPU-process failure in this
+  container. On Alpine the ANGLE/Vulkan initialisation errors were not fatal;
+  the SIGSYS crashes were.
+
+#### 20.9.3 What changed (source only; nothing built)
+
+The owner approved changes to these five files only.
+
+- **`apps/browser-service/Dockerfile`:**
+  - Every stage is built from
+    `node:24.22.3-trixie-slim@sha256:af02d57b57719b9657a45199a79264a9437940cd55b3c7b3fc99615654f124a0`:
+    Node 24.22.3 on Debian 13, with the digest checked against the registry.
+    Its `node` user is uid/gid 1000, as before.
+  - The base stage installs `openssl` with apt, for Prisma's generator. It
+    was `apk add libc6-compat openssl`.
+  - The runtime stage installs `chromium=156.0.8078.79-1~deb13u1` and
+    `chromium-common=156.0.8078.79-1~deb13u1`, with
+    `--no-install-recommends`, plus `fonts-liberation` so that pages render
+    text. This is the same upstream version as the Alpine package, so the C
+    library is what changes.
+  - The same RUN fails the build if `chromium-sandbox` (Debian's setuid
+    helper, a separate package) is installed, if
+    `/usr/lib/chromium/chrome-sandbox` exists, or if
+    `/usr/lib/chromium/chromium` is not executable.
+  - `CHROME_PATH` is `/usr/lib/chromium/chromium`. `/usr/bin/chromium` is
+    Debian's wrapper script, which adds switches from `/etc/chromium.d`
+    (`--enable-gpu-rasterization`, `--disable-pings` and others) to every
+    launch.
+- **`docker-compose.yml`:** `CHROME_PATH: /usr/lib/chromium/chromium`, and
+  nothing else.
+- **`apps/browser-service/test/browser-service-compose.test.ts`:** the
+  `CHROME_PATH` literal, and six structural tests of the image:
+  - the base is pinned by digest;
+  - nothing from Alpine is left;
+  - exactly the pinned packages are installed, with no recommends;
+  - `chromium-sandbox` is never installed, and the build-time checks run in
+    order;
+  - `CHROME_PATH` names the real binary in both places;
+  - Chromium is installed before `USER node`, which is the only `USER`.
+- **`docs/DEPLOYMENT.md`** and this document.
+
+Unchanged:
+
+- `engine.ts` and every launch option;
+- both seccomp profiles;
+- the tmpfs mounts, limits, networks, `read_only`, `cap_drop: ALL`,
+  `no-new-privileges` and the non-root user;
+- the S10 and S11 scripts and their acceptance criteria;
+- Playwright (`playwright-core` 1.63.0);
+- the root `Dockerfile`.
+
+The egress proxy runs from the same image, so it moves to Debian too.
+
+Debian's sandbox patch (`debianization/sandbox.patch`) still fails closed.
+Where upstream logs FATAL when no sandbox is usable, Debian logs an error and
+exits.
+
+#### 20.9.4 Still to do
+
+*(Done the same day — §20.10. The acceptance below is what that run was held
+to.)*
+
+The image must be built and verified in an isolated project, as in §20.5,
+before anything else, and that needs the owner's approval. Acceptance is
+everything §20.8 lists, plus:
+
+- S10 passes in three runs (exit 0);
+- the browser stays up at least 30 s and renders again;
+- `chrome://sandbox` still holds afterwards;
+- Chromium's log shows no `seccomp-bpf failure`, no "GPU process exited
+  unexpectedly" and no FATAL;
+- under Docker's default profile it fails closed;
+- the containment probes give the §20.5 answers;
+- S11 passes 12/12 in both modes;
+- the image holds `chromium` at the pinned version and no `chromium-sandbox`,
+  and its setuid files and its size are recorded.
+
+Risks and open points:
+
+- **The fix is inferred from source, not yet observed** (§20.9.2). *(Observed
+  since, in isolation: §20.10.)*
+- **An exact pin can stop resolving.** Debian keeps only the current version
+  in trixie-security, so after a new advisory the build fails. That is the
+  signal to take the update (`docs/DEPLOYMENT.md`), not to unpin.
+- **Debian lags Chrome stable by days to weeks.** On 2026-11-16 it had 156,
+  against stable 157.0.8103.78.
+- **Playwright skew.** `playwright-core` 1.63.0 was built against Chromium
+  153.0.8010.12; 156 is the skew already in use on Alpine. Version 1.64.1
+  targets 156.0.8078.4. Upgrading is a separate change.
+- **The image grows.** `chromium` and `chromium-common` alone are about 390 MB
+  installed (Debian's metadata), and they bring dependencies such as
+  `x11-utils` and `xdg-utils`. Debian's base also carries setuid tools (`su`,
+  `mount`, `passwd`), which `no-new-privileges` neutralises. None of this is
+  measured yet. *(Measured since: §20.10.2.)*
+- **No init process** (§20.7): unchanged.
+- **Build-time network.** The build needs Debian's archive, as well as npm and
+  Prisma's engine host as before.
+
+### 20.10 The Debian image, verified in isolation (2026-11-16, working tree, not committed)
+
+**Status: PASS in an isolated run on Docker Desktop (WSL2).** Every acceptance
+criterion in §20.9.4 is met. The browser service **stays disabled**
+(`BROWSER_SERVICE_CHROMIUM_ENABLED` off) until the open items in §20.10.6 are
+resolved.
+
+#### 20.10.1 Method
+
+- **Isolation.** The run used compose project `jarvis-p19-glibc-verify`, with
+  only `browser-service` and `browser-egress`, on the project's own networks
+  and with no published port. It had a throwaway env file and test TLS
+  material. The existing JARVIS containers, networks, volumes and databases
+  were not touched.
+- **Source.** A `git archive` of `9c17dd4`, with the nine approved uncommitted
+  files laid over it, each checked by SHA-256 against the working tree: the
+  Dockerfile, `docker-compose.yml`, both seccomp profiles, the S10 and S11
+  scripts, the compose test, `docs/DEPLOYMENT.md` and this document.
+  `engine.ts` is unchanged. The image tag was
+  `jarvis-p19-glibc-verify/browser-service:9c17dd4-43a01b757db0`.
+- **Host.** Docker Desktop, Engine 29.9.2, kernel
+  `6.18.58.1-microsoft-standard-WSL2`.
+- **The 30 s stability check** is a scratch diagnostic, not a repository file.
+  It was piped into the container and:
+  - launches Chromium with the service's own launch options, offline;
+  - renders a page;
+  - holds the browser for 35 s, sampling every 5 s whether it is still
+    connected and which GPU-process PID exists;
+  - renders again and re-reads `chrome://sandbox`.
+
+  Chromium's own log was captured throughout (`DEBUG=pw:browser`).
+- **The containment probes** are the ten from §20.5, run with Debian's
+  `unshare` and `nsenter` (util-linux) and `chroot` (coreutils) instead of
+  busybox.
+
+#### 20.10.2 The image
+
+| | |
+|---|---|
+| Build | Exit 0 in 108 s. The base resolved at `sha256:af02d57b…f124a0`, the digest in §20.9.3 |
+| Size | 2,745,574,344 bytes (the Alpine image: 2,722,951,777) |
+| System | Debian 13.7, glibc 2.41-12+deb13u4, no musl loader |
+| Chromium | `chromium` and `chromium-common` 156.0.8078.79-1~deb13u1, from trixie-security. The binary reports Chromium 156.0.8078.79 |
+| The other named packages | `fonts-liberation` 1:2.1.5-3 and `openssl` 3.5.7-1~deb13u3 |
+| Setuid helper | `chromium-sandbox` is not installed, and `/usr/lib/chromium/chrome-sandbox` is absent |
+| `CHROME_PATH` | `/usr/lib/chromium/chromium`, which is executable |
+| Packages the runtime step installed | 170 (169 new and 1 upgraded), with recommends off. Chromium's dependencies bring in `systemd`, `dbus`, GTK 3, Mesa, LLVM 19, `x11-utils` and `xdg-utils` |
+| Setuid and setgid files | 12: `chage`, `chfn`, `chsh`, `expiry`, `gpasswd`, `mount`, `newgrp`, `passwd`, `su`, `umount` and `unix_chkpwd` from Debian's base, and `dbus-daemon-launch-helper` from Chromium's dependencies. `no-new-privileges` (`NoNewPrivs` 1) keeps any of them from gaining privilege |
+| Container | uid 1000; `NoNewPrivs` 1; `Seccomp` 2; `CapEff` and `CapBnd` 0; read-only root; `HOME` a writable tmpfs (700, 1000:1000); `pids.max` 512; `memory.max` 2 GiB. The applied profile is content-identical to `browser-service.json` (40 rules, the 3 JARVIS ones). The egress proxy is on Docker's default |
+
+#### 20.10.3 Results
+
+| Check | Result |
+|---|---|
+| S10, three runs | **3/3 passed, 12/12 and exit 0 in each.** Layer 1 `Namespace`; PID namespaces, network namespaces and Seccomp-BPF Yes; "adequately sandboxed"; no sandbox-disabling switch. The renderers run in their own namespaces, for example browser `user:[4026531837] pid:[4026532693] net:[4026532695]` and renderer `user:[4026532838] pid:[4026532840] net:[4026532770]`, with 3 live renderers. The offline page renders, the browser is up 5 s later, and the control sees `--no-sandbox` |
+| Stability, three runs | **3/3 passed, each over 30 s** (exit 0). The browser stayed connected for 35.4, 35.4 and 35.6 s and rendered a second page after the hold. `chrome://sandbox` then still reported `Namespace`, PID, network and Seccomp-BPF, and "adequately sandboxed". Each run kept one GPU-process PID throughout (1752, 2081, 2405), so there was no restart |
+| Chromium's log, all three stability runs | **Seccomp-BPF failures 0. Unexpected GPU-process exits ("GPU process exited unexpectedly") 0. FATAL errors 0.** GPU initialisation exits 0. Its 78 error lines are all D-Bus connection failures; the container has no system bus. Chromium exited with code 0 when closed |
+| Negative control | **PASS: fails closed.** With the same image and hardening under Docker's default profile (`--network none`), Chromium did not start. It printed "No usable sandbox! If this is a Debian system, please install the chromium-sandbox package…" and exited 1; S10 gave 2 passed, 1 failed, exit 1. Nothing ran unsandboxed. Under that profile the user-namespace probes are refused |
+| Containment, reviewed profile | **10/10 PASS.** Allowed: a user namespace, and `chroot` inside the process's own user namespace. Refused: a mount, UTS, IPC and cgroup namespace inside a new user namespace; a network namespace through `unshare`; a mount namespace alone; `chroot` outside a user namespace; and `setns` into PID 1's mount namespace. The cgroup probe ran this time (util-linux `unshare -C`) |
+| S11, container mode | **12/12**, exit 0. No route to a public address, the metadata address or PostgreSQL by name, nor to either gateway's published PostgreSQL and API ports. The proxy is reachable, and metadata, PostgreSQL and the API are refused through it (403) |
+| S11, local mode | **12/12**, exit 0, from the snapshot with the host's Chrome. An allowed name loads through the proxy (200). The metadata address, a private name and loopback all go to the proxy and are refused |
+| Regression and static checks | **PASS.** In the snapshot: `@jarvis/browser-service` 198/198 (the compose test 42/42); `typecheck`, `typecheck:tests` and `lint` exit 0; ESLint on the S10 and S11 scripts exit 0. In the working tree: `apps/api`'s `docker-healthchecks` and `docker-oauth-callback` tests 10/10 |
+
+The negative control's message suggests installing `chromium-sandbox`. Never do
+that here (§20.9.3).
+
+#### 20.10.4 Cleanup and integrity (PASS)
+
+- **Removed**, each by exact name and label: the 2 containers, 2 networks,
+  1 volume and 1 image tag of `jarvis-p19-glibc-verify`, plus the throwaway
+  certificates, env file and snapshot.
+- **No base image was left locally**: BuildKit kept its layers in the build
+  cache. Nothing was pruned, so the build cache remains.
+- **Docker inventory** afterwards was identical to the pre-flight: 4 containers
+  (IDs, images, start times, restart counts, policies, mounts, networks and
+  configuration hashes), 5 networks, 51 volumes and 8 images. Docker Desktop
+  was left running.
+- **Databases**, read only: `jarvis-docker-postgres` had 1 user and 38
+  migrations, and `jarvis-postgres` 2 users and 39 migrations, each with the
+  same latest migration time as before.
+- **Git** was identical before and after: branch, HEAD `9c17dd4`, 0 staged,
+  all 81 status entries and the hash of every changed and untracked file.
+- **`BROWSER_SERVICE_CHROMIUM_ENABLED`** stayed off: the compose default is
+  `false`, and no live browser-service container exists.
+
+#### 20.10.5 What this establishes
+
+The GPU-process crash came from musl's `pwrite()` (§20.9.2). With the same
+Chromium version built against glibc, the GPU process starts once and stays
+up, and Chromium's sandbox is whole. S10's criteria are met in this isolated
+environment.
+
+#### 20.10.6 Still open
+
+The browser service **must remain disabled**. Before it can be enabled:
+
+1. **Deployment-host verification is pending.** These results are from Docker
+   Desktop on WSL2. S10 and S11 must pass on the host that will run the
+   service, whose own policy on unprivileged user namespaces may differ
+   (§20.7).
+2. **Full browser-service integration testing is pending:** navigation,
+   screenshots and downloads through the service itself, with Chromium
+   enabled. S10 and S11 launch Chromium directly.
+3. **Playwright 1.63 with Chromium 156 has not been fully validated.**
+   `playwright-core` 1.63.0 was built against Chromium 153.0.8010.12, and S10
+   and S11 exercise only part of what the service uses.
+4. **Zombie processes accumulate, and the init-process decision is open.**
+   Between 24 and 33 unreaped processes were present during these runs, rising
+   from run to run (§20.7). They count against `pids_limit: 512`.
+5. **`BROWSER_SERVICE_CHROMIUM_ENABLED` stays off** until all of the above are
+   resolved.
+
+Also still true:
+
+- the pinned version stops resolving at Debian's next Chromium advisory
+  (§20.9.4);
+- Debian lags Chrome stable;
+- the image carries Chromium's whole Debian dependency chain (§20.10.2).
+
+Nothing in §20 is committed.
+
+---
+
+## 21. P0 — the API's wiring to the browser service, and a real-Chromium E2E (2026-11-16, working tree, not committed)
+
+**Status: P0 complete in the working tree (not committed). The real-Chromium E2E
+passed 18/18 on its third owner-approved run, with the artifact check 12/12 and
+the Docker inventory unchanged (§21.5). The first two runs found one product
+defect (in-page scripts, now fixed) and three test-harness errors, all fixed.
+This is not production enablement. The browser service stays disabled:**
+`BROWSER_ENABLED` is `false` in the default stack, and
+`BROWSER_SERVICE_CHROMIUM_ENABLED` is `false` everywhere except the E2E's own
+isolated project. What remains before enabling it anywhere is in §21.6.
+
+### 21.1 What was missing
+
+- **The Docker stack could not browse at all.** The compose API had
+  `BROWSER_ENABLED: "false"` as a literal, overriding the `.env` it also
+  loads, and nothing wired it to the browser service or mounted its client
+  certificate.
+- **The TLS files were checked only for being named.**
+  `readBrowserServiceEndpoint` checked that the client certificate and key
+  paths were SET, never that they were usable. An unreadable, mismatched,
+  expired or wrong-identity file surfaced only as "unavailable" on the first
+  browser request a person made.
+- **Nothing said whether the API could talk to the service.** That covers
+  reachability, the TLS handshake, the API's identity, the signature, the
+  clock and the protocol version.
+
+### 21.2 The wiring (scope A)
+
+- **The default stays off.** `docker-compose.yml` keeps the API's
+  `BROWSER_ENABLED` at `"false"`, now with the reason stated beside it.
+- **The opt-in is `docker-compose.browser.yml`**, named on the command line
+  together with the `browser-service` profile. It is not a
+  `docker-compose.override.yml`, which compose would load by itself; the
+  compose test pins that none exists. It sets:
+  - the API's `BROWSER_ENABLED`, `BROWSER_SERVICE_URL`
+    (`https://browser-service:3200`, over the internal `browser` network the
+    API was already on) and its client certificate, key and CA paths;
+  - the service's own certificate, key and CA paths;
+  - two read-only mounts from `JARVIS_BROWSER_TLS_DIR`, which compose refuses
+    to run without: `api/` into the API only, `service/` into the service
+    only. Neither container holds the other's private key.
+
+  It sets nothing else: no network, port, limit, capability, user or security
+  option. It never sets `BROWSER_SERVICE_CHROMIUM_ENABLED`, which stays a
+  separate switch.
+- **The TLS check** (`checkBrowserServiceClientTls`, in
+  `@jarvis/browser-protocol`) runs before any browser tool is registered. It
+  requires each file to be readable; the certificate and the CA to parse; the
+  key to parse and match the certificate; both certificates to be in date; and
+  the certificate to name `BROWSER_SERVICE_PEER_IDENTITY`. The last uses the
+  service's own rule: its CN, or else its first subject alternative name. A
+  failure registers no tool and never falls back to an in-process browser.
+  Reasons name the variable to fix, never a path, contents or a value.
+- **The probe** (`probeBrowserService`) runs in the background after
+  registration and never blocks start-up. It is one authenticated no-op over
+  the real protocol: `session.close` for a random session id that was never
+  issued, as the subject `jarvis-startup-probe`. The service authenticates it
+  (mutual TLS, signature, timestamp, nonce), checks the protocol version and
+  answers `{ closed: true }` without touching any session. No operation was
+  added, and it works with Chromium off.
+  - Transport failures are classified by their error CODE only, never the
+    message (`BrowserServiceTransportError.failure`).
+  - Transient reasons are retried at 0, 5, 15, 30 and 60 s. A configuration
+    failure is logged once.
+- **Diagnostics.** Every registration outcome is its own `cause`; the table is
+  in `docs/DEPLOYMENT.md`, step 4. The disabled event says whether a service
+  URL is being ignored. `readBrowserServiceEndpoint`'s `invalid` result now
+  carries `problem: missing | invalid-url | invalid-value`.
+
+### 21.3 The real-Chromium E2E (scope B)
+
+Command: `node scripts/browser-e2e/run.mjs`. `--dry-run` prints the plan and
+every command and touches nothing; `--keep` leaves the project running.
+
+**The path under test**
+(`apps/api/test/e2e/browser-real-chromium.e2e.ts`). Every link is the
+production class:
+
+1. a request whose tool choice comes from a scripted model;
+2. the `Orchestrator` and the `BrowserAgent`, with its policy;
+3. `ToolApprovalService`, for the approval-gated writes;
+4. `ToolExecutor`, with `PermissionService`, `ApprovalService` and the
+   shared-connection access gate;
+5. the browser tools, with the journal, approval consumption and write scope;
+6. `RemoteBrowserRuntime`, whose Organization comes from the real resolver
+   over an in-memory tenancy;
+7. `BrowserServiceClient` and the real `node:https` transport, with mutual
+   TLS;
+8. the browser service, built from the working tree on Debian 13 with
+   Chromium 156, under the reviewed seccomp profile;
+9. the egress proxy's policy;
+10. a fixture site.
+
+In memory rather than PostgreSQL: the approval rows (`MemoryOrgApprovals`,
+which applies the Phase 17 rules), the journal and the audit stores. The
+executor's audit rows are written by the production `AuditLogger` from
+`@jarvis/security`, so the leak check reads them after its redaction, as
+production stores them.
+
+**What it does not cover.** The E2E's orchestrator has no
+`PendingActionService`, so a write stops at `ToolApprovalService` or at the
+executor's own approval, not at a chat pending action. The pending-action path
+and its access gate are covered by unit tests
+(`computer-control-pending-action-p19` in `@jarvis/agents`), not by this E2E.
+The orchestrator's own audit logger in the harness discards its rows, so those
+rows are not part of the leak check.
+
+**What it checks**
+
+- **Start-up:** the endpoint read, the TLS check and the probe, exactly as the
+  API makes them.
+- **Reads, through the orchestrator:**
+  - navigate: the tool chosen, the operations the service received, and their
+    statuses;
+  - inspect;
+  - extract, including text the fixture's own script wrote, which only a real
+    engine produces;
+  - a screenshot, stored and returned by id only.
+- **Navigation and egress policy:** the metadata address, a name off the
+  allowlist and a privately resolving name are all refused, and the site
+  receives none of them. A page that never answers ends at the browser's own
+  deadline.
+- **Approval-gated download and submit:**
+  - each is asked for in explicit words, because the orchestrator's
+    write-intent gate reads the request before any approval can exist;
+  - the orchestrator stops at approval, and the approval belongs to the owning
+    Organization;
+  - an unapproved run is refused;
+  - the requester's own approval is refused (`self_approval_forbidden`);
+  - an independent admin approves;
+  - the confirm path runs once, the journal says `SUCCEEDED`, and the approval
+    is consumed;
+  - a replay is refused;
+  - the site's side is read back through the browser.
+- **Unknown outcome:** a client with a 3 s deadline and a submit control that
+  appears only after 4 s. The result is `UNKNOWN`, with the fixed sentence. A
+  new approval for the same write is refused without a request being sent, and
+  the site never receives it twice.
+- **Tenancy:**
+  - the outsider's account is refused before any request;
+  - at the service, another Organization, another user, or a false
+    Organization claim against a live session gets `CROSS_TENANT_DENIED`, and
+    the page's confidential text appears in none of the refusals;
+  - an artifact is usable by its owner (`browser.upload`), and refused for a
+    colleague in the same Organization and for another Organization.
+- **Sessions:** a never-issued id, a closed one and an expired one (30 s TTL)
+  are all refused.
+- **Failures:**
+  - a wrong secret is `UNAUTHENTICATED`;
+  - a certificate for another identity, no client certificate at all, and one
+    from an untrusted CA are all refused;
+  - an unreadable certificate file, a service that is down and an unusable URL
+    are each reported before anything is sent;
+  - nothing surfaced or audited carries the secret, key material, a TLS path,
+    the page's confidential text or a submitted value.
+
+After the test, `fixture/verify-artifacts.mjs` runs inside the service
+container. It asks the service's own `DownloadStore` about the screenshot and
+the download in the owner's scope (found; PNG bytes; the CSV's exact SHA-256;
+the type sniffed; the name generated) and in three other scopes (not found).
+There is no user-facing artifact route or UI. That stays a separate product
+decision, and nothing here adds one.
+
+**What is substituted, and why**
+
+- **The egress container** runs `fixture/fixture-egress.mjs`: the real
+  `createEgressProxy` with the real `loadEgressConfig` policy and health
+  listener. Only name resolution and the final dial are substituted, as in
+  S11's local mode. The fixture name resolves to a public address the policy
+  judges, and only a dial to that address reaches the in-process fixture site.
+  It can resolve and dial nothing real. No environment variable gives the
+  production proxy this behaviour.
+- **A relay** (`fixture/relay.mjs`, on `127.0.0.1` only) forwards raw TCP to
+  `browser-service:3200`, because an internal network cannot publish a port.
+  Mutual TLS runs end to end between the host-side client and the service. The
+  service's own network position is unchanged.
+
+**Isolation**
+
+- The project is `jarvis-p19-browser-e2e`, with project-scoped container,
+  network and volume names, the label `jarvis.test=browser-e2e`, and a unique
+  image tag (never `jarvis-browser-service:latest`).
+- It contains no database, API or web container.
+- The runner works in a temporary directory outside the repository: copies of
+  the compose file and the profiles, an empty `.env` (so the real one is never
+  read), and throwaway TLS material and a secret.
+- It refuses to start if any resource already carries the project's name.
+- It removes exactly its own containers, networks, volume and image tag, each
+  checked by name and label. It never prunes.
+- It compares the full inventory before and after.
+- `apps/api/vitest.browser-e2e.config.ts` is the only configuration that
+  collects the E2E file; `pnpm test` does not, and without
+  `JARVIS_BROWSER_E2E=1` every test in it is skipped.
+
+### 21.4 Verification (2026-11-16, Windows, from the working tree)
+
+| What | Result |
+|---|---|
+| Static: `docker compose config` on the default stack, the opt-in and the E2E project | 28/28. Run on copies with an empty `.env`; no resource was created |
+| `@jarvis/browser-protocol` | 114 passed (39 new); typecheck, test typecheck and lint pass |
+| `@jarvis/browser` | 360 passed; typecheck, test typecheck and lint pass |
+| `@jarvis/browser-service` | 250 passed (52 new: the opt-in compose test 11, the real-socket TLS and probe tests 24, the harness pins 17); typecheck, test typecheck and lint pass |
+| `@jarvis/api` | 3,096 passed and 306 skipped (the database suites, with no test database); typecheck, test typecheck, lint and build pass. The new diagnostics test is 16 of them |
+| `@jarvis/tools` computer-control, sprint7-browser, shared-connection and meta-ads; `@jarvis/core` computer-control; `@jarvis/agents` computer-control, sprint7-browser and shared-connection | 842, 244 and 102 passed |
+| ESLint on every new file, scripts and tests included | Clean |
+| The E2E's opt-in | Without the switch, 18/18 skipped. Not collected by the default configuration (0 of 144 files) |
+| **Real-Chromium E2E** | Not run at the time of this table. **Passed 18/18 on the third run** (§21.5) |
+
+The table records the state before the E2E runs. The fixes made after them
+were verified again (§21.5.4). The Debian/glibc S10/S11 results in §20.10 were
+not re-run for this change.
+
+### 21.5 The real-Chromium E2E runs (2026-11-16, each approved by the owner)
+
+Each run was `node scripts/browser-e2e/run.mjs`. Each kept its evidence in a
+temporary directory (`jarvis-browser-e2e-evidence-*`):
+
+- the test output and the artifact check;
+- the service, egress and relay logs;
+- the build and compose logs;
+- the inventory before and after.
+
+#### 21.5.1 The three runs
+
+| Run | Started | Tests | Artifact check | What failed, and why |
+|---|---|---|---|---|
+| 1 (`cTA3TP`) | 16:48 | 10 passed, 8 failed, 0 skipped | Not reached | **A product defect:** inspect and extract returned nothing (5 failures, including the tests that read the site through extract). **The test's own wording:** "please use browser.download" and "…submit" never reached an approval (2). The artifact test needed the download's id (1) |
+| 2 (`egwHGj`) | 17:46 | 16 passed, 2 failed, 0 skipped | 12/12 | **Two test-harness errors, no product defect:** an off-by-one in the egress count, and a leak check that read the logger's raw input instead of the stored rows |
+| 3 (`INsRR1`) | 18:02 | **18 passed, 0 failed, 0 skipped** (57 s) | **12/12** | Nothing |
+
+#### 21.5.2 What was fixed between runs
+
+- **The product defect (after run 1).** `BrowserSession` passed its in-page
+  code to Playwright as source strings. Playwright 1.63 evaluates a string and
+  never calls the function it produces, so the page returned the function
+  itself, which serializes to `undefined`. Inspect failed and extract came
+  back empty.
+  - The three in-page functions now live, self-contained, in
+    `packages/browser/src/page-scripts.ts`. They are passed as functions, with
+    their arguments.
+  - `PageLike.evaluate` accepts only a function, so a string no longer
+    compiles. No string evaluation was added, and nothing else about their
+    behaviour changed.
+  - `page-scripts-p19.test.ts` has 9 tests, and all pass against the new
+    implementation. Its 3 session-level tests fail against the old one, the
+    way the E2E did.
+  - A host-Chrome check through the real `BrowserRuntime` passed 7/7. It is not
+    a container result.
+- **The test's wording (after run 1).** The download and submit requests now
+  say what they want:
+  - `Please download report.csv from <fixture>/: click the "Download the report" link and save the file.`
+  - `Submit the contact form on <fixture>/ with the email e2e@example.test.`
+
+  The write-intent gate and the approvals are unchanged. "download" is not one
+  of the gate's action verbs, so the download request also says "click" and
+  "save" (§21.6). One assertion was corrected too: download is `LOW_IMPACT`, so
+  the turn reaches the executor once and is answered `approval_pending`, with
+  nothing sent.
+- **The harness errors (after run 2).**
+  - The fixture counts the `/state` read that reports the count, so the egress
+    test now expects `before + 1`. In run 2 the count rose by exactly one,
+    which showed that none of the three refused destinations reached the site.
+  - The executor's audit logger in the harness was a stand-in that kept its
+    raw input. It is now the production `AuditLogger`, and the leak check
+    reads the stored rows. The check now also requires that:
+    - neither submitted value (`e2e@…`, `slow@…`) appears;
+    - every submit row holds only `action`, `summary`, `targetResource` and
+      `details`, with field names.
+
+    The production redaction was not changed. Run against the old stand-in's
+    rows, the new check fails, so it is not vacuous.
+
+#### 21.5.3 The final run's evidence
+
+- **Tests:** 18 passed of 18, in the one collected file. There was no failure,
+  skip or todo, and no stderr, warning or unhandled error in the output. The
+  file's only skip is the suite-level switch, which was on.
+- **The image:** `jarvis-p19-browser-e2e/browser-service:9c17dd4-a4944f`,
+  built from the working tree. It uses the pinned
+  `node:24.22.3-trixie-slim@sha256:af02d57b…` (Debian 13), with the
+  Dockerfile's pinned Chromium 156 package. All three containers reported
+  healthy.
+- **Reads:** navigate, inspect, extract (including the text the fixture's own
+  script wrote) and a screenshot passed.
+- **Writes and approvals:**
+  - download and submit each stopped at approval for the owning Organization;
+  - unapproved runs were refused;
+  - the requester's own approval was refused (the download test checks this;
+    the submit test does not);
+  - an admin's approval ran each exactly once, and replays were refused;
+  - the site received one download and one submit;
+  - the unknown-outcome test passed: `UNKNOWN`, never sent again, even with a
+    new approval.
+- **Egress:** the metadata address, a name off the allowlist and a privately
+  resolving name were all refused, and none reached the site.
+  - The proxy refused the private name (`blocked-address`/`private`).
+  - It also refused 24 background requests that Chromium made by itself to
+    four Google hosts (`not-allowlisted`, §21.6).
+- **Tenancy and sessions:** the service logged `CROSS_TENANT_DENIED` ×3,
+  `SESSION_NOT_FOUND` ×3 and `UNAUTHENTICATED` ×3. The outsider's account was
+  refused before any request.
+- **Transport:** these were refused:
+  - a wrong secret;
+  - a certificate for another identity;
+  - no client certificate;
+  - an untrusted CA.
+
+  An unreadable certificate, a service that is down and an unusable URL were
+  each reported without sending anything.
+- **Artifacts (`verify-artifacts.mjs`, 12/12):**
+  - the screenshot (a 17,239-byte PNG) was found in the owner's scope;
+  - so was the download: `text/csv`, 47 bytes, the fixture's exact SHA-256,
+    with a generated name;
+  - neither was found in the three other scopes.
+- **Nothing leaked:** no secret, key line, PEM header, TLS path, confidential
+  page text or submitted value appears in any surfaced error, audit row or
+  evidence log.
+  - The production `AuditLogger` wrote 29 executor rows, and the five submit
+    rows hold field names only.
+  - The service log holds codes and request ids only.
+- **Cleanup:** the inventory after cleanup equals the one before it:
+  - 9 containers, with the same start times and restart counts, so none was
+    restarted;
+  - 6 networks, 54 volumes and 12 images.
+
+  No resource carrying the project's name remained. The runner's temporary
+  directory, with its throwaway TLS material and secret, was removed.
+
+#### 21.5.4 Verification after the fixes (Windows, from the working tree, no Docker)
+
+| What | Result |
+|---|---|
+| `@jarvis/browser` | 369 passed (9 new); typecheck and lint pass |
+| `@jarvis/browser-service` | 250 passed; test typecheck passes |
+| `@jarvis/api` browser tests (4 files) | 61 passed. Test typecheck (which includes the E2E file) and ESLint on the E2E file pass. Without its switch, the E2E's 18 tests are skipped |
+| `@jarvis/tools` computer-control and sprint7-browser | 293 passed |
+| `@jarvis/agents` computer-control, sprint7-browser and write-intent | 141 passed |
+| `@jarvis/security` audit, redaction and computer-control | 51 passed |
+| `@jarvis/core` computer-control | 244 passed |
+| `node scripts/browser-e2e/run.mjs --dry-run` | Exit 0; nothing created |
+
+#### 21.5.5 What a run creates
+
+The E2E starts containers, so every run waits for the owner. `node
+scripts/browser-e2e/run.mjs --dry-run` prints every command. A run creates,
+and then removes:
+
+- containers `jarvis-p19-browser-e2e-browser`, `-egress` and `-relay`;
+- networks `jarvis-p19-browser-e2e_browser` (internal),
+  `_browser-egress` and `_browser-e2e-access`;
+- the volume `jarvis-p19-browser-e2e_jarvis-browser-artifacts`;
+- an image `jarvis-p19-browser-e2e/browser-service:<head>-<random>`.
+
+It also leaves BuildKit cache, which is not pruned.
+
+### 21.6 Still open (not in this scope)
+
+P0 is the wiring and the passing E2E. Nothing below is done, and none of it is
+marked done by P0.
+
+- **Found by the E2E runs, deferred (P1/P2), for the owner to judge:**
+  - **Duplicate approval requests.** Each unapproved executor attempt at an
+    approval-gated write opens a new pending approval. In run 2 that was
+    `apr_0002` and `apr_0004`, beside the proposals' own. Retries therefore
+    pile up in the approver's queue.
+  - **Chromium's own background traffic.** Chromium calls Google services by
+    itself (component updates, accounts, autofill). The egress allowlist
+    refused every attempt, 24 in the final run. Switching them off with
+    Chromium flags would remove the noise.
+  - **An outsider's approval row on the direct path.** Without a
+    `PendingActionService`, the orchestrator asks no access gate before
+    `ToolApprovalService`. An outsider's explicit write request therefore
+    leaves a pending approval in the owning Organization's queue.
+    - It can never run: even once approved, the executor refuses the outsider
+      and nothing reaches the browser.
+    - Production wires the pending-action service, where the access gate runs
+      first.
+    - Seen in a fake-browser check during P0, not in the E2E.
+  - **"download" is not a write-intent verb.** A plain "Download report.csv
+    from …" is held as ambiguous and never reaches an approval. The request
+    has to say "click" or "save" as well.
+- **Recorded as follow-ups, not built:** a user-facing artifact retrieval API
+  and UI; browser session reuse; a shared persistent nonce store; capacity
+  and queueing across Organizations; timeout and abort propagation; approval
+  ordering; metrics and alerting; a Chromium or Playwright upgrade.
+- **Before enabling the service anywhere:** deployment-host verification and
+  production enablement.
+- **From §20.10.6, unchanged:** the deployment host, Playwright 1.63 with
+  Chromium 156, and zombie processes and the init decision.
+- **Seen while building the harness.** These are product behaviour this
+  change does not alter, for the owner to judge:
+  - `browser.submit` returns once the click lands; it does not wait for the
+    navigation the click starts. Since a session closes as soon as its tool
+    call ends, a slow form post may not leave the browser before the session
+    is closed. The E2E reads the site's side to observe this.
+  - `browser.upload` sets the file and returns. It does not submit the form.

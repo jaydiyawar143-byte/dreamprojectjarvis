@@ -43,9 +43,15 @@ export interface BrowserServiceEndpointConfig {
   tls: BrowserServiceClientTls | null;
 }
 
+/**
+ * Which kind of mistake an `invalid` configuration is (Phase 19, P0), so an
+ * operator's log says whether to add a variable, fix the URL or fix a value.
+ */
+export type BrowserServiceEndpointProblem = "missing" | "invalid-url" | "invalid-value";
+
 export type BrowserServiceEndpointRead =
   | { state: "absent"; reason: string }
-  | { state: "invalid"; reason: string }
+  | { state: "invalid"; reason: string; problem: BrowserServiceEndpointProblem }
   | { state: "ready"; config: BrowserServiceEndpointConfig };
 
 const MIN_TIMEOUT_MS = 1_000;
@@ -84,42 +90,48 @@ export function readBrowserServiceEndpoint(
   try {
     url = new URL(rawUrl);
   } catch {
-    return { state: "invalid", reason: "BROWSER_SERVICE_URL is not a valid URL" };
+    return { state: "invalid", problem: "invalid-url", reason: "BROWSER_SERVICE_URL is not a valid URL" };
   }
   // Stage 19.2 audit (M2): the service accepts mutual TLS only, so a plain
   // http endpoint could never authenticate — and would carry typed text and
   // form values in the clear if it somehow answered. It is refused here.
   if (url.protocol !== "https:") {
-    return { state: "invalid", reason: "BROWSER_SERVICE_URL must use https" };
+    return { state: "invalid", problem: "invalid-url", reason: "BROWSER_SERVICE_URL must use https" };
   }
   if (url.username || url.password) {
-    return { state: "invalid", reason: "BROWSER_SERVICE_URL must not carry credentials" };
+    return { state: "invalid", problem: "invalid-url", reason: "BROWSER_SERVICE_URL must not carry credentials" };
   }
   if (url.search || url.hash) {
-    return { state: "invalid", reason: "BROWSER_SERVICE_URL must not carry a query or fragment" };
+    return {
+      state: "invalid",
+      problem: "invalid-url",
+      reason: "BROWSER_SERVICE_URL must not carry a query or fragment",
+    };
   }
 
   const keyId = trimmed(env.BROWSER_SERVICE_KEY_ID);
-  if (!keyId) return { state: "invalid", reason: "BROWSER_SERVICE_KEY_ID is not set" };
+  if (!keyId) return { state: "invalid", problem: "missing", reason: "BROWSER_SERVICE_KEY_ID is not set" };
 
   const secret = trimmed(env.BROWSER_SERVICE_SHARED_SECRET);
-  if (!secret) return { state: "invalid", reason: "BROWSER_SERVICE_SHARED_SECRET is not set" };
+  if (!secret) return { state: "invalid", problem: "missing", reason: "BROWSER_SERVICE_SHARED_SECRET is not set" };
   if (secret.length < BROWSER_PROTOCOL_MIN_SECRET_LENGTH) {
     return {
       state: "invalid",
+      problem: "invalid-value",
       reason: `BROWSER_SERVICE_SHARED_SECRET is shorter than ${BROWSER_PROTOCOL_MIN_SECRET_LENGTH} characters`,
     };
   }
 
   const peerIdentity = trimmed(env.BROWSER_SERVICE_PEER_IDENTITY);
   if (!peerIdentity) {
-    return { state: "invalid", reason: "BROWSER_SERVICE_PEER_IDENTITY is not set" };
+    return { state: "invalid", problem: "missing", reason: "BROWSER_SERVICE_PEER_IDENTITY is not set" };
   }
 
   const timeoutMs = parseTimeout(env.BROWSER_SERVICE_TIMEOUT_MS);
   if (timeoutMs === null) {
     return {
       state: "invalid",
+      problem: "invalid-value",
       reason: `BROWSER_SERVICE_TIMEOUT_MS must be a whole number of milliseconds between ${MIN_TIMEOUT_MS} and ${MAX_TIMEOUT_MS}`,
     };
   }
@@ -132,6 +144,7 @@ export function readBrowserServiceEndpoint(
   if (certPath === null || keyPath === null) {
     return {
       state: "invalid",
+      problem: "missing",
       reason:
         "BROWSER_SERVICE_CLIENT_CERT_PATH and BROWSER_SERVICE_CLIENT_KEY_PATH are required: the browser service accepts mutual TLS only",
     };

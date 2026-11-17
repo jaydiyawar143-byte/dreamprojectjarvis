@@ -34,6 +34,7 @@
 
 export type WidgetId =
   | "orb"
+  | "office"
   | "map"
   | "system"
   | "clock"
@@ -133,6 +134,10 @@ export interface WidgetConstraints {
  */
 export const CONSTRAINTS: Record<WidgetId, WidgetConstraints> = {
   orb: { minW: 3, minH: 4, maxW: GRID_COLS, maxH: GRID_ROWS, hideable: false },
+  // VO-2.2 — the Virtual Office. Prominent by default and hideable like every
+  // widget except the Orb. Below four columns by three rows its floor plan
+  // cannot show a department beside another.
+  office: { minW: 4, minH: 3, maxW: GRID_COLS, maxH: GRID_ROWS, hideable: true },
   map: { minW: 3, minH: 3, maxW: GRID_COLS, maxH: GRID_ROWS, hideable: true },
   system: { minW: 3, minH: 3, maxW: GRID_COLS, maxH: GRID_ROWS, hideable: true },
   clock: { minW: 2, minH: 2, maxW: 8, maxH: 8, hideable: true },
@@ -147,20 +152,23 @@ export const CONSTRAINTS: Record<WidgetId, WidgetConstraints> = {
  *
  * It tiles the 12x12 grid EXACTLY — 144 cells, no overlap and no holes:
  *
- *     rows 0-3   orb(0-3)   map(4-11)
- *     rows 4-6   orb(0-3)   system(4-7)  weather(8-9)  tasks(10-11)
+ *     rows 0-4   orb(0-3)   office(4-11)
+ *     rows 5-6   orb(0-3)   system(4-7)  weather(8-9)  tasks(10-11)
  *     row  7     clock(0-1) worldclock(2-3) system(4-7) weather(8-9) tasks(10-11)
- *     rows 8-11  clock(0-1) worldclock(2-3) markets(4-11)
+ *     rows 8-11  clock(0-1) worldclock(2-3) markets(4-7) map(8-11)
  *
  *   ┌──────────┬──────────────────────────────┐
- *   │          │             MAP              │
- *   │   ORB    ├──────────┬─────────┬─────────┤
- *   │          │  SYSTEM  │ WEATHER │  TASKS  │
- *   ├────┬─────┤          │         │         │
- *   │CLK │WORLD│          │         │         │
- *   │    │     ├──────────┴─────────┴─────────┤
- *   │    │     │           MARKETS            │
- *   └────┴─────┴──────────────────────────────┘
+ *   │          │        VIRTUAL OFFICE        │
+ *   │   ORB    │                              │
+ *   │          ├──────────┬─────────┬─────────┤
+ *   ├────┬─────┤  SYSTEM  │ WEATHER │  TASKS  │
+ *   │CLK │WORLD├──────────┴────┬────┴─────────┤
+ *   │    │     │    MARKETS    │     MAP      │
+ *   └────┴─────┴───────────────┴──────────────┘
+ *
+ * VO-2.2 — the Virtual Office takes the prominent top-right slot the map held,
+ * and the map moves to the bottom-right beside the markets. Every widget keeps
+ * at least its minimum size.
  *
  * Tiling exactly is what stops the dashboard opening with a dead area in one
  * corner. It is a starting point, not a constraint — the moment the user drags
@@ -168,13 +176,14 @@ export const CONSTRAINTS: Record<WidgetId, WidgetConstraints> = {
  */
 export const DEFAULT_LAYOUT: WidgetPlacement[] = [
   { id: "orb", x: 0, y: 0, w: 4, h: 7 },
-  { id: "map", x: 4, y: 0, w: 8, h: 4 },
-  { id: "system", x: 4, y: 4, w: 4, h: 4 },
-  { id: "weather", x: 8, y: 4, w: 2, h: 4 },
-  { id: "tasks", x: 10, y: 4, w: 2, h: 4 },
+  { id: "office", x: 4, y: 0, w: 8, h: 5 },
+  { id: "system", x: 4, y: 5, w: 4, h: 3 },
+  { id: "weather", x: 8, y: 5, w: 2, h: 3 },
+  { id: "tasks", x: 10, y: 5, w: 2, h: 3 },
   { id: "clock", x: 0, y: 7, w: 2, h: 5 },
   { id: "worldclock", x: 2, y: 7, w: 2, h: 5 },
-  { id: "markets", x: 4, y: 8, w: 8, h: 4 },
+  { id: "markets", x: 4, y: 8, w: 4, h: 4 },
+  { id: "map", x: 8, y: 8, w: 4, h: 4 },
 ];
 
 export const ALL_WIDGET_IDS: WidgetId[] = DEFAULT_LAYOUT.map((p) => p.id);
@@ -333,7 +342,32 @@ export function setHidden(
   hidden: boolean
 ): WidgetPlacement[] {
   if (hidden && !CONSTRAINTS[id].hideable) return layout;
-  return layout.map((p) => (p.id === id ? { ...p, hidden } : p));
+  if (hidden) return layout.map((p) => (p.id === id ? { ...p, hidden } : p));
+
+  // VO-2.2 — showing a widget again must never put it on top of another.
+  //
+  // Hiding keeps the placement, so a widget comes back where it was whenever
+  // that space is still free — the common case, and the one the person
+  // expects. But the layout may have changed while it was hidden (something
+  // was stretched into its slot), or it may never have had a real place at
+  // all: `placeNewWidget` parks a widget it cannot place at the bottom of the
+  // grid, hidden, on top of whatever is there. Either way the stored cells are
+  // not free, and it is re-placed by the same rule a new widget follows: the
+  // first free space, else below everything, moving nothing else. If even that
+  // is impossible — the layout already reaches the storable bottom — it stays
+  // hidden, and the layout is returned unchanged so nothing reads as an edit.
+  const current = layout.find((p) => p.id === id);
+  if (!current) return layout;
+
+  const restored: WidgetPlacement = { ...current, hidden: false };
+  const others = layout.filter((p) => p.id !== id);
+  const free =
+    isWithinGrid(restored) && !visibleWidgets(others).some((p) => overlaps(restored, p));
+
+  const placed = free ? restored : placeNewWidget(restored, others);
+  if (placed.hidden) return layout;
+
+  return layout.map((p) => (p.id === id ? { ...placed, hidden: false } : p));
 }
 
 export function visibleWidgets(layout: WidgetPlacement[]): WidgetPlacement[] {
@@ -513,9 +547,58 @@ export function normalizeLayout(stored: unknown): WidgetPlacement[] {
     seen.add(id);
   }
 
+  // A widget the stored layout has never seen — one added in a later release.
+  //
+  // It used to be appended at its DEFAULT position, which is wherever the
+  // shipped layout puts it and therefore, in a layout someone arranged, almost
+  // certainly on top of something. VO-2.2 places it without disturbing what
+  // the person saved: see `placeNewWidget`.
   for (const fallback of DEFAULT_LAYOUT) {
-    if (!seen.has(fallback.id)) result.push(fallback);
+    if (!seen.has(fallback.id)) result.push(placeNewWidget(fallback, result));
   }
 
   return result.length > 0 ? result : DEFAULT_LAYOUT;
+}
+
+/**
+ * VO-2.2 — where a widget goes in a layout that has never held it.
+ *
+ * The layout someone saved is theirs, so nothing in it moves. The newcomer, at
+ * its default size, takes the FIRST free space — rows top to bottom, columns
+ * left to right, within the rows the layout already uses — that overlaps no
+ * visible widget. If there is none (a fully tiled layout, like every shipped
+ * default), it goes directly BELOW the lowest visible widget, at its default
+ * column. Either way it overlaps nothing.
+ *
+ * Below costs depth: a twelve-row layout plus a five-row office is seventeen
+ * shorter rows until the person rearranges or resets. That is the honest price
+ * of not moving anything they placed. The one case with no honest answer — a
+ * layout already so deep that "below" would leave the storable grid — gets the
+ * widget hidden rather than placed on top of something; the customise bar can
+ * show it.
+ */
+export function placeNewWidget(
+  fallback: WidgetPlacement,
+  layout: WidgetPlacement[]
+): WidgetPlacement {
+  const visible = visibleWidgets(layout);
+  const { w, h } = fallback;
+  const depth = layoutRows(layout);
+
+  for (let y = 0; y + h <= depth; y++) {
+    for (let x = 0; x + w <= GRID_COLS; x++) {
+      const candidate: WidgetPlacement = { ...fallback, x, y };
+      if (!visible.some((p) => overlaps(candidate, p))) return candidate;
+    }
+  }
+
+  const bottom = visible.reduce((max, p) => Math.max(max, p.y + p.h), 0);
+  const below: WidgetPlacement = { ...fallback, y: bottom };
+  if (isWithinGrid(below)) return below;
+
+  // A widget that may not be hidden is placed as low as the grid allows; the
+  // grid library's compaction then resolves the overlap. Only a widget that
+  // may be hidden takes the hidden route.
+  if (!CONSTRAINTS[fallback.id].hideable) return clampPlacement(below);
+  return { ...fallback, y: Math.max(0, MAX_ROWS - h), hidden: true };
 }

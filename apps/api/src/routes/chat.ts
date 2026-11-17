@@ -5,7 +5,7 @@ import { DESKTOP_CHAT_EXECUTION_TIMEOUT_MS, JarvisRequestSchema, JarvisError, is
 import { maskIdentifiersInText } from "@jarvis/core";
 import type { SessionContext, AuthContext } from "@jarvis/core";
 import { createAuthMiddleware, type AuthenticatedRequest } from "../middleware/auth.js";
-import { detectIntent, detectMemoryCommand, detectWorkRequest, PendingActionConflictError, type PendingActionService } from "@jarvis/agents";
+import { detectIntent, detectMemoryCommand, detectWorkRequest, looksLikeBrowsingRequest, PendingActionConflictError, type PendingActionService } from "@jarvis/agents";
 import type {
   AuditLogger,
   ConversationStorePort,
@@ -646,7 +646,18 @@ export function createChatRouter(container: ChatRouterDeps): Router {
       // -----------------------------------------------------------------------
       // Phase 19.7 — "run calculator" is a word the detector acts on, and desktop
       // tools are not task tools: a person must be present, so it stays in chat.
-      const workRequest = looksLikeDesktopRequest(jarvisRequest.message) ? ({ type: "NONE" } as const) : detectWorkRequest(jarvisRequest.message);
+      const detectedWork = looksLikeDesktopRequest(jarvisRequest.message) ? ({ type: "NONE" } as const) : detectWorkRequest(jarvisRequest.message);
+      // Phase 19 — opening or reading a page NOW is the Browser Agent's, so it
+      // stays in chat. The work path plans ONE tool from one sentence and
+      // reports only that the tool ran. "Check https://… and summarize the
+      // page" came back as "Done — I ran browser.extract", with nothing the page
+      // said. With browsing off, it ran whatever the planner picked instead.
+      // Only EXECUTE moves: a named time stays a scheduled task, never "open
+      // it now", and a plan-only request still runs nothing.
+      const workRequest =
+        detectedWork.type === "EXECUTE" && looksLikeBrowsingRequest(jarvisRequest.message)
+          ? ({ type: "NONE" } as const)
+          : detectedWork;
       // Saved by whichever branch reaches it first, and never twice.
       let savedUserMessage: Awaited<ReturnType<typeof saveUserMessage>> | undefined;
 

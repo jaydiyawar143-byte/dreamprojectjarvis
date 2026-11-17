@@ -14,7 +14,9 @@
 //   dials nothing else. Nothing leaves the machine. It proves the APPLICATION
 //   layer: Chromium sends every request — top-level, subresource, fetch,
 //   loopback — to the proxy, and the proxy refuses and never dials what the
-//   policy refuses.
+//   policy refuses. Chromium gets the service's launch options plus one switch
+//   that turns off its HTTPS-first behaviour (see `localMode`), so the page
+//   loads over plain HTTP as the check intends.
 //
 //   container — inside the running browser-service container:
 //     docker compose exec browser-service node apps/browser-service/scripts/s11-egress-check.mjs --container
@@ -173,6 +175,18 @@ async function localMode() {
     headless: true,
     egressProxy: { url: `http://127.0.0.1:${proxyPort}`, host: "127.0.0.1" },
   });
+  // The one difference from the service's launch options, and only here.
+  // Since Chrome 157 (156 passed without it) a plain-HTTP navigation is tried
+  // as HTTPS first: HTTPS-Upgrades sends a CONNECT to :443, and HTTPS-First
+  // balanced mode then ends on a "not secure" interstitial
+  // (net::ERR_BLOCKED_BY_CLIENT) instead of loading over HTTP — however :443
+  // answers. That is the browser's own HTTPS policy, not egress: this check's
+  // page and its subresources are plain HTTP on purpose, to drive the proxy's
+  // plain-HTTP path. It changes nothing about the proxy, the resolver lock or
+  // the sandbox, and every assertion below is unchanged. If Chrome renames
+  // these features, the allowed name stops loading and this check FAILS; it
+  // cannot pass by accident.
+  options.args = [...options.args, "--disable-features=HttpsUpgrades,HttpsFirstBalancedMode"];
   const browser = await chromium.launch(options);
   try {
     const page = await browser.newPage();

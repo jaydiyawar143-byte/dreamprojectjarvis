@@ -99,6 +99,7 @@ import { SystemWidget } from "@/components/widgets/system-widget";
 import { TasksWidget } from "@/components/widgets/tasks-widget";
 import { MarketsWidget } from "@/components/widgets/markets-widget";
 import { MapWidget } from "@/components/widgets/map-widget";
+import { OfficeDeepLink, OfficeWidget } from "@/components/office/office-widget";
 import { useChatStore } from "@/lib/chat-store";
 import { useVoiceStore } from "@/lib/voice/voice-store";
 import { MicButton } from "@/components/voice/mic-button";
@@ -440,6 +441,14 @@ export function CommandCenter() {
     switch (id) {
       case "orb":
         return <OrbWidget status={status} label={readout.label} text={readout.text} tone={toneClass} />;
+      case "office":
+        // VO-2.2 — the Virtual Office lives here now, not in the sidebar. It
+        // owns its data and its expanded dialog; customise mode only stops it
+        // opening, so arranging the dashboard never opens a dialog.
+        //
+        // `layoutLoaded` is `dash.loaded`: the office reads nothing and opens a
+        // socket only once the saved layout says it is actually on screen.
+        return <OfficeWidget customizing={dash.customizing} layoutLoaded={dash.loaded} />;
       case "clock":
         return (
           <ClockWidget
@@ -765,6 +774,18 @@ export function CommandCenter() {
             </button>
           </p>
         </div>
+      )}
+
+      {/* VO-2.2 — `/dashboard?office=open` (where the old /office route now
+          sends people) still opens the office when the person has hidden the
+          widget. Mounted only while it is hidden — a visible widget handles the
+          link itself, so there is never a second subscription — and only once
+          the saved layout has loaded: until then "hidden" is not known (the
+          default layout shows the office), and mounting it early would read the
+          office for someone who keeps it on their dashboard. It waits out
+          customise mode exactly as the widget does. */}
+      {dash.loaded && !visible.some((p) => p.id === "office") && (
+        <OfficeDeepLink customizing={dash.customizing} />
       )}
     </section>
   );

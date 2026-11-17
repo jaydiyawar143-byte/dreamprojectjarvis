@@ -1,12 +1,15 @@
 import { defineConfig } from "vitest/config";
-import { resolve } from "path";
+import { fileURLToPath } from "node:url";
 import react from "@vitejs/plugin-react";
 
+// A `.mts` config is loaded as ESM, so Vite's native config loader does not
+// warn about ESM syntax in a CommonJS file. `import.meta.url` replaces
+// `__dirname`, which does not exist in ESM.
 export default defineConfig({
   plugins: [react()],
   resolve: {
     alias: {
-      "@": resolve(__dirname, "./src"),
+      "@": fileURLToPath(new URL("./src", import.meta.url)),
     },
   },
   test: {

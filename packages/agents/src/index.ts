@@ -83,9 +83,30 @@ export {
   sanitizeToolName,
   scopedToolRegistry,
 } from "./agent-policy.js";
+// UEE-3 — the deterministic execution router: a pure policy that picks which
+// ONE capability a model's proposal may route to, from the UEE-2 catalogue. It
+// runs nothing, grants nothing and decides no approval; the executor still does.
+export {
+  routeExecution,
+  MAX_ROUTE_CANDIDATES,
+  type ExecutionRouteDecision,
+  type ExecutionRouteRequest,
+  type RoutingCatalogue,
+  type RoutingRefusalReason,
+  type RoutingSurface,
+  type RoutingVerdict,
+} from "./execution-router.js";
 // Task Planner V1.1 — is this turn a request to PERFORM work? Pure
 // heuristic, no model call, same shape as the pending-action detector.
 export { detectWorkRequest, type WorkRequest } from "./work-request-detector.js";
+// VO-3.1 — which agent a task is assigned to, from the tool it runs. Pure.
+// Attribution for the task record and the office, never execution authority.
+export {
+  assignAgentForTool,
+  type TaskAssignment,
+  type TaskAssignmentOptions,
+  type TaskAssignmentReason,
+} from "./task-assignment.js";
 // S7.2 L5 — is this turn an explicit command about JARVIS's memory? Pure,
 // closed patterns, default NONE; deleting still needs a confirmed pending action.
 export { detectMemoryCommand } from "./memory-command-detector.js";
@@ -102,6 +123,7 @@ export {
   rankAgentCandidates,
   isAmbiguous,
   isMetaAdsQuery,
+  looksLikeBrowsingRequest,
   type RouteCandidate,
 } from "./agent-router.js";
 

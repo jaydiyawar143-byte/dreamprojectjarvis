@@ -16,6 +16,7 @@ import type { CSSProperties, ReactElement } from "react";
 
 import type { OfficeModel } from "./office-model";
 import { OfficeActor, OfficeSystemActorCard } from "./office-actor";
+import { PixelOfficeRenderer } from "./pixel/pixel-office-renderer";
 
 export interface OfficeRendererProps {
   model: OfficeModel;
@@ -132,9 +133,20 @@ export function DomOfficeRenderer({
 }
 
 /**
- * The registry VO-4 extends. Keeping the lookup explicit means an unknown
- * renderer id cannot silently fall through to a half-built scene.
+ * The registry. Keeping the lookup explicit means an unknown renderer id
+ * cannot silently fall through to a half-built scene.
+ *
+ * VO-2.2 Stage 2 adds `pixel` (`pixel/pixel-office-renderer.tsx`), the SVG
+ * pixel-art office, and the scene draws with it. `dom` — the VO-1 list of
+ * rooms and figures — stays registered as the text fallback behind the same
+ * interface. A Canvas renderer, if one is ever needed, is added here and
+ * nowhere else.
  */
-export const OFFICE_RENDERERS: Record<"dom", OfficeRenderer> = {
+export const OFFICE_RENDERERS: {
+  dom: OfficeRenderer;
+  /** Accepts the base props and, optionally, a viewport, a focused room and a room control. */
+  pixel: typeof PixelOfficeRenderer;
+} = {
   dom: DomOfficeRenderer,
+  pixel: PixelOfficeRenderer,
 };

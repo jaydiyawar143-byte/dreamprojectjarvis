@@ -20,6 +20,7 @@ import {
   PendingActionService,
   AGENT_IDS,
   AGENT_POLICIES,
+  assignAgentForTool,
   isToolAllowed,
   schedulableToolIds,
 } from "@jarvis/agents";
@@ -78,8 +79,14 @@ import {
 import {
   BrowserServiceClient,
   RemoteBrowserRuntime,
+  checkBrowserServiceClientTls,
   readBrowserServiceEndpoint,
 } from "@jarvis/browser-protocol";
+import {
+  causeForEndpointProblem,
+  causeForTlsProblem,
+  startBrowserServiceProbe,
+} from "./browser-service-diagnostics.js";
 import { createMetaGraphProvider, createMetaPagePublisher, isPagePublishingEnabled } from "@jarvis/meta-graph";
 import {
   createGoogleAdsProvider,
@@ -101,6 +108,7 @@ import {
   buildIdempotencyKey,
   createN8nLibraryPageSource,
   createN8nLibraryTriggerTargetSource,
+  createN8nSandboxClient,
   N8N_NODE_SCHEMA_SNAPSHOT,
 } from "@jarvis/n8n";
 import {
@@ -175,6 +183,7 @@ import { GoogleWriteService } from "./google/write-service.js";
 import { buildGoogleWriteService } from "./google/build-write-service.js";
 import { DbBackedRateLimiter } from "./rate-limiter.js";
 import { CapabilityService } from "./capabilities/capability-service.js";
+import { CapabilityRegistry, policiesOfRegisteredAgents } from "./capabilities/capability-registry.js";
 import {
   buildSkillContext,
   FallbackAIProvider,
@@ -217,6 +226,8 @@ import { errorMonitor, operationalLog } from "./observability/index.js";
 import { createApprovalParamsSealer } from "./approval-sealer.js";
 import { loadDesktopAgentConfig } from "./desktop/config.js";
 import { DesktopControlService } from "./desktop/desktop-control-service.js";
+import { loadN8nSandboxConfig } from "./n8n-sandbox/config.js";
+import { N8nSandboxService } from "./n8n-sandbox/sandbox-service.js";
 import { mcpToolUnavailable } from "./integration-registry.js";
 import { libraryInstanceKey, type LibraryPageSource, type LibraryTriggerTargetSource } from "@jarvis/core";
 import { AutomationLibraryService, LIBRARY_SYNC_BUDGETS } from "./automation-library/library-service.js";
@@ -415,6 +426,14 @@ export interface Container {
    */
   taskPlanner: TaskPlannerService;
   /**
+   * UEE-2 — the read-only catalogue of what the engine may consider: derived
+   * from the tool registry, the policies of the agents registered here and the
+   * caller's own n8n allow-list. Discovery only — it authorizes and runs
+   * nothing, reads no integration, and the sandbox is stated unavailable.
+   * The planner holds the same instance.
+   */
+  capabilityRegistry: CapabilityRegistry;
+  /**
    * Task Planner V1.1 — the conversational entry point to work.
    *
    * Sequences the three services above for a chat turn that asks JARVIS to DO
@@ -458,6 +477,13 @@ export interface Container {
    */
   marketingPublishingUnavailableReason: string | null;
   /**
+   * Phase 19 — why this deployment cannot open web pages, when it cannot:
+   * browsing switched off (BROWSER_ENABLED), or switched on with no browser
+   * the API could set up. Null when the Browser Agent is registered. The
+   * orchestrator answers a browsing request with it.
+   */
+  browsingUnavailableReason: string | null;
+  /**
    * Phase 15 — the role table, the SAME instance the executor checks against.
    * Exposed read-only so a route can tell a screen which controls a role could
    * use. It grants nothing: the executor still asks for itself.
@@ -489,6 +515,15 @@ export interface Container {
    * tools are both given it.
    */
   automationPlanning: AutomationPlanningService;
+  /**
+   * The n8n Sandbox Service, or null when it is not configured. Built only
+   * when `N8N_SANDBOX_API_URL` and `N8N_SANDBOX_API_KEY` are both set.
+   *
+   * NOT WIRED TO ANYTHING YET. It has no route, no tool and no agent allowlist
+   * entry; reaching it requires a later, deliberate change. It runs commands in
+   * the operator's sandbox service and never on this host.
+   */
+  n8nSandbox: N8nSandboxService | null;
 }
 
 /**
@@ -888,7 +923,11 @@ function createMetaToolRegistry(
     console.log(JSON.stringify({
       level: "info",
       event: "browser_tools_disabled",
+      cause: "disabled",
       reason: describeBrowserConfigStatus().reason,
+      // A browser-service URL with browsing switched off is ignored. Saying so
+      // tells an operator which of the two switches they forgot.
+      browserServiceConfigured: browserService.state !== "absent",
     }));
   } else if (browserService.state === "invalid") {
     // The operator configured a remote browser and got it wrong. Refusing here
@@ -897,41 +936,72 @@ function createMetaToolRegistry(
     console.log(JSON.stringify({
       level: "warn",
       event: "browser_registration_skipped",
+      cause: causeForEndpointProblem(browserService.problem),
       reason: browserService.reason,
     }));
   } else if (browserService.state === "ready") {
-    try {
-      const client = new BrowserServiceClient({ config: browserService.config });
-      const runtime = new RemoteBrowserRuntime({
-        client,
-        tenant: createBrowserSessionTenantResolver(sharedAccess),
-      });
-      _browserRuntime = runtime;
-
-      const browserJournal = new PrismaToolExecutionRepository(prisma);
-      // Phase 19.5 — the write tools only where their approvals can be sealed.
-      for (const tool of createBrowserTools(runtime, browserJournal, approvalConsumption, browserWriteScope)
-        .filter((tool) => browserWritesSealed || !tool.requiresApproval)) {
-        registry.register(tool);
-      }
-      if (!browserWritesSealed) logBrowserWritesUnavailable();
-
-      console.log(JSON.stringify({
-        level: "info",
-        event: "browser_tools_enabled",
-        // The service's address is not a secret, but it is also not useful to
-        // an operator reading logs; the host and port identify it.
-        mode: "remote",
-        serviceHost: new URL(browserService.config.baseUrl).host,
-        timeoutMs: browserService.config.timeoutMs,
-        mutualTls: browserService.config.tls !== null,
-      }));
-    } catch (err) {
+    // Phase 19, P0 — the client's TLS files, checked BEFORE any tool exists:
+    // readable, parseable, a matching pair, in date, naming the peer identity.
+    // A problem registers nothing — and, as above, never falls back to an
+    // in-process browser. The reason names the variable to fix, never a path
+    // or a file's contents.
+    const tlsCheck = browserService.config.tls
+      ? checkBrowserServiceClientTls(browserService.config.tls, browserService.config.peerIdentity)
+      : null;
+    if (!tlsCheck || !tlsCheck.ok) {
       console.log(JSON.stringify({
         level: "warn",
         event: "browser_registration_skipped",
-        reason: err instanceof Error ? err.message : "unknown",
+        cause: tlsCheck ? causeForTlsProblem(tlsCheck.problem) : "tls_material_unreadable",
+        reason: tlsCheck
+          ? tlsCheck.reason
+          : "BROWSER_SERVICE_CLIENT_CERT_PATH and BROWSER_SERVICE_CLIENT_KEY_PATH are required",
       }));
+    } else {
+      try {
+        const client = new BrowserServiceClient({ config: browserService.config });
+        const runtime = new RemoteBrowserRuntime({
+          client,
+          tenant: createBrowserSessionTenantResolver(sharedAccess),
+        });
+        _browserRuntime = runtime;
+
+        const browserJournal = new PrismaToolExecutionRepository(prisma);
+        // Phase 19.5 — the write tools only where their approvals can be sealed.
+        for (const tool of createBrowserTools(runtime, browserJournal, approvalConsumption, browserWriteScope)
+          .filter((tool) => browserWritesSealed || !tool.requiresApproval)) {
+          registry.register(tool);
+        }
+        if (!browserWritesSealed) logBrowserWritesUnavailable();
+
+        console.log(JSON.stringify({
+          level: "info",
+          event: "browser_tools_enabled",
+          // The service's address is not a secret, but it is also not useful to
+          // an operator reading logs; the host and port identify it.
+          mode: "remote",
+          serviceHost: new URL(browserService.config.baseUrl).host,
+          timeoutMs: browserService.config.timeoutMs,
+          mutualTls: browserService.config.tls !== null,
+          clientCertificateNotAfter: tlsCheck.clientCertificateNotAfter,
+        }));
+
+        // Phase 19, P0 — registered is not reachable. Ask the service, in the
+        // background, whether it accepts this API (network, TLS, identity,
+        // signature, clock, protocol version); the answer is logged as
+        // `browser_service_reachable` or `browser_service_probe_failed`.
+        startBrowserServiceProbe({
+          config: browserService.config,
+          log: operationalLog.child("browser-service"),
+        });
+      } catch (err) {
+        console.log(JSON.stringify({
+          level: "warn",
+          event: "browser_registration_skipped",
+          cause: "construction_failed",
+          reason: err instanceof Error ? err.message : "unknown",
+        }));
+      }
     }
   } else if (isBrowserConfigured()) {
     try {
@@ -1774,6 +1844,39 @@ export function getContainer(options?: {
     nodeSchema,
   });
   for (const tool of createAutomationPlanningTools(automationPlanning)) toolRegistry.register(tool);
+
+  // -------------------------------------------------------------------------
+  // n8n Sandbox Service — the third n8n surface, built but NOT exposed
+  // -------------------------------------------------------------------------
+  // Configured when BOTH N8N_SANDBOX_API_URL and N8N_SANDBOX_API_KEY are set;
+  // there is no separate switch, and there is nothing else to remember.
+  //
+  // Building it is not exposure. No route, tool or agent allowlist entry is
+  // wired to `container.n8nSandbox` in this release, so neither HTTP nor a
+  // sentence can reach it. A later change that adds one goes through this same
+  // service instance, as the integration rule requires.
+  //
+  // The log names neither the URL nor the key. The URL can be internal and the
+  // key is a credential; an operator reads both from their own configuration.
+  // Nothing is requested from the sandbox service here: this is construction,
+  // not a connection, so an unreachable sandbox does not delay boot.
+  // -------------------------------------------------------------------------
+  const n8nSandboxConfig = loadN8nSandboxConfig();
+  let n8nSandbox: N8nSandboxService | null = null;
+  if (n8nSandboxConfig.enabled) {
+    n8nSandbox = new N8nSandboxService({
+      client: createN8nSandboxClient({ config: n8nSandboxConfig.config }),
+      log: operationalLog.child("n8n-sandbox"),
+    });
+    operationalLog.child("n8n-sandbox").info("n8n_sandbox_configured", {
+      exposure: "none: no route, tool or agent is wired to this service",
+    });
+  } else {
+    operationalLog.child("n8n-sandbox").info("n8n_sandbox_disabled", {
+      reason: n8nSandboxConfig.reason,
+    });
+  }
+
   const marketingPublishingUnavailableReason =
     marketingPublishers.length > 0
       ? null
@@ -2083,6 +2186,17 @@ export function getContainer(options?: {
     })),
   }));
 
+  // Phase 19 — what a browsing request is told where there is no Browser
+  // Agent, instead of being handed to an agent with no browser. Read from the
+  // registry, so it is null exactly when the agent exists. Neither sentence
+  // names a path, a host or a value: why the browser could not be set up is
+  // in the start-up log (`browser_registration_skipped`).
+  const browsingUnavailableReason = agentRegistry.get(AGENT_IDS.browser)
+    ? null
+    : isBrowserEnabled()
+      ? "Opening web pages is switched on, but the browser could not be set up on this server, so nothing was opened. An administrator can find why in the server's start-up log."
+      : "Opening web pages is switched off on this server, so nothing was opened. An administrator can switch it on by setting BROWSER_ENABLED=true, with a browser configured, and restarting.";
+
   const toolApprovalService = new ToolApprovalService(approvalRepo, auditRepo, permissionService);
 
   // Wrap registry so the orchestrator resolves sanitized LLM tool names
@@ -2140,10 +2254,19 @@ export function getContainer(options?: {
   // scheduled work.
   const taskToolAllowlist = schedulableToolIds();
 
+  // VO-3.1 — which agent a task is assigned to, from its tool, over the agents
+  // THIS process registered (read at call time: some register conditionally).
+  // Recorded on the task row for the office; never handed to the executor.
+  const assignTaskAgent = (toolId: string): string | null =>
+    assignAgentForTool(toolId, {
+      registeredAgentIds: new Set(agentRegistry.getAll().map((registered) => registered.id)),
+    })?.agentId ?? null;
+
   taskExecutionService = new TaskExecutionService({
     tasks: taskService,
     executor: toolExecutor,
     allowedToolIds: taskToolAllowlist,
+    assignAgent: assignTaskAgent,
   });
 
   // Task Planner V1 — proposes, never runs.
@@ -2152,10 +2275,22 @@ export function getContainer(options?: {
   // configured provider through the existing IAIProvider abstraction. It is
   // deliberately NOT given the executor: there is no code path from a plan to
   // a side effect that does not go through TaskExecutionService.
+  // UEE-2 — the read-only capability catalogue. Both sources are read at CALL
+  // time (some tools and agents register after this point, some conditionally),
+  // and it is given nothing that could run or authorize: the registry for
+  // metadata, the registered agents' policies, and the n8n allow-list, which it
+  // asks only about the caller and only where the runner tool exists.
+  const capabilityRegistry = new CapabilityRegistry({
+    tools: toolRegistry,
+    agentPolicies: () => policiesOfRegisteredAgents(agentRegistry),
+    workflows: new PrismaN8nRepository(prisma),
+  });
+
   taskPlannerService = new TaskPlannerService({
     provider: adapter,
     registry: toolRegistry,
     allowedToolIds: taskToolAllowlist,
+    capabilities: capabilityRegistry,
   });
 
   // The conversational sequencer. Same three services the REST endpoints use,
@@ -2188,6 +2323,7 @@ export function getContainer(options?: {
     planner: taskPlannerService,
     execution: taskExecutionService,
     scheduler: taskSchedulerService,
+    assignAgent: assignTaskAgent,
   });
 
   // PHASE 11.9 — Pending action service for write-tool confirmation flow
@@ -2355,6 +2491,8 @@ export function getContainer(options?: {
     // Phase 15: the publish tools where publishing is off, and the page reads
     // where page reads are off — each with why.
     switchedOffTools: marketingSwitchedOffTools,
+    // Phase 19: a browsing request where there is no Browser Agent, with why.
+    ...(browsingUnavailableReason !== null ? { browsingUnavailableReason } : {}),
     ...(desktopControl ? { desktopChat: desktopControl } : {}),
     // Phase 17: the same gate the executor asks, asked before a pending action
     // is created — a write nobody could let this caller make is refused now.
@@ -2473,12 +2611,14 @@ export function getContainer(options?: {
     selfKnowledge: selfKnowledgeService,
     taskExecution: taskExecutionService!,
     taskPlanner: taskPlannerService!,
+    capabilityRegistry,
     taskConversation: taskConversationService!,
     taskScheduler: taskSchedulerService!,
     // Phase 15 — the marketing workspace service the tools hold.
     marketing: marketingService,
     marketingPublishFlow,
     marketingPublishingUnavailableReason,
+    browsingUnavailableReason,
     permissions: permissionService,
     // Phase 18, Stage 18.1 — the persistent n8n workflow catalog.
     automationLibrary,
@@ -2488,6 +2628,9 @@ export function getContainer(options?: {
     automationLibraryAllowlist: new LibraryAllowlistFlow({ executor: toolExecutor, approvals: approvalRepo, audit: auditLogger }),
     // Phase 18.4 — workflow planning and drafts.
     automationPlanning,
+    // The n8n Sandbox Service, or null. Deliberately unreachable from a route,
+    // a tool and an agent in this release.
+    n8nSandbox,
   };
 
   return _container;

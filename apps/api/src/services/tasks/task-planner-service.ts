@@ -39,6 +39,7 @@
 import { z } from "zod";
 import type { IAIProvider, ITool, ToolPlan } from "@jarvis/core";
 import { ToolPlanValidator } from "@jarvis/agents";
+import type { CapabilityCatalogue, CapabilityCataloguePort } from "../capabilities/capability-registry.js";
 
 // ---------------------------------------------------------------------------
 // The contract
@@ -96,6 +97,23 @@ export interface TaskPlannerDeps {
   allowedToolIds: ReadonlySet<string>;
   /** Overridable for tests; defaults to the real one. */
   validator?: ToolPlanValidator;
+  /**
+   * UEE-2 — the read-only capability catalogue, for DISCOVERY only. Planning
+   * never reads it: `planTask` neither calls it nor shows the model anything
+   * from it, so a plan is exactly what it was without it. Absent: no catalogue.
+   */
+  capabilities?: CapabilityCataloguePort;
+}
+
+/**
+ * The catalogue as the planner offers it: the registry's own, and which of the
+ * available capabilities THIS planner could actually plan — the ones whose tool
+ * is in its allowlist. An MCP tool is discoverable and is not plannable: MCP is
+ * granted for a conversation with a person present, never for scheduled work.
+ */
+export interface PlannerCapabilityCatalogue extends CapabilityCatalogue {
+  /** Ids of available capabilities whose tool this planner may propose. Sorted. */
+  readonly plannable: readonly string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -147,6 +165,28 @@ export class TaskPlannerService {
 
   constructor(private readonly deps: TaskPlannerDeps) {
     this.validator = deps.validator ?? new ToolPlanValidator();
+  }
+
+  /**
+   * UEE-2 — what JARVIS could do for this user, read-only, for the planner to
+   * know about. Discovery data: it runs nothing, grants nothing, and is not
+   * consulted by `planTask`.
+   *
+   * Null when there is no catalogue source, or when it cannot be read: a
+   * failure of discovery is never a failure of planning.
+   */
+  async capabilityCatalogue(userId: string): Promise<PlannerCapabilityCatalogue | null> {
+    if (!this.deps.capabilities) return null;
+    try {
+      const catalogue = await this.deps.capabilities.catalogue(userId);
+      const plannable = catalogue.available
+        .filter((capability) => this.deps.allowedToolIds.has(capability.toolId))
+        .map((capability) => capability.id)
+        .sort();
+      return Object.freeze({ ...catalogue, plannable: Object.freeze(plannable) });
+    } catch {
+      return null;
+    }
   }
 
   /**

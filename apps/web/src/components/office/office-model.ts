@@ -23,10 +23,31 @@
 // So an agent actor can be idle, recently finished, waiting, or in need of
 // attention — and never "working". Only the JARVIS system actor may be shown
 // as working, and only from a real `Task.status === "RUNNING"` row.
+//
+// VO-3.1 CHANGES ONE OF THOSE FACTS. A task now records the agent it is
+// assigned to (`Task.agentId`, set by the server when the work is committed),
+// so "this agent is running a task" IS provable: a RUNNING row naming it. The
+// per-agent lifecycle lives in `office-lifecycle.ts` and is attached to each
+// actor here; `state` keeps its VO-1 meaning (the audit-derived state) so the
+// conversational path, which still records no task, keeps speaking. A
+// conversational turn is still never shown as working.
 // ---------------------------------------------------------------------------
 
-import type { ActivityEntry, AgentSummary, TaskRecord, TaskStatusCounts } from "@/lib/api";
+import type {
+  ActivityEntry,
+  AgentSummary,
+  OfficeAgentWork,
+  OfficeAgentWorkView,
+  OfficeTaskView,
+  TaskRecord,
+  TaskStatusCounts,
+} from "@/lib/api";
 import type { OfficeStreamEvent, OfficeTaskEvent } from "@jarvis/core/office-stream";
+import {
+  deriveLifecycle,
+  upcomingTask,
+  type OfficeAgentLifecycle,
+} from "./office-lifecycle";
 
 export type DepartmentId =
   | "command-center"
@@ -142,8 +163,25 @@ export interface OfficeAgentActor {
   lastSummary: string | null;
   toolCount: number;
   approvedWrites: boolean;
-  /** True only for `idle`: the one state where motion is decorative. */
+  /** True only when the agent has nothing real to do: the one case where motion is decorative. */
   decorative: boolean;
+
+  // ---- VO-3.1 ------------------------------------------------------------
+  /** The agent's state from durable facts (see office-lifecycle.ts). */
+  lifecycle: OfficeAgentLifecycle;
+  lifecycleLabel: string;
+  /** The task the lifecycle is about: running, claimed, queued, or just finished. */
+  currentTask: OfficeTaskView | null;
+  /** A scheduled task beyond the queue horizon, when that is all it has. */
+  upcomingTask: OfficeTaskView | null;
+  queuedCount: number;
+  lastCompleted: OfficeTaskView | null;
+  lastFailed: OfficeTaskView | null;
+  pendingApprovals: OfficeAgentWork["pendingApprovals"];
+  /** Tool ids with their declared risk. `toolCount` stays for older readers. */
+  tools: Array<{ id: string; risk?: string }>;
+  /** The newest tool run attributed to this agent, from the audit rows. */
+  lastTool: { toolId: string; at: string; result: OfficeEventResult } | null;
 }
 
 export interface OfficeSystemActor {
@@ -225,6 +263,12 @@ export interface OfficeModelInput {
    * list's cap bounds, and says so through `countsAreTotals`.
    */
   taskCounts?: TaskStatusCounts | null;
+  /**
+   * VO-3.1 — the server's per-agent read, with live task events already
+   * applied (`overlayAgentWork`). Null when the API has no such read (an older
+   * server) or it failed: agents then speak only from the audit rows, as in VO-1.
+   */
+  agentWork?: OfficeAgentWorkView | null;
   /** Injectable clock, so the tests are deterministic. */
   now?: number;
 }
@@ -307,6 +351,27 @@ function latestForAgent(
   return activity.find((entry) => entry.agentId === agentId);
 }
 
+/**
+ * VO-3.1 — which registered agent an audit row belongs to.
+ *
+ * The row's own `agentId` when it names a registered agent (a conversational
+ * turn). Otherwise, the agent the TASK it ran for is assigned to: a task run's
+ * audit row names no agent (the executor is never handed one), but it carries
+ * the run's `executionId`, and the task row carries the same id and its agent.
+ */
+function rowAgent(
+  entry: ActivityEntry,
+  registeredIds: ReadonlySet<string>,
+  executionAgents: ReadonlyMap<string, string>
+): string | null {
+  if (typeof entry.agentId === "string" && registeredIds.has(entry.agentId)) return entry.agentId;
+  if (entry.executionId) {
+    const assigned = executionAgents.get(entry.executionId);
+    if (assigned && registeredIds.has(assigned)) return assigned;
+  }
+  return null;
+}
+
 function agentState(
   latest: ActivityEntry | undefined,
   now: number
@@ -330,10 +395,36 @@ function agentState(
 function buildAgentActor(
   agent: AgentSummary,
   activity: ActivityEntry[],
-  now: number
+  now: number,
+  context: {
+    work: OfficeAgentWork | null;
+    approvalsRead: boolean;
+    registeredIds: ReadonlySet<string>;
+    executionAgents: ReadonlyMap<string, string>;
+  }
 ): OfficeAgentActor {
   const latest = latestForAgent(activity, agent.agentId);
   const { state, label } = agentState(latest, now);
+
+  const life = deriveLifecycle({
+    work: context.work,
+    approvalsRead: context.approvalsRead,
+    auditState: state,
+    now,
+  });
+
+  // The newest tool run that is this agent's: its own rows, or its tasks' rows.
+  const toolRow = activity.find(
+    (entry) =>
+      entry.action === "tool.execute" &&
+      entry.toolId &&
+      rowAgent(entry, context.registeredIds, context.executionAgents) === agent.agentId
+  );
+
+  const tools =
+    agent.tools && agent.tools.length > 0
+      ? agent.tools.map((tool) => (tool.risk ? { id: tool.id, risk: tool.risk } : { id: tool.id }))
+      : agent.allowedTools.map((id) => ({ id }));
 
   return {
     kind: "agent",
@@ -347,9 +438,21 @@ function buildAgentActor(
     lastSummary: latest ? describeActivityAction(latest) : null,
     toolCount: agent.toolCount,
     approvedWrites: agent.writesRequireApproval,
-    // Motion is decorative in exactly one state, and the legend says what it
-    // means. A real event removes the pulse rather than adding one.
-    decorative: state === "idle",
+    // Motion is decorative in exactly one case: the agent has nothing real to
+    // do. The legend says what it means; a real state removes it.
+    decorative: life.lifecycle === "idle",
+    lifecycle: life.lifecycle,
+    lifecycleLabel: life.label,
+    currentTask: life.task,
+    upcomingTask: upcomingTask(context.work, now),
+    queuedCount: context.work?.queuedCount ?? 0,
+    lastCompleted: context.work?.lastCompleted ?? null,
+    lastFailed: context.work?.lastFailed ?? null,
+    pendingApprovals: context.work?.pendingApprovals ?? null,
+    tools,
+    lastTool: toolRow
+      ? { toolId: toolRow.toolId as string, at: toolRow.timestamp, result: toolRow.result }
+      : null,
   };
 }
 
@@ -390,7 +493,7 @@ function buildSystemActor(
   };
 }
 
-function taskEvent(task: TaskRecord): OfficeEventRow | null {
+function taskEvent(task: TaskRecord, registeredIds: ReadonlySet<string>): OfficeEventRow | null {
   const status = statusOf(task);
   if (status !== "PENDING" && status !== "RUNNING") return null;
 
@@ -399,14 +502,18 @@ function taskEvent(task: TaskRecord): OfficeEventRow | null {
       ? task.startedAt ?? task.createdAt
       : task.scheduledAt ?? task.createdAt;
 
+  // VO-3.1 — a task assigned to a registered agent is that agent's work. One
+  // with no assignment (older rows, plan-only work, a tool no agent covers)
+  // remains JARVIS system work, as before.
+  const agentId = typeof task.agentId === "string" && registeredIds.has(task.agentId) ? task.agentId : null;
+
   return {
     id: `task:${task.id}`,
     at,
-    actorId: "jarvis",
-    actorLabel: "JARVIS",
-    actorKind: "system",
-    // The task engine records no agent for a task run, so this is system work.
-    attributed: false,
+    actorId: agentId ?? "jarvis",
+    actorLabel: agentId ? displayAgentName(agentId) : "JARVIS",
+    actorKind: agentId ? "agent" : "system",
+    attributed: agentId !== null,
     summary: status === "RUNNING" ? `Running: ${task.title}` : `Queued: ${task.title}`,
     result: status === "RUNNING" ? "running" : "queued",
     source: "task",
@@ -415,22 +522,37 @@ function taskEvent(task: TaskRecord): OfficeEventRow | null {
 
 function auditEvent(
   entry: ActivityEntry,
-  registeredIds: ReadonlySet<string>
+  registeredIds: ReadonlySet<string>,
+  executionAgents: ReadonlyMap<string, string>
 ): OfficeEventRow {
-  const attributed =
-    typeof entry.agentId === "string" && registeredIds.has(entry.agentId);
+  const agentId = rowAgent(entry, registeredIds, executionAgents);
+  const attributed = agentId !== null;
 
   return {
     id: `audit:${entry.id}`,
     at: entry.timestamp,
-    actorId: attributed ? (entry.agentId as string) : "jarvis",
-    actorLabel: attributed ? displayAgentName(entry.agentId as string) : "JARVIS",
+    actorId: agentId ?? "jarvis",
+    actorLabel: agentId ? displayAgentName(agentId) : "JARVIS",
     actorKind: attributed ? "agent" : "system",
     attributed,
     summary: describeActivityAction(entry),
     result: resultOf(entry),
     source: "audit",
   };
+}
+
+/** VO-3.1 — execution id -> assigned agent, from every task row the office holds. */
+function executionAgentsOf(tasks: TaskRecord[], work: OfficeAgentWorkView | null): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const task of tasks) {
+    if (task.executionId && task.agentId) map.set(task.executionId, task.agentId);
+  }
+  for (const agent of work?.agents ?? []) {
+    for (const view of [agent.active, agent.lastCompleted, agent.lastFailed]) {
+      if (view?.executionId) map.set(view.executionId, agent.agentId);
+    }
+  }
+  return map;
 }
 
 /**
@@ -461,7 +583,18 @@ export function buildOfficeModel(input: OfficeModelInput): OfficeModel {
     return right - left;
   });
 
-  const actors = registered.map((agent) => buildAgentActor(agent, activity, now));
+  const work = input.agentWork ?? null;
+  const workByAgent = new Map((work?.agents ?? []).map((entry) => [entry.agentId, entry]));
+  const executionAgents = executionAgentsOf(input.tasks, work);
+
+  const actors = registered.map((agent) =>
+    buildAgentActor(agent, activity, now, {
+      work: workByAgent.get(agent.agentId) ?? null,
+      approvalsRead: work?.approvalsRead ?? false,
+      registeredIds,
+      executionAgents,
+    })
+  );
   const system = buildSystemActor(input.tasks, input.taskCounts ?? null);
 
   const byDepartment = new Map<DepartmentId, OfficeAgentActor[]>();
@@ -477,8 +610,10 @@ export function buildOfficeModel(input: OfficeModelInput): OfficeModel {
   }));
 
   const events = [
-    ...input.tasks.map(taskEvent).filter((event): event is OfficeEventRow => event !== null),
-    ...activity.map((entry) => auditEvent(entry, registeredIds)),
+    ...input.tasks
+      .map((task) => taskEvent(task, registeredIds))
+      .filter((event): event is OfficeEventRow => event !== null),
+    ...activity.map((entry) => auditEvent(entry, registeredIds, executionAgents)),
   ]
     .sort((a, b) => {
       const left = parseTime(a.at) ?? 0;

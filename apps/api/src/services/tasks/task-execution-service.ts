@@ -96,6 +96,17 @@ export interface TaskExecutionDeps {
    * ToolExecutor still runs every one of its own checks afterwards.
    */
   allowedToolIds: ReadonlySet<string>;
+  /**
+   * VO-3.1 — which agent the run is assigned to, from its tool
+   * (`assignAgentForTool` over the registered agents, built in the container).
+   * Null: no registered agent covers the tool, so it is JARVIS system work.
+   *
+   * ATTRIBUTION ONLY. The answer is written on the task row with the claim; it
+   * is never handed to the executor, which runs exactly as before — with the
+   * caller's role, and with an agent only when the caller itself supplied one.
+   * Optional: without it no assignment is recorded, as before VO-3.1.
+   */
+  assignAgent?: (toolId: string) => string | null;
 }
 
 export class TaskExecutionService {
@@ -166,7 +177,14 @@ export class TaskExecutionService {
     // honours `request.executionId`, so this is the same id it audits under.
     const executionId = crypto.randomUUID();
 
-    const claimed = await this.deps.tasks.startTask(userId, taskId, { executionId });
+    // VO-3.1 — the agent and the tool are written with the claim, in the same
+    // statement, so a RUNNING task always says who it is assigned to and what
+    // it is running. Nothing about the execution below changes.
+    const claimed = await this.deps.tasks.startTask(userId, taskId, {
+      executionId,
+      toolId: request.toolId,
+      ...(this.deps.assignAgent ? { agentId: this.deps.assignAgent(request.toolId) } : {}),
+    });
     if (!claimed.ok) {
       return {
         ok: false,

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { Role } from "./common.js";
+import type { UnifiedExecutionOutcome } from "../execution-capability.js";
 import type { ToolResult } from "./tool.js";
 import type { InputMode } from "./voice.js";
 
@@ -108,9 +109,21 @@ export interface ToolExecutionEntry {
   toolId: string;
   toolCallId?: string;
   status: ToolExecutionStatus;
+  /**
+   * Whether the tool RETURNED success. Kept exactly as it was: it is not "the
+   * thing the tool started finished" — an n8n trigger returns success when it
+   * was accepted. `outcome` is what says what happened.
+   */
   success: boolean;
   error?: string;
   durationMs?: number;
+  /**
+   * UEE-4 — what happened, in the unified contract: succeeded, failed, pending
+   * or uncertain, with whether a side effect is possible and whether a retry is
+   * safe. Derived from the execution's own status and flags, never from a
+   * model's words, and carrying ids only. Absent when it could not be derived.
+   */
+  outcome?: UnifiedExecutionOutcome;
 }
 
 export interface ToolExecutionSummary {

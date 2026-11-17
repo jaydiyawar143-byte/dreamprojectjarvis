@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { BrowserSession, type PageLike, type RouteLike } from "../src/session.js";
+import { inspectPageElements, pageBodyText } from "../src/page-scripts.js";
 import { DownloadStore } from "../src/download.js";
 import { createBrowserConfig, type BrowserConfig } from "../src/config.js";
 import type { NavigationPolicyConfig } from "../src/navigation-policy.js";
@@ -63,12 +64,16 @@ class FakePage implements PageLike {
     this.selectCalls.push([selector, value]);
     return [value];
   }
-  async evaluate<T>(fn: string): Promise<T> {
-    if (fn.includes("clone.innerText")) return this.bodyText as unknown as T;
-    if (fn.includes("querySelectorAll")) {
-      return (this.evaluateResults.get("inspect") ?? []) as T;
+  // Phase 19, P0: the session passes the in-page FUNCTIONS (a string would be
+  // evaluated by Playwright and never called), so this fake answers by which
+  // function it was given. What the functions do in a page is pinned in
+  // page-scripts-p19.test.ts.
+  async evaluate<R, A>(pageFunction: (arg: A) => R, _arg?: A): Promise<R> {
+    if ((pageFunction as unknown) === pageBodyText) return this.bodyText as unknown as R;
+    if ((pageFunction as unknown) === inspectPageElements) {
+      return (this.evaluateResults.get("inspect") ?? []) as R;
     }
-    return (this.evaluateResults.get("fields") ?? {}) as T;
+    return (this.evaluateResults.get("fields") ?? {}) as R;
   }
   async waitForTimeout(): Promise<void> {}
   setDefaultTimeout(): void {}

@@ -76,6 +76,13 @@ export interface TaskConversationDeps {
   execution: TaskExecutionService;
   /** Scheduler V1. Absent on a deployment without scheduling. */
   scheduler?: TaskSchedulerService;
+  /**
+   * VO-3.1 — the same agent assignment the execution service records at a
+   * run's start, used here for SCHEDULED work: the task is assigned when the
+   * schedule is recorded, so the office can show it queued at that agent's
+   * desk. Plan-only work is not assigned — nothing is committed to run.
+   */
+  assignAgent?: (toolId: string) => string | null;
 }
 
 const MAX_TITLE = 200;
@@ -150,7 +157,8 @@ export class TaskConversationService {
       const scheduled = await this.deps.scheduler.scheduleTask(
         input.userId,
         task.id,
-        input.scheduledAt
+        input.scheduledAt,
+        this.deps.assignAgent ? { agentId: this.deps.assignAgent(plan.toolId) } : {}
       );
 
       if (!scheduled.ok) {

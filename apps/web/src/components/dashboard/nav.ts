@@ -13,7 +13,6 @@ import {
   BookOpen,
   Bot,
   Brain,
-  Building2,
   CalendarRange,
   CheckSquare,
   Globe,
@@ -74,10 +73,8 @@ export const NAV_GROUPS: NavGroup[] = [
     title: "Capabilities",
     items: [
       { href: "/agents", label: "Agents", icon: Bot, available: true },
-      // VO-1 — a 2D floor plan of the agents this deployment registered, fed by
-      // the live registry, the task engine and the audit log. It is a window,
-      // not an execution surface: nothing on that page runs or approves work.
-      { href: "/office", label: "Virtual Office", icon: Building2, available: true },
+      // VO-2.2 — no Virtual Office entry. The office is a widget on the
+      // dashboard, and `/office` redirects there (`/dashboard?office=open`).
       { href: "/automations", label: "Automations", icon: Workflow, available: true },
       { href: "/integrations", label: "Integrations", icon: Plug, available: true },
       // Browser now has a real page. It reports the browser agent's LIVE

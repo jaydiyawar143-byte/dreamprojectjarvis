@@ -152,6 +152,18 @@ export interface OrchestratorConfig {
    */
   switchedOffTools?: Readonly<Record<string, string>>;
   /**
+   * Phase 19 — why this server cannot open web pages, in a person's words.
+   * Given only where the Browser Agent is not registered.
+   *
+   * A message that asks for a page to be opened, read or captured
+   * (`looksLikeBrowsingRequest`), and that the router would give to the
+   * Browser Agent first, is answered with this sentence and audited
+   * (`agent.unavailable`). It does not fall through to an agent with no
+   * browser, which could only guess at the page. No model is asked and
+   * nothing runs. Absent: such a message falls through as before.
+   */
+  browsingUnavailableReason?: string;
+  /**
    * Phase 19.7 — holds a proposed desktop action to the owner's own words and
    * finds the computer it is for, before any approval exists. With none wired,
    * every desktop action is refused.

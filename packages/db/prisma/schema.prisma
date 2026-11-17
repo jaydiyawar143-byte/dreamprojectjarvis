@@ -979,6 +979,20 @@ model Task {
   /// attributable. Null on every historical row and on any task that has not
   /// executed.
   executionId String?   @map("execution_id")
+  /// VO-3.1 - the agent this work is assigned to.
+  ///
+  /// Decided by `assignAgentForTool` (packages/agents) from the tool the run
+  /// uses, when the work is COMMITTED: scheduled, or started. A plan-only task
+  /// is not assigned. This is attribution, not authority: the executor still
+  /// runs with the caller's role and no agent, exactly as before, and the run
+  /// is linked to its audit row by `executionId`. Null on every historical row
+  /// and on work no registered agent's policy covers (JARVIS system work).
+  agentId     String?   @map("agent_id")
+  /// VO-3.1 - when `agentId` was first set.
+  assignedAt  DateTime? @map("assigned_at")
+  /// VO-3.1 - the tool the run executes, written in the SAME statement as
+  /// PENDING -> RUNNING, so a RUNNING task says what it is running.
+  toolId      String?   @map("tool_id")
   /// Set once a reminder has been surfaced, so it is not raised twice.
   remindedAt  DateTime? @map("reminded_at")
   /// Which agent or flow created it, for the audit trail. Null when manual.
@@ -993,6 +1007,8 @@ model Task {
   @@index([userId, status])
   /// The scheduler sweep's only query: due work, by state.
   @@index([scheduledAt, status])
+  /// VO-3.1 - the office's per-agent read: one user's assigned work, by state.
+  @@index([userId, agentId, status])
   @@map("Task")
 }
 

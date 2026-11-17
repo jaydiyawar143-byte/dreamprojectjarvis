@@ -206,7 +206,16 @@ export class TaskSchedulerService {
     userId: string,
     taskId: string,
     scheduledAt: Date,
-    options: { replace?: boolean } = {}
+    options: {
+      replace?: boolean;
+      /**
+       * VO-3.1 — the agent the scheduled work is assigned to, recorded in the
+       * same statement as the schedule. The conversation knows it from the
+       * feasibility plan; the REST schedule route does not plan, so it leaves
+       * the assignment to the run.
+       */
+      agentId?: string | null;
+    } = {}
   ): Promise<ScheduleResult> {
     if (Number.isNaN(scheduledAt.getTime())) {
       return { ok: false, refusal: "INVALID_TIME", message: "That is not a valid date and time." };
@@ -237,10 +246,13 @@ export class TaskSchedulerService {
       userId,
       taskId,
       JARVIS_TASK_CREATOR,
-      scheduledAt
+      scheduledAt,
+      options.agentId !== undefined ? { agentId: options.agentId } : {}
     );
 
     if (!task) return this.notSchedulable();
+    // VO-3.1 — the office hears about scheduled work as it hears about a move.
+    this.deps.taskService.announce(task);
     return { ok: true, task };
   }
 
@@ -258,7 +270,12 @@ export class TaskSchedulerService {
     // The PENDING requirement in the WHERE clause is what stops a RUNNING
     // execution being "cancelled" here: this only ever clears a future plan,
     // it never interrupts work in flight.
+    //
+    // VO-3.1 — clearing the schedule also clears the assignment, in the same
+    // statement: work no longer committed to run is nobody's. The office hears
+    // about it like any other write.
     if (!task) return this.notSchedulable();
+    this.deps.taskService.announce(task);
     return { ok: true, task };
   }
 
@@ -521,6 +538,13 @@ export class TaskSchedulerService {
     if (!claimed) {
       return { taskId: task.id, outcome: "claim_lost" };
     }
+
+    // VO-3.1 — the claim is durable now, so the office may hear that the work
+    // was picked up. Re-read rather than reconstructed: the event is built
+    // from the row as stored. A failed read announces nothing and changes
+    // nothing about the run.
+    const claimedRow = await this.deps.taskService.getTask(task.userId, task.id).catch(() => null);
+    if (claimedRow?.ok) this.deps.taskService.announce(claimedRow.task);
 
     // V2.1 - the claim is now durable, so it is worth recording. `lateness` is
     // the gap between the instant the task was due and the instant it was

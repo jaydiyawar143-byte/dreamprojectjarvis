@@ -156,11 +156,97 @@ uses it when `BROWSER_SERVICE_URL` is set as well.
 It is not a sandbox by itself. It is a container with limits; Chromium keeps its
 own sandbox (the launcher sets Playwright's `chromiumSandbox: true`, without
 which Playwright would add `--no-sandbox` itself), and if the host cannot
-support that, sessions fail rather than run unsandboxed. Under the shipped
-compose settings that failure is likely: Docker's default seccomp profile
-refuses the user namespaces Chromium's Linux sandbox uses. This has not been
-observed yet — see step 5. Do not "fix" it with `seccomp:unconfined` or
-`--no-sandbox`.
+support that, sessions fail rather than run unsandboxed. Do not "fix" a sandbox
+failure with `seccomp:unconfined`, `--no-sandbox`, `--disable-gpu-sandbox`,
+`CAP_SYS_ADMIN`, privileged mode or by dropping `no-new-privileges`.
+
+**Chromium's sandbox needs a seccomp profile of its own (Phase 19 S10,
+2026-11-15).** Docker's default seccomp profile refuses the unprivileged user
+namespaces Chromium's Linux sandbox is built on, and `no-new-privileges` rules
+out its setuid fallback. Under the default profile Chromium refuses to start,
+so it fails closed. The browser service therefore runs under
+`apps/browser-service/seccomp/browser-service.json`. That file is Docker's
+default profile, copied byte for byte from moby/profiles `seccomp/v0.2.4` (the
+version Docker Engine 29.9.2 builds in), and it is vendored beside it as
+`docker-default-profiles-v0.2.4.json`. On top of it are exactly three rules,
+nothing else, all for the browser service only:
+
+- `clone` may make new user, PID and network namespaces. Mount, UTS, IPC and
+  cgroup namespaces stay refused.
+- `unshare` may make a new user namespace, and only that.
+- `chroot` passes the filter. The kernel still demands `CAP_SYS_CHROOT`, which
+  the container does not have, so only a process inside its own user namespace
+  can use it.
+
+`setns` and `mount` stay as Docker's default has them: refused without
+`CAP_SYS_ADMIN`. The egress proxy keeps Docker's default profile. The browser
+service also gets a small tmpfs home (`/home/node`, uid/gid 1000, mode 0700),
+because Chromium writes there and the root filesystem stays read-only.
+
+**S10 passes on the new image in an isolated run, but the service stays off
+(2026-11-16).** On the old Alpine image this profile let Chromium's sandbox
+come up whole, but Chromium's **own** seccomp policy killed its GPU process
+three times, and the browser then exited ("GPU process isn't usable.
+Goodbye."). The cause is the C library: musl 1.2.6 implements `pwrite()` with
+the `pwritev2` syscall, which Chromium's GPU-process policy does not allow.
+That policy allows `pwrite64`, which glibc's `pwrite()` uses. `--disable-gpu`
+did not help. So the image is now Debian (next paragraph).
+
+In an isolated run on Docker Desktop (WSL2) the Debian image:
+
+- passed S10 three times out of three;
+- stayed up past 30 s three times, with no seccomp failure, no unexpected
+  GPU-process exit and no FATAL error;
+- failed closed under Docker's default profile;
+- passed all ten containment probes;
+- passed S11 12/12 in both modes.
+
+**Keep `BROWSER_SERVICE_CHROMIUM_ENABLED` off** all the same, until:
+
+- S10 and S11 pass on the deployment host (steps 5 and 6);
+- the service is tested end to end with Chromium on (navigation, screenshots,
+  downloads);
+- Playwright 1.63 with Chromium 156 is validated;
+- the init-process decision for the zombie processes is made.
+
+The record is `docs/phases/phase-19.md` §20.9 and §20.10.
+
+**The image is Debian, and it is pinned.** `apps/browser-service/Dockerfile`:
+
+- builds every stage from `node:24.22.3-trixie-slim`, pinned by digest
+  (`sha256:af02d57b57719b9657a45199a79264a9437940cd55b3c7b3fc99615654f124a0`);
+- installs Debian's `chromium` and `chromium-common` at exactly
+  `156.0.8078.79-1~deb13u1`, from Debian's signed archive (trixie-security),
+  with `--no-install-recommends` and one font package (`fonts-liberation`);
+- never installs `chromium-sandbox`, the setuid helper: the build fails if the
+  package or its binary is present;
+- sets `CHROME_PATH` to `/usr/lib/chromium/chromium`, the real binary.
+  `/usr/bin/chromium` is Debian's wrapper script, which adds switches of its
+  own.
+
+The egress proxy runs from the same image. `browser-service-compose.test.ts`
+pins all of this. Built on 2026-11-16, the image was 2,745,574,344 bytes. Debian
+13.7, glibc 2.41.
+
+To take a Chromium security update (Debian announces one as a DSA for
+`chromium`):
+
+1. Change the version on the Dockerfile's install line, and `CHROMIUM_VERSION`
+   in `browser-service-compose.test.ts`, to the new version.
+2. Rebuild the image.
+3. Run S10 and S11 (steps 5 and 6) in the new container.
+4. Only then deploy it.
+
+Debian keeps only the current version in trixie-security, so after a new
+advisory the old pin can stop resolving and the build fails. That is the
+signal to do the above; never unpin to get round it. A new base image digest
+(a Node patch release, say) follows the same steps.
+
+When Docker Engine is upgraded, compare its default profile with the vendored
+copy. If it changed, vendor the new version, re-apply the three rules and run
+S10 again. The compose test (`browser-service-compose.test.ts`) pins the
+vendored copy's SHA-256 and holds the applied profile to "the vendored copy
+plus exactly those three rules".
 
 What the container receives is limited, and how far:
 
@@ -179,42 +265,96 @@ What the container receives is limited, and how far:
   persistent path is the named volume `jarvis-browser-artifacts`, mounted at
   `/var/lib/jarvis-browser/artifacts` for its artifact store (see "Browser
   artifacts" below); `/tmp` is a size-capped tmpfs for Chromium's scratch,
-  emptied on every restart. The volume is mounted into no other service.
+  emptied on every restart. `/home/node` is a 32 MB tmpfs owned by the `node`
+  user (mode 0700): it is Chromium's home directory, and it is emptied on every
+  restart as well. The volume is mounted into no other service.
+
+**The default stack never browses (Phase 19, P0).** `docker-compose.yml` pins
+the API's `BROWSER_ENABLED` to `"false"`, whatever `.env` says, and gives it no
+browser-service URL. The wiring is a second file, `docker-compose.browser.yml`,
+which compose loads only when it is named on the command line. It is not a
+`docker-compose.override.yml`, which compose would load by itself. That file:
+
+- switches browsing on for the API;
+- points it at `https://browser-service:3200`, over the internal `browser`
+  network it is already on;
+- sets both sides' TLS paths;
+- mounts the TLS material read-only;
+- changes no network, port, limit or security option;
+- does **not** switch Chromium on.
 
 To enable it:
 
-1. Generate the TLS material yourself. This deployment ships none, and both
-   sides refuse to run without it: a certificate and key for the service, a CA
-   both sides trust, and a client certificate for the API whose CN/SAN is the
-   value of `BROWSER_SERVICE_PEER_IDENTITY`. Mount the directory into both
-   containers with a `docker-compose.override.yml`; nothing here mounts it for
-   you. Certificate lifetime, rotation and revocation are **not decided** (U2,
-   `docs/phases/phase-19.md` §14.7): nothing rotates or revokes a certificate,
-   and a leaked client certificate stays valid until you replace its CA.
-2. In `.env`, set `BROWSER_ENABLED="true"` and
-   `BROWSER_SERVICE_URL="https://browser-service:3200"` (an `http:` URL is
-   refused), the same `BROWSER_SERVICE_KEY_ID`, `BROWSER_SERVICE_SHARED_SECRET`
-   (32+ random characters) and `BROWSER_SERVICE_PEER_IDENTITY` for both sides,
-   the API's `BROWSER_SERVICE_CLIENT_CERT_PATH`, `BROWSER_SERVICE_CLIENT_KEY_PATH`
-   and `BROWSER_SERVICE_CA_PATH`, and the service's
-   `BROWSER_SERVICE_TLS_CERT_PATH`, `BROWSER_SERVICE_TLS_KEY_PATH` and
-   `BROWSER_SERVICE_TLS_CA_PATH`, as mounted. Mutual TLS is the only mode: the
-   service will not start if `BROWSER_SERVICE_REQUIRE_MTLS` is set to anything
-   but `true` or `BROWSER_SERVICE_TRUST_FORWARDED_PEER_IDENTITY` to anything but
-   `false`.
-3. Set `BROWSER_SERVICE_CHROMIUM_ENABLED="true"` for the service. Without it the
-   container is up and refuses every session, by design. With it, the service
-   also requires `BROWSER_SERVICE_EGRESS_PROXY_URL`, which compose sets to
-   `http://browser-egress:3128`, and `BROWSER_ARTIFACT_RETENTION_HOURS`, which
-   has no default and which you set in `.env` (Phase 19.4, below); it refuses
-   to start without either.
-4. Start it — compose starts `browser-egress` first and the browser service only
-   once the proxy is healthy — then restart the API so it reads the endpoint:
+1. **Make the TLS material**, in a directory OUTSIDE the repository. This
+   deployment ships none, and both sides refuse to run without it. Lay it out
+   like this:
+
+   ```text
+   <dir>/api/      client.crt  client.key  ca.crt
+   <dir>/service/  server.crt  server.key  ca.crt
+   ```
+
+   - `client.crt` must name `BROWSER_SERVICE_PEER_IDENTITY`: its CN, or else
+     its first subject alternative name.
+   - `server.crt` must name `browser-service`, the host in the URL.
+   - Each subdirectory is mounted into its own container only, so neither
+     container holds the other's private key.
+   - Set `JARVIS_BROWSER_TLS_DIR` to `<dir>` in `.env`. Compose refuses to
+     start the opt-in without it.
+
+   Certificate lifetime, rotation and revocation are **not decided** (U2,
+   `docs/phases/phase-19.md` §14.7). Nothing rotates or revokes a
+   certificate, and a leaked client certificate stays valid until you replace
+   its CA.
+2. **Set the signing values** in `.env`: the same `BROWSER_SERVICE_KEY_ID`,
+   `BROWSER_SERVICE_SHARED_SECRET` (32+ random characters) and
+   `BROWSER_SERVICE_PEER_IDENTITY` for both sides. The opt-in file sets
+   `BROWSER_ENABLED`, `BROWSER_SERVICE_URL` and every certificate path itself.
+   Mutual TLS is the only mode: the service will not start if
+   `BROWSER_SERVICE_REQUIRE_MTLS` is set to anything but `true`, or
+   `BROWSER_SERVICE_TRUST_FORWARDED_PEER_IDENTITY` to anything but `false`.
+3. **Switch Chromium on**: set `BROWSER_SERVICE_CHROMIUM_ENABLED="true"` for
+   the service. It is a separate switch, and the opt-in file never sets it.
+   Without it the container is up and refuses every session, by design. With
+   it, the service also requires two things, and refuses to start without
+   either:
+   - `BROWSER_SERVICE_EGRESS_PROXY_URL`, which compose sets to
+     `http://browser-egress:3128`;
+   - `BROWSER_ARTIFACT_RETENTION_HOURS`, which has no default and which you
+     set in `.env` (Phase 19.4, below).
+
+   **Do not switch it on until the open items in `docs/phases/phase-19.md`
+   §20.10.6 and §21 are resolved.**
+4. **Start it with both files.** Compose starts `browser-egress` first, and the
+   browser service only once the proxy is healthy. Then recreate the API, so it
+   reads the endpoint:
 
 ```bash
-docker compose --profile browser-service up -d browser-service
-docker compose up -d api
+docker compose -f docker-compose.yml -f docker-compose.browser.yml --profile browser-service up -d browser-service
+docker compose -f docker-compose.yml -f docker-compose.browser.yml up -d api
 ```
+
+   **Read the API's start-up diagnosis** in its log, one line per state:
+
+   | Event | Meaning |
+   |---|---|
+   | `browser_tools_disabled`, `cause: "disabled"` | `BROWSER_ENABLED` is not `true`. `browserServiceConfigured: true` means a service URL is being ignored |
+   | `browser_registration_skipped`, `cause: "configuration_missing"` / `"invalid_service_url"` / `"configuration_invalid"` | A variable is missing, the URL is unusable (`http:`, credentials, a query), or a value is out of range. `reason` names the variable. No browser tool is registered, and nothing falls back to an in-process browser |
+   | `browser_registration_skipped`, `cause: "tls_material_unreadable"` / `"tls_material_invalid"` | A certificate, key or CA file is unreadable, or is not PEM, not a matching pair, not in date, or does not name `BROWSER_SERVICE_PEER_IDENTITY`. No tool is registered |
+   | `browser_tools_enabled`, `mode: "remote"` | Registered. It includes `clientCertificateNotAfter` |
+   | `browser_service_reachable` | The service accepted this API over mutual TLS, with a valid signature and the same protocol version |
+   | `browser_service_probe_failed` | `reason` is one of `unreachable`, `tls-handshake`, `authentication`, `clock-skew`, `protocol-version`, `timeout`, `service-unavailable`, `client-credentials-unreadable` or `unexpected-response`, and `message` says what to check. Transient reasons are retried (5 attempts over about two minutes); a configuration failure is logged once |
+
+   The probe is one authenticated no-op: closing a session id that was never
+   issued. It opens no browser and works with Chromium off. The tools stay
+   registered whatever it answers, so a service that starts after the API
+   needs no restart. No line names a path, a certificate, a key or a value.
+
+   The whole path also has an opt-in end-to-end test: the orchestrator,
+   ToolExecutor, the tools, the signed client, mutual TLS, the service, real
+   Chromium and the egress policy. It runs in an isolated compose project of
+   its own, `node scripts/browser-e2e/run.mjs` (`docs/phases/phase-19.md` §21),
+   and never touches this stack's containers, volumes or databases.
 
 Check it without a published port — there is none, deliberately. Port 3200
 answers only a peer with a client certificate from your CA, so the check — like
@@ -238,10 +378,29 @@ sends.
 docker compose exec browser-service node apps/browser-service/scripts/s10-sandbox-check.mjs
 ```
 
-   A failure to start Chromium with its sandbox means the host refuses what the
-   sandbox needs, and sessions will be refused. Keep the service's Chromium off
-   until a reviewed seccomp profile allows it; never answer it with
-   `seccomp:unconfined` or `--no-sandbox`.
+   It prints its preconditions first (uid, `NoNewPrivs`, seccomp mode,
+   capabilities, a read-only root, a writable `HOME`) for information. Then it
+   requires all of the following:
+   - Chromium starts with its sandbox and with no switch that disables it;
+   - `chrome://sandbox` shows Layer 1 as the namespace sandbox (never SUID,
+     never None), with PID namespaces, network namespaces and Seccomp-BPF, and
+     says the browser is adequately sandboxed;
+   - a renderer renders an offline page;
+   - that renderer runs in its own user, PID and network namespace;
+   - the browser is still up five seconds later.
+
+   The exit code is 0 when every check passes, 1 when any check fails, and 2
+   when a prerequisite is missing (not Linux, no Chromium, an unbuilt service).
+
+   Every check must pass before `BROWSER_SERVICE_CHROMIUM_ENABLED` is switched
+   on. On the Alpine image (2026-11-15) the last three did not. On the Debian
+   image every check passed in an isolated run (2026-11-16). Run it again on
+   the deployment host (see the paragraph on S10 above). A failure to *start*
+   means the host refuses what the sandbox needs: check that the container
+   really runs the browser service's own profile (`docker inspect` lists it
+   under `SecurityOpt`).
+   Never answer it with `seccomp:unconfined`, `--no-sandbox` or
+   `--disable-gpu-sandbox`.
 
 6. Check the network layer once in the running stack (S11, container mode). It
    tries direct connections that the internal network must not allow — a public
@@ -1093,6 +1252,52 @@ What to look for:
 No new environment variable was added.
 
 **Still decided per account, not by Organization:** sending a WhatsApp message (only the account the phone number is assigned to), triggering an n8n workflow (only the account's own registered workflows), the read-only Maps tools (any account, within `GOOGLE_MAPS_MONTHLY_LIMIT`) and the reviewed MCP servers. Publishing to a Facebook Page is off unless `MARKETING_PUBLISH_ENABLED=true`, and is not Organization-checked: leave it off on a deployment that serves more than one business.
+
+### n8n Sandbox Service (optional; built, not exposed)
+
+This is a **third** n8n surface, separate from the Public REST API and the MCP server. It talks to a self-hosted [`n8n-io/n8n-sandbox-service`](https://github.com/n8n-io/n8n-sandbox-service) deployment — not n8n Cloud — which runs shell commands inside an isolated sandbox it owns. JARVIS never starts a process on the API host for this.
+
+**There is nothing to switch on beyond the two values.** The service is built only when both `N8N_SANDBOX_API_URL` and `N8N_SANDBOX_API_KEY` are set. There is no separate enable flag. Neither value is read at boot beyond validation: the API makes no request to the sandbox service at start-up.
+
+**It is not reachable yet.** In this release no route, tool or agent allowlist entry is wired to the service. A deployment that configures it gains a `container.n8nSandbox` for server code, and no HTTP endpoint and no chat command. That is deliberate — building the client is not exposure. When a later change adds a surface, it must call this same service instance, never the provider directly.
+
+**Configuration.** Both are plain optional strings; a bad or unreachable sandbox never stops the API booting.
+
+```bash
+# In the root .env. Inside a container, "localhost" is the container itself —
+# use the sandbox service's hostname on the compose network.
+N8N_SANDBOX_API_URL="http://sandbox-api:8080"
+N8N_SANDBOX_API_KEY="the key your sandbox service issued"
+
+# Optional ceilings. Defaults shown.
+N8N_SANDBOX_REQUEST_TIMEOUT_MS="15000"        # create/read/delete/cancel
+N8N_SANDBOX_EXECUTION_TIMEOUT_MS="300000"     # per command (5m)
+N8N_SANDBOX_MAX_OUTPUT_BYTES="1000000"        # collected stdout+stderr
+```
+
+`N8N_SANDBOX_API_KEY` is sent only in the `X-Api-Key` header. It is never returned, logged or placed in a URL, and it is **not** `N8N_API_KEY` — the sandbox service issues its own key.
+
+**What the log says.** One line at start-up, naming neither the URL nor the key:
+
+```bash
+docker compose logs api | grep n8n_sandbox
+```
+
+```
+{"event":"n8n_sandbox_configured","exposure":"none: no route, tool or agent is wired to this service"}
+```
+
+When the values are absent or invalid it writes `n8n_sandbox_disabled` with a reason that names the missing field, never its value.
+
+**Verifying the connection without printing the key.** From inside the API container, the service's own tenant endpoint is the honest check — admin routes are not reachable with a tenant key:
+
+```bash
+docker compose exec api node -e 'fetch(process.env.N8N_SANDBOX_API_URL+"/sandboxes",{headers:{"X-Api-Key":process.env.N8N_SANDBOX_API_KEY}}).then(r=>console.log(r.status))'
+```
+
+`200` means the URL, key and network path work. `401`/`403` means the key is wrong or belongs to another tenant; `404`/`5xx` means the URL or service is wrong. Nothing is created by this read.
+
+**Rollback.** Remove the two values and restart the API. There is no migration, no table and no JARVIS state for this surface; an execution inside the sandbox service is unaffected by an API restart.
 
 ## 8. After the deployment
 

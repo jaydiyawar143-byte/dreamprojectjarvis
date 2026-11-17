@@ -115,3 +115,64 @@ export {
   type AutomationSourceReport,
 } from "./automation-catalog.js";
 
+// ---------------------------------------------------------------------------
+// n8n Sandbox Service (additive; unrelated to the Public REST API above)
+// ---------------------------------------------------------------------------
+// A third n8n surface. These exports do not change the behaviour of any
+// existing one: `api-client.ts`, `client.ts`, `provider.ts`, `config.ts` and
+// `mcp-connector.ts` are untouched. Building a client is not exposure — no
+// route, tool or agent receives one unless a later change wires it.
+export {
+  createN8nSandboxConfig,
+  isN8nSandboxConfigured,
+  describeN8nSandboxStatus,
+  N8N_SANDBOX_DEFAULT_REQUEST_TIMEOUT_MS,
+  N8N_SANDBOX_MAX_REQUEST_TIMEOUT_MS,
+  N8N_SANDBOX_DEFAULT_EXECUTION_TIMEOUT_MS,
+  N8N_SANDBOX_MAX_EXECUTION_TIMEOUT_MS,
+  N8N_SANDBOX_EXECUTION_GRACE_MS,
+  N8N_SANDBOX_DEFAULT_MAX_OUTPUT_BYTES,
+  N8N_SANDBOX_MAX_OUTPUT_BYTES,
+  type N8nSandboxConfig,
+  type N8nSandboxConfigInput,
+} from "./sandbox-config.js";
+
+export {
+  N8nSandboxError,
+  classifySandboxHttpError,
+  classifySandboxTransportError,
+  redactSandboxText,
+  malformedSandboxResponseError,
+  incompleteSandboxStreamError,
+  type N8nSandboxErrorCode,
+  type N8nSandboxErrorOptions,
+  type N8nSandboxResult,
+} from "./sandbox-error.js";
+
+export {
+  parseN8nSandboxEvent,
+  createN8nSandboxNdjsonDecoder,
+  isTerminalSandboxEvent,
+  N8N_SANDBOX_MAX_NDJSON_LINE_LENGTH,
+  type N8nSandboxEvent,
+  type N8nSandboxStartedEvent,
+  type N8nSandboxOutputEvent,
+  type N8nSandboxExitEvent,
+  type N8nSandboxErrorEvent,
+  type N8nSandboxNdjsonDecoder,
+} from "./sandbox-ndjson.js";
+
+export {
+  createN8nSandboxClient,
+  type N8nSandboxClient,
+  type N8nSandboxClientOptions,
+  type N8nSandboxFetch,
+  type N8nSandbox,
+  type N8nSandboxCreateOptions,
+  type N8nSandboxExecutionRequest,
+  type N8nSandboxExecutionResult,
+  type N8nSandboxExecutionSnapshot,
+  type N8nSandboxRequestOptions,
+  type N8nSandboxResumeOptions,
+} from "./sandbox-client.js";
+
