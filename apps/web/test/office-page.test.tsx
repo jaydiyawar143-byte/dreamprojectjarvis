@@ -1,5 +1,10 @@
 // ---------------------------------------------------------------------------
-// VO-1 — the Virtual Office tab.
+// VO-1 — the Virtual Office.
+//
+// VO-2.2 — there is no /office page any more: the office is a dashboard
+// widget that opens this view in a full-screen dialog. These tests render
+// that dialog, open, over the real `useOfficeData` hook — exactly what the
+// widget opens — so every rule below is pinned where the office now lives.
 //
 // The office is a WINDOW, so these tests pin what it shows and what it refuses
 // to show:
@@ -7,7 +12,9 @@
 //   * registered agents are drawn, unregistered ones are not employees;
 //   * a task run with no agent is JARVIS system work;
 //   * an audit row with no agent attribution is never given to an agent;
-//   * there is no working agent, no paused state and no percentage progress;
+//   * an agent is never shown working from a task that names no agent
+//     (VO-3.1: an agent's work needs its own assigned RUNNING task), there is
+//     no paused state and no percentage progress;
 //   * the same facts are available as text (scene summary + event table).
 //
 // Nothing here exercises execution, approvals or writes: the office has no
@@ -18,9 +25,16 @@ import { describe, it, expect, vi, beforeEach, onTestFinished } from "vitest";
 import React from "react";
 import { render, screen, within, fireEvent } from "@testing-library/react";
 
+const navigation = vi.hoisted(() => ({
+  redirect: vi.fn((url: string) => {
+    throw new Error(`NEXT_REDIRECT ${url}`);
+  }),
+}));
+
 vi.mock("next/navigation", () => ({
+  redirect: navigation.redirect,
   useRouter: () => ({ push: vi.fn(), replace: vi.fn(), prefetch: vi.fn() }),
-  usePathname: () => "/office",
+  usePathname: () => "/dashboard",
   useParams: () => ({}),
   useSearchParams: () => new URLSearchParams(),
 }));
@@ -52,34 +66,30 @@ vi.mock("../src/lib/use-office-stream", () => ({
   useOfficeStream: () => officeStream.value,
 }));
 
-// The layout is covered separately, below. These stand-ins let the page render
-// on its own without a real session or a socket connection.
-vi.mock("../src/components/require-auth", () => ({
-  RequireAuth: ({ children }: { children: React.ReactNode }) => (
-    <div data-testid="require-auth">{children}</div>
-  ),
-}));
-
-vi.mock("../src/components/dashboard/dashboard-shell", () => ({
-  DashboardShell: ({
-    children,
-    fullscreen,
-  }: {
-    children: React.ReactNode;
-    fullscreen?: boolean;
-  }) => (
-    <div data-testid="dashboard-shell" data-fullscreen={String(Boolean(fullscreen))}>
-      {children}
-    </div>
-  ),
-}));
-
 import * as api from "../src/lib/api";
-import OfficePage from "../src/app/office/page";
-import OfficeLayout from "../src/app/office/layout";
+import OfficeRedirect from "../src/app/office/page";
+import { OfficeExpandedDialog } from "../src/components/office/office-expanded";
+import { useOfficeData } from "../src/components/office/use-office-data";
+import { OFFICE_DEEP_LINK } from "../src/components/office/office-widget";
 import { NAV_ITEMS } from "../src/components/dashboard/nav";
 
 const mocked = vi.mocked(api);
+
+/** The expanded office, open, over the real data hook — what the widget opens. */
+function ExpandedOffice() {
+  const data = useOfficeData();
+  const [selected, setSelected] = React.useState<string | null>(null);
+  return (
+    <OfficeExpandedDialog
+      open
+      onClose={() => undefined}
+      data={data}
+      selectedActorId={selected}
+      onSelectActor={setSelected}
+      ambient={false}
+    />
+  );
+}
 const ts = () => new Date().toISOString();
 const ok = <T,>(data: T) => ({ success: true as const, data, timestamp: ts() });
 const refused = (code: string, message: string) => ({
@@ -198,33 +208,15 @@ beforeEach(() => {
 
 // ---------------------------------------------------------------------------
 
-describe("Virtual Office — route and navigation", () => {
-  it("sits beside Agents in the dashboard nav", () => {
-    const hrefs = NAV_ITEMS.map((item) => item.href);
-    const agentsIndex = hrefs.indexOf("/agents");
-    const officeIndex = hrefs.indexOf("/office");
-
-    expect(officeIndex).toBeGreaterThanOrEqual(0);
-    expect(officeIndex).toBe(agentsIndex + 1);
-    expect(NAV_ITEMS[officeIndex]).toMatchObject({
-      href: "/office",
-      label: "Virtual Office",
-      available: true,
-    });
+describe("Virtual Office — route and navigation (VO-2.2)", () => {
+  it("has no sidebar entry: the dashboard widget is the way in", () => {
+    expect(NAV_ITEMS.find((item) => item.href === "/office")).toBeUndefined();
+    expect(NAV_ITEMS.find((item) => /virtual office/i.test(item.label))).toBeUndefined();
   });
 
-  it("keeps the authenticated shell, and does not take the fullscreen command surface", () => {
-    render(
-      <OfficeLayout>
-        <p>office</p>
-      </OfficeLayout>
-    );
-
-    const shell = screen.getByTestId("dashboard-shell");
-    expect(screen.getByTestId("require-auth")).toBeTruthy();
-    expect(within(shell).getByText("office")).toBeTruthy();
-    // Only /dashboard is fullscreen; the office is a document that scrolls.
-    expect(shell.getAttribute("data-fullscreen")).toBe("false");
+  it("redirects the old /office route to the dashboard with the office open", () => {
+    expect(() => OfficeRedirect()).toThrow("NEXT_REDIRECT /dashboard?office=open");
+    expect(navigation.redirect).toHaveBeenCalledWith(OFFICE_DEEP_LINK);
   });
 });
 
@@ -234,18 +226,18 @@ describe("Virtual Office — loading, empty and error", () => {
     mocked.listWorkTasks.mockReturnValue(new Promise(() => {}));
     mocked.listActivity.mockReturnValue(new Promise(() => {}));
 
-    render(<OfficePage />);
+    render(<ExpandedOffice />);
 
     expect(screen.getByTestId("loading-state")).toBeTruthy();
-    expect(screen.queryByTestId("office-page")).toBeNull();
+    expect(screen.queryByTestId("office-view")).toBeNull();
   });
 
   it("renders an honest empty office when nothing is registered and nothing has happened", async () => {
     resolveAll();
 
-    render(<OfficePage />);
+    render(<ExpandedOffice />);
 
-    expect(await screen.findByTestId("office-page")).toBeTruthy();
+    expect(await screen.findByTestId("office-view")).toBeTruthy();
     expect(screen.getByTestId("office-floor-plan")).toBeTruthy();
 
     expect(screen.getByText("No agents registered")).toBeTruthy();
@@ -264,12 +256,12 @@ describe("Virtual Office — loading, empty and error", () => {
     mocked.listWorkTasks.mockResolvedValue(ok({ tasks: [], count: 0 }));
     mocked.listActivity.mockResolvedValue(ok({ entries: [], count: 0, limit: 40 }));
 
-    render(<OfficePage />);
+    render(<ExpandedOffice />);
 
     expect(await screen.findByTestId("error-state")).toBeTruthy();
     expect(screen.getByText("The agent registry could not be read.")).toBeTruthy();
     expect(screen.getByTestId("error-retry")).toBeTruthy();
-    expect(screen.queryByTestId("office-page")).toBeNull();
+    expect(screen.queryByTestId("office-view")).toBeNull();
   });
 });
 
@@ -287,8 +279,8 @@ describe("Virtual Office — what is on the floor", () => {
       ]),
     });
 
-    render(<OfficePage />);
-    await screen.findByTestId("office-page");
+    render(<ExpandedOffice />);
+    await screen.findByTestId("office-view");
 
     const actors = screen.getAllByTestId("office-actor");
     expect(actors).toHaveLength(1);
@@ -314,14 +306,15 @@ describe("Virtual Office — what is on the floor", () => {
       entries: [ENTRY({ timestamp: at(-30_000), result: "success" })],
     });
 
-    render(<OfficePage />);
-    await screen.findByTestId("office-page");
+    render(<ExpandedOffice />);
+    await screen.findByTestId("office-view");
 
     const actor = screen.getByTestId("office-actor");
     expect(actor.getAttribute("data-state")).toBe("recent");
     expect(within(actor).getByTestId("office-actor-state").textContent).toBe("Just finished");
     expect(actor.getAttribute("data-decorative")).toBe("false");
-    // No agent is ever "working": that word belongs to the JARVIS system actor.
+    // This task names no agent, so the agent cannot claim it: the word
+    // "working" belongs to the JARVIS system actor, from a real RUNNING task.
     expect(actor.getAttribute("data-state")).not.toBe("working");
   });
 });
@@ -330,8 +323,8 @@ describe("Virtual Office — system work and attribution", () => {
   it("shows JARVIS working only from a real RUNNING task", async () => {
     resolveAll({ tasks: [TASK({ status: "RUNNING", startedAt: at(-5_000) })] });
 
-    render(<OfficePage />);
-    await screen.findByTestId("office-page");
+    render(<ExpandedOffice />);
+    await screen.findByTestId("office-view");
 
     const system = screen.getByTestId("office-system-actor");
     expect(system.getAttribute("data-state")).toBe("working");
@@ -355,8 +348,8 @@ describe("Virtual Office — system work and attribution", () => {
       tasks: [TASK({ status: "PENDING", createdAt: at(-10_000) })],
     });
 
-    render(<OfficePage />);
-    await screen.findByTestId("office-page");
+    render(<ExpandedOffice />);
+    await screen.findByTestId("office-view");
 
     const taskRow = screen
       .getAllByTestId("data-row")
@@ -372,8 +365,8 @@ describe("Virtual Office — system work and attribution", () => {
       entries: [ENTRY({ agentId: undefined, action: "approval.approve", toolId: undefined })],
     });
 
-    render(<OfficePage />);
-    await screen.findByTestId("office-page");
+    render(<ExpandedOffice />);
+    await screen.findByTestId("office-view");
 
     const row = screen
       .getAllByTestId("data-row")
@@ -395,8 +388,8 @@ describe("Virtual Office — honesty in the rendering", () => {
       entries: [ENTRY({ result: "pending" })],
     });
 
-    const { container } = render(<OfficePage />);
-    const page = await screen.findByTestId("office-page");
+    const { container } = render(<ExpandedOffice />);
+    const page = await screen.findByTestId("office-view");
 
     expect(container.querySelector('[data-state="paused"]')).toBeNull();
     expect(container.querySelector('[data-state="working"][data-agent-id]')).toBeNull();
@@ -410,8 +403,8 @@ describe("Virtual Office — honesty in the rendering", () => {
   it("states, in the page, that idle movement is decorative and agent work is not claimed", async () => {
     resolveAll({ agents: agentsResponse([AGENT()]) });
 
-    render(<OfficePage />);
-    await screen.findByTestId("office-page");
+    render(<ExpandedOffice />);
+    await screen.findByTestId("office-view");
 
     expect(screen.getByTestId("office-legend-decorative").textContent).toContain("decorative");
     expect(screen.getByTestId("office-legend-limits").textContent).toContain(
@@ -427,26 +420,31 @@ describe("Virtual Office — honesty in the rendering", () => {
 
 describe("Virtual Office — selection", () => {
   it("shows a selected agent's last recorded action, and never a start it cannot know", async () => {
+    freezeDateAtFixtureTime();
     resolveAll({
       agents: agentsResponse([AGENT()]),
       entries: [ENTRY({ timestamp: at(-30_000) })],
     });
 
-    render(<OfficePage />);
-    await screen.findByTestId("office-page");
+    render(<ExpandedOffice />);
+    await screen.findByTestId("office-view");
 
     fireEvent.click(screen.getByTestId("office-actor"));
 
     const last = await screen.findByTestId("office-last-activity");
     expect(last.textContent).toContain("Ran meta.adsets");
-    expect(screen.getByText(/does not show the\s+agent as working/)).toBeTruthy();
+    // VO-3.1: the panel says where the state came from, and that a task is
+    // only ever shown as running while the task engine says RUNNING.
+    expect(screen.getByTestId("office-agent-work-note").textContent).toContain(
+      "claims a task is running only while the task engine says RUNNING"
+    );
   });
 
   it("says why system work is not attributed to an agent", async () => {
     resolveAll({ tasks: [TASK({ status: "RUNNING", startedAt: at(-5_000) })] });
 
-    render(<OfficePage />);
-    await screen.findByTestId("office-page");
+    render(<ExpandedOffice />);
+    await screen.findByTestId("office-view");
 
     fireEvent.click(screen.getByTestId("office-system-actor"));
 
@@ -464,8 +462,8 @@ describe("Virtual Office — the accessible text version", () => {
       entries: [ENTRY({ timestamp: at(-30_000) })],
     });
 
-    render(<OfficePage />);
-    await screen.findByTestId("office-page");
+    render(<ExpandedOffice />);
+    await screen.findByTestId("office-view");
 
     const scene = screen.getByTestId("office-scene");
     expect(scene.getAttribute("role")).toBe("group");
@@ -473,7 +471,7 @@ describe("Virtual Office — the accessible text version", () => {
 
     const summary = screen.getByTestId("office-scene-summary").textContent ?? "";
     expect(summary).toContain("1 registered agent is on the floor");
-    expect(summary).toContain("Slow idle movement is decorative");
+    expect(summary).toContain("Slow idle movement and break activities are decorative");
 
     // The actors are real controls, not decorative divs.
     const actor = screen.getByRole("button", { name: "Knowledge Agent, Just finished" });
@@ -491,8 +489,8 @@ describe("Virtual Office — live updates", () => {
   it("says live only while the stream is connected", async () => {
     resolveAll();
 
-    render(<OfficePage />);
-    await screen.findByTestId("office-page");
+    render(<ExpandedOffice />);
+    await screen.findByTestId("office-view");
 
     const status = screen.getByTestId("office-stream-status");
     expect(status.getAttribute("data-status")).toBe("live");
@@ -503,8 +501,8 @@ describe("Virtual Office — live updates", () => {
     officeStream.value = { ...officeStream.value, status: "offline" };
     resolveAll();
 
-    render(<OfficePage />);
-    await screen.findByTestId("office-page");
+    render(<ExpandedOffice />);
+    await screen.findByTestId("office-view");
 
     const status = screen.getByTestId("office-stream-status");
     expect(status.getAttribute("data-status")).toBe("offline");
@@ -517,8 +515,8 @@ describe("Virtual Office — live updates", () => {
     officeStream.value = { ...officeStream.value, status: "offline" };
     resolveAll();
 
-    render(<OfficePage />);
-    await screen.findByTestId("office-page");
+    render(<ExpandedOffice />);
+    await screen.findByTestId("office-view");
     const readsBefore = mocked.listWorkTasks.mock.calls.length;
 
     fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
@@ -547,12 +545,12 @@ describe("Virtual Office — live updates", () => {
     };
     resolveAll({ agents: agentsResponse([AGENT()]), entries: [] });
 
-    render(<OfficePage />);
-    await screen.findByTestId("office-page");
+    render(<ExpandedOffice />);
+    await screen.findByTestId("office-view");
 
     expect(await screen.findByText("Ran meta.newtool")).toBeTruthy();
     // Still one office, one activity table.
-    expect(screen.getByTestId("office-page")).toBeTruthy();
+    expect(screen.getByTestId("office-view")).toBeTruthy();
   });
 
   it("applies a live RUNNING transition to the JARVIS system actor", async () => {
@@ -573,8 +571,8 @@ describe("Virtual Office — live updates", () => {
     };
     resolveAll({ tasks: [TASK({ status: "PENDING", createdAt: at(-60_000) })] });
 
-    render(<OfficePage />);
-    await screen.findByTestId("office-page");
+    render(<ExpandedOffice />);
+    await screen.findByTestId("office-view");
 
     const system = screen.getByTestId("office-system-actor");
     expect(system.getAttribute("data-state")).toBe("working");
@@ -602,8 +600,8 @@ describe("Virtual Office — live updates", () => {
     };
     resolveAll({ tasks: [] });
 
-    render(<OfficePage />);
-    await screen.findByTestId("office-page");
+    render(<ExpandedOffice />);
+    await screen.findByTestId("office-view");
 
     const system = screen.getByTestId("office-system-actor");
     // The event carries no title, so the office waits for the read instead of
@@ -632,8 +630,8 @@ describe("Virtual Office — task totals (VO-2.1)", () => {
       statusCounts: { ...ZERO, PENDING: 9, RUNNING: 64, COMPLETED: 210 },
     });
 
-    render(<OfficePage />);
-    await screen.findByTestId("office-page");
+    render(<ExpandedOffice />);
+    await screen.findByTestId("office-view");
 
     expect(statValue("Running tasks")).toBe("64");
     expect(statValue("Queued tasks")).toBe("9");
@@ -649,8 +647,8 @@ describe("Virtual Office — task totals (VO-2.1)", () => {
   it("says work is queued when every queued task is past the list's cap", async () => {
     resolveAll({ tasks: [], statusCounts: { ...ZERO, PENDING: 3 } });
 
-    render(<OfficePage />);
-    await screen.findByTestId("office-page");
+    render(<ExpandedOffice />);
+    await screen.findByTestId("office-view");
 
     expect(statValue("Queued tasks")).toBe("3");
     expect(screen.getByTestId("office-system-actor").getAttribute("data-state")).toBe("queued");
@@ -659,8 +657,8 @@ describe("Virtual Office — task totals (VO-2.1)", () => {
   it("says when the counts are only the listed rows", async () => {
     resolveAll({ tasks: [TASK({ status: "RUNNING", startedAt: at(-5_000) })], statusCounts: null });
 
-    render(<OfficePage />);
-    await screen.findByTestId("office-page");
+    render(<ExpandedOffice />);
+    await screen.findByTestId("office-view");
 
     expect(statValue("Running tasks")).toBe("1");
     expect(
@@ -676,8 +674,8 @@ describe("Virtual Office — task totals (VO-2.1)", () => {
   it("does not show the counts note when the totals arrived", async () => {
     resolveAll({ tasks: [TASK({ status: "RUNNING", startedAt: at(-5_000) })] });
 
-    render(<OfficePage />);
-    await screen.findByTestId("office-page");
+    render(<ExpandedOffice />);
+    await screen.findByTestId("office-view");
 
     fireEvent.click(screen.getByTestId("office-system-actor"));
     expect(screen.queryByTestId("office-system-counts-note")).toBeNull();
@@ -689,8 +687,8 @@ describe("Virtual Office — task totals (VO-2.1)", () => {
       statusCounts: { ...ZERO, PENDING: -4, RUNNING: 999 },
     });
 
-    render(<OfficePage />);
-    await screen.findByTestId("office-page");
+    render(<ExpandedOffice />);
+    await screen.findByTestId("office-view");
 
     expect(statValue("Running tasks")).toBe("1");
     expect(
@@ -719,8 +717,8 @@ describe("Virtual Office — task totals (VO-2.1)", () => {
       statusCounts: { ...ZERO, PENDING: 20, RUNNING: 5 },
     });
 
-    render(<OfficePage />);
-    await screen.findByTestId("office-page");
+    render(<ExpandedOffice />);
+    await screen.findByTestId("office-view");
 
     expect(statValue("Running tasks")).toBe("6");
     expect(statValue("Queued tasks")).toBe("19");

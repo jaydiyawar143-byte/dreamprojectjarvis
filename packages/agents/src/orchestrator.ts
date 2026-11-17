@@ -30,12 +30,13 @@ import type {
 import { JarvisError, decideSurface, classifyToolFailures, toClientErrorDetails, rankMemories, scoreMemoryRelevance, MEMORY_SIMILARITY_FLOOR } from "@jarvis/core";
 import { DESKTOP_CHAT_REFUSALS, DESKTOP_CHAT_TOOL_IDS, VOICE_TOOL_REFUSED_CODE, voiceToolRefusal } from "@jarvis/core";
 import type { DesktopChatPort, DesktopChatProposal } from "@jarvis/core";
-import type { SurfaceDecision } from "@jarvis/core";
+import type { SurfaceDecision, UnifiedExecutionOutcome } from "@jarvis/core";
 import type { AgentPolicy, AgentResolution, ISkillContextProvider } from "@jarvis/core";
 import { renderSkillContext } from "@jarvis/core";
+import { capabilityRefForTool, outcomeFromToolExecution } from "@jarvis/core";
 import type { AgentRegistry } from "./registry.js";
-import { rankAgentCandidates, isAmbiguous } from "./agent-router.js";
-import { isToolAllowed, resolveAllowedToolId, sanitizeToolName, scopedToolRegistry } from "./agent-policy.js";
+import { rankAgentCandidates, isAmbiguous, looksLikeBrowsingRequest } from "./agent-router.js";
+import { AGENT_IDS, isToolAllowed, resolveAllowedToolId, sanitizeToolName, scopedToolRegistry } from "./agent-policy.js";
 import { ToolDescriptionBuilder, ToolPlanValidator, ToolPlanParser } from "./tool-planner.js";
 import { classifyWriteIntent } from "./write-intent-gate.js";
 import {
@@ -131,6 +132,8 @@ export class Orchestrator implements IOrchestrator {
   private readonly skillContextProvider: ISkillContextProvider | null;
   /** Phase 15 — tools this server switched off, by registry id, with the reason in a person's words. */
   private readonly switchedOffTools: Readonly<Record<string, string>>;
+  /** Phase 19 — why this server cannot open web pages, given only where the Browser Agent is absent. */
+  private readonly browsingUnavailableReason: string | null;
   /** Phase 19.7 — holds a desktop proposal to the owner's own words. Absent, every one is refused. */
   private readonly desktopChat: Pick<DesktopChatPort, "propose"> | null;
   private readonly toolDescriptionBuilder: ToolDescriptionBuilder;
@@ -171,6 +174,7 @@ export class Orchestrator implements IOrchestrator {
     this.pendingActionService = (config as unknown as { pendingActionService?: import("./pending-action-service.js").PendingActionService }).pendingActionService ?? null;
     this.skillContextProvider = config.skillContext ?? null;
     this.switchedOffTools = { ...(config.switchedOffTools ?? {}) };
+    this.browsingUnavailableReason = config.browsingUnavailableReason ?? null;
     this.desktopChat = config.desktopChat ?? null;
     this.toolDescriptionBuilder = new ToolDescriptionBuilder();
     this.toolPlanValidator = new ToolPlanValidator();
@@ -185,6 +189,24 @@ export class Orchestrator implements IOrchestrator {
     const startedAt = new Date();
 
     try {
+      // Phase 19 — a request to open, read or capture a page, on a server with
+      // no Browser Agent. The router would skip the missing agent and hand the
+      // turn to one with no browser, which could only guess at the page. It is
+      // answered here instead, in the server's words: no model, no tool.
+      const browsingUnavailable = this.browsingUnavailableAnswer(request);
+      if (browsingUnavailable !== null) {
+        await this.auditLogger.log({
+          userId: context.auth.userId,
+          agentId: AGENT_IDS.browser,
+          action: "agent.unavailable",
+          result: "rejected",
+          traceId: context.traceId,
+          ipAddress: context.ipAddress,
+          metadata: { domain: "browser", reason: "browsing is unavailable on this server" },
+        });
+        return this.buildSuccessResponse(browsingUnavailable, traceId, context, { unavailable: "browser" });
+      }
+
       const { agent, policy, resolution } = this.selectAgent(request, context);
       context.agentId = agent.id;
       await this.initializeAgent(agent, context, policy);
@@ -926,6 +948,27 @@ export class Orchestrator implements IOrchestrator {
    * single answer is what lets a deployment with WhatsApp or n8n unconfigured
    * fall through to the general assistant instead of failing.
    */
+  /**
+   * Phase 19 — the sentence for a browsing request this server cannot serve,
+   * or null to route the turn as usual.
+   *
+   * Only when all of these hold:
+   * - the composition root said why browsing is unavailable;
+   * - the client named no agent (a named agent is the client's choice);
+   * - no Browser Agent is registered;
+   * - the message asks for a page (`looksLikeBrowsingRequest`);
+   * - the router ranks the Browser Agent first. "Check the SEO of https://…"
+   *   is marketing's, and still reaches marketing.
+   */
+  private browsingUnavailableAnswer(request: JarvisRequest): string | null {
+    if (this.browsingUnavailableReason === null || request.agentId) return null;
+    if (this.agentRegistry.get(AGENT_IDS.browser)) return null;
+    const message = request.message ?? "";
+    if (!looksLikeBrowsingRequest(message)) return null;
+    const first = rankAgentCandidates(message, request.conversationHistory)[0];
+    return first?.agentId === AGENT_IDS.browser ? this.browsingUnavailableReason : null;
+  }
+
   private selectAgent(
     request: JarvisRequest,
     context: SessionContext
@@ -1649,6 +1692,9 @@ export class Orchestrator implements IOrchestrator {
       success: r.status === "completed",
       error: r.error,
       durationMs: r.durationMs,
+      // UEE-4 — what happened, normalized. `success` above is unchanged: it says the
+      // tool RETURNED success, which for an accepted workflow trigger is not completion.
+      ...this.normalizedOutcomeFor(r),
     }));
 
     const succeeded = executions.filter((e) => e.status === "completed").length;
@@ -1668,6 +1714,26 @@ export class Orchestrator implements IOrchestrator {
       allFailed: executions.length > 0 && (succeeded + denied) === 0 && failed > 0,
       executions,
     };
+  }
+
+  /**
+   * UEE-4 — the unified outcome for one execution result, for the response.
+   *
+   * Decided by the result's own status and flags and the tool's own declared
+   * risk — never by what a model went on to say. A tool the registry does not
+   * know is read as the most cautious kind, a write, so a timeout on it is
+   * uncertain rather than a clean failure. Nothing here can fail an execution
+   * summary: if an outcome cannot be derived the entry simply has none.
+   * Reporting only — it routes nothing and changes no count.
+   */
+  private normalizedOutcomeFor(result: ToolExecutionResult): { outcome?: UnifiedExecutionOutcome } {
+    try {
+      const tool = this.toolRegistry?.get(result.toolId);
+      const ref = capabilityRefForTool(tool ? { id: tool.id ?? result.toolId, risk: tool.risk } : { id: result.toolId, risk: "EXTERNAL_SIDE_EFFECT" });
+      return { outcome: outcomeFromToolExecution(result, ref) };
+    } catch {
+      return {};
+    }
   }
 
   private logStructuredToolExecution(

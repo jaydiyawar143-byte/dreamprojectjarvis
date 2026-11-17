@@ -393,6 +393,118 @@ pwsh ./packaging/build-msix.ps1 -TestCertificate                                
   dynamic code, exportable keys. Adding to the agent's abilities is a change to
   those lists, reviewed — and a decision for the owner.
 
+## Browsing in local development (Phase 19)
+
+"Open Amazon and check the price of an iPhone 17" is answered by the Browser
+Agent, which reads pages **only** through the isolated browser service
+(Chromium in its own container, on an internal network, behind an egress
+proxy). There is no in-process fallback, on purpose: if the service is not
+running, JARVIS says so and does not pretend it read anything.
+
+That has one consequence for local work. The service has no host port, so the
+API started by `pnpm dev` (3001) **cannot reach it**, and answers a browsing
+request with "Opening web pages is switched off on this server". Browsing is
+tried against the Docker API (3101), with your dev web app (3000) pointed at it.
+
+### What a request does
+
+| You write | Where it goes |
+|---|---|
+| a link, or a well-known site by name (`Amazon kholo …`, `open flipkart`, `https://…`) | straight to the Browser Agent, never a task |
+| the same with a stated time (`kal 10 baje …`, `at 6 pm …`) | a scheduled task; nothing opens now |
+| browsing is off, or the service did not start | one fixed sentence saying nothing was opened |
+| the service is registered but cannot be reached | "The browser service could not complete that request, so the page was not opened or read. Check that the browser service is running and reachable." |
+
+The named sites are the closed list in `packages/agents/src/known-sites.ts`
+(Amazon, Flipkart, Snapdeal, Myntra, Croma, eBay, Walmart, Best Buy, Wikipedia,
+YouTube). A number is not a time: `iPhone 17` is a product, `at 17` is 5 pm.
+For a price the agent reads the site's search page and reports the displayed
+price with its currency, the availability, and the source URL. It reports a
+robot check or a login wall as that, and never answers a price from memory.
+
+### One-time setup (writes files only)
+
+```powershell
+# Throwaway TLS, a random key id and shared secret, and a compose override, in a
+# folder OUTSIDE the repo (default ~\.jarvis-browser-dev). It never starts or
+# builds anything, never reads a .env file and never prints a secret.
+node scripts/browser-dev/setup.mjs
+```
+
+It needs `openssl` (Git for Windows has one) and refuses to overwrite a folder
+or to write inside the repo. The certificates last 7 days (`--days`); rerun it
+into a new `--dir` when they lapse. `docker-compose.browser.yml` leaves the key
+id, secret and peer identity to `.env`; the generated override supplies them to
+the API from `browser-dev.env`, so nothing is added to your `.env`.
+
+### An API image that has the chat changes
+
+The running `jarvis-app:latest` is not the image to test with: it is rebuilt by
+other work, and it must contain the routing and prompt changes. Build a
+separate tag from a **clean copy** of the tree (the repo's `.dockerignore` does
+not exclude the desktop agent's `bin/` and `obj/`), with at least 5 GiB of free
+memory, and never move `latest`:
+
+```powershell
+docker build --target runtime -t jarvis-app:browser-dev -f Dockerfile .
+```
+
+### Run it (each command needs the owner's approval first)
+
+Set `$C` once, from the repo root. Both `docker compose` lines use only the
+files named here; the real `.env` is still loaded by the API's `env_file`.
+
+```powershell
+$D = "$env:USERPROFILE/.jarvis-browser-dev"
+$C = "docker compose --env-file $D/browser-dev.env -f docker-compose.yml -f docker-compose.browser.yml -f $D/docker-compose.browser-dev.yml --profile browser-service"
+
+Invoke-Expression "$C build browser-service"                       # builds the Debian Chromium image (about 2.7 GB)
+Invoke-Expression "$C up -d --no-deps browser-egress browser-service api"
+```
+
+`--no-deps` and the explicit list matter: a bare `up` would also start
+`jarvis-docker-web`, which is stopped on purpose, and `docker compose down -v`
+would delete the artifact volume. Then point the dev web app at that API:
+
+```powershell
+$env:NEXT_PUBLIC_API_URL = "http://localhost:3101/api/v1"
+pnpm --filter @jarvis/web dev          # http://localhost:3000, from PowerShell, never Git Bash
+```
+
+The Docker stack has its own database: register or sign in again there.
+
+### Check it, in this order
+
+```powershell
+docker logs jarvis-docker-api 2>&1 | Select-String "browser_tools_enabled|browser_registration_skipped|browser_service_reachable|browser_service_probe_failed"
+docker logs jarvis-docker-browser 2>&1 | Select-Object -Last 20
+```
+
+| Line | Means |
+|---|---|
+| `browser_tools_enabled` with `mode":"remote"` | the Browser Agent is registered |
+| `browser_service_reachable` | the API authenticated to the service over mutual TLS |
+| `browser_registration_skipped`, with a `cause` | refused and failed closed. `configuration_missing` names the variable; `tls_material_*` means regenerate the folder |
+| `browser_tools_disabled` | `BROWSER_ENABLED` is not `true`: you are on a stack without `docker-compose.browser.yml` |
+| `browser_service_probe_failed` | registered but not reachable yet (retried); check the service container |
+
+Then ask: `Amazon kholo aur iPhone 17 ka price check karo.` An answer that
+names no price, or says the page was a robot check, is a true answer: Amazon
+may refuse a datacenter browser. A reply that claims a price with no tool
+result behind it is a bug.
+
+### Stop and clean up
+
+```powershell
+docker stop jarvis-docker-browser jarvis-docker-browser-egress   # leaves the API, its database and every volume alone
+Remove-Item -Recurse -Force "$env:USERPROFILE/.jarvis-browser-dev"  # the throwaway keys; nothing else uses them
+```
+
+Tests for all of this need no Docker: `apps/api/test/browser-agent-registration-p19`
+(registration and every fail-closed case, with real throwaway TLS),
+`apps/api/test/browser-chat-route-p19` (the chat route end to end, with a fake
+service) and `packages/agents/test/computer-control-browser-chat-p19`.
+
 ## Never commit
 
 - Any `.env` file except `.env.example`.

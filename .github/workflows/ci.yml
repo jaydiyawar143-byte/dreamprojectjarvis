@@ -344,6 +344,16 @@ jobs:
           pnpm --filter @jarvis/core exec vitest run mcp-boundaries-s8
           pnpm --filter @jarvis/tools exec vitest run mcp-tools-boundaries-s8
 
+      # UEE-1 — execution capability descriptors and the unified execution
+      # outcome in core: pure derivation (an unknown, ungranted or invalid tool is
+      # never available; the sandbox never is; an uncertain outcome is never a
+      # success, a plain failure or retryable). @jarvis/core is not gated as a
+      # whole, so this one file is selected by name, as the slices above are. The
+      # UEE-0 boundary tests run in "Test @jarvis/api".
+      - name: Test execution capability contracts (@jarvis/core)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: pnpm --filter @jarvis/core exec vitest run execution-capability-uee1.test.ts
+
       # From here on, the PostgreSQL-backed tests. DATABASE_URL is set on these
       # steps only, so nothing above ever sees a database. Applying every
       # migration to the empty database first fails the run if it is unreachable

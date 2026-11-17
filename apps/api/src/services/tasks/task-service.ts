@@ -28,7 +28,7 @@ import {
   JARVIS_TASK_CREATOR,
   type TaskStatus,
 } from "@jarvis/core";
-import type { PrismaTaskRepository, TaskRecord, TaskStatusCounts } from "@jarvis/db";
+import type { AgentWorkRows, PrismaTaskRepository, TaskRecord, TaskStatusCounts } from "@jarvis/db";
 
 /** Why a task operation could not be performed. */
 export type TaskFailureReason =
@@ -63,7 +63,10 @@ export interface TaskServiceDeps {
   tasks: Pick<
     PrismaTaskRepository,
     "create" | "list" | "listByStatus" | "countByStatus" | "findOwned" | "transitionOwned"
-  >;
+  > &
+    // VO-3.1 — optional so the many existing fakes need not grow it; without it
+    // the per-agent read answers "nothing assigned", which is what it means.
+    Partial<Pick<PrismaTaskRepository, "agentWork">>;
   /**
    * VO-2 — told about a task row AFTER its durable write succeeded.
    *
@@ -165,11 +168,42 @@ export class TaskService {
     return this.deps.tasks.countByStatus(userId, { createdBy: JARVIS_TASK_CREATOR });
   }
 
+  /**
+   * VO-3.1 — the caller's assigned WORK, by agent: what each agent has open
+   * and what it last finished. The same set `listTasks` reads (the caller's
+   * rows, JARVIS work only); the repository scopes by user first.
+   */
+  async agentWork(userId: string): Promise<AgentWorkRows> {
+    if (!this.deps.tasks.agentWork) return { active: [], latest: [] };
+    return this.deps.tasks.agentWork(userId, { createdBy: JARVIS_TASK_CREATOR });
+  }
+
+  /**
+   * VO-3.1 — tell the observer about a row another writer changed.
+   *
+   * The scheduler writes schedules and claims through the repository, not
+   * through `move`. It hands the row it just wrote here, so the office hears
+   * about scheduled and claimed work exactly as it hears about a move: after
+   * the durable write, never able to fail it.
+   */
+  announce(task: TaskRecord): void {
+    notifyTaskChanged(this.deps.onTaskChanged, task);
+  }
+
   /** PENDING -> RUNNING. */
   async startTask(
     userId: string,
     taskId: string,
-    options: { executionId?: string } = {}
+    options: {
+      executionId?: string;
+      /**
+       * VO-3.1 — the agent the run is assigned to (null: no registered agent
+       * covers its tool, so it is JARVIS system work) and the tool it runs.
+       * Written in the same statement as the move.
+       */
+      agentId?: string | null;
+      toolId?: string;
+    } = {}
   ): Promise<TaskResult> {
     // V2.1 - the caller may name the execution it is about to start. Written
     // in the SAME statement as PENDING -> RUNNING, so a RUNNING task always
@@ -215,7 +249,7 @@ export class TaskService {
     taskId: string,
     to: TaskStatus,
     error?: string,
-    options: { executionId?: string } = {}
+    options: { executionId?: string; agentId?: string | null; toolId?: string } = {}
   ): Promise<TaskResult> {
     const existing = await this.deps.tasks.findOwned(userId, taskId);
     if (!existing) return this.notFound();
@@ -232,6 +266,16 @@ export class TaskService {
     const result = await this.deps.tasks.transitionOwned(userId, taskId, existing.status, to, {
       error: error ? error.slice(0, MAX_ERROR) : null,
       ...(options.executionId !== undefined ? { executionId: options.executionId } : {}),
+      ...(options.toolId !== undefined ? { toolId: options.toolId } : {}),
+      // VO-3.1 — `assignedAt` moves only when the agent does: a scheduled
+      // task already assigned to the agent that now runs it keeps the time it
+      // was first assigned. The status pin in the write makes this read safe.
+      ...(options.agentId !== undefined
+        ? {
+            agentId: options.agentId,
+            assign: (existing.agentId ?? null) !== (options.agentId ?? null),
+          }
+        : {}),
     });
 
     if (result.ok) {

@@ -31,15 +31,17 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import React from "react";
-import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent, within, act } from "@testing-library/react";
 
 let pathname = "/dashboard";
+/** VO-2.2 — the query, so a test can arrive with `?office=open`. */
+let search = "";
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: vi.fn(), replace: vi.fn(), prefetch: vi.fn() }),
   usePathname: () => pathname,
   useParams: () => ({}),
-  useSearchParams: () => new URLSearchParams(),
+  useSearchParams: () => new URLSearchParams(search),
 }));
 
 vi.mock("../src/lib/api", async () => {
@@ -61,6 +63,33 @@ vi.mock("../src/lib/api", async () => {
     searchPlaces: vi.fn(),
     getMapsConfig: vi.fn(),
     reverseGeocode: vi.fn(),
+    // VO-2.2 — the Virtual Office widget reads these three.
+    listAgents: vi.fn(),
+    listWorkTasks: vi.fn(),
+    listActivity: vi.fn(),
+  };
+});
+
+// VO-2.2 — the office's live feed is a socket too, and equally beside the point
+// of laying out a grid. `subscribe` fires once per MOUNTED office (an effect,
+// not the hook call), so a test can count subscriptions rather than renders.
+const officeStream = vi.hoisted(() => ({ subscribe: vi.fn() }));
+
+vi.mock("../src/lib/use-office-stream", async () => {
+  const { useEffect } = await import("react");
+  return {
+    useOfficeStream: () => {
+      useEffect(() => {
+        officeStream.subscribe();
+      }, []);
+      return {
+        status: "live" as const,
+        events: [] as never[],
+        taskUpdates: new Map<never, never>(),
+        taskRevision: 0,
+        reconnect: () => undefined,
+      };
+    },
   };
 });
 
@@ -90,6 +119,7 @@ import { DashboardShell } from "../src/components/dashboard/dashboard-shell";
 import { WidgetShell } from "../src/components/widgets/widget-shell";
 import { CommandCenter } from "../src/components/dashboard/command-center";
 import {
+  DEFAULT_LAYOUT,
   GRID_ROWS,
   gridHeight,
   gridRowHeight,
@@ -131,6 +161,18 @@ beforeEach(() => {
   mockedApi.getWeather.mockResolvedValue({ success: true, data: { value: null, meta: unavailable }, timestamp: ts() } as never);
   mockedApi.getCrypto.mockResolvedValue({ success: true, data: { value: [], meta: unavailable }, timestamp: ts() } as never);
   mockedApi.getIndices.mockResolvedValue({ success: true, data: { value: null, meta: unavailable }, timestamp: ts() } as never);
+  // VO-2.2 — an empty office: no agents, no tasks, no activity.
+  mockedApi.listAgents.mockResolvedValue({
+    success: true, data: { agents: [], total: 0, registeredCount: 0 }, timestamp: ts(),
+  } as never);
+  mockedApi.listWorkTasks.mockResolvedValue({
+    success: true,
+    data: { tasks: [], count: 0, statusCounts: { PENDING: 0, RUNNING: 0, COMPLETED: 0, FAILED: 0, UNRESOLVED: 0 } },
+    timestamp: ts(),
+  } as never);
+  mockedApi.listActivity.mockResolvedValue({
+    success: true, data: { entries: [], count: 0, limit: 40 }, timestamp: ts(),
+  } as never);
   // The map hook rejects on an unmocked config call, which takes the tree down
   // and turns every assertion below into a mystery. "Not configured" is the
   // honest answer in a test: no key, no map, no network.
@@ -316,7 +358,7 @@ describe("command centre viewport layout", () => {
 
       // Every widget is present as a grid cell, the Orb included — it is a
       // widget now, not a hard-coded hero outside the layout.
-      for (const id of ["orb", "map", "system", "clock", "worldclock", "weather", "tasks", "markets"]) {
+      for (const id of ["orb", "office", "map", "system", "clock", "worldclock", "weather", "tasks", "markets"]) {
         expect(screen.getByTestId(`cell-${id}`)).toBeInTheDocument();
       }
       // And it does not scroll: the grid is sized to fit.
@@ -342,6 +384,201 @@ describe("command centre viewport layout", () => {
       await waitFor(() => expect(screen.getByTestId("grid-guides")).toBeInTheDocument());
     } finally {
       restore();
+    }
+  });
+
+  // ---- VO-2.2 — the Virtual Office widget ---------------------------------
+
+  it("places the Virtual Office widget in the top-right 8x5 slot by default", async () => {
+    const restore = withMeasuredWorkspace(1600, 800);
+    try {
+      render(<CommandCenter />);
+      await waitFor(() =>
+        expect(screen.getByTestId("command-workspace").getAttribute("data-mode")).toBe("grid")
+      );
+
+      const cell = screen.getByTestId("cell-office");
+      expect([cell.dataset.x, cell.dataset.y, cell.dataset.w, cell.dataset.h]).toEqual(["4", "0", "8", "5"]);
+      expect(within(cell).getByTestId("office-widget")).toBeInTheDocument();
+      expect(screen.getByTestId("cell-map").dataset.y).toBe("8");
+    } finally {
+      restore();
+    }
+  });
+
+  it("does not open the office while the dashboard is being customised", async () => {
+    const restore = withMeasuredWorkspace(1600, 800);
+    try {
+      render(<CommandCenter />);
+      await screen.findByTestId("office-widget-expand");
+
+      // The frame wraps a widget differently while customising, so the widget
+      // is re-queried after each toggle rather than held across it.
+      const expand = () => screen.getByTestId("office-widget-expand");
+
+      fireEvent.click(screen.getByTestId("customize-toggle"));
+      await waitFor(() => expect(expand()).toBeDisabled());
+      expect(screen.getByTestId("office-widget").dataset.customizing).toBe("true");
+      await screen.findByTestId("office-system-actor");
+
+      // Neither the expand control nor the floor opens anything mid-arrange.
+      fireEvent.click(expand());
+      fireEvent.click(screen.getByTestId("office-system-actor"));
+      expect(screen.queryByTestId("office-dialog")).toBeNull();
+
+      // Done customising: the office opens again.
+      fireEvent.click(screen.getByTestId("customize-done"));
+      await waitFor(() => expect(expand()).not.toBeDisabled());
+      fireEvent.click(expand());
+      expect(await screen.findByTestId("office-dialog")).toBeInTheDocument();
+    } finally {
+      restore();
+    }
+  });
+
+  it("can hide the Virtual Office from the customise controls", async () => {
+    const restore = withMeasuredWorkspace(1600, 800);
+    try {
+      render(<CommandCenter />);
+      await screen.findByTestId("cell-office");
+
+      fireEvent.click(screen.getByTestId("customize-toggle"));
+      fireEvent.click(await screen.findByRole("button", { name: "Hide Virtual Office" }));
+
+      await waitFor(() => expect(screen.queryByTestId("cell-office")).toBeNull());
+    } finally {
+      restore();
+    }
+  });
+
+  it("opens ?office=open with the widget hidden, and waits out customise mode", async () => {
+    // A saved layout with the office hidden: the command centre mounts the
+    // deep link instead of the widget.
+    mockedApi.getPreferences.mockResolvedValue({
+      success: true,
+      data: {
+        preferences: {
+          layout: DEFAULT_LAYOUT.map((p) => (p.id === "office" ? { ...p, hidden: true } : p)),
+        },
+      },
+      timestamp: ts(),
+    } as never);
+    search = "office=open";
+    const restore = withMeasuredWorkspace(1600, 800);
+    try {
+      render(<CommandCenter />);
+      await waitFor(() => expect(screen.queryByTestId("cell-office")).toBeNull());
+
+      // The URL opens the office, with no widget on the dashboard.
+      const opened = await screen.findByRole("dialog", { name: "Virtual Office" });
+      expect(within(opened).getByTestId("office-view")).toBeInTheDocument();
+
+      // Arranging the dashboard closes it and keeps the request.
+      fireEvent.click(screen.getByTestId("customize-toggle"));
+      await waitFor(() => expect(screen.queryByTestId("office-dialog")).toBeNull());
+
+      // Done arranging: the request is honoured again.
+      fireEvent.click(screen.getByTestId("customize-done"));
+      expect(await screen.findByRole("dialog", { name: "Virtual Office" })).toBeInTheDocument();
+    } finally {
+      search = "";
+      restore();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// VO-2.2 — the office waits for the SAVED layout.
+//
+// The dashboard renders DEFAULT_LAYOUT until GET /preferences answers, and the
+// office is visible in that default. Reading the office on mount therefore paid
+// for three requests and one socket subscription on every dashboard load — and
+// threw them away when a saved layout hid the widget. These tests hold the
+// preferences read open and assert that nothing is read until it answers, and
+// that exactly one subscription follows when it does.
+// ---------------------------------------------------------------------------
+
+describe("VO-2.2 — the office waits for the saved layout", () => {
+  const officeReads = () => [
+    mockedApi.listAgents.mock.calls.length,
+    mockedApi.listWorkTasks.mock.calls.length,
+    mockedApi.listActivity.mock.calls.length,
+  ];
+
+  /** The shipped layout with the office hidden: the widget is not on the dashboard. */
+  const OFFICE_HIDDEN = DEFAULT_LAYOUT.map((p) => (p.id === "office" ? { ...p, hidden: true } : p));
+
+  /**
+   * A `GET /preferences` that stays open until the test answers it.
+   *
+   * The loaded state is what the fix hangs on, so the test must be able to
+   * observe the dashboard WHILE it is unknown rather than after.
+   */
+  function holdPreferences() {
+    let release: (preferences: Record<string, unknown>) => void = () => undefined;
+    const pending = new Promise((resolve) => {
+      release = (preferences) =>
+        resolve({ success: true, data: { preferences }, timestamp: ts() });
+    });
+    mockedApi.getPreferences.mockReturnValue(pending as never);
+    return (preferences: Record<string, unknown> = {}) => release(preferences);
+  }
+
+  it("makes no office reads and opens no subscription until the layout answers", async () => {
+    const answer = holdPreferences();
+    render(<CommandCenter />);
+
+    // The cell is drawn — the dashboard keeps its shape — but the office has
+    // not been read for, and its socket has not been opened.
+    await screen.findByTestId("office-widget");
+    expect(screen.getByTestId("office-widget").dataset.state).toBe("pending");
+    expect(officeReads()).toEqual([0, 0, 0]);
+    expect(officeStream.subscribe).not.toHaveBeenCalled();
+
+    await act(async () => answer());
+    await waitFor(() => expect(screen.getByTestId("office-widget").dataset.state).toBe("ready"));
+
+    // The visible office starts ONE round of reads and ONE subscription.
+    expect(officeReads()).toEqual([1, 1, 1]);
+    expect(officeStream.subscribe).toHaveBeenCalledTimes(1);
+  });
+
+  it("mounts no office subscription at all when the saved layout hides it", async () => {
+    const answer = holdPreferences();
+    render(<CommandCenter />);
+    await screen.findByTestId("office-widget");
+
+    await act(async () => answer({ layout: OFFICE_HIDDEN }));
+    await waitFor(() => expect(screen.queryByTestId("cell-office")).toBeNull());
+
+    // The widget is gone, and nothing was ever read for it.
+    expect(screen.queryByTestId("office-widget")).toBeNull();
+    expect(officeReads()).toEqual([0, 0, 0]);
+    expect(officeStream.subscribe).not.toHaveBeenCalled();
+  });
+
+  it("opens a hidden office from ?office=open exactly once, after the layout loads", async () => {
+    search = "office=open";
+    const answer = holdPreferences();
+    try {
+      render(<CommandCenter />);
+      await screen.findByTestId("office-widget");
+
+      // While the layout is unknown the request is not acted on: nothing opens,
+      // nothing is read, no socket is opened.
+      expect(screen.queryByTestId("office-dialog")).toBeNull();
+      expect(officeReads()).toEqual([0, 0, 0]);
+      expect(officeStream.subscribe).not.toHaveBeenCalled();
+
+      await act(async () => answer({ layout: OFFICE_HIDDEN }));
+      expect(await screen.findByRole("dialog", { name: "Virtual Office" })).toBeInTheDocument();
+
+      // Exactly one: one round of reads, one subscription, one dialog.
+      expect(officeReads()).toEqual([1, 1, 1]);
+      expect(officeStream.subscribe).toHaveBeenCalledTimes(1);
+      expect(screen.getAllByTestId("office-dialog")).toHaveLength(1);
+    } finally {
+      search = "";
     }
   });
 });

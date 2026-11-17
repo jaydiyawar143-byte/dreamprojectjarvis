@@ -1253,6 +1253,52 @@ No new environment variable was added.
 
 **Still decided per account, not by Organization:** sending a WhatsApp message (only the account the phone number is assigned to), triggering an n8n workflow (only the account's own registered workflows), the read-only Maps tools (any account, within `GOOGLE_MAPS_MONTHLY_LIMIT`) and the reviewed MCP servers. Publishing to a Facebook Page is off unless `MARKETING_PUBLISH_ENABLED=true`, and is not Organization-checked: leave it off on a deployment that serves more than one business.
 
+### n8n Sandbox Service (optional; built, not exposed)
+
+This is a **third** n8n surface, separate from the Public REST API and the MCP server. It talks to a self-hosted [`n8n-io/n8n-sandbox-service`](https://github.com/n8n-io/n8n-sandbox-service) deployment — not n8n Cloud — which runs shell commands inside an isolated sandbox it owns. JARVIS never starts a process on the API host for this.
+
+**There is nothing to switch on beyond the two values.** The service is built only when both `N8N_SANDBOX_API_URL` and `N8N_SANDBOX_API_KEY` are set. There is no separate enable flag. Neither value is read at boot beyond validation: the API makes no request to the sandbox service at start-up.
+
+**It is not reachable yet.** In this release no route, tool or agent allowlist entry is wired to the service. A deployment that configures it gains a `container.n8nSandbox` for server code, and no HTTP endpoint and no chat command. That is deliberate — building the client is not exposure. When a later change adds a surface, it must call this same service instance, never the provider directly.
+
+**Configuration.** Both are plain optional strings; a bad or unreachable sandbox never stops the API booting.
+
+```bash
+# In the root .env. Inside a container, "localhost" is the container itself —
+# use the sandbox service's hostname on the compose network.
+N8N_SANDBOX_API_URL="http://sandbox-api:8080"
+N8N_SANDBOX_API_KEY="the key your sandbox service issued"
+
+# Optional ceilings. Defaults shown.
+N8N_SANDBOX_REQUEST_TIMEOUT_MS="15000"        # create/read/delete/cancel
+N8N_SANDBOX_EXECUTION_TIMEOUT_MS="300000"     # per command (5m)
+N8N_SANDBOX_MAX_OUTPUT_BYTES="1000000"        # collected stdout+stderr
+```
+
+`N8N_SANDBOX_API_KEY` is sent only in the `X-Api-Key` header. It is never returned, logged or placed in a URL, and it is **not** `N8N_API_KEY` — the sandbox service issues its own key.
+
+**What the log says.** One line at start-up, naming neither the URL nor the key:
+
+```bash
+docker compose logs api | grep n8n_sandbox
+```
+
+```
+{"event":"n8n_sandbox_configured","exposure":"none: no route, tool or agent is wired to this service"}
+```
+
+When the values are absent or invalid it writes `n8n_sandbox_disabled` with a reason that names the missing field, never its value.
+
+**Verifying the connection without printing the key.** From inside the API container, the service's own tenant endpoint is the honest check — admin routes are not reachable with a tenant key:
+
+```bash
+docker compose exec api node -e 'fetch(process.env.N8N_SANDBOX_API_URL+"/sandboxes",{headers:{"X-Api-Key":process.env.N8N_SANDBOX_API_KEY}}).then(r=>console.log(r.status))'
+```
+
+`200` means the URL, key and network path work. `401`/`403` means the key is wrong or belongs to another tenant; `404`/`5xx` means the URL or service is wrong. Nothing is created by this read.
+
+**Rollback.** Remove the two values and restart the API. There is no migration, no table and no JARVIS state for this surface; an execution inside the sandbox service is unaffected by an API restart.
+
 ## 8. After the deployment
 
 Look at what the API said while starting:

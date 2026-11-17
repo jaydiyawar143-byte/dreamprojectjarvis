@@ -65,6 +65,22 @@ const baseEnvSchema = z.object({
   // always allowed and needs no entry here.
   N8N_MCP_ALLOWED_ORIGINS: z.string().optional(),
 
+  // The THIRD n8n surface: a self-hosted n8n Sandbox Service. BOTH the URL and
+  // the key must be present for the service to be built; there is no enable
+  // flag, and in this release no route, tool or agent is wired to it. Plain
+  // optional strings so a misconfigured sandbox never stops the API booting —
+  // `loadN8nSandboxConfig()` in the API reports why it is off.
+  N8N_SANDBOX_API_URL: z.string().optional(),
+  N8N_SANDBOX_API_KEY: z.string().optional(),
+  N8N_SANDBOX_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().max(120000).optional(),
+  N8N_SANDBOX_EXECUTION_TIMEOUT_MS: z.coerce.number().int().positive().max(3600000).optional(),
+  N8N_SANDBOX_MAX_OUTPUT_BYTES: z
+    .coerce.number()
+    .int()
+    .positive()
+    .max(16 * 1024 * 1024)
+    .optional(),
+
   // OmniRoute — a self-hosted AI gateway. Plain optional strings: a malformed
   // base URL must not stop the API booting over an integration that is only
   // reported on. `createOmniRouteConfig()` in @jarvis/omniroute validates them,

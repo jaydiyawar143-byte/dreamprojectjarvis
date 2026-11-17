@@ -50,8 +50,23 @@ vi.mock("../src/lib/api", async () => {
     getIndices: vi.fn(),
     getRoute: vi.fn(),
     searchPlaces: vi.fn(),
+    // VO-2.2 — the Virtual Office widget reads these three.
+    listAgents: vi.fn(),
+    listWorkTasks: vi.fn(),
+    listActivity: vi.fn(),
   };
 });
+
+// VO-2.2 — the office's live feed is a socket; nothing here is about it.
+vi.mock("../src/lib/use-office-stream", () => ({
+  useOfficeStream: () => ({
+    status: "live",
+    events: [],
+    taskUpdates: new Map(),
+    taskRevision: 0,
+    reconnect: () => undefined,
+  }),
+}));
 
 import * as api from "../src/lib/api";
 import { DashboardShell } from "../src/components/dashboard/dashboard-shell";
@@ -185,6 +200,18 @@ beforeEach(() => {
   mockedApi.getWeather.mockResolvedValue({ success: true, data: { value: null, meta: unavailable }, timestamp: ts() } as never);
   mockedApi.getCrypto.mockResolvedValue({ success: true, data: { value: [], meta: unavailable }, timestamp: ts() } as never);
   mockedApi.getIndices.mockResolvedValue({ success: true, data: { value: null, meta: unavailable }, timestamp: ts() } as never);
+  // VO-2.2 — an empty office: no agents, no tasks, no activity.
+  mockedApi.listAgents.mockResolvedValue({
+    success: true, data: { agents: [], total: 0, registeredCount: 0 }, timestamp: ts(),
+  } as never);
+  mockedApi.listWorkTasks.mockResolvedValue({
+    success: true,
+    data: { tasks: [], count: 0, statusCounts: { PENDING: 0, RUNNING: 0, COMPLETED: 0, FAILED: 0, UNRESOLVED: 0 } },
+    timestamp: ts(),
+  } as never);
+  mockedApi.listActivity.mockResolvedValue({
+    success: true, data: { entries: [], count: 0, limit: 40 }, timestamp: ts(),
+  } as never);
 });
 
 // ---------------------------------------------------------------------------
@@ -428,9 +455,8 @@ describe("navigation model", () => {
     const capabilities = NAV_GROUPS.find((g) => g.title === "Capabilities")!;
     expect(capabilities.items.map((i) => i.label)).toEqual([
       "Agents",
-      // VO-1 — a floor plan of the agents this deployment registered. Beside
-      // Agents because it is a view of the same registry, not a new capability.
-      "Virtual Office",
+      // VO-2.2 — no "Virtual Office": the office is a widget on the dashboard
+      // now, and `/office` redirects there.
       "Automations",
       "Integrations",
       "Browser",
@@ -459,7 +485,6 @@ describe("navigation model", () => {
     // layout-without-page folders created mid-implementation.
     const uiV2 = [
       "/agents",
-      "/office",
       "/automations",
       "/integrations",
       "/activity",
@@ -471,6 +496,13 @@ describe("navigation model", () => {
       expect(item, `nav entry for ${href}`).toBeDefined();
       expect(item!.available, href).toBe(true);
     }
+  });
+
+  it("has no sidebar entry for the Virtual Office (VO-2.2)", () => {
+    // The office is a dashboard widget. A sidebar item would be a second way
+    // in that the product decision rules out.
+    expect(NAV_ITEMS.find((i) => i.href === "/office")).toBeUndefined();
+    expect(NAV_ITEMS.find((i) => /virtual office/i.test(i.label))).toBeUndefined();
   });
 
   it("every destination in the model is reachable", () => {

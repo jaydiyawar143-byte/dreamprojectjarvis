@@ -19,6 +19,7 @@ import { CONSTRAINTS, type WidgetId, type WidgetPlacement } from "./layout";
 
 export const WIDGET_LABELS: Record<WidgetId, string> = {
   orb: "JARVIS Orb",
+  office: "Virtual Office",
   map: "Location & map",
   system: "System monitor",
   clock: "Clock",

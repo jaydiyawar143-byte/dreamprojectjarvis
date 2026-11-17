@@ -667,3 +667,232 @@ body > div:first-child {
     background: linear-gradient(180deg, rgba(12, 21, 32, 0.98), rgba(8, 14, 22, 0.99));
   }
 }
+
+/* ---------------------------------------------------------------------------
+   VO-2.2 Stage 2 — the pixel-art office.
+
+   The scene is one SVG drawn in scene units; the browser scales it. Every
+   animation here is CSS over two or three pre-painted frames, so nothing in
+   JavaScript ticks for motion. Under reduced motion every loop stops and the
+   first frame stays (the scene also reports `data-motion="reduced"`).
+   --------------------------------------------------------------------------- */
+.px-office {
+  display: block;
+  width: 100%;
+  height: 100%;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+  shape-rendering: crispEdges;
+  /* The fallback INSIDE var(): with a bare var(), a font that failed to load
+     (next/font timing out offline) leaves the whole declaration invalid and the
+     floor's text falls back to the browser's serif, not to a monospace. */
+  font-family: var(--font-mono, ui-monospace), SFMono-Regular, monospace;
+  user-select: none;
+  -webkit-user-select: none;
+  background: #080d15;
+}
+.px-office text {
+  font-weight: 600;
+  text-rendering: geometricPrecision;
+}
+.px-office-interactive {
+  cursor: grab;
+}
+.px-office-interactive:active {
+  cursor: grabbing;
+}
+.px-office:focus-visible {
+  outline: 2px solid rgba(62, 224, 242, 0.9);
+  outline-offset: 2px;
+}
+.px-passive {
+  pointer-events: none;
+}
+.px-actor,
+.px-core,
+.px-sign-interactive {
+  cursor: pointer;
+  outline: none;
+}
+.px-focus-ring,
+.px-sign-focus {
+  visibility: hidden;
+}
+.px-actor:focus-visible .px-focus-ring,
+.px-core:focus-visible .px-focus-ring,
+.px-sign-interactive:focus-visible .px-sign-focus {
+  visibility: visible;
+}
+.px-sign-interactive:hover .px-sign-focus {
+  visibility: visible;
+  opacity: 0.6;
+}
+
+/* Frames. Only the first is visible until an animation class says otherwise. */
+.px-frame {
+  visibility: hidden;
+}
+.px-f0 {
+  visibility: visible;
+}
+.px-anim-idle .px-f0 {
+  animation: px-frame-a 2.4s steps(1, end) infinite;
+}
+.px-anim-idle .px-f1 {
+  animation: px-frame-b 2.4s steps(1, end) infinite;
+}
+.px-core-working .px-f0 {
+  animation: px-frame3-a 0.9s steps(1, end) infinite;
+}
+.px-core-working .px-f1 {
+  animation: px-frame3-b 0.9s steps(1, end) infinite;
+}
+.px-core-working .px-f2 {
+  animation: px-frame3-c 0.9s steps(1, end) infinite;
+}
+.px-core-queued .px-f0 {
+  animation: px-frame-a 2s steps(1, end) infinite;
+}
+.px-core-queued .px-f1 {
+  animation: px-frame-b 2s steps(1, end) infinite;
+}
+.px-core-working .px-core-glow {
+  animation: px-glow 1.2s ease-in-out infinite;
+}
+.px-idle-pulse {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: px-breathe 2.4s ease-in-out infinite;
+}
+.px-led {
+  animation: px-blink 1s steps(1, end) infinite;
+}
+.px-glyph-wait {
+  animation: px-blink 1.2s steps(1, end) infinite;
+}
+.px-glyph-alert {
+  animation: px-blink 0.5s steps(1, end) infinite;
+}
+.px-pop {
+  transform-box: fill-box;
+  transform-origin: center bottom;
+  animation: px-pop 0.7s ease-out 1;
+}
+.px-selection {
+  animation: px-blink-soft 1.6s ease-in-out infinite;
+}
+
+@keyframes px-frame-a {
+  0%, 49.999% { visibility: visible; }
+  50%, 100% { visibility: hidden; }
+}
+@keyframes px-frame-b {
+  0%, 49.999% { visibility: hidden; }
+  50%, 100% { visibility: visible; }
+}
+@keyframes px-frame3-a {
+  0%, 33.332% { visibility: visible; }
+  33.333%, 100% { visibility: hidden; }
+}
+@keyframes px-frame3-b {
+  0%, 33.332% { visibility: hidden; }
+  33.333%, 66.665% { visibility: visible; }
+  66.666%, 100% { visibility: hidden; }
+}
+@keyframes px-frame3-c {
+  0%, 66.665% { visibility: hidden; }
+  66.666%, 100% { visibility: visible; }
+}
+@keyframes px-glow {
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 0.6; }
+}
+@keyframes px-breathe {
+  0%, 100% { transform: scaleX(1); opacity: 0.3; }
+  50% { transform: scaleX(1.25); opacity: 0.45; }
+}
+@keyframes px-blink {
+  0%, 59% { opacity: 1; }
+  60%, 100% { opacity: 0.15; }
+}
+@keyframes px-blink-soft {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+@keyframes px-pop {
+  0% { transform: translateY(2px) scale(0.6); opacity: 0; }
+  60% { transform: translateY(-1px) scale(1.15); opacity: 1; }
+  100% { transform: translateY(0) scale(1); opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .px-office * {
+    animation: none !important;
+  }
+  .px-office .px-frame {
+    visibility: hidden !important;
+  }
+  .px-office .px-f0 {
+    visibility: visible !important;
+  }
+}
+.px-office[data-motion="reduced"] * {
+  animation: none !important;
+}
+.px-office[data-motion="reduced"] .px-frame {
+  visibility: hidden !important;
+}
+.px-office[data-motion="reduced"] .px-f0 {
+  visibility: visible !important;
+}
+
+/* ---------------------------------------------------------------------------
+   VO-3.1 — the living office. Typing, walking, a busy monitor, steam, speech
+   and the location hotspots. Same rules as above: CSS frames only, and the
+   reduced-motion brake above stops every one of them.
+   --------------------------------------------------------------------------- */
+.px-anim-typing .px-f0 {
+  animation: px-frame-a 0.36s steps(1, end) infinite;
+}
+.px-anim-typing .px-f1 {
+  animation: px-frame-b 0.36s steps(1, end) infinite;
+}
+.px-anim-walk .px-f0 {
+  animation: px-frame-a 0.42s steps(1, end) infinite;
+}
+.px-anim-walk .px-f1 {
+  animation: px-frame-b 0.42s steps(1, end) infinite;
+}
+.px-screen-busy {
+  animation: px-blink 0.7s steps(1, end) infinite;
+}
+.px-steam {
+  animation: px-steam 1.6s ease-in-out infinite;
+}
+.px-speech {
+  animation: px-blink-soft 1.4s ease-in-out infinite;
+}
+.px-glyph-queued,
+.px-glyph-assigned {
+  animation: px-blink-soft 1.8s ease-in-out infinite;
+}
+.px-hotspot-ring {
+  visibility: hidden;
+}
+.px-hotspot-interactive {
+  cursor: pointer;
+  outline: none;
+}
+.px-hotspot-interactive:hover .px-hotspot-ring,
+.px-hotspot-interactive:focus-visible .px-hotspot-ring {
+  visibility: visible;
+}
+@keyframes px-steam {
+  0% { transform: translateY(1px); opacity: 0; }
+  40% { opacity: 0.8; }
+  100% { transform: translateY(-2px); opacity: 0; }
+}
+.px-steam,
+.px-glyph {
+  transform-box: fill-box;
+}

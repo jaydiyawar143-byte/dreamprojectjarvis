@@ -20,6 +20,7 @@
 import type { AgentDomain, ConversationMessage } from "@jarvis/core";
 import { looksLikeDesktopRequest } from "@jarvis/core";
 import { AGENT_IDS } from "./agent-policy.js";
+import { KNOWN_SITE_NAMES } from "./known-sites.js";
 
 export interface RouteCandidate {
   agentId: string;
@@ -110,6 +111,63 @@ const BROWSER_SIGNALS: RegExp[] = [
   /\bsubmit\s+(this|that|the)\s+form\b/i,
   /\bscreenshot\s+(this|that|the)\b/i,
 ];
+
+/**
+ * Phase 19 — the verbs that ask for a page to be opened, read or captured.
+ * A CLOSED list, like the work detector's: widening it is a decision with a
+ * test, not a synonym that felt obvious.
+ */
+const BROWSING_VERBS =
+  "open|visit|browse|go\\s+to|navigate\\s+to|load|check|read|look\\s+at|view|search|screenshot|capture|summari[sz]e|extract|scrape|fetch|inspect|khol(?:o|na|iye)?|dekho|padho";
+const LINK = "https?:\\/\\/[^\\s<>\"']+";
+/** "open https://…", "take a screenshot of https://…": the verb, then the link within a few words. */
+const VERB_THEN_LINK = new RegExp(`\\b(?:${BROWSING_VERBS})\\b(?:\\s+\\S+){0,4}?\\s+${LINK}`, "i");
+/** "https://… summarize this", "https://… kholo": the link, then the verb within a few words. */
+const LINK_THEN_VERB = new RegExp(`${LINK}(?:\\s+\\S+){0,3}?\\s+(?:${BROWSING_VERBS})\\b`, "i");
+/** A message that is nothing but a link: pasting one is asking for it to be opened. */
+const ONLY_A_LINK = new RegExp(`^\\s*${LINK}\\s*$`, "i");
+/**
+ * A well-known site named by name. Not "Amazon ads" or "Amazon Web Services",
+ * and not the company's possessive ("Amazon's results"): those are about
+ * something else that shares the word.
+ */
+const SITE = `(?:www\\.)?(?:${KNOWN_SITE_NAMES})(?!\\s+(?:ads?|web\\s+services|aws)\\b)(?!['’]s?\\b)`;
+/** "open amazon", "go to amazon.in", "search amazon for ...": the verb, then the site within a few words. */
+const VERB_THEN_SITE = new RegExp(`\\b(?:${BROWSING_VERBS})\\b(?:\\s+\\S+){0,3}?\\s+\\b${SITE}\\b`, "i");
+/** "Amazon kholo", "flipkart.com dekho": the site, then the verb within a few words. */
+const SITE_THEN_VERB = new RegExp(`\\b${SITE}\\b(?:\\s+\\S+){0,3}?\\s+(?:${BROWSING_VERBS})\\b`, "i");
+/**
+ * A price asked of a shop with no browsing verb at all: "Price of iPhone 17 on
+ * Flipkart", "iPhone 17 ka price Amazon par batao", "Flipkart par laptop ka
+ * price kya hai". The shop AND a price word, within a few words of each other.
+ */
+const PRICE = "price|prices|cost|rate|daam|kimat";
+const PRICE_THEN_SITE = new RegExp(`\\b(?:${PRICE})\\b(?:\\s+\\S+){0,6}?\\s+(?:(?:on|at|from|in)\\s+)?\\b${SITE}\\b`, "i");
+const SITE_THEN_PRICE = new RegExp(`\\b${SITE}\\b(?:\\s+\\S+){0,4}?\\s+\\b(?:${PRICE})\\b`, "i");
+/** "Amazon stock price", "Flipkart ka share price": a company's value, not a product's price. */
+const COMPANY_VALUE = /\b(?:stock|shares?|market\s+cap|valuation|ipo)\b/i;
+
+/**
+ * Phase 19 — whether a message asks for a web page to be opened, read or
+ * captured: an explicit http(s) link AND a browsing verb that governs it (or a
+ * link and nothing else). A message that merely contains a link — "write a
+ * tagline for https://…" — is not one.
+ *
+ * FOR ROUTING ONLY. It decides where a turn is answered and authorizes
+ * nothing: the Browser Agent still chooses a tool, its policy still allowlists
+ * it, and the executor still checks it.
+ */
+export function looksLikeBrowsingRequest(message: string): boolean {
+  const text = typeof message === "string" ? message : "";
+  return (
+    ONLY_A_LINK.test(text) ||
+    VERB_THEN_LINK.test(text) ||
+    LINK_THEN_VERB.test(text) ||
+    VERB_THEN_SITE.test(text) ||
+    SITE_THEN_VERB.test(text) ||
+    (!COMPANY_VALUE.test(text) && (PRICE_THEN_SITE.test(text) || SITE_THEN_PRICE.test(text)))
+  );
+}
 
 const ANALYTICS_SIGNALS: RegExp[] = [
   /\bkpi(s)?\b/i,
@@ -424,6 +482,14 @@ export function rankAgentCandidates(
       domain: "browser",
       confidence: 0.95,
       reason: "message contains an explicit web URL",
+    });
+  } else if (looksLikeBrowsingRequest(text)) {
+    // Phase 19 — a well-known site named without a link ("Amazon kholo ...").
+    candidates.push({
+      agentId: AGENT_IDS.browser,
+      domain: "browser",
+      confidence: 0.9,
+      reason: "message asks for a well-known website to be opened or read",
     });
   }
 

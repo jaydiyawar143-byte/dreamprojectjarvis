@@ -1299,11 +1299,56 @@ export interface AgentSummary {
   domain: string;
   description: string;
   allowedTools: string[];
+  /**
+   * VO-3.1 — the same tools with their declared risk, from the registry that
+   * gates execution. Optional: an older API sends only `allowedTools`.
+   */
+  tools?: Array<{ id: string; risk?: string }>;
   toolCount: number;
   writesRequireApproval: boolean;
   clientSelectable: boolean;
   registered: boolean;
   availability: AgentAvailability;
+}
+
+// ---------------------------------------------------------------------------
+// VO-3.1 — the office's per-agent read
+// ---------------------------------------------------------------------------
+
+/** One task as the office's agent read reports it. */
+export interface OfficeTaskView {
+  taskId: string;
+  title: string;
+  status: string;
+  executionId: string | null;
+  toolId: string | null;
+  toolRisk: string | null;
+  assignedAt: string | null;
+  startedAt: string | null;
+  scheduledAt: string | null;
+  claimed: boolean;
+  finishedAt: string | null;
+  error: string | null;
+}
+
+export interface OfficeAgentWork {
+  agentId: string;
+  active: OfficeTaskView | null;
+  queuedCount: number;
+  lastCompleted: OfficeTaskView | null;
+  lastFailed: OfficeTaskView | null;
+  pendingApprovals: { count: number; newestAt: string; toolId: string; expiresAt: string } | null;
+}
+
+export interface OfficeAgentWorkView {
+  agents: OfficeAgentWork[];
+  approvalsRead: boolean;
+  generatedAt: string;
+}
+
+/** What each agent is doing, for the caller only. Read-only. */
+export async function getOfficeAgentWork(): Promise<ApiResponse<OfficeAgentWorkView>> {
+  return request("/office/agent-work");
 }
 
 export async function listAgents(): Promise<
@@ -1979,6 +2024,13 @@ export interface TaskRecord {
   startedAt?: string | null;
   /** Why a run failed, in the user's terms. Null unless status is FAILED. */
   error?: string | null;
+  /** V2.1 — the run's id, which its audit row carries as `executionId`. */
+  executionId?: string | null;
+  /** VO-3.1 — the agent the work is assigned to, when, and the tool its run uses. */
+  agentId?: string | null;
+  assignedAt?: string | null;
+  toolId?: string | null;
+  claimedAt?: string | null;
 }
 
 /**

@@ -26,6 +26,7 @@ import { startMemoryRetentionSweep, type MemoryRetentionScheduler } from "./serv
 import { createDashboardRouter } from "./routes/dashboard.js";
 import { createAgentsRouter } from "./routes/agents.js";
 import { createActivityRouter } from "./routes/activity.js";
+import { createOfficeRouter } from "./routes/office.js";
 import { createGoogleAuthRouter } from "./routes/google-auth.js";
 import {
   googleOAuthPresence,
@@ -312,6 +313,9 @@ app.use(
   })
 );
 app.use("/api/v1/activity", createActivityRouter(container));
+// VO-3.1 — the Virtual Office's per-agent read: what each agent is doing, for
+// the caller only. Read-only, auth-gated, no parameters.
+app.use("/api/v1/office", createOfficeRouter(container));
 
 // ---------------------------------------------------------------------------
 // Capability discovery — what this deployment can ACTUALLY do, per user.

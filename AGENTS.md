@@ -544,9 +544,47 @@ change must not break.
 The contract is in [`docs/VIRTUAL_OFFICE.md`](docs/VIRTUAL_OFFICE.md); these are
 the parts a change must not break.
 
-- **A window, not an authority.** `/office` runs, approves and writes nothing.
-  `office:subscribe` and `office:unsubscribe` stay `READ_ONLY` with no
+- **A window, not an authority.** The Virtual Office runs, approves and writes
+  nothing. `office:subscribe` and `office:unsubscribe` stay `READ_ONLY` with no
   parameters; never add an office socket event that starts work.
+- **A dashboard widget, not a page (VO-2.2).** No sidebar entry; `/office`
+  only redirects to `/dashboard?office=open`. The widget holds the one
+  `useOfficeData` subscription and hands it to its dialog — never open a
+  second. A widget added later never lands on a saved layout's widgets: it
+  takes free space or goes below (`placeNewWidget`), and showing a hidden
+  widget again re-places it the same way when its old cells are no longer
+  free (`setHidden`). In customise mode nothing opens the office, widget
+  visible or hidden; a `?office=open` arriving then waits in the URL.
+- **Two layers, and real work always wins (VO-3.1).** An agent's state is
+  derived only from durable facts in `office-lifecycle.ts`: a RUNNING task
+  assigned to it (with its tool's declared risk), an unexpired approval it
+  asked for, an assigned or queued task, its newest finished task or audit row.
+  Coffee, water, lunch, the sofa, a chat, a stretch, a walk and the washroom are
+  decoration (`pixel/ambient.ts`), a pure function of time: they read no task,
+  approval or audit row and write nothing. Never create a fake task, event,
+  approval or progress. Real work interrupts the decoration at once and walks
+  the figure back to its desk (`pixel/agent-motion.ts`); it never resumes a
+  break that began while it worked. Typing is drawn only for the three
+  executing states and only while seated. `OfficeScene`'s `ambient` prop turns
+  decoration off; reduced motion does too. Never let a figure look busy from
+  anything but a real state, and never let a decorative activity survive one.
+- **The per-agent read is the only source of an agent's work (VO-3.1).**
+  `GET /office/agent-work` is built by `OfficeAgentWorkService`; a task is
+  assigned by `assignAgentForTool` and the assignment (`agentId`, `assignedAt`,
+  `toolId`) is written on the task row. A task run's audit row names no agent:
+  attribute it through its `executionId`, never by guessing. An unassigned run
+  stays JARVIS system work. The panel shows the current task, the queued count,
+  approvals and the agent's tool names with their declared risk; never show a
+  state, a tool or a task the read did not provide.
+- **A look is not a claim (VO-2.2 Stage 2, VO-3.1).** The pixel-art office draws
+  with `OFFICE_RENDERERS.pixel`; sprites (`pixel/sprites.ts`) and the floor
+  plan (`pixel/floor-plan.ts`) are pure data. `agentVisual` and
+  `systemVisual` are the only places a state becomes a look, and they map
+  exactly the lifecycle: never add a look the model did not say, a queue marker
+  from anything but the real count, or a working animation from a state that is
+  not executing. Motion is CSS frames driven by the scene's ONE clock
+  (`pixel/use-office-motion.ts`); a test passes `clock` and gets no timer. A
+  new renderer goes in the registry and nowhere else.
 - **Events are built in core, field by field.** `officeActivityEvent`,
   `officeTaskEvent` and `parseOfficeStreamEvent` are the only way a row becomes
   an event. Never spread a row into one, and never add a title, description,

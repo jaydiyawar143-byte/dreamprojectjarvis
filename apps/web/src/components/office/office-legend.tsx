@@ -1,12 +1,16 @@
 "use client";
 
 // ---------------------------------------------------------------------------
-// VO-1 — the legend.
+// VO-1 — the legend. VO-3.1 — the states the living office may show.
 //
 // A pixel office invites the viewer to read movement as work. This legend is
 // the correction, in the page itself rather than in a tooltip: it says what
-// each state means, that idle motion is decorative, and which two states the
+// each state means, that idle motion is decorative, and which states the
 // office refuses to invent.
+//
+// Every working state below has one source: a RUNNING task assigned to the
+// agent. Coffee, walking and conversation are a separate, decorative layer
+// that stops the moment a real state arrives.
 // ---------------------------------------------------------------------------
 
 import { StatusDot } from "@/components/ui/primitives";
@@ -21,28 +25,40 @@ const ENTRIES: Array<{
     tone: "neutral",
     label: "Idle",
     meaning:
-      "The agent is registered but has no recent audit row. Its slow pulse is decorative.",
+      "Registered, with nothing real to do. Its slow pulse, coffee, walking and conversations are decorative.",
+  },
+  {
+    tone: "info",
+    label: "Queued / assigned",
+    meaning:
+      "A PENDING task is assigned to the agent — due within ten minutes, or already claimed by the scheduler.",
   },
   {
     tone: "ok",
-    label: "Just finished",
-    meaning: "The newest audit row for this agent succeeded within the last ten minutes.",
+    label: "Working / researching / using a tool",
+    meaning:
+      "A RUNNING task is assigned to the agent. The word comes from the tool's declared risk: research for a read-only tool, a tool by name for a write.",
   },
   {
     tone: "warn",
     label: "Waiting for approval",
     meaning:
-      "The newest audit row for this agent is a fresh pending request. VO-3 will read the Approval table for the authoritative state.",
+      "The agent asked for a pending approval that has not expired. It cannot proceed until a person answers.",
+  },
+  {
+    tone: "ok",
+    label: "Task completed",
+    meaning: "The agent's newest finished task completed within the last ten minutes.",
   },
   {
     tone: "danger",
-    label: "Needs attention",
-    meaning: "The newest audit row for this agent failed or was refused.",
+    label: "Task failed",
+    meaning: "The agent's newest finished task failed or was left unresolved.",
   },
   {
     tone: "ok",
     label: "JARVIS working",
-    meaning: "At least one task in the task engine is RUNNING.",
+    meaning: "At least one task in the task engine is RUNNING and names no agent.",
   },
   {
     tone: "info",
@@ -72,13 +88,13 @@ export function OfficeLegend() {
 
       <div className="mt-3 space-y-1.5 border-t border-sys-line/60 pt-3 text-xs leading-relaxed text-sys-dim">
         <p data-testid="office-legend-decorative">
-          Only registered agents appear as employees. Idle movement is decorative and never
-          means an agent is working.
+          Only registered agents appear as employees. Coffee, walking, lunch and other idle
+          activity are decorative: they are a simulation, never a claim of work, and they stop
+          when real work arrives.
         </p>
         <p data-testid="office-legend-limits">
-          The office shows no percentage progress and no paused state, because the task
-          engine has neither. A task run with no agent attribution is shown as JARVIS
-          system work.
+          The office shows no percentage progress and no paused state, because the task engine
+          has neither. A task run with no agent attribution is shown as JARVIS system work.
         </p>
       </div>
     </Panel>

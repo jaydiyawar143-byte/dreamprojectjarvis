@@ -39,6 +39,7 @@ export type SafeFailureCode =
   | "REQUEST_INCOMPLETE"
   | "RATE_LIMITED"
   | "PROVIDER_UNAVAILABLE"
+  | "BROWSER_UNAVAILABLE"
   | "TOOL_EXECUTION_FAILED";
 
 export interface ClassifiedToolFailure {
@@ -91,6 +92,8 @@ interface Rule {
   match: RegExp;
   /** Used when the tool's own sentence is not safe to pass through. */
   fallback: string;
+  /** Always say the fallback, never the tool's own sentence. */
+  fixed?: boolean;
 }
 
 /**
@@ -127,6 +130,18 @@ const RULES: Rule[] = [
     actionable: true,
     match: /approval[_ ]required|requires? (your )?approval|must be approved/i,
     fallback: "This needs your approval before it can run. Open Approvals to review it.",
+  },
+  {
+    // Phase 19 — the browser service could not do what a browsing request needs.
+    // Its own sentences ("...is not available.") name no remedy, and without this
+    // rule they collapsed to "Data retrieval failed.". Fixed words: it says the
+    // page was NOT opened, and what to check.
+    code: "BROWSER_UNAVAILABLE",
+    actionable: true,
+    match: /\bbrowser service\b|\bthe browser could not\b/i,
+    fixed: true,
+    fallback:
+      "The browser service could not complete that request, so the page was not opened or read. Check that the browser service is running and reachable, then try again.",
   },
   {
     code: "RATE_LIMITED",
@@ -183,7 +198,7 @@ export function classifyToolFailure(
 
     return {
       code,
-      message: isSafeToSurface(text) ? text : rule.fallback,
+      message: !rule.fixed && isSafeToSurface(text) ? text : rule.fallback,
       actionable: rule.actionable,
     };
   }

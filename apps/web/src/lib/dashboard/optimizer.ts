@@ -100,6 +100,9 @@ export interface OptimizationPlan {
  */
 const PRIORITY: Record<WidgetId, number> = {
   orb: 100,
+  // VO-2.2 — the Virtual Office is the dashboard's second feature, after the
+  // Orb: it yields to the Orb and to nothing else.
+  office: 80,
   map: 60,
   tasks: 50,
   system: 40,
@@ -383,6 +386,7 @@ export function applyPlan(
 
 const LABELS: Record<WidgetId, string> = {
   orb: "The JARVIS orb",
+  office: "Virtual Office",
   map: "Location",
   system: "System monitor",
   clock: "Time",

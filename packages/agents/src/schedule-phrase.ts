@@ -164,6 +164,32 @@ const CLOCK =
 const TOMORROW = /\b(tomorrow|kal)\b/i;
 const TODAY = /\b(today|aaj)\b/i;
 
+/**
+ * The first number in a message that is STATED as a time.
+ *
+ * A bare number is not a time: "iPhone 17", "the top 5 campaigns" and "the
+ * last 10 posts" contain numbers and no schedule, and reading one as a clock
+ * hour turned "Amazon kholo aur iPhone 17 ka price check karo." into work for
+ * 17:00 instead of work to do now. A number counts when it carries a minute
+ * ("10:30"), a meridiem or "baje", is introduced by "at", or directly follows
+ * a day word ("kal 10"). Earlier numbers that fail this are skipped, so
+ * "the iPhone 17 price tomorrow at 10 am" still finds "at 10 am".
+ */
+function statedClock(message: string): RegExpExecArray | null {
+  const each = new RegExp(CLOCK.source, "gi");
+  for (let found = each.exec(message); found !== null; found = each.exec(message)) {
+    if (found[0].length === 0) {
+      each.lastIndex += 1;
+      continue;
+    }
+    // "kal 10", "tomorrow 10": a bare number directly after a day word.
+    const afterDay = /\b(?:tomorrow|kal|today|aaj)\s*$/i.test(message.slice(0, found.index));
+    const stated = found[2] !== undefined || found[3] !== undefined || /^at\s/i.test(found[0]) || afterDay;
+    if (stated) return found;
+  }
+  return null;
+}
+
 /** "in 30 minutes", "in 2 hours". The only relative form V1 accepts. */
 const RELATIVE = /\bin\s+(\d{1,3})\s*(minute|minutes|min|mins|hour|hours|hr|hrs)\b/i;
 
@@ -235,7 +261,7 @@ export function parseSchedulePhrase(
     return { at: new Date(now.getTime() + ms), matched: relative[0] };
   }
 
-  const clock = CLOCK.exec(message);
+  const clock = statedClock(message);
   if (!clock) return null;
 
   let hour = Number(clock[1]);

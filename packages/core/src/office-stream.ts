@@ -90,6 +90,13 @@ export interface OfficeTaskEvent {
   taskId: string;
   status: TaskStatus;
   executionId?: string;
+  /**
+   * VO-3.1 — the agent the task is assigned to, and the tool its run executes.
+   * Identifiers only, exactly as on an activity event; never a title, a
+   * parameter or an error.
+   */
+  agentId?: string;
+  toolId?: string;
 }
 
 export type OfficeStreamEvent = OfficeActivityEvent | OfficeTaskEvent;
@@ -183,6 +190,9 @@ export interface OfficeTaskSource {
   /** The durable row's `updatedAt`. */
   updatedAt: Date | string;
   executionId?: string | null;
+  /** VO-3.1 — the assigned agent and the run's tool, when the row has them. */
+  agentId?: string | null;
+  toolId?: string | null;
 }
 
 /**
@@ -197,6 +207,8 @@ export function officeTaskEvent(task: OfficeTaskSource): OfficeTaskEvent | null 
   if (!taskId || !at || !isTaskStatus(task.status)) return null;
 
   const executionId = text(task.executionId ?? undefined);
+  const agentId = text(task.agentId ?? undefined);
+  const toolId = text(task.toolId ?? undefined);
 
   return {
     kind: "task",
@@ -205,6 +217,8 @@ export function officeTaskEvent(task: OfficeTaskSource): OfficeTaskEvent | null 
     taskId,
     status: task.status,
     ...(executionId ? { executionId } : {}),
+    ...(agentId ? { agentId } : {}),
+    ...(toolId ? { toolId } : {}),
   };
 }
 
@@ -257,6 +271,8 @@ export function parseOfficeStreamEvent(value: unknown): OfficeStreamEvent | null
     if (!taskId || !at || !isTaskStatus(record.status)) return null;
 
     const executionId = text(record.executionId);
+    const agentId = text(record.agentId);
+    const toolId = text(record.toolId);
 
     return {
       kind: "task",
@@ -267,6 +283,8 @@ export function parseOfficeStreamEvent(value: unknown): OfficeStreamEvent | null
       taskId,
       status: record.status,
       ...(executionId ? { executionId } : {}),
+      ...(agentId ? { agentId } : {}),
+      ...(toolId ? { toolId } : {}),
     };
   }
 

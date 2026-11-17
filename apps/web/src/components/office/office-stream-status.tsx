@@ -59,3 +59,18 @@ export function OfficeStreamStatus({ status }: { status: StreamStatus }) {
     </div>
   );
 }
+
+/**
+ * VO-2.2 — the same state, in one line, for the dashboard widget's header.
+ * The full sentence is kept as the tooltip, so the short form never says less
+ * than the long one; it only says it more briefly.
+ */
+export function OfficeStreamBadge({ status }: { status: StreamStatus }) {
+  const copy = COPY[status];
+
+  return (
+    <span data-testid="office-stream-badge" data-status={status} title={copy.meaning}>
+      <StatusDot tone={copy.tone} label={copy.label} />
+    </span>
+  );
+}

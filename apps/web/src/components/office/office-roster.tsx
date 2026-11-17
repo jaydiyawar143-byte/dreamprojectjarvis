@@ -16,6 +16,7 @@ import {
   OFFICE_DEPARTMENTS,
   type OfficeAgentActor,
 } from "./office-model";
+import { lifecycleTone } from "./office-lifecycle-tone";
 import type { AgentSummary } from "@/lib/api";
 
 function departmentLabel(id: string): string {
@@ -54,19 +55,7 @@ export function OfficeRoster({
                     {departmentLabel(agent.department)}
                   </span>
                 </span>
-                <Badge
-                  tone={
-                    agent.state === "recent"
-                      ? "ok"
-                      : agent.state === "attention"
-                        ? "danger"
-                        : agent.state === "waiting"
-                          ? "warn"
-                          : "neutral"
-                  }
-                >
-                  {agent.stateLabel}
-                </Badge>
+                <Badge tone={lifecycleTone(agent.lifecycle)}>{agent.lifecycleLabel}</Badge>
               </li>
             ))}
           </ul>

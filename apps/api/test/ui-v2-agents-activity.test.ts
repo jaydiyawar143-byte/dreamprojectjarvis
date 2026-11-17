@@ -201,8 +201,17 @@ describe("UI V2 — GET /agents", () => {
       "domain",
       "registered",
       "toolCount",
+      // VO-3.1 — the same tool ids with their declared risk, and nothing else.
+      "tools",
       "writesRequireApproval",
     ]);
+
+    for (const agent of (res.body as { data: { agents: Array<{ allowedTools: string[]; tools: Array<Record<string, unknown>> }> } }).data.agents) {
+      expect(agent.tools.map((tool) => tool.id)).toEqual(agent.allowedTools);
+      for (const tool of agent.tools) {
+        expect(Object.keys(tool).every((key) => key === "id" || key === "risk")).toBe(true);
+      }
+    }
   });
 });
 

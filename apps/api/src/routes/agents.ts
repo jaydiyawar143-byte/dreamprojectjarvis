@@ -42,6 +42,12 @@ export interface AgentSummary {
   description: string;
   /** Registry tool ids this agent may execute. Empty is meaningful. */
   allowedTools: string[];
+  /**
+   * VO-3.1 — the same tools with their declared risk, read from the registry
+   * that gates execution. A tool this process did not register reports no
+   * risk rather than a guessed one.
+   */
+  tools: Array<{ id: string; risk?: string }>;
   toolCount: number;
   /** True when every non-read action this agent takes stops at a human. */
   writesRequireApproval: boolean;
@@ -72,6 +78,14 @@ export function createAgentsRouter(container: Container): Router {
 
       const registeredIds = new Set(container.agentRegistry.getAll().map((agent) => agent.id));
 
+      const riskOf = (toolId: string): string | undefined => {
+        try {
+          return container.toolRegistry.get(toolId)?.risk;
+        } catch {
+          return undefined;
+        }
+      };
+
       const agents: AgentSummary[] = Object.values(AGENT_POLICIES).map((policy) => {
         const registered = registeredIds.has(policy.agentId);
         return {
@@ -79,6 +93,10 @@ export function createAgentsRouter(container: Container): Router {
           domain: policy.domain,
           description: policy.description,
           allowedTools: [...policy.allowedTools],
+          tools: policy.allowedTools.map((id) => {
+            const risk = riskOf(id);
+            return risk ? { id, risk } : { id };
+          }),
           toolCount: policy.allowedTools.length,
           writesRequireApproval: policy.writesRequireApproval,
           clientSelectable: policy.clientSelectable,

@@ -128,6 +128,12 @@ export * from "./capability-presentation.js";
 // audit rows that already exist, plus the one explicit user signal. It
 // executes nothing and feeds nothing back into planning.
 export * from "./execution-outcome.js";
+// UEE-1 — execution capability descriptors and the unified execution outcome.
+// Pure vocabulary and two pure functions (`deriveCapabilities`,
+// `outcomeFromToolExecution`) for the Unified Execution Engine to come: nothing
+// here executes, routes or reaches anything, and nothing calls it yet. The
+// outcome is `UnifiedExecutionOutcome` because `ExecutionOutcome` above is S5's.
+export * from "./execution-capability.js";
 // S6 — Objective Evaluation, Phase 1: objective extraction. A fixed-rule
 // reader of the user's own request, for a READ-ONLY evaluation after the fact.
 // No model, no I/O; it decides, authorizes and plans nothing.

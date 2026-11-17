@@ -46,6 +46,19 @@ export interface TaskRecord {
    * its `AuditLog` row. Null until the task runs.
    */
   executionId: string | null;
+  /**
+   * VO-3.1 - the agent this work is assigned to, and when it was assigned to
+   * that agent. Attribution, not authority: see the schema. Null on historical
+   * rows, on plan-only work and on work no registered agent covers.
+   *
+   * Optional in the TYPE only: every row the database returns carries them
+   * (null or set), but a record built by hand — a test fake, an older caller —
+   * predates them and means exactly "not assigned".
+   */
+  agentId?: string | null;
+  assignedAt?: Date | null;
+  /** VO-3.1 - the tool the run executes, recorded with PENDING -> RUNNING. */
+  toolId?: string | null;
   remindedAt: Date | null;
   createdBy: string | null;
   createdAt: Date;
@@ -60,6 +73,22 @@ export interface CreateTaskInput {
   /** Which agent created it, when it did not come from the UI. */
   createdBy?: string | null;
 }
+
+/**
+ * VO-3.1 - one user's assigned work, by agent, for the office.
+ *
+ * `active` is every PENDING or RUNNING task that carries an agent. `latest` is,
+ * per agent and per terminal state, the most recently finished task — found by
+ * a `GROUP BY` in the database, so it is exact however much other work the
+ * user has, never "the newest N rows happened to include it".
+ */
+export interface AgentWorkRows {
+  active: TaskRecord[];
+  latest: TaskRecord[];
+}
+
+/** A bound on `active`: the office shows one current task per agent. */
+export const AGENT_WORK_ACTIVE_LIMIT = 200;
 
 export interface UpdateTaskInput {
   title?: string;
@@ -266,7 +295,18 @@ export class PrismaTaskRepository {
     taskId: string,
     expectedFrom: TaskStatus,
     to: TaskStatus,
-    options: { error?: string | null; executionId?: string } = {}
+    options: {
+      error?: string | null;
+      executionId?: string;
+      /**
+       * VO-3.1 - the agent and tool of the run, written in the same statement
+       * as the move. `assignedAt` is set only when `assign` says the row had
+       * no assignment yet (the caller read it under the same status pin).
+       */
+      agentId?: string | null;
+      toolId?: string;
+      assign?: boolean;
+    } = {}
   ): Promise<
     | { ok: true; task: TaskRecord }
     | { ok: false; reason: "not_found" | "state_changed"; current: TaskStatus | null }
@@ -278,6 +318,12 @@ export class PrismaTaskRepository {
     // always carries the id of the execution that is running it, with no
     // window in between where the two disagree.
     if (options.executionId !== undefined) data.executionId = options.executionId;
+
+    // VO-3.1 - the same rule for the assignment: a RUNNING task names the
+    // agent it is assigned to and the tool it is running in the SAME write.
+    if (options.agentId !== undefined) data.agentId = options.agentId;
+    if (options.toolId !== undefined) data.toolId = options.toolId;
+    if (options.assign && options.agentId) data.assignedAt = new Date();
 
     // The timestamps are derived from the target state, never supplied, so a
     // RUNNING task always has a startedAt and a COMPLETED one always has a
@@ -341,11 +387,29 @@ export class PrismaTaskRepository {
     userId: string,
     taskId: string,
     createdBy: string,
-    scheduledAt: Date | null
+    scheduledAt: Date | null,
+    options: {
+      /**
+       * VO-3.1 - the agent the scheduled work is assigned to, written in the
+       * SAME statement as the schedule. Omitted leaves the assignment alone;
+       * clearing a schedule (`scheduledAt: null`) always clears it, because
+       * work that is no longer committed to run is no longer anyone's.
+       */
+      agentId?: string | null;
+    } = {}
   ): Promise<TaskRecord | null> {
+    const data: Record<string, unknown> = { scheduledAt };
+    if (scheduledAt === null) {
+      data.agentId = null;
+      data.assignedAt = null;
+    } else if (options.agentId !== undefined) {
+      data.agentId = options.agentId;
+      data.assignedAt = options.agentId ? new Date() : null;
+    }
+
     const result = await this.prisma.task.updateMany({
       where: { id: taskId, userId, createdBy, status: "PENDING" },
-      data: { scheduledAt },
+      data,
     });
     if (result.count === 0) return null;
     return this.findOwned(userId, taskId);
@@ -604,6 +668,75 @@ export class PrismaTaskRepository {
     }
 
     return counts;
+  }
+
+  /**
+   * VO-3.1 - one user's assigned work, by agent.
+   *
+   * Two reads, both scoped to `userId` FIRST (the creator filter narrows, as
+   * everywhere here), so no other user's task can appear whatever the agent:
+   *
+   *   active  PENDING and RUNNING rows that carry an agent, newest first,
+   *           bounded by AGENT_WORK_ACTIVE_LIMIT;
+   *   latest  per (agent, terminal state), the row with the newest
+   *           `updatedAt`: a `GROUP BY` finds each maximum, then one read
+   *           fetches exactly those rows. Exact, not "the newest N rows".
+   *
+   * A terminal row's `updatedAt` is the instant it finished: nothing writes a
+   * COMPLETED, FAILED or UNRESOLVED task again (the lifecycle has no move out
+   * of them except a todo-checkbox reopen, which is not JARVIS work).
+   */
+  async agentWork(
+    userId: string,
+    options: { createdBy?: string } = {}
+  ): Promise<AgentWorkRows> {
+    const scope = {
+      userId,
+      ...(options.createdBy !== undefined ? { createdBy: options.createdBy } : {}),
+      agentId: { not: null },
+    };
+
+    const [active, groups] = await Promise.all([
+      this.prisma.task.findMany({
+        where: { ...scope, status: { in: ["PENDING", "RUNNING"] } },
+        orderBy: [{ updatedAt: "desc" }, { id: "asc" }],
+        take: AGENT_WORK_ACTIVE_LIMIT,
+      }) as unknown as Promise<TaskRecord[]>,
+      this.prisma.task.groupBy({
+        by: ["agentId", "status"],
+        where: { ...scope, status: { in: ["COMPLETED", "FAILED", "UNRESOLVED"] } },
+        _max: { updatedAt: true },
+      }),
+    ]);
+
+    const wanted = groups.filter(
+      (group): group is typeof group & { agentId: string; _max: { updatedAt: Date } } =>
+        typeof group.agentId === "string" && group._max.updatedAt instanceof Date
+    );
+    if (wanted.length === 0) return { active, latest: [] };
+
+    const candidates = (await this.prisma.task.findMany({
+      where: {
+        userId,
+        OR: wanted.map((group) => ({
+          agentId: group.agentId,
+          status: group.status,
+          updatedAt: group._max.updatedAt,
+        })),
+      },
+      orderBy: [{ updatedAt: "desc" }, { id: "asc" }],
+    })) as unknown as TaskRecord[];
+
+    // Two rows can share an updatedAt to the millisecond; keep one per pair.
+    const seen = new Set<string>();
+    const latest: TaskRecord[] = [];
+    for (const row of candidates) {
+      const key = `${row.agentId}\u0000${row.status}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      latest.push(row);
+    }
+    return { active, latest };
   }
 
   async findOwned(userId: string, taskId: string): Promise<TaskRecord | null> {

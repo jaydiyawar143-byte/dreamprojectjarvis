@@ -37,6 +37,7 @@ import {
   nudge,
   occupiedCells,
   overlaps,
+  placeNewWidget,
   resizeBy,
   setHidden,
   visibleWidgets,
@@ -78,7 +79,297 @@ describe("default layout", () => {
   it("includes every widget the command centre ships with", () => {
     const ids = DEFAULT_LAYOUT.map((p) => p.id).sort();
     expect(ids).toEqual(
-      ["clock", "map", "markets", "orb", "system", "tasks", "weather", "worldclock"].sort()
+      ["clock", "map", "markets", "office", "orb", "system", "tasks", "weather", "worldclock"].sort()
+    );
+  });
+
+  it("puts the Virtual Office in the top-right 8x5 slot and the map bottom-right (VO-2.2)", () => {
+    expect(find(DEFAULT_LAYOUT, "office")).toEqual({ id: "office", x: 4, y: 0, w: 8, h: 5 });
+    expect(find(DEFAULT_LAYOUT, "map")).toEqual({ id: "map", x: 8, y: 8, w: 4, h: 4 });
+    expect(find(DEFAULT_LAYOUT, "office").hidden).toBeUndefined();
+  });
+
+  it("lets the office be hidden, like every widget except the Orb", () => {
+    expect(CONSTRAINTS.office.hideable).toBe(true);
+    expect(CONSTRAINTS.orb.hideable).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// VO-2.2 — a widget added after a layout was saved
+// ---------------------------------------------------------------------------
+
+/** The layout every user had before VO-2.2: eight widgets, tiling 12x12. */
+const PRE_OFFICE_DEFAULT: WidgetPlacement[] = [
+  at("orb", 0, 0, 4, 7),
+  at("map", 4, 0, 8, 4),
+  at("system", 4, 4, 4, 4),
+  at("weather", 8, 4, 2, 4),
+  at("tasks", 10, 4, 2, 4),
+  at("clock", 0, 7, 2, 5),
+  at("worldclock", 2, 7, 2, 5),
+  at("markets", 4, 8, 8, 4),
+];
+
+/** Every placement in `before` is still exactly where it was. */
+function expectUntouched(before: WidgetPlacement[], after: WidgetPlacement[]): void {
+  for (const p of before) expect(find(after, p.id)).toEqual(p);
+}
+
+describe("VO-2.2 — adding the office to a saved layout", () => {
+  it("leaves a saved pre-office layout intact and puts the office below it", () => {
+    const restored = normalizeLayout(PRE_OFFICE_DEFAULT);
+
+    expectUntouched(PRE_OFFICE_DEFAULT, restored);
+    // Fully tiled: no free 8x5 anywhere, so directly below, at its own column.
+    expect(find(restored, "office")).toEqual({ id: "office", x: 4, y: 12, w: 8, h: 5 });
+    expect(findCollisions(restored)).toEqual([]);
+    for (const p of restored) expect(isWithinGrid(p)).toBe(true);
+  });
+
+  it("takes the first free space when the saved layout has one, wherever it is", () => {
+    // The markets are hidden, which leaves rows 7-11 of columns 4-11 empty:
+    // an 8x5 gap that is NOT the office's default slot.
+    const saved: WidgetPlacement[] = [
+      at("orb", 0, 0, 4, 7),
+      at("map", 4, 0, 8, 4),
+      at("system", 4, 4, 4, 3),
+      at("weather", 8, 4, 2, 3),
+      at("tasks", 10, 4, 2, 3),
+      at("clock", 0, 7, 2, 5),
+      at("worldclock", 2, 7, 2, 5),
+      { ...at("markets", 4, 7, 8, 5), hidden: true },
+    ];
+
+    const restored = normalizeLayout(saved);
+
+    expectUntouched(saved, restored);
+    expect(find(restored, "office")).toEqual({ id: "office", x: 4, y: 7, w: 8, h: 5 });
+    expect(findCollisions(restored)).toEqual([]);
+    // Nothing went below: the dashboard keeps its twelve rows.
+    expect(layoutRows(restored)).toBe(GRID_ROWS);
+  });
+
+  it("uses a genuine 8x5 gap, at the first row and column it fits", () => {
+    // Rows 0-4 of columns 4-11 are empty: exactly the office's default slot.
+    const saved: WidgetPlacement[] = [
+      at("orb", 0, 0, 4, 7),
+      at("system", 4, 5, 4, 3),
+      at("weather", 8, 5, 2, 3),
+      at("tasks", 10, 5, 2, 3),
+      at("clock", 0, 7, 2, 5),
+      at("worldclock", 2, 7, 2, 5),
+      at("markets", 4, 8, 4, 4),
+      at("map", 8, 8, 4, 4),
+    ];
+
+    const restored = normalizeLayout(saved);
+
+    expectUntouched(saved, restored);
+    expect(find(restored, "office")).toEqual({ id: "office", x: 4, y: 0, w: 8, h: 5 });
+    expect(findCollisions(restored)).toEqual([]);
+    expect(layoutRows(restored)).toBe(GRID_ROWS);
+  });
+
+  it("does not let a HIDDEN widget block the space it would occupy", () => {
+    const saved: WidgetPlacement[] = [
+      at("orb", 0, 0, 4, 12),
+      { ...at("markets", 4, 0, 8, 5), hidden: true },
+      at("system", 4, 5, 4, 7),
+      at("map", 8, 5, 4, 7),
+    ];
+
+    const restored = normalizeLayout(saved);
+
+    expect(find(restored, "office")).toMatchObject({ x: 4, y: 0, w: 8, h: 5 });
+    expect(find(restored, "office").hidden).toBeUndefined();
+    expect(findCollisions(restored)).toEqual([]);
+  });
+
+  it("never overlaps anything, across many saved arrangements", () => {
+    // A deterministic generator of saved layouts: each pre-office widget at a
+    // random size within its limits and a random position, dropped (hidden) if
+    // it would overlap one already placed — as a real saved layout never
+    // overlaps. Then the office is added.
+    let seed = 20261112;
+    const random = () => {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      return seed / 2147483648;
+    };
+    const between = (lo: number, hi: number) => lo + Math.floor(random() * (hi - lo + 1));
+
+    for (let round = 0; round < 60; round += 1) {
+      const saved: WidgetPlacement[] = [];
+      for (const { id } of PRE_OFFICE_DEFAULT) {
+        const limits = CONSTRAINTS[id];
+        const w = between(limits.minW, Math.min(limits.maxW, 8));
+        const h = between(limits.minH, Math.min(limits.maxH, 8));
+        const candidate = clampPlacement({ id, x: between(0, GRID_COLS - w), y: between(0, 16), w, h });
+        const collides = visibleWidgets(saved).some((p) => overlaps(p, candidate));
+        saved.push(collides && limits.hideable ? { ...candidate, hidden: true } : candidate);
+      }
+      if (findCollisions(saved).length > 0) continue; // the Orb landed on something; not a real save
+
+      const restored = normalizeLayout(saved);
+
+      expectUntouched(saved, restored);
+      expect(findCollisions(restored)).toEqual([]);
+      for (const p of restored) expect(isWithinGrid(p)).toBe(true);
+      expect(restored.filter((p) => p.id === "office")).toHaveLength(1);
+    }
+  });
+
+  it("hides the office rather than overlapping when the layout is too deep to go below", () => {
+    // Columns 0-11 are full down to row 32: nowhere free, nothing below.
+    const saved: WidgetPlacement[] = [
+      at("orb", 0, 0, 4, 12),
+      at("map", 4, 0, 8, 12),
+      at("system", 0, 12, 12, 12),
+      at("markets", 0, 24, 12, 8),
+    ];
+
+    const restored = normalizeLayout(saved);
+
+    expectUntouched(saved, restored);
+    expect(find(restored, "office").hidden).toBe(true);
+    expect(findCollisions(restored)).toEqual([]);
+  });
+
+  it("is stable: a layout that already holds the office is restored as saved", () => {
+    const once = normalizeLayout(PRE_OFFICE_DEFAULT);
+    const twice = normalizeLayout(once);
+    expect(twice).toEqual(once);
+  });
+
+  it("places a new widget on its own, outside normalizeLayout, by the same rule", () => {
+    const office = find(DEFAULT_LAYOUT, "office");
+    // Fully tiled: below, at its own column.
+    expect(placeNewWidget(office, PRE_OFFICE_DEFAULT)).toEqual({ ...office, y: 12 });
+    // Nothing placed yet: the first free space is the top-left corner.
+    expect(placeNewWidget(office, [])).toEqual({ ...office, x: 0, y: 0 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// VO-2.2 — restoring a hidden widget never creates an overlap
+// ---------------------------------------------------------------------------
+
+describe("VO-2.2 — restoring a hidden office", () => {
+  /** The shipped layout with the office hidden: its slot is free, nothing moved into it. */
+  const OFFICE_HIDDEN = setHidden(DEFAULT_LAYOUT, "office", true);
+
+  it("restores the office where it was when that space is still free", () => {
+    const shown = setHidden(OFFICE_HIDDEN, "office", false);
+
+    expect(find(shown, "office")).toMatchObject({ x: 4, y: 0, w: 8, h: 5, hidden: false });
+    expectUntouched(visibleWidgets(OFFICE_HIDDEN), shown);
+    expect(findCollisions(shown)).toEqual([]);
+  });
+
+  it("moves the office into the first free space when its old slot is now taken", () => {
+    // The person hid the office, then stretched the system monitor up into the
+    // office's old rows and left columns 4-11 of rows 7-11 (markets, map) empty.
+    const saved: WidgetPlacement[] = [
+      at("orb", 0, 0, 4, 7),
+      { ...at("office", 4, 0, 8, 5), hidden: true },
+      at("system", 4, 0, 4, 7),
+      at("weather", 8, 0, 2, 7),
+      at("tasks", 10, 0, 2, 7),
+      at("clock", 0, 7, 2, 5),
+      at("worldclock", 2, 7, 2, 5),
+      { ...at("markets", 4, 8, 4, 4), hidden: true },
+      { ...at("map", 8, 8, 4, 4), hidden: true },
+    ];
+
+    const shown = setHidden(saved, "office", false);
+
+    // Not where it was: that would sit on the system monitor.
+    expect(find(shown, "office")).toMatchObject({ x: 4, y: 7, w: 8, h: 5, hidden: false });
+    expectUntouched(saved.filter((p) => p.id !== "office"), shown);
+    expect(findCollisions(shown)).toEqual([]);
+    for (const p of shown) expect(isWithinGrid(p)).toBe(true);
+  });
+
+  it("goes below a crowded layout, moving nothing the person placed", () => {
+    // Fully tiled twelve rows, and the hidden office parked on top of the map.
+    const saved: WidgetPlacement[] = [
+      ...PRE_OFFICE_DEFAULT,
+      { ...at("office", 4, 0, 8, 5), hidden: true },
+    ];
+
+    const shown = setHidden(saved, "office", false);
+
+    expect(find(shown, "office")).toMatchObject({ x: 4, y: 12, w: 8, h: 5, hidden: false });
+    expectUntouched(PRE_OFFICE_DEFAULT, shown);
+    expect(findCollisions(shown)).toEqual([]);
+    for (const p of shown) expect(isWithinGrid(p)).toBe(true);
+  });
+
+  it("restores the office that a too-deep layout had to hide, below that layout, once there is room", () => {
+    // What `normalizeLayout` produces for a layout too deep to place the office:
+    // hidden, parked at the bottom of the storable grid, over the markets.
+    const deep: WidgetPlacement[] = [
+      at("orb", 0, 0, 4, 12),
+      at("map", 4, 0, 8, 12),
+      at("system", 0, 12, 12, 12),
+      at("markets", 0, 24, 12, 8),
+    ];
+    const parked = normalizeLayout(deep);
+    expect(find(parked, "office")).toMatchObject({ y: 27, hidden: true });
+
+    // Still no room: showing it changes nothing rather than putting it on the markets.
+    expect(setHidden(parked, "office", false)).toBe(parked);
+    expect(findCollisions(setHidden(parked, "office", false))).toEqual([]);
+
+    // The person shortens the markets: the parked cells are free now, so the
+    // office is shown exactly where it was parked.
+    const shortened = parked.map((p) => (p.id === "markets" ? { ...p, h: 3 } : p));
+    const shown = setHidden(shortened, "office", false);
+    expect(find(shown, "office")).toMatchObject({ x: 4, y: 27, w: 8, h: 5, hidden: false });
+    expect(findCollisions(shown)).toEqual([]);
+    for (const p of shown) expect(isWithinGrid(p)).toBe(true);
+  });
+
+  it("never overlaps after a restore, across many saved arrangements", () => {
+    let seed = 20261113;
+    const random = () => {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      return seed / 2147483648;
+    };
+    const between = (lo: number, hi: number) => lo + Math.floor(random() * (hi - lo + 1));
+
+    for (let round = 0; round < 60; round += 1) {
+      const saved: WidgetPlacement[] = [];
+      for (const { id } of DEFAULT_LAYOUT) {
+        const limits = CONSTRAINTS[id];
+        const w = between(limits.minW, Math.min(limits.maxW, 8));
+        const h = between(limits.minH, Math.min(limits.maxH, 8));
+        const candidate = clampPlacement({ id, x: between(0, GRID_COLS - w), y: between(0, 16), w, h });
+        const collides = visibleWidgets(saved).some((p) => overlaps(p, candidate));
+        // The office is always saved hidden here, wherever it landed.
+        const hide = id === "office" || (collides && limits.hideable);
+        saved.push(hide ? { ...candidate, hidden: true } : candidate);
+      }
+      if (findCollisions(saved).length > 0) continue;
+
+      const shown = setHidden(saved, "office", false);
+
+      expectUntouched(saved.filter((p) => p.id !== "office"), shown);
+      expect(findCollisions(shown)).toEqual([]);
+      for (const p of shown) expect(isWithinGrid(p)).toBe(true);
+    }
+  });
+
+  it("keeps a saved layout exactly as saved, hidden office included", () => {
+    const saved: WidgetPlacement[] = [
+      ...PRE_OFFICE_DEFAULT,
+      { ...at("office", 4, 0, 8, 5), hidden: true },
+    ];
+    const restored = normalizeLayout(saved);
+    expect(restored).toEqual(saved);
+    // And hiding then showing a widget whose slot stayed free is a round trip.
+    expect(setHidden(setHidden(DEFAULT_LAYOUT, "office", true), "office", false)).toEqual(
+      DEFAULT_LAYOUT.map((p) => (p.id === "office" ? { ...p, hidden: false } : p))
     );
   });
 });
